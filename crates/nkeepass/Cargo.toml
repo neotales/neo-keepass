@@ -1,0 +1,33 @@
+[package]
+name = "nkeepass"
+version = "0.0.0-alpha.25"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Headless KeePass automation CLI and TUI"
+
+[dependencies]
+neotales-keepass.workspace = true
+base64.workspace = true
+crossterm.workspace = true
+arboard.workspace = true
+getrandom.workspace = true
+rpassword.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+syn.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+known-folders = "1.4.2"
+windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_Memory"] }
+
+[lints]
+workspace = true
