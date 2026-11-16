@@ -43,24 +43,30 @@ executed at the time of writing, so the actual outcome is unobserved; the job
 is left unsuppressed so the first runs report exactly which scenarios fail.
 Do not silence them with `continue-on-error` or `#[cfg(windows)]` skips.
 
-**Audit:** `cargo audit` scans the pinned `Cargo.lock`. As of this writing it
-reports one vulnerability: RUSTSEC-2023-0071 (`rsa 0.9.10`, Marvin Attack;
-fix requires the 0.10 line via `sad-rsa`/`rsa` dependency work). The `audit`
-job therefore fails until that is resolved. Triage means upgrading the
-dependency or a justified, dated ignore in `audit.toml` — not removing the
-job.
+**Audit:** `cargo audit` scans the pinned `Cargo.lock` and currently reports
+one vulnerability, RUSTSEC-2023-0071 (`rsa 0.9.10`, Marvin Attack; patched
+only in the 0.10 line). The `audit` job is left failing on it honestly:
+there is no suppression in this repository. The exact state, reviewed
+2026-11-16:
 
-**Audit triage (2026-11-16):** `.cargo/audit.toml` now carries a reviewed,
-dated ignore for RUSTSEC-2023-0071 with the full assessment: `rsa` 0.9.10
-performs no private-key operations in this workspace (all OAEP decryption is
-converted to the Marvin-hardened `sad-rsa` and runs through its blinded
-decrypt path; `rsa` 0.9 is used only for signature verification, OAEP
-encryption, and key parsing). Upgrading to `rsa` 0.10 is not a drop-in fix —
-it removed the `sha2` feature the vendored crates depend on and needs a
-migration of the vendored source, which must follow the vendored crates'
-upstream. The advisory is still printed with this reason on every audit run;
-the ignore must be removed the moment `rsa` 0.9 gains a private-key use or
-the upgrade lands.
+- Reachability: `rsa` 0.9.10 is on the decryption path. The vendored crates
+  use it for key parsing/serialization (`PrivateKeyParts` reads of `d` and
+  the primes) whose secret-dependent private-key preprocessing feeds the
+  hardened implementation, plus public-key verification and OAEP encryption.
+  The blinded private-key exponentiation itself runs in the maintained
+  `sad-rsa` fork (`decrypt_blinded`), so the advisory's unblinded-decrypt
+  oracle is not directly present — but secret-dependent private-key
+  preprocessing does run in `rsa` 0.9 code, and that is exactly what a
+  "public-key only" claim would wave away.
+- Exploitability: **no proven exploit** has been demonstrated for this
+  usage; the exposure is an unquantified subset of the advisory's attack
+  class, not a clear absence of it.
+- Upgrade: unresolved. `rsa` 0.10.0 (the patched line) removed the `sha2`
+  feature the vendored crates depend on and requires migrating the vendored
+  `neotales-age`/`neotales-x509` source, which must follow those crates'
+  upstream. Until that migration lands, the advisory stands and the audit
+  job fails. Do not add an ignore; do not describe the advisory as resolved
+  or accepted.
 
 **Windows failure of run 43846609261 (first Windows execution):** the `Test`
 step failed with exit code 101. What public data shows and what it cannot:
@@ -70,10 +76,13 @@ artifacts require authentication (401) — the failing test is not identifiable
 without credentials. Local reproduction is equally blocked: the `ring` and
 `alloca` build scripts cannot run for a Windows target without MSVC/mingw,
 which this machine cannot install. Mitigation in `ci.yml`: the test matrix
-now runs `cargo check --workspace --all-targets` and `cargo test` as separate
-steps, so the next Windows failure is classifiable from public step
-conclusions alone (Windows-only `cfg(windows)` code compiles nowhere else;
-a compile defect fails Check, an assertion failure fails Test).
+runs three steps — `Check` (`cargo check --all-targets`), `Test compile`
+(`cargo test --no-run`, which fully builds the test binaries including build
+scripts and linking), and `Test` (execution). This **narrows, but does not
+conclusively distinguish**, the cause: a Check failure is a compile defect
+(Windows-only `cfg(windows)` code compiles nowhere else); a Test-compile
+failure is a test-binary build/link defect; only a failure of the final
+Test step with both predecessors green is a test assertion failure.
 
 ## `build.yml` — Linux amd64/arm64 build + packaging
 
@@ -142,15 +151,22 @@ full `cargo test --workspace`, `cargo fmt --check`, clippy, `cargo bench
 --bench vault` execution, archive build + re-run idempotency, packaging
 self-tests (`packaging/test.sh`: positive validation incl. real `makepkg`
 build and smoke run, plus negative cases — wrong ELF arch, wrong deb
-arch/version, missing formats — all caught), YAML syntax of all workflows,
-cargo audit run.
+arch/version, missing formats, wrong payload binary, symlink tar member,
+modified/missing pacman payload, hostile pacman filename, smoke-withheld
+markers — all caught, run both with the structural ar+tar deb fallback and
+with a temporary real `dpkg-deb` via PATH), workflow run-block checking
+(`scripts/check-workflows.sh`, incl. expression-scanner selftest), and
+`cargo audit` (currently exits 1 on RUSTSEC-2023-0071 — the honest result;
+there is no ignore in this repository).
 
 Not verifiable locally: the aarch64 cross-check compiles only up to the
 missing `aarch64-linux-gnu-gcc` (cannot install the cross toolchain without
 sudo); `dpkg-deb` is absent on this Arch-based machine (searched `/usr`,
 `/opt`, and `~/.local`; no system package was installed), so the real
 `dpkg-deb` path of `validate.sh`/`test.sh` runs only on the ubuntu CI runner
-— locally the structural `ar`+`tar` fallback is what runs; `actionlint` is
-not installed here, so workflow validation is YAML parsing plus manual
-review; and the workflows themselves have not been executed on GitHub yet.
-First run of `build.yml` on a tag is the real test.
+— locally the structural `ar`+`tar` fallback is what runs; `actionlint` and
+the temporary `cargo-audit`/`dpkg-deb` binaries used for verification are
+downloaded tools under `/tmp/opencode`, not installed system-wide and not
+repo dependencies; and the workflows themselves have not been executed on
+GitHub beyond the first `ci` run. First run of `build.yml` on a tag is the
+real test.

@@ -39,15 +39,22 @@ jobs:
       # integration test files under crates/nkeepass/tests/ are #![cfg(unix)]
       # (they exercise real file permissions and PTY-style password prompts),
       # so Windows runs the unit and doc tests only. The first Windows run
-      # failed in this step with exit code 101 (logs need authenticated
-      # access, so the failing test is not identifiable from public data);
-      # the separate Check step below splits compile errors of the
-      # Windows-only cfg(windows) code - which never compiles anywhere else -
-      # from test assertion failures, making the next failure's cause visible
-      # from public step conclusions alone.
+      # failed in the Test step with exit code 101 (logs need authenticated
+      # access, so the failing test is not identifiable from public data).
+      # The three steps narrow, but do not conclusively distinguish, the
+      # cause: Check type-checks everything including Windows-only
+      # cfg(windows) code (which never compiles anywhere else); Test
+      # --no-run fully compiles the test binaries (build scripts and linking
+      # are only exercised here, not by check); Test then runs them. A Check
+      # failure is a compile defect; a Test --no-run failure is a test-binary
+      # build/link defect; only a failure of the final Test step, with the
+      # earlier two green, is a test assertion failure.
       - name: Check
         shell: bash
         run: cargo check --workspace --all-targets
+      - name: Test compile
+        shell: bash
+        run: cargo test --workspace --no-run
       - name: Test
         shell: bash
         run: cargo test --workspace
@@ -100,8 +107,9 @@ jobs:
           tool: cargo-audit
       # The lockfile pins the audited inputs, but results depend on the
       # advisory database at run time, so findings are not reproducible across
-      # time. The job fails when cargo audit reports vulnerabilities; triage
-      # means upgrading the dependency or a justified, dated ignore in
-      # audit.toml — not removing the job.
+      # time. The job fails when cargo audit reports vulnerabilities, as it
+      # does today on RUSTSEC-2023-0071 (see docs/ci-cd.md for the reviewed
+      # reachability and the unresolved upgrade). The fix is upgrading the
+      # dependency — not an ignore, and not removing the job.
       - name: cargo audit
         run: cargo audit
