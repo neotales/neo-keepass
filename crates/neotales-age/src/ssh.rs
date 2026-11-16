@@ -10,7 +10,8 @@ use {
     md5::Md5,
     rsa::{
         self, BoxedUint, PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey,
-        pkcs1::DecodeRsaPrivateKey,
+        pkcs1::der::{Decode as _, asn1::AsUintRef as _},
+        pkcs8::PrivateKeyInfoRef,
         traits::{PrivateKeyParts, PublicKeyParts},
     },
     sha2::Digest,
@@ -455,7 +456,9 @@ fn parse_openssh_rsa(reader: &mut SshReader<'_>, public_blob: &[u8]) -> Result<O
     // The private-component constructor uses the explicit SSH limits above,
     // rather than the dependency's default public-key maximum, before it performs
     // CRT precomputation.
-    let private_key = RsaPrivateKey::from_components(
+    // Imported SSH keys select modulus-width prime storage unconditionally:
+    // this preserves unbalanced factors without inspecting their secret widths.
+    let private_key = RsaPrivateKey::from_components_with_wide_primes(
         rsa_uint_from_be(&modulus)?,
         rsa_uint_from_be(&exponent)?,
         rsa_uint_from_be(private_exponent.as_slice())?,
@@ -713,7 +716,7 @@ fn parse_legacy_encrypted_rsa(text: &str, passphrase: &[u8]) -> Result<OpenSshPr
                 continue;
             }
         };
-        let Ok(private_key) = RsaPrivateKey::from_pkcs1_der(plaintext.as_slice()) else {
+        let Ok(private_key) = rsa_private_key_from_pkcs1_der(plaintext.as_slice()) else {
             continue;
         };
         validate_ssh_rsa_private_key(&private_key)?;
@@ -856,14 +859,48 @@ pub(crate) fn parse_ed25519_pkcs8_pem(pem: &str) -> Result<OpenSshPrivateKey> {
 
 /// Parses a PEM RSA private key (PKCS#1 or PKCS#8).
 pub(crate) fn parse_rsa_pem(pem: &str) -> Result<RsaPrivateKey> {
-    if let Ok(key) = RsaPrivateKey::from_pkcs1_pem(pem) {
-        validate_ssh_rsa_private_key(&key)?;
-        return Ok(key);
-    }
-    let key = RsaPrivateKey::from_pkcs8_pem(pem)
+    let (label, der) = rsa::pkcs1::der::SecretDocument::from_pem(pem)
         .map_err(|_| AgeError::InvalidKey("invalid RSA private key"))?;
+    let key = match label {
+        "RSA PRIVATE KEY" => rsa_private_key_from_pkcs1_der(der.as_bytes())?,
+        "PRIVATE KEY" => rsa_private_key_from_pkcs8_der(der.as_bytes())?,
+        _ => return Err(AgeError::InvalidKey("invalid RSA private key")),
+    };
     validate_ssh_rsa_private_key(&key)?;
     Ok(key)
+}
+
+fn rsa_private_key_from_pkcs1_der(der: &[u8]) -> Result<RsaPrivateKey> {
+    let components = rsa::pkcs1::RsaPrivateKeyRef::from_der(der)
+        .map_err(|_| AgeError::InvalidKey("invalid RSA private key"))?;
+    if components.version() != rsa::pkcs1::Version::TwoPrime {
+        return Err(AgeError::InvalidKey("invalid RSA private key"));
+    }
+    RsaPrivateKey::from_components_with_wide_primes(
+        rsa_uint_from_be(components.modulus.as_uint_ref().as_bytes())?,
+        rsa_uint_from_be(components.public_exponent.as_uint_ref().as_bytes())?,
+        rsa_uint_from_be(components.private_exponent.as_uint_ref().as_bytes())?,
+        vec![
+            rsa_uint_from_be(components.prime1.as_uint_ref().as_bytes())?,
+            rsa_uint_from_be(components.prime2.as_uint_ref().as_bytes())?,
+        ],
+    )
+    .map_err(|_| AgeError::InvalidKey("invalid RSA private key"))
+}
+
+fn rsa_private_key_from_pkcs8_der(der: &[u8]) -> Result<RsaPrivateKey> {
+    let info = PrivateKeyInfoRef::try_from(der)
+        .map_err(|_| AgeError::InvalidKey("invalid RSA private key"))?;
+    if info.algorithm.oid.as_bytes() != [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]
+        || info
+            .algorithm
+            .parameters_any()
+            .map_err(|_| AgeError::InvalidKey("invalid RSA private key"))?
+            != rsa::pkcs8::der::asn1::Null.into()
+    {
+        return Err(AgeError::InvalidKey("invalid RSA private key"));
+    }
+    rsa_private_key_from_pkcs1_der(info.private_key.as_bytes())
 }
 
 fn passphrase_missing_error(public_blob: &[u8]) -> Result<AgeError> {
@@ -1079,6 +1116,11 @@ fn rsa_public_from_components(modulus: &[u8], exponent: &[u8]) -> Result<RsaPubl
 }
 
 fn rsa_uint_from_be(bytes: &[u8]) -> Result<BoxedUint> {
+    if bytes.is_empty() || bytes.len() > 2048 {
+        return Err(AgeError::InvalidKey(
+            "RSA integer exceeds the SSH RSA size policy",
+        ));
+    }
     let precision = u32::try_from(
         bytes
             .len()

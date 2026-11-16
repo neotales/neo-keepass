@@ -91,6 +91,13 @@ The RSA key-taking API uses upstream `rsa` 0.10 types. Callers migrating from
 source-breaking dependency change; SSH wire encoding and the 16,384-bit SSH
 modulus policy are unchanged.
 
+RSA private-key imports use `rsa 0.10`'s wide-prime component constructor,
+selected for imported keys independent of secret factor widths. Unbalanced
+two-prime RSA keys remain supported, though the wide-prime representation is
+slower than the ordinary balanced-prime path. Multi-prime PKCS#1 keys are not
+supported by upstream `rsa 0.10`; the age SSH RSA import accepts two-prime
+OpenSSH keys.
+
 ## Licence
 
 MIT. See [LICENSE.md](LICENSE.md).

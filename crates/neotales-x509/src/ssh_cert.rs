@@ -1144,16 +1144,28 @@ fn decode_rsa_components(
     exponent: &[u8],
     modulus: &[u8],
 ) -> Result<(Vec<u8>, rsa::PublicKey), CertificateError> {
-    if !is_positive_mpint(exponent) || !is_positive_mpint(modulus) {
-        return Err(CertificateError::InvalidPublicKey);
-    }
     let key = rsa::PublicKey::new_with_size_limits(
-        rsa_uint_from_be(modulus)?,
-        rsa_uint_from_be(exponent)?,
+        rsa_uint_from_be(positive_mpint_magnitude(modulus)?)?,
+        rsa_uint_from_be(positive_mpint_magnitude(exponent)?)?,
         1024..=16_384,
     )
     .map_err(|_| CertificateError::InvalidPublicKey)?;
     Ok((encode_rsa_blob(&key)?, key))
+}
+
+fn positive_mpint_magnitude(value: &[u8]) -> Result<&[u8], CertificateError> {
+    if !is_positive_mpint(value) {
+        return Err(CertificateError::InvalidPublicKey);
+    }
+    let magnitude = if value.first() == Some(&0) {
+        value.get(1..).ok_or(CertificateError::InvalidPublicKey)?
+    } else {
+        value
+    };
+    if magnitude.is_empty() {
+        return Err(CertificateError::InvalidPublicKey);
+    }
+    Ok(magnitude)
 }
 
 fn rsa_uint_from_be(bytes: &[u8]) -> Result<rsa::BoxedUint, CertificateError> {

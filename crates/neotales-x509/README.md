@@ -38,6 +38,11 @@ The manifest lists `aes`, `base64`, `blowfish`, `ctr`, `ed25519-dalek`,
 `ml-dsa`, `p256`, `p384`, `p521`, `rcgen`, `rsa`, `sha2`, `subtle`, `time`,
 and `zeroize`. Exact versions and feature flags are in `Cargo.toml`.
 
+RSA PKCS#1, PKCS#8, and OpenSSH private-key imports preserve unbalanced
+two-prime keys using `rsa 0.10`'s wide-prime constructor, selected independently
+of secret factor widths. Multi-prime PKCS#1 keys are unsupported by upstream
+`rsa 0.10`.
+
 ## Licence
 
 MIT. See [LICENSE.md](LICENSE.md).

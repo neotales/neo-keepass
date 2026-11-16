@@ -19,7 +19,7 @@ use p256::elliptic_curve::{
 };
 use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
-use rsa::pkcs1::DecodeRsaPrivateKey as _;
+use rsa::pkcs1::der::{Decode as _, asn1::AsUintRef as _};
 use rsa::pkcs8::{PrivateKeyInfoRef, Version};
 use rsa::traits::PublicKeyParts as _;
 use rsa::{BoxedUint, PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
@@ -290,8 +290,7 @@ fn parse_private_key(
 }
 
 fn parse_pkcs1_private(der: &Zeroizing<Vec<u8>>) -> Result<ParsedPrivateKey, SshKeyError> {
-    let key = RsaPrivateKey::from_pkcs1_der(der.as_slice())
-        .map_err(|_| SshKeyError::InvalidPrivateKey)?;
+    let key = rsa_private_key_from_pkcs1(der.as_slice())?;
     Ok(ParsedPrivateKey::Rsa(key))
 }
 
@@ -310,8 +309,14 @@ fn parse_pkcs8_private(der: &Zeroizing<Vec<u8>>) -> Result<ParsedPrivateKey, Ssh
     }
 
     if oid == RSA_OID {
-        let key = RsaPrivateKey::from_pkcs8_der(der.as_slice())
+        let parameters = info
+            .algorithm
+            .parameters_any()
             .map_err(|_| SshKeyError::InvalidPrivateKey)?;
+        if parameters != rsa::pkcs8::der::asn1::Null.into() {
+            return Err(SshKeyError::InvalidPrivateKey);
+        }
+        let key = rsa_private_key_from_pkcs1(info.private_key.as_bytes())?;
         return Ok(ParsedPrivateKey::Rsa(key));
     }
 
@@ -329,6 +334,25 @@ fn parse_pkcs8_private(der: &Zeroizing<Vec<u8>>) -> Result<ParsedPrivateKey, Ssh
     }
 
     Err(SshKeyError::UnsupportedAlgorithm)
+}
+
+fn rsa_private_key_from_pkcs1(der: &[u8]) -> Result<RsaPrivateKey, SshKeyError> {
+    let components =
+        rsa::pkcs1::RsaPrivateKeyRef::from_der(der).map_err(|_| SshKeyError::InvalidPrivateKey)?;
+    if components.version() != rsa::pkcs1::Version::TwoPrime {
+        return Err(SshKeyError::InvalidPrivateKey);
+    }
+    let key = RsaPrivateKey::from_components_with_wide_primes(
+        uint_from_be(components.modulus.as_uint_ref().as_bytes())?,
+        uint_from_be(components.public_exponent.as_uint_ref().as_bytes())?,
+        uint_from_be(components.private_exponent.as_uint_ref().as_bytes())?,
+        vec![
+            uint_from_be(components.prime1.as_uint_ref().as_bytes())?,
+            uint_from_be(components.prime2.as_uint_ref().as_bytes())?,
+        ],
+    )
+    .map_err(|_| SshKeyError::InvalidPrivateKey)?;
+    Ok(key)
 }
 
 #[derive(Clone, Copy)]
@@ -528,7 +552,10 @@ fn parse_openssh_rsa(reader: &mut SshReader<'_>) -> Result<ParsedPrivateKey, Ssh
     let prime1 = read_private_mpint(reader)?;
     let prime2 = read_private_mpint(reader)?;
 
-    let key = RsaPrivateKey::from_components(
+    // Imported SSH keys choose the modulus-width prime policy unconditionally.
+    // This preserves historically accepted unbalanced factors without
+    // inspecting secret factor widths or retrying a failed narrow import.
+    let key = RsaPrivateKey::from_components_with_wide_primes(
         (*modulus).clone(),
         (*exponent).clone(),
         (*private_exponent).clone(),
@@ -951,6 +978,22 @@ mod tests {
             blob.extend_from_slice(&ssh_string(&signature));
             crate::ssh_cert::verify_rsa(&public_key, &blob, message)
                 .expect("SHA-2 SSH RSA signature should verify");
+
+            let mut corrupted_signature = signature.clone();
+            let byte = corrupted_signature
+                .last_mut()
+                .expect("RSA signature is nonempty");
+            *byte ^= 1;
+            let mut corrupted_blob = ssh_string(algorithm.as_bytes());
+            corrupted_blob.extend_from_slice(&ssh_string(&corrupted_signature));
+            assert_eq!(
+                crate::ssh_cert::verify_rsa(&public_key, &corrupted_blob, message),
+                Err(crate::ssh_cert::CertificateError::InvalidSignature)
+            );
+            assert_eq!(
+                crate::ssh_cert::verify_rsa(&public_key, &blob, b"modified signed bytes"),
+                Err(crate::ssh_cert::CertificateError::InvalidSignature)
+            );
         }
     }
 

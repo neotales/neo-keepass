@@ -192,6 +192,15 @@ mod tests {
             rsa_oaep_decrypt(&private_key, &ciphertext[..ciphertext.len() - 1]),
             Err(AgeError::AuthenticationFailed)
         ));
+        let mut corrupted_ciphertext = ciphertext.clone();
+        let byte = corrupted_ciphertext
+            .last_mut()
+            .expect("RSA ciphertext is nonempty");
+        *byte ^= 1;
+        assert!(matches!(
+            rsa_oaep_decrypt(&private_key, &corrupted_ciphertext),
+            Err(AgeError::AuthenticationFailed)
+        ));
 
         let wrong_label_ciphertext = public_key
             .encrypt(
