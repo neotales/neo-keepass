@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CHOCOLATEY NUSPEC STUB - NOT A BUILDABLE PACKAGE.
+     A chocolatey package needs tools/chocolateyInstall.ps1 plus a reachable
+     package source, neither of which exists yet. This file is the foundation
+     only; do not `choco pack` or push it. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>nkeepass</id>
+    <version>0.0.0-alpha.25</version>
+    <title>nkeepass (Staging)</title>
+    <authors>Neotales</authors>
+    <owners>Neotales</owners>
+    <licenseUrl>https://github.com/neotales/neokeepass/blob/main/LICENSE.md</licenseUrl>
+    <projectUrl>https://github.com/neotales/neokeepass</projectUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Headless KeePass automation CLI and TUI. Staging nuspec: no install script is shipped, so this package cannot be built or installed yet.</description>
+    <tags>nkeepass keepass password cli</tags>
+  </metadata>
+</package>

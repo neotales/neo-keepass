@@ -25,6 +25,13 @@ zeroize.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 syn.workspace = true
+criterion.workspace = true
+
+# Benchmark harness. `cargo bench` builds this with the pinned release profile
+# and writes criterion output to target/criterion.
+[[bench]]
+name = "vault"
+harness = false
 
 [target.'cfg(windows)'.dependencies]
 known-folders = "1.4.2"

@@ -1,0 +1,27 @@
+# PKGBUILD for nkeepass. Build on an Arch machine with:
+#   cd packaging/pacman && makepkg -f
+# It repackages the prebuilt release binary from the tarball; it does not
+# compile Rust. Not built in CI: no Arch toolchain on the CI runners.
+# Maintainer: Neotales <maintainers@neotales.invalid>
+pkgname=nkeepass
+pkgver=0.0.0.alpha.25
+pkgrel=1
+pkgdesc='Headless KeePass automation CLI and TUI'
+arch=('x86_64')
+url='https://github.com/neotales/neokeepass'
+license=('MIT')
+provides=('nkeepass')
+conflicts=('nkeepass')
+# Fill in with the sha256sum of the tar.gz produced by
+# packaging/scripts/archive.sh before building.
+sha256sums_x86_64=('PLACEHOLDER_UNTIL_FIRST_BUILD')
+source_x86_64=("nkeepass-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+
+package() {
+    install -D -m 755 "${pkgname}-${pkgver}-x86_64-unknown-linux-gnu/nkeepass" \
+        "${pkgdir}/usr/bin/nkeepass"
+    install -D -m 644 "${pkgname}-${pkgver}-x86_64-unknown-linux-gnu/README.md" \
+        "${pkgdir}/usr/share/doc/nkeepass/README.md"
+    install -D -m 644 "${pkgname}-${pkgver}-x86_64-unknown-linux-gnu/LICENSE.md" \
+        "${pkgdir}/usr/share/licenses/nkeepass/LICENSE"
+}

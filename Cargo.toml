@@ -51,6 +51,7 @@ time = { version = "0.3", features = ["serde", "serde-human-readable", "formatti
 zeroize = { version = "=1.9.1", features = ["derive"] }
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 tempfile = "3.24"
+criterion = "0.8.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29"] }

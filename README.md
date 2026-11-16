@@ -76,3 +76,6 @@ cargo build --workspace
 cargo test --workspace
 cargo run -p nkeepass -- --help
 ```
+
+CI/CD, packaging, and benchmarks are documented in `docs/ci-cd.md`; packaging
+artifact status is in `packaging/README.md`.

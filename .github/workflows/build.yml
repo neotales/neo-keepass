@@ -1,0 +1,81 @@
+name: build
+
+# Builds Linux amd64/arm64 release binaries and packaging artifacts
+# (tar.gz, zip, deb) and uploads them as workflow artifacts.
+#
+# Builds run from a tag when triggered by tag push, or from an explicit ref
+# when dispatched, so what ran is always a nameable commit. Nothing is
+# published to any release or package registry; artifacts live only in the
+# workflow run.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build (defaults to current branch)"
+        required: false
+        default: ""
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: linux (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
+            cross: true
+    env:
+      # Cross-linker only affects the aarch64 target; the native build ignores it.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+      - name: Build release
+        run: cargo build --release -p nkeepass --target ${{ matrix.target }}
+      - name: Strip binary
+        run: strip "target/${{ matrix.target }}/release/nkeepass"
+      - name: Package (tar.gz, zip, deb)
+        run: |
+          version=$(packaging/scripts/version.sh)
+          dist="$PWD/dist"
+          mkdir -p "$dist"
+          packaging/scripts/archive.sh \
+            "target/${{ matrix.target }}/release/nkeepass" \
+            "$version" "${{ matrix.target }}" "$dist"
+          packaging/deb/build.sh \
+            "target/${{ matrix.target }}/release/nkeepass" \
+            "$version" "${{ matrix.deb_arch }}" "$dist"
+      - name: Validate artifacts
+        run: packaging/validate.sh "$PWD/dist"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nkeepass-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
