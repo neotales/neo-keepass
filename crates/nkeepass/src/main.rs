@@ -24,6 +24,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use neotales_age::{AgeFile, AgeIdentity, AgeRecipient};
 use neotales_keepass::{KdbxCredentials, KdbxKdf, KdbxWriteOptions, SecretBytes, read_key_file};
 use nkeepass::{
     KDBX_LIMITS, SearchHit,
@@ -267,9 +268,34 @@ const GET_OPTIONS: &[HelpOption] = &[
         label: "--is-output",
         summary: "Mark Azure DevOps output as an output variable.",
     },
+    HelpOption {
+        label: "--age-encrypt",
+        summary: "Encrypt the selected value to one or more age recipients.",
+    },
+    HelpOption {
+        label: "-r, --age-recipient KEY",
+        summary: "Age/SSH key, @FILE, gh:USER, or HTTPS source; repeatable.",
+    },
+    HelpOption {
+        label: "--output PATH",
+        summary: "Write encrypted output to a private, no-clobber file.",
+    },
 ];
 const GETX_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, FORMAT_OPTION];
-const SET_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, FILE_OPTION, STDIN_OPTION];
+const SET_OPTIONS: &[HelpOption] = &[
+    KEY_OPTION,
+    FIELD_OPTION,
+    FILE_OPTION,
+    STDIN_OPTION,
+    HelpOption {
+        label: "--age-decrypt",
+        summary: "Decrypt age-encrypted input before setting the field.",
+    },
+    HelpOption {
+        label: "-i, --age-identity PATH",
+        summary: "Read an age or unencrypted SSH identity from this file.",
+    },
+];
 const RM_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, YES_OPTION];
 const ENSURE_OPTIONS: &[HelpOption] = &[
     KEY_OPTION,
@@ -1765,6 +1791,10 @@ struct Options<'a> {
     memory: Option<u64>,
     iterations: Option<u64>,
     parallelism: Option<u64>,
+    age_encrypt: bool,
+    age_decrypt: bool,
+    age_recipients: Vec<&'a str>,
+    age_identity: Option<&'a str>,
 }
 
 fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
@@ -1804,6 +1834,10 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
                 | "--memory"
                 | "--iterations"
                 | "--parallelism"
+                | "--age-recipient"
+                | "-r"
+                | "--age-identity"
+                | "-i"
         ) {
             i += 1;
             Some(take_arg(args, i)?)
@@ -1838,6 +1872,14 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             }
             "--parallelism" if opts.parallelism.is_none() => {
                 opts.parallelism = Some(count(value, "invalid parallelism")?);
+            }
+            "--age-encrypt" if !opts.age_encrypt => opts.age_encrypt = true,
+            "--age-decrypt" if !opts.age_decrypt => opts.age_decrypt = true,
+            "--age-recipient" | "-r" => opts
+                .age_recipients
+                .push(value.ok_or_else(|| err("age recipient required"))?),
+            "--age-identity" | "-i" if opts.age_identity.is_none() => {
+                opts.age_identity = value;
             }
             word if !word.starts_with('-') => match positional {
                 Positional::Glob if opts.glob.is_none() => opts.glob = Some(word),
@@ -1998,6 +2040,185 @@ fn bounded_file(path: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
         return Err(err("input exceeds size limit"));
     }
     Ok(bytes)
+}
+
+/// Parses inline native or SSH public keys and explicit `@PATH` key files.
+fn age_recipients(values: &[&str]) -> Result<Vec<AgeRecipient>> {
+    let mut recipients = Vec::new();
+    for value in values {
+        let key = if value.starts_with("gh:") || value.starts_with("https://") {
+            fetch_recipient_source(value)?
+        } else if let Some(path) = value.strip_prefix('@') {
+            if path.is_empty() {
+                return Err(err("invalid age recipient file"));
+            }
+            let bytes =
+                bounded_file(path, 64 * 1024).map_err(|_| err("cannot read age recipient file"))?;
+            String::from_utf8(bytes.to_vec()).map_err(|_| err("invalid age recipient file"))?
+        } else {
+            (*value).to_owned()
+        };
+        for line in key
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            recipients.push(
+                AgeRecipient::from_public_key(line)
+                    .or_else(|_| AgeRecipient::from_ssh_public_key(line))
+                    .map_err(|_| err("invalid age recipient"))?,
+            );
+        }
+    }
+    if recipients.is_empty() {
+        return Err(err("age recipient required"));
+    }
+    Ok(recipients)
+}
+
+/// Resolves an explicitly requested GitHub or HTTPS recipient source.
+fn fetch_recipient_source(source: &str) -> Result<String> {
+    let url = if let Some(username) = source.strip_prefix("gh:") {
+        if username.is_empty()
+            || username.len() > 39
+            || !username
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(err("invalid GitHub recipient name"));
+        }
+        format!("https://github.com/{username}.keys")
+    } else {
+        validate_https_url(source)?;
+        source.to_owned()
+    };
+
+    let mut command = std::process::Command::new("curl");
+    command
+        .args([
+            "--disable",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "5",
+            "--max-filesize",
+            "65536",
+            "--max-redirs",
+            "0",
+            "--proto",
+            "=https",
+            "--url",
+        ])
+        .arg(url)
+        .env_clear()
+        .env("PATH", env::var_os("PATH").unwrap_or_default())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| err("HTTPS recipient lookup unavailable"))?;
+    let Some(mut output) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err("HTTPS recipient lookup failed"));
+    };
+    let bytes = match read_bounded(&mut output, 64 * 1024, "HTTPS recipient lookup failed") {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    if bytes.len() > 64 * 1024 {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err("HTTPS recipient response exceeds size limit"));
+    }
+    let status = child
+        .wait()
+        .map_err(|_| err("HTTPS recipient lookup failed"))?;
+    if !status.success() {
+        return Err(err("HTTPS recipient lookup failed"));
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|_| err("invalid HTTPS recipient response"))
+}
+
+/// Restricts discovery URLs to a simple HTTPS authority and path.
+fn validate_https_url(url: &str) -> Result<()> {
+    let Some(authority_and_path) = url.strip_prefix("https://") else {
+        return Err(err("recipient URL must use HTTPS"));
+    };
+    if url.len() > 2048
+        || authority_and_path.is_empty()
+        || authority_and_path
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || authority_and_path.contains(['?', '#', '@'])
+    {
+        return Err(err("invalid HTTPS recipient URL"));
+    }
+    let authority = authority_and_path.split('/').next().unwrap_or_default();
+    let host = authority.split(':').next().unwrap_or_default();
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return Err(err("invalid HTTPS recipient URL"));
+    }
+    if let Some(port) = authority
+        .strip_prefix(host)
+        .and_then(|rest| rest.strip_prefix(':'))
+        && port.parse::<u16>().ok().filter(|port| *port > 0).is_none()
+    {
+        return Err(err("invalid HTTPS recipient URL"));
+    }
+    Ok(())
+}
+
+/// Loads bounded native age identities or unencrypted SSH private keys.
+fn age_identities(path: &str) -> Result<Vec<AgeIdentity>> {
+    let bytes = bounded_file(path, 1 << 20).map_err(|_| err("cannot read age identity file"))?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| err("invalid age identity file"))?;
+    if text.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
+        || text.starts_with("-----BEGIN RSA PRIVATE KEY-----")
+        || text.starts_with("-----BEGIN PRIVATE KEY-----")
+    {
+        return AgeIdentity::from_ssh_private_key(text)
+            .map(|identity| vec![identity])
+            .map_err(|_| err("invalid age identity"));
+    }
+    let mut identities = Vec::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        identities.push(
+            AgeIdentity::from_private_key(line)
+                .or_else(|_| AgeIdentity::from_ssh_private_key(line))
+                .map_err(|_| err("invalid age identity"))?,
+        );
+    }
+    if identities.is_empty() {
+        return Err(err("age identity required"));
+    }
+    Ok(identities)
+}
+
+/// Decrypts either strict age ASCII armor or the binary age file format.
+fn decrypt_age_input(input: &[u8], identities: &[AgeIdentity]) -> Result<Zeroizing<Vec<u8>>> {
+    let plaintext = if input.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----") {
+        let armored = std::str::from_utf8(input).map_err(|_| err("invalid encrypted input"))?;
+        AgeFile::decrypt_armored(armored, identities)
+    } else {
+        AgeFile::decrypt(input, identities)
+    }
+    .map_err(|_| err("age decryption failed"))?;
+    Ok(Zeroizing::new(plaintext))
 }
 
 fn read_bounded(mut input: impl Read, max: u64, error: &'static str) -> Result<Zeroizing<Vec<u8>>> {
@@ -2653,6 +2874,13 @@ fn vault_creation_options(opts: &Options<'_>) -> bool {
 )]
 fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
     let value_input = opts.file.is_some() || opts.stdin;
+    let has_age_options = opts.age_encrypt
+        || opts.age_decrypt
+        || !opts.age_recipients.is_empty()
+        || opts.age_identity.is_some();
+    if has_age_options && !matches!(action, "get" | "set") {
+        return Err(err("age options are only valid for get and set"));
+    }
     let invalid = match action {
         "ls" | "search" | "group-ls" => {
             opts.key.is_some()
@@ -2687,7 +2915,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
         }
         "get" | "getx" | "field-get" => {
             opts.file.is_some()
-                || opts.output.is_some()
+                || (opts.output.is_some() && !opts.age_encrypt)
                 || opts.yes
                 || opts.dry_run
                 || opts.replace
@@ -2695,6 +2923,10 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.glob.is_some()
                 || opts.strategy.is_some()
                 || opts.stdin
+                || opts.age_decrypt
+                || opts.age_identity.is_some()
+                || (!opts.age_encrypt && !opts.age_recipients.is_empty())
+                || (opts.age_encrypt && opts.age_recipients.is_empty())
                 // `getx` is the JSON interchange read: there is no variable to
                 // name and no output scope to declare.
                 || (action == "getx" && (opts.name.is_some() || opts.is_output))
@@ -2712,6 +2944,10 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.is_output
                 || opts.strategy.is_some()
                 || !value_input
+                || opts.age_encrypt
+                || !opts.age_recipients.is_empty()
+                || (opts.age_decrypt != opts.age_identity.is_some())
+                || (opts.age_identity.is_some() && action != "set")
         }
         "rm" | "field-rm" | "attachment-rm" => {
             opts.name.is_some()
@@ -3069,6 +3305,14 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         if action == "getx" && format != "json" {
             return Err(err("getx requires JSON format"));
         }
+        if opts.age_encrypt
+            && (action != "get"
+                || !matches!(format, "text")
+                || opts.name.is_some()
+                || opts.is_output)
+        {
+            return Err(err("age encryption requires plain get output"));
+        }
         if is_named_format(format) && opts.name.is_none() {
             return Err(err("--name required for formatted output"));
         }
@@ -3127,7 +3371,21 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                     nkeepass::ServiceError::NotFound => err("field not found"),
                     error => err(error.message()),
                 })?;
-            emit_value(value.as_slice(), format, opts.name, opts.is_output)
+            if opts.age_encrypt {
+                let recipients = age_recipients(&opts.age_recipients)?;
+                let encrypted = AgeFile::encrypt_armored(value.as_slice(), &recipients)
+                    .map_err(|_| err("age encryption failed"))?;
+                if let Some(path) = opts.output {
+                    write_private_output(path, encrypted.as_bytes())
+                } else {
+                    io::stdout()
+                        .write_all(encrypted.as_bytes())
+                        .and_then(|()| io::stdout().write_all(b"\n"))
+                        .map_err(|_| err("cannot write encrypted output"))
+                }
+            } else {
+                emit_value(value.as_slice(), format, opts.name, opts.is_output)
+            }
         })();
         let locked = service.lock(session).map_err(|error| err(error.message()));
         result?;
@@ -3242,6 +3500,15 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             return Err(err("custom field required"));
         }
         let bytes = input_value(&opts)?;
+        let bytes = if opts.age_decrypt {
+            let identities = age_identities(
+                opts.age_identity
+                    .ok_or_else(|| err("age identity required"))?,
+            )?;
+            decrypt_age_input(&bytes, &identities)?
+        } else {
+            bytes
+        };
         let value = Zeroizing::new(
             String::from_utf8(bytes.to_vec()).map_err(|_| err("field requires UTF-8"))?,
         );
@@ -5417,6 +5684,71 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn age_input_and_identity_helpers_round_trip_and_parse_recipient_files() {
+        let key = neotales_age::AgeKey::generate().expect("age key");
+        let recipient_path = tempfile::NamedTempFile::new().expect("recipient file");
+        fs::write(recipient_path.path(), format!("{}\n", key.public_key)).expect("write recipient");
+        let recipient_path = recipient_path.path().to_str().expect("UTF-8 temp path");
+        let recipients = age_recipients(&[&format!("@{recipient_path}")]).expect("recipient file");
+        let identity_path = tempfile::NamedTempFile::new().expect("identity file");
+        fs::write(identity_path.path(), format!("{}\n", key.private_key)).expect("write identity");
+        let identities = age_identities(identity_path.path().to_str().expect("UTF-8 temp path"))
+            .expect("identity file");
+        let ciphertext = AgeFile::encrypt(b"age CLI payload", &recipients).expect("encrypt");
+        assert_eq!(
+            decrypt_age_input(&ciphertext, &identities)
+                .expect("decrypt")
+                .as_slice(),
+            b"age CLI payload"
+        );
+        let armored = AgeFile::encrypt_armored(b"armored CLI payload", &recipients).expect("armor");
+        assert_eq!(
+            decrypt_age_input(armored.as_bytes(), &identities)
+                .expect("armored decrypt")
+                .as_slice(),
+            b"armored CLI payload"
+        );
+    }
+
+    #[test]
+    fn age_flags_parse_and_reject_duplicate_identity_options() {
+        let args = [
+            "--key".to_owned(),
+            "service/account".to_owned(),
+            "--age-encrypt".to_owned(),
+            "-r".to_owned(),
+            "age1example".to_owned(),
+            "--age-recipient".to_owned(),
+            "ssh-ed25519 AAAA".to_owned(),
+        ];
+        let parsed = options(&args, Positional::Forbidden).expect("age flags parse");
+        assert!(parsed.age_encrypt);
+        assert_eq!(parsed.age_recipients.len(), 2);
+        assert!(
+            options(
+                &[
+                    "--age-identity".to_owned(),
+                    "one".to_owned(),
+                    "-i".to_owned(),
+                    "two".to_owned(),
+                ],
+                Positional::Forbidden,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn age_network_sources_are_strictly_https_and_bounded_by_contract() {
+        assert!(validate_https_url("https://example.invalid/keys").is_ok());
+        assert!(validate_https_url("http://example.invalid/keys").is_err());
+        assert!(validate_https_url("https://user@example.invalid/keys").is_err());
+        assert!(validate_https_url("https://example.invalid/keys?token=bad").is_err());
+        assert!(validate_https_url("https://example.invalid:0/keys").is_err());
+        assert!(fetch_recipient_source("gh:bad/name").is_err());
+    }
 
     #[test]
     fn windows_home_candidates_prefer_known_folders_then_validated_env_fallbacks() {

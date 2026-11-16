@@ -973,6 +973,108 @@ fn shortcuts_fields_attachments_and_exec() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("hidden-sentinel"));
     let out = run(&["get", "--key", "LOGIN", auth[0], auth[1]]);
     assert_eq!(out.stdout, b"hidden-sentinel");
+    let age_key = neotales_age::AgeKey::generate().unwrap();
+    let encrypted_path = tmp.path().join("encrypted.age");
+    let out = run(&[
+        "get",
+        "--key",
+        "LOGIN",
+        "--age-encrypt",
+        "-r",
+        &age_key.public_key,
+        "--output",
+        encrypted_path.to_str().unwrap(),
+        auth[0],
+        auth[1],
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let identity_path = tmp.path().join("identity.txt");
+    std::fs::write(&identity_path, &age_key.private_key).unwrap();
+    let ciphertext = std::fs::read(&encrypted_path).unwrap();
+    let identity = neotales_age::AgeIdentity::from_private_key(&age_key.private_key).unwrap();
+    assert_eq!(
+        neotales_age::AgeFile::decrypt_armored(
+            std::str::from_utf8(&ciphertext).unwrap(),
+            &[identity]
+        )
+        .unwrap(),
+        b"hidden-sentinel"
+    );
+    let out = run(&[
+        "get",
+        "--key",
+        "LOGIN",
+        "--age-encrypt",
+        "--age-recipient",
+        &age_key.public_key,
+        auth[0],
+        auth[1],
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.stdout
+            .windows(16)
+            .any(|window| window == b"hidden-sentinel")
+    );
+    let identity = neotales_age::AgeIdentity::from_private_key(&age_key.private_key).unwrap();
+    assert_eq!(
+        neotales_age::AgeFile::decrypt_armored(
+            std::str::from_utf8(&out.stdout).unwrap(),
+            &[identity]
+        )
+        .unwrap(),
+        b"hidden-sentinel"
+    );
+    let out = run(&[
+        "set",
+        "--key",
+        "LOGIN",
+        "--field",
+        "Notes",
+        "--age-decrypt",
+        "-i",
+        identity_path.to_str().unwrap(),
+        "--file",
+        encrypted_path.to_str().unwrap(),
+        auth[0],
+        auth[1],
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        run(&[
+            "get", "--key", "LOGIN", "--field", "Notes", auth[0], auth[1],
+        ])
+        .stdout,
+        b"hidden-sentinel"
+    );
+    let out = run(&[
+        "get",
+        "--key",
+        "LOGIN",
+        "--age-encrypt",
+        "-r",
+        &age_key.public_key,
+        "--output",
+        encrypted_path.to_str().unwrap(),
+        auth[0],
+        auth[1],
+    ]);
+    assert!(
+        !out.status.success(),
+        "encrypted output clobbered existing file"
+    );
     let out = run(&["getx", "--key", "LOGIN", auth[0], auth[1]]);
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["value"], "hidden-sentinel");

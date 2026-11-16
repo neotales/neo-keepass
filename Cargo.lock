@@ -1298,6 +1298,7 @@ dependencies = [
  "crossterm",
  "getrandom 0.3.4",
  "known-folders",
+ "neotales-age",
  "neotales-keepass",
  "ratatui",
  "rpassword",
