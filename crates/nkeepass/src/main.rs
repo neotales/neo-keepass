@@ -2325,9 +2325,19 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
             .map_or(url, |end| &url[..end]);
         command.env("http_proxy", proxy);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| err("HTTPS recipient lookup unavailable"))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            #[cfg(test)]
+            if matches!(transport, RecipientTransport::HttpFixture) {
+                return Err(err(&format!(
+                    "HTTP fixture curl could not start ({})",
+                    curl_fixture_diagnostic(None, &[])
+                )));
+            }
+            return Err(err("HTTPS recipient lookup unavailable"));
+        }
+    };
     #[cfg(test)]
     let mut fixture_stderr = if matches!(transport, RecipientTransport::HttpFixture) {
         child.stderr.take()
