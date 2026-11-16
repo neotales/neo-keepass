@@ -31,6 +31,12 @@ jobs:
           toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run benchmarks
+        env:
+          # Expression-parsing fixtures for scripts/check-workflows.sh:
+          # '}}' inside a single-quoted string must not end the token, and ''
+          # is an escaped quote. actionlint validates these too.
+          BENCH_REF_NOTE: ${{ contains('}}', inputs.ref) && format('ref {0}', inputs.ref) || format('branch {0}', github.ref) }}
+          BENCH_QUOTE_NOTE: ${{ format('it''s run {0}', github.run_id) }}
         run: cargo bench -p nkeepass
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

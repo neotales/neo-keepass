@@ -448,7 +448,7 @@ run_smoke() {
         echo "skip smoke run (validation failed; payloads are never executed)"
         return
     fi
-    [ -n "$smoke_binary" ] || return
+    [ -n "$smoke_binary" ] || return 0
     if timeout 10 "$smoke_binary" --help >/dev/null 2>&1; then
         record ok "smoke run: $smoke_triple binary --help exits 0 (timeout 10s)"
     else

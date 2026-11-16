@@ -124,6 +124,9 @@ build_positive_deb() { # build_positive_deb <out-dir>
     fi
 }
 
+echo "== positive case: manifest-only run (no args) must succeed with exit 0"
+expect_pass "manifest-only validation exits 0" bash "$repo/packaging/validate.sh"
+
 echo "== positive case: complete, correct artifacts (real structure)"
 pos="$work/positive"
 bash "$repo/packaging/scripts/archive.sh" "$binary" "$version" x86_64-unknown-linux-gnu "$pos" >/dev/null

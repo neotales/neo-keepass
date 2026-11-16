@@ -14,7 +14,6 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 python3 - "$repo" <<'PY'
 import os
-import re
 import subprocess
 import sys
 
@@ -25,9 +24,64 @@ wf_dir = os.path.join(repo, ".github", "workflows")
 problems = 0
 
 PLACEHOLDER = "CI_EXPRESSION_PLACEHOLDER"
+# Complete GitHub expression tokens only. A token ends at the first `}}`
+# that is OUTSIDE a single-quoted string; inside a string, `''` is an escaped
+# quote. Non-greedy regexes cannot express that, so this is a scanner.
+def replace_expressions(text: str, replacement: str = PLACEHOLDER) -> str:
+    out = []
+    i = 0
+    while True:
+        start = text.find("${{", i)
+        if start < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:start])
+        k = start + 3
+        in_quote = False
+        end = -1
+        while k < len(text):
+            ch = text[k]
+            if in_quote:
+                if ch == "'":
+                    if text[k : k + 2] == "''":  # doubled quote is escaped '
+                        k += 2
+                        continue
+                    in_quote = False
+            elif ch == "'":
+                in_quote = True
+            elif text[k : k + 2] == "}}":
+                end = k
+                break
+            k += 1
+        if end < 0:
+            # Unterminated expression: keep the remainder verbatim; the
+            # rendered shell and actionlint will reject it.
+            out.append(text[start:])
+            break
+        out.append(replacement)
+        i = end + 2
+    return "".join(out)
+
+
+SELFTEST_CASES = [
+    # (input, expected render)
+    ("echo ${{ contains('}}', github.ref) }}", "echo " + PLACEHOLDER),
+    ("echo ${{ format('it''s {0}', github.ref) }}", "echo " + PLACEHOLDER),
+    ("a ${{ x }} b ${{ y }}", f"a {PLACEHOLDER} b {PLACEHOLDER}"),
+    ("echo ${{ matrix.target }}", "echo " + PLACEHOLDER),
+    # Unterminated: left verbatim.
+    ("echo ${{ oops", "echo ${{ oops"),
+]
+
+for source, want in SELFTEST_CASES:
+    got = replace_expressions(source)
+    if got != want:
+        print(f"FAIL scanner: {source!r} -> {got!r}, want {want!r}")
+        sys.exit(1)
+print(f"ok   expression scanner selftest ({len(SELFTEST_CASES)} cases)")
 # Complete GitHub expression tokens only; non-greedy so two adjacent
 # expressions never bleed into each other.
-EXPRESSION = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
+# Validate every workflow; scanner selftest runs first.
 
 for name in sorted(os.listdir(wf_dir)):
     if not (name.endswith(".yml") or name.endswith(".yaml")):
@@ -52,7 +106,7 @@ for name in sorted(os.listdir(wf_dir)):
     collect(doc)
 
     for i, run in enumerate(runs):
-        rendered = EXPRESSION.sub(PLACEHOLDER, run)
+        rendered = replace_expressions(run)
         label = f"{name} run[{i}]"
         # Folded/plain scalars turn a line-leading continuation into
         # backslash-space, which silently changes shell semantics.
