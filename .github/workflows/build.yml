@@ -4,9 +4,9 @@ name: build
 # (tar.gz, zip, deb) and uploads them as workflow artifacts.
 #
 # Builds run from a tag when triggered by tag push, from an explicit ref
-# when dispatched, or from the branch head on pull requests, so what ran is
-# always a nameable commit. Nothing is published to any release or package
-# registry; artifacts live only in the workflow run.
+# when dispatched, or from the event's merge commit on pull requests, so
+# what ran is always a nameable commit. Nothing is published to any release
+# or package registry; artifacts live only in the workflow run.
 on:
   workflow_dispatch:
     inputs:
