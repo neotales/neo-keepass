@@ -1912,8 +1912,8 @@ fn service_backed_search_preserves_ndjson_projection_and_order() {
     assert_eq!(
         output.stdout,
         concat!(
-            "{\"fields\":[\"UserName\",\"token\"],\"path\":\"Root/first\",\"tags\":[],\"title\":\"first\"}\n",
-            "{\"fields\":[\"UserName\"],\"path\":\"Root/second\",\"tags\":[],\"title\":\"second\"}\n",
+            "{\"fields\":[\"Title\",\"UserName\",\"token\"],\"path\":\"Root/first\",\"tags\":[],\"title\":\"first\"}\n",
+            "{\"fields\":[\"Title\",\"UserName\"],\"path\":\"Root/second\",\"tags\":[],\"title\":\"second\"}\n",
         )
         .as_bytes(),
     );
@@ -2101,9 +2101,9 @@ fn service_backed_ls_keeps_unfiltered_schema_and_vault_order() {
     assert_eq!(
         output.stdout,
         concat!(
-            "{\"fields\":[\"custom\"],\"path\":\"Root/first\",\"tags\":[],\"title\":\"first\"}\n",
-            "{\"fields\":[],\"path\":\"Root/second\",\"tags\":[],\"title\":\"second\"}\n",
-            "{\"fields\":[],\"path\":\"Root/nested/third\",\"tags\":[],\"title\":\"third\"}\n",
+            "{\"fields\":[\"Title\",\"custom\"],\"path\":\"Root/first\",\"tags\":[],\"title\":\"first\"}\n",
+            "{\"fields\":[\"Title\"],\"path\":\"Root/second\",\"tags\":[],\"title\":\"second\"}\n",
+            "{\"fields\":[\"Title\"],\"path\":\"Root/nested/third\",\"tags\":[],\"title\":\"third\"}\n",
         )
         .as_bytes(),
     );
@@ -2347,10 +2347,15 @@ fn field_ls_ignores_unrelated_unsafe_metadata_but_rejects_unsafe_field_names() {
         "{}",
         String::from_utf8_lossy(&fields.stderr)
     );
-    let row: serde_json::Value = serde_json::from_slice(&fields.stdout).unwrap();
-    assert_eq!(row["name"], "safe-field");
-    assert_eq!(row["protected"], true);
-    assert_eq!(row["protect_in_memory"], false);
+    let rows: Vec<serde_json::Value> = fields
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let safe = rows.iter().find(|row| row["name"] == "safe-field").unwrap();
+    assert_eq!(safe["protected"], true);
+    assert_eq!(safe["protect_in_memory"], false);
     assert!(!String::from_utf8_lossy(&fields.stdout).contains("bad"));
 
     let rejected = run_against(&vault, &config, &["field", "ls", "--key", "unsafe-field"]);
@@ -2404,7 +2409,7 @@ fn ls_glob_withholds_only_matching_hostile_rows() {
     );
     assert_eq!(
         output.stdout,
-        b"{\"fields\":[],\"path\":\"Root/needle-visible\",\"tags\":[],\"title\":\"needle-visible\"}\n"
+        b"{\"fields\":[\"Title\"],\"path\":\"Root/needle-visible\",\"tags\":[],\"title\":\"needle-visible\"}\n"
     );
     assert_eq!(
         output.stderr,

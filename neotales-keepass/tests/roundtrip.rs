@@ -367,6 +367,70 @@ fn aes_kdf_aes_cbc_round_trips_protected_fields() {
     );
 }
 
+#[test]
+fn standard_entry_fields_round_trip_with_documented_field_precedence() {
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("scalar title");
+    entry.notes = "scalar notes".into();
+    entry.username = "scalar user".into();
+    entry.url = "https://scalar.example".into();
+    entry.override_url = "{USERNAME}".into();
+    entry.set_field(Field::new("Title", "field title"));
+    entry.set_field(Field::new("Notes", "field notes"));
+    entry.set_field(Field::new("UserName", "field user"));
+    entry.set_field(Field::new("URL", "https://field.example"));
+    database.root.entries.push(entry);
+
+    let mut bytes = Vec::new();
+    KdbxFile::save_default(&database, &mut bytes, "pw").expect("save standard fields");
+    let loaded = KdbxFile::load_password(bytes.as_slice(), "pw", &KdbxReadLimits::default())
+        .expect("load standard fields");
+    let entry = &loaded.root.entries[0];
+    assert_eq!(entry.title, "field title");
+    assert_eq!(entry.notes, "field notes");
+    assert_eq!(entry.username, "field user");
+    assert_eq!(entry.url, "https://field.example");
+    assert_eq!(entry.override_url, "{USERNAME}");
+    assert_eq!(
+        entry
+            .field("Title")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "field title"
+    );
+    assert_eq!(
+        entry
+            .field("Notes")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "field notes"
+    );
+
+    let mut fallback = Entry::new("scalar-only title");
+    fallback.notes = "scalar-only notes".into();
+    fallback.username = "scalar-only user".into();
+    fallback.url = "https://scalar-only.example".into();
+    fallback.override_url = "https://override.example/{URL}".into();
+    database.root.entries.clear();
+    database.root.entries.push(fallback);
+    let mut bytes = Vec::new();
+    KdbxFile::save_default(&database, &mut bytes, "pw").expect("save scalar fields");
+    let loaded = KdbxFile::load_password(bytes.as_slice(), "pw", &KdbxReadLimits::default())
+        .expect("load scalar fields");
+    let entry = &loaded.root.entries[0];
+    assert_eq!(entry.title, "scalar-only title");
+    assert_eq!(entry.notes, "scalar-only notes");
+    assert_eq!(entry.username, "scalar-only user");
+    assert_eq!(entry.url, "https://scalar-only.example");
+    assert_eq!(entry.override_url, "https://override.example/{URL}");
+}
+
 /// Regression: the KDBX 4 inner protected stream is consumed in document
 /// order, so a document that mixes entries and child groups under one parent
 /// must round-trip every protected value. A reader that grouped `Entry` and

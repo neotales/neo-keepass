@@ -150,6 +150,66 @@ impl KdbxAsyncWrite for CancelAfterWrite {
     }
 }
 
+struct FailingReader;
+
+impl KdbxAsyncRead for FailingReader {
+    fn poll_read(&mut self, _cx: &mut Context<'_>, _buffer: &mut [u8]) -> Poll<io::Result<usize>> {
+        Poll::Ready(Err(io::Error::other("private reader detail")))
+    }
+}
+
+struct FailingWriter {
+    fail_flush: bool,
+}
+
+impl KdbxAsyncWrite for FailingWriter {
+    fn poll_write(&mut self, _cx: &mut Context<'_>, buffer: &[u8]) -> Poll<io::Result<usize>> {
+        if self.fail_flush {
+            Poll::Ready(Ok(buffer.len()))
+        } else {
+            Poll::Ready(Err(io::Error::other("private writer detail")))
+        }
+    }
+
+    fn poll_flush(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Err(io::Error::other("private flush detail")))
+    }
+}
+
+#[test]
+fn async_transport_failures_match_synchronous_io_category() {
+    let mut reader = FailingReader;
+    let mut credentials = KdbxCredentials::password("pw").unwrap();
+    let error = drive(KdbxFile::load_async(
+        &mut reader,
+        &mut credentials,
+        &KdbxReadLimits::default(),
+        KdbxCancellation::never(),
+    ))
+    .unwrap_err();
+    assert_eq!(error.kind, KdbxFailureKind::Io);
+    assert_eq!(error.message, "KDBX stream I/O failed");
+
+    for fail_flush in [false, true] {
+        let mut writer = FailingWriter { fail_flush };
+        let mut credentials = KdbxCredentials::password("pw").unwrap();
+        let error = drive(KdbxFile::save_async(
+            &KeePassDatabase::default(),
+            &mut writer,
+            &mut credentials,
+            KdbxWriteOptions {
+                aes_kdf_rounds: 8,
+                ..KdbxWriteOptions::default()
+            },
+            &KdbxReadLimits::default(),
+            KdbxCancellation::never(),
+        ))
+        .unwrap_err();
+        assert_eq!(error.kind, KdbxFailureKind::Io);
+        assert_eq!(error.message, "KDBX stream I/O failed");
+    }
+}
+
 #[test]
 fn async_load_reads_in_chunks_requires_eof_and_preserves_auth_and_limit_errors() {
     let bytes = vault();

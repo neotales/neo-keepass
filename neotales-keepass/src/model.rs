@@ -949,17 +949,26 @@ impl Group {
 pub struct Entry {
     /// Stable entry UUID.
     pub id: KdbxUuid,
-    /// Entry title/path segment. This is ordinary owned model text.
+    /// Entry title/path segment, projected from the standard `Title` field.
+    /// An explicitly present `Title` field takes precedence on save. This
+    /// ordinary string is not zeroized on drop.
     pub title: String,
-    /// Entry username. This is ordinary owned model text and is not zeroized
-    /// on drop; applications that classify usernames as secrets need a
-    /// caller-owned storage policy.
+    /// Entry username, projected from the standard `UserName` field. An
+    /// explicitly present `UserName` field takes precedence on save. This
+    /// ordinary string is not zeroized on drop.
     pub username: String,
-    /// Entry password.
+    /// Entry password. An explicitly present standard `Password` field takes
+    /// precedence on save.
     pub password: ProtectedValue,
-    /// Entry URL. This is ordinary owned model text.
+    /// Entry URL, projected from the standard `URL` field. An explicitly
+    /// present `URL` field takes precedence on save.
     pub url: String,
-    /// Notes. This is ordinary owned model text and is not zeroized on drop.
+    /// KeePass `OverrideURL` expression, distinct from the standard `URL`
+    /// field.
+    pub override_url: String,
+    /// Notes, projected from the standard `Notes` field. An explicitly present
+    /// `Notes` field takes precedence on save. This ordinary string is not
+    /// zeroized on drop.
     pub notes: String,
     /// Standard icon identifier.
     pub icon_id: u32,
@@ -1005,6 +1014,7 @@ impl Entry {
             username: String::new(),
             password: ProtectedValue::from_text(String::new()),
             url: String::new(),
+            override_url: String::new(),
             notes: String::new(),
             icon_id: 48,
             custom_icon_id: KdbxUuid::ZERO,

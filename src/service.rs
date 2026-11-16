@@ -5880,7 +5880,12 @@ mod tests {
             reference.id,
         )
         .unwrap();
-        let duplicate = entry.fields[0].clone();
+        let duplicate = entry
+            .fields
+            .iter()
+            .find(|field| field.key == "otp")
+            .unwrap()
+            .clone();
         entry.fields.push(duplicate);
         assert_eq!(
             service.otp_code(&reference, 59),
@@ -6006,7 +6011,7 @@ mod tests {
         // KDBX round-tripping currently drops model-only tags; the service
         // projects the same loaded metadata the existing CLI sees.
         assert!(hit.tags().is_empty());
-        assert_eq!(hit.field_names(), &["UserName", "URL", "recovery"]);
+        assert_eq!(hit.field_names(), &["Title", "UserName", "URL", "recovery"]);
         let reference = hit.reference();
         assert!(service.validate_entry(&reference).is_ok());
         assert_eq!(

@@ -192,7 +192,7 @@ pub(crate) fn aes_cbc_decrypt(
     key: &[u8; 32],
     iv: &[u8],
     data: &[u8],
-) -> Result<Vec<u8>, KdbxError> {
+) -> Result<Zeroizing<Vec<u8>>, KdbxError> {
     if iv.len() != 16 || data.is_empty() || data.len() % 16 != 0 {
         return Err(KdbxError::malformed("invalid AES-CBC input"));
     }
@@ -200,7 +200,7 @@ pub(crate) fn aes_cbc_decrypt(
         Aes256::new_from_slice(key).map_err(|_| KdbxError::malformed("invalid AES key"))?;
     let decryptor = cbc::Decryptor::<Aes256>::inner_iv_slice_init(cipher, iv)
         .map_err(|_| KdbxError::malformed("invalid AES-CBC IV"))?;
-    let mut output = vec![0; data.len()];
+    let mut output = Zeroizing::new(vec![0; data.len()]);
     let length = decryptor
         .decrypt_padded_b2b::<Pkcs7>(data, &mut output)
         .map_err(|_| {

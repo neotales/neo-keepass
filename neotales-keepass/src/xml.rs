@@ -854,7 +854,7 @@ fn parse_entry(
         entry.id = KdbxUuid::from_base64(value)?;
     }
     if let Some(value) = text(node, "OverrideURL") {
-        entry.url = value.into();
+        entry.override_url = value.into();
     }
     if let Some(value) = text(node, "IconID") {
         entry.icon_id = value
@@ -894,9 +894,11 @@ fn parse_entry(
         if let Ok(value) = field.value.reveal_text() {
             let value = value.as_str().to_owned();
             match field.key.as_str() {
+                "Title" => entry.title = value,
                 "UserName" => entry.username = value,
                 "URL" => entry.url = value,
                 "Password" => entry.password = field.value.clone(),
+                "Notes" => entry.notes = value,
                 _ => {}
             }
         }
@@ -1557,8 +1559,7 @@ fn write_group(xml: &mut String, group: &Group, stream: &mut InnerCipher) -> Res
 fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Result<(), KdbxError> {
     xml.push_str("<Entry>");
     write_text(xml, "UUID", &entry.id.to_base64());
-    write_text(xml, "Name", &entry.title);
-    write_text(xml, "OverrideURL", &entry.url);
+    write_text(xml, "OverrideURL", &entry.override_url);
     write_text(xml, "IconID", &entry.icon_id.to_string());
     if !entry.custom_icon_id.is_zero() {
         write_text(xml, "CustomIconUUID", &entry.custom_icon_id.to_base64());
@@ -1574,43 +1575,25 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
         &entry.previous_parent_group_id.to_base64(),
     );
     write_times(xml, &entry.times);
-    if !entry.username.is_empty() && entry.field("UserName").is_none() {
-        write_field_xml(
-            xml,
-            "UserName",
-            entry.username.as_bytes(),
-            false,
-            false,
-            stream,
-        )?;
-    }
-    if !entry.url.is_empty() && entry.field("URL").is_none() {
-        write_field_xml(xml, "URL", entry.url.as_bytes(), false, false, stream)?;
-    }
-    if !entry.password.is_empty() && entry.field("Password").is_none() {
+    write_standard_field(xml, entry, "Title", entry.title.as_bytes(), stream)?;
+    write_standard_field(xml, entry, "UserName", entry.username.as_bytes(), stream)?;
+    write_standard_field(xml, entry, "URL", entry.url.as_bytes(), stream)?;
+    if let Some(field) = entry.field("Password") {
+        write_string_field(xml, field, stream)?;
+    } else if !entry.password.is_empty() {
         entry.password.with_revealed_bytes(|password| {
             write_field_xml(xml, "Password", password, true, false, stream)
         })??;
     }
+    write_standard_field(xml, entry, "Notes", entry.notes.as_bytes(), stream)?;
     for field in &entry.fields {
-        xml.push_str("<String>");
-        write_text(xml, "Key", &field.key);
-        if field.protected {
-            let encoded = field.value.with_revealed_bytes(|bytes| {
-                stream.transform(bytes);
-                STANDARD.encode(bytes)
-            })?;
-            write!(
-                xml,
-                "<Value Protected=\"True\" ProtectInMemory=\"{}\">{}</Value>",
-                field.protect_in_memory, encoded
-            )
-            .expect("writing to String cannot fail");
-        } else {
-            let text = field.value.reveal_text()?.as_str().to_owned();
-            write!(xml, "<Value>{}</Value>", escape(&text)).expect("writing to String cannot fail");
+        if matches!(
+            field.key.as_str(),
+            "Title" | "UserName" | "URL" | "Password" | "Notes"
+        ) {
+            continue;
         }
-        xml.push_str("</String>");
+        write_string_field(xml, field, stream)?;
     }
     for attachment in &entry.attachments {
         write!(
@@ -1660,6 +1643,48 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
         xml.push_str("</History>");
     }
     xml.push_str("</Entry>");
+    Ok(())
+}
+
+fn write_standard_field(
+    xml: &mut String,
+    entry: &Entry,
+    key: &str,
+    fallback: &[u8],
+    stream: &mut InnerCipher,
+) -> Result<(), KdbxError> {
+    if let Some(field) = entry.field(key) {
+        write_string_field(xml, field, stream)
+    } else if key == "Title" || !fallback.is_empty() {
+        write_field_xml(xml, key, fallback, false, false, stream)
+    } else {
+        Ok(())
+    }
+}
+
+fn write_string_field(
+    xml: &mut String,
+    field: &Field,
+    stream: &mut InnerCipher,
+) -> Result<(), KdbxError> {
+    xml.push_str("<String>");
+    write_text(xml, "Key", &field.key);
+    if field.protected {
+        let encoded = field.value.with_revealed_bytes(|bytes| {
+            stream.transform(bytes);
+            STANDARD.encode(bytes)
+        })?;
+        write!(
+            xml,
+            "<Value Protected=\"True\" ProtectInMemory=\"{}\">{}</Value>",
+            field.protect_in_memory, encoded
+        )
+        .expect("writing to String cannot fail");
+    } else {
+        let text = field.value.reveal_text()?.as_str().to_owned();
+        write!(xml, "<Value>{}</Value>", escape(&text)).expect("writing to String cannot fail");
+    }
+    xml.push_str("</String>");
     Ok(())
 }
 fn write_field_xml(

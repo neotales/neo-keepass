@@ -14,6 +14,16 @@ The crate is under active development. It currently provides:
 - ordered metadata/tree/attachment models, typed public-header custom data, XML import/export, path queries, merge strategies, and lossless-save blocking;
 - HOTP/TOTP and the headless KeePassXC `otp` field adapter.
 
+Entry XML uses KeePass's standard `String` fields for `Title`, `UserName`,
+`URL`, `Password`, and `Notes`. When both a standard field and its convenience
+scalar (`title`, `username`, `url`, `password`, or `notes`) are populated, the
+standard field is authoritative on save. If it is absent, the scalar is
+serialized as that standard field. Loading standard fields updates the
+convenience scalar projections. `OverrideURL` is kept separately as
+`Entry::override_url`; it is not the entry's `URL` field. The reader continues
+to accept the older nonstandard `<Name>` element as a title fallback, but the
+writer emits only standard KeePass entry fields.
+
 KDBX 3.1 writing is available through [`KdbxFile::save_kdbx3`]; KDBX 3.0 and KDBX 3 Argon2/ChaCha20 writing remain unsupported because they are not part of the selected KDBX 3 writer path. Argon2d/Argon2id writing is available for KDBX 4.1. Configuration-framework adapters and UI/platform integrations are intentionally outside this crate.
 
 ## Security
@@ -57,37 +67,31 @@ byte-origin values:
   strings or buffers. `with_revealed_bytes` supplies a mutable, temporary slice;
   `with_revealed_text` supplies a temporary `&str`. Neither is a pinning guard.
 - `from_bytes_with_protection` accepts a `MemoryProtectionProvider`, allowing a
-  Windows DPAPI implementation to be supplied without making this crate
-  Windows-specific. The optional `neotales-keepass-platform` crate provides a
-  feature-gated safe adapter for the native Windows API.
+  platform implementation without making this crate platform-specific. This
+  repository does not include an implementation/provider crate.
 
 The core crate does not pin memory. `MemoryPinningPolicy` and
 `MemoryPinningStatus` describe the contract for an optional platform provider:
 `BestEffort` can report an unavailable/failed pin, while `Required` must fail
 explicitly. The core never silently claims that a value is pinned. Optional
 `mlock`/`VirtualLock` integration belongs in a platform-owned allocation and
-must zeroize before unlocking; see the [platform integration
-plan](../keepass-platform/README.md). `ProtectedValue` debug output is
-redacted.
+must zeroize before unlocking; this repository does not provide such an
+adapter. `ProtectedValue` debug output is redacted.
 
-### Windows DPAPI provider boundary
+### Platform provider boundary
 
-The optional [`neotales-keepass-platform`](../keepass-platform/README.md)
-crate supplies `WindowsDpapiProvider` behind `windows-dpapi`; on non-Windows
-hosts its protect/unprotect calls return `PlatformUnavailable`. It protects the
-stored byte representation, not revealed plaintext, and reports pinning as
-disabled/not pinned. The safe wrapper does not promise
-`CRYPTPROTECT_UI_FORBIDDEN`; applications needing that flag must review the
-native dependency boundary before deployment.
+No Windows DPAPI or memory-pinning provider is included here. The core exposes
+provider traits only; callers must supply and independently review any
+platform-specific implementation.
 
 ## Development
 
-From the repository's `rust` directory:
+From the repository root (Rust 1.98.1 is pinned in `rust-toolchain.toml`):
 
 ```sh
-mise exec rust@stable -- cargo fmt --all -- --check
-mise exec rust@stable -- cargo check -p neotales-keepass
-mise exec rust@stable -- cargo test -p neotales-keepass
+cargo fmt --all -- --check
+cargo check -p neotales-keepass
+cargo test -p neotales-keepass
 ```
 
 ## API contract
@@ -96,8 +100,10 @@ mise exec rust@stable -- cargo test -p neotales-keepass
 streams; they do not open paths, prompt for credentials, access a key store,
 or make assumptions about a UI. `KdbxCredentials` owns the password and
 optional key-file/provider components for the duration of an operation. For
-ordinary local files, `KdbxFile::open`/`save_default` provide concise forms
-using the standard library limits and the selected KDBX 4.1 writer defaults.
+ordinary caller-owned streams, `KdbxFile::open`/`save_default` provide concise
+forms using the standard library limits and selected KDBX 4.1 writer defaults.
+These methods do not accept filesystem paths; applications open files and
+choose their own filesystem policy.
 Use the explicit `load`/`save` forms when selecting resource limits, KDF,
 cipher, compression, or block sizes. `KdbxFile::open_with_credentials` and
 `save_default_with_credentials` are the concise forms for key-file and custom
@@ -146,8 +152,9 @@ checks before I/O, between bounded input chunks, and between decoding stages.
 Blocking `Read`, KDF, cryptography, and XML parsing cannot be interrupted
 mid-call; applications requiring responsive cancellation should run the
 operation on a worker. The loader still buffers one bounded input document and
-its decoded payload. The streaming/allocator work is tracked separately in
-`../../../agents/work/keepass/009-streaming-and-interoperability.md`.
+its decoded payload. Incremental authenticated block processing, bounded
+decompression/XML consumption, and a cancellation-aware KDF boundary remain
+future work.
 
 ### Runtime-neutral async transport
 

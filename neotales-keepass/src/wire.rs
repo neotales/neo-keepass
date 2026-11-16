@@ -354,7 +354,7 @@ pub(crate) fn derive_key(
     header: &OuterHeader,
     composite: &[u8],
     limits: &KdbxReadLimits,
-) -> Result<([u8; 32], [u8; 64]), KdbxError> {
+) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 64]>), KdbxError> {
     let transformed = Zeroizing::new(match &header.kdf {
         KdfSpec::Aes { seed, rounds } => crypto::aes_kdf(composite, seed, *rounds, limits)?,
         KdfSpec::Argon2 {
@@ -373,16 +373,17 @@ pub(crate) fn derive_key(
             limits,
         )?,
     });
-    let mut cipher_input = header.master_seed.clone();
+    let mut cipher_input = Zeroizing::new(header.master_seed.clone());
     cipher_input.extend_from_slice(&transformed[..]);
-    let cipher_key = crypto::sha256(&cipher_input);
-    cipher_input.zeroize();
-    let mut hmac_input = header.master_seed.clone();
+    let mut cipher_key = crypto::sha256(&cipher_input);
+    let mut hmac_input = Zeroizing::new(header.master_seed.clone());
     hmac_input.extend_from_slice(&transformed[..]);
     hmac_input.push(1);
-    let base_hmac = crypto::sha512(&hmac_input);
-    hmac_input.zeroize();
-    Ok((cipher_key, base_hmac))
+    let mut base_hmac = crypto::sha512(&hmac_input);
+    let result = (Zeroizing::new(cipher_key), Zeroizing::new(base_hmac));
+    cipher_key.zeroize();
+    base_hmac.zeroize();
+    Ok(result)
 }
 
 pub(crate) fn read_hmac_blocks(

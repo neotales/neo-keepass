@@ -124,10 +124,12 @@ impl KdbxCredentials {
     pub fn composite_key(&mut self) -> Result<[u8; 32], KdbxError> {
         let mut components = Zeroizing::new(Vec::with_capacity(1 + self.providers.len()));
         if let Some(password) = &self.password {
-            components.push(Sha256::digest(password).into());
+            let component = Zeroizing::new(<[u8; 32]>::from(Sha256::digest(password)));
+            components.push(*component);
         }
         for provider in &mut self.providers {
-            components.push(provider.key_component()?);
+            let component = Zeroizing::new(provider.key_component()?);
+            components.push(*component);
         }
         if components.is_empty() {
             return Err(invalid("at least one credential component is required"));
@@ -233,7 +235,7 @@ impl KdbxKeyFile {
         reader.config_mut().trim_text(true);
         reader.config_mut().enable_all_checks(true);
         let mut version = None;
-        let mut key_data = None;
+        let mut key_data: Option<Zeroizing<String>> = None;
         let mut key_hash = None;
         let mut current = String::new();
         let mut depth = 0usize;
@@ -269,7 +271,7 @@ impl KdbxKeyFile {
                     let value = text.as_ref().to_owned();
                     match current.as_str() {
                         "Version" => version = Some(value),
-                        "Data" => key_data = Some(value),
+                        "Data" => key_data = Some(Zeroizing::new(value)),
                         _ => {}
                     }
                 }
@@ -290,11 +292,13 @@ impl KdbxKeyFile {
             return Err(KdbxError::malformed("key-file XML root must be KeyFile"));
         }
         let value = key_data.ok_or_else(|| KdbxError::malformed("key-file data is required"))?;
-        let bytes = if version.as_deref() == Some("2.0") {
-            let compact: Vec<u8> = value
-                .bytes()
-                .filter(|byte| !byte.is_ascii_whitespace())
-                .collect();
+        let bytes = Zeroizing::new(if version.as_deref() == Some("2.0") {
+            let compact = Zeroizing::new(
+                value
+                    .bytes()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect::<Vec<_>>(),
+            );
             if compact.len() % 2 != 0 {
                 return Err(KdbxError::malformed(
                     "XML v2 key must contain complete hex bytes",
@@ -327,13 +331,12 @@ impl KdbxKeyFile {
             STANDARD
                 .decode(&value)
                 .map_err(|_| KdbxError::malformed("invalid XML v1 key data"))?
-        };
+        });
         if bytes.len() != 32 {
             return Err(KdbxError::malformed("key-file data must contain 32 bytes"));
         }
-        Ok(Self {
-            key: bytes.try_into().expect("length checked"),
-        })
+        let key = Zeroizing::new(<[u8; 32]>::try_from(bytes.as_slice()).expect("length checked"));
+        Ok(Self { key: *key })
     }
 }
 
@@ -366,18 +369,15 @@ impl Drop for KdbxKeyFile {
 
 /// Reads a key file from a caller-managed stream.
 pub fn read_key_file(source: impl Read) -> Result<KdbxKeyFile, KdbxError> {
-    let mut data = Vec::new();
+    let mut data = Zeroizing::new(Vec::new());
     source
         .take(64 * 1024 + 1)
         .read_to_end(&mut data)
         .map_err(|_| KdbxError::new(KdbxFailureKind::Io, "unable to read key file"))?;
     if data.len() > 64 * 1024 {
-        data.zeroize();
         return Err(KdbxError::resource_limit(
             "key file exceeds the configured limit",
         ));
     }
-    let result = KdbxKeyFile::parse(&data);
-    data.zeroize();
-    result
+    KdbxKeyFile::parse(&data)
 }

@@ -21,6 +21,23 @@ impl Read for FailingReader {
     }
 }
 
+struct PartialThenFail {
+    first: bool,
+}
+
+impl Read for PartialThenFail {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.first {
+            self.first = false;
+            let source = b"PARTIAL-SECRET-KEY-MATERIAL";
+            let count = source.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&source[..count]);
+            return Ok(count);
+        }
+        Err(io::Error::other("fixture partial reader failure"))
+    }
+}
+
 struct FailingWriter;
 
 impl Write for FailingWriter {
@@ -60,6 +77,16 @@ fn caller_owned_stream_failures_have_a_distinct_io_contract() {
     .unwrap_err();
     assert_eq!(error.kind, KdbxFailureKind::Io);
     assert!(!error.message.contains("fixture writer failure"));
+}
+
+#[test]
+fn partial_key_file_read_failure_returns_safe_io_error() {
+    let Err(error) = read_key_file(PartialThenFail { first: true }) else {
+        panic!("partial failing key-file reader unexpectedly succeeded");
+    };
+    assert_eq!(error.kind, KdbxFailureKind::Io);
+    assert!(!error.message.contains("PARTIAL-SECRET-KEY-MATERIAL"));
+    assert!(!error.message.contains("fixture partial reader failure"));
 }
 
 #[test]

@@ -5,6 +5,7 @@ use std::{
 
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::async_api::{KdbxAsyncRead, KdbxAsyncWrite, KdbxLoadFuture, KdbxSaveFuture};
 use crate::cancellation::KdbxCancellation;
@@ -132,7 +133,7 @@ pub struct Kdbx4AuthenticatedBlockReader<'a, R> {
     cancellation: KdbxCancellation<'a>,
     limits: KdbxReadLimits,
     input_bytes: u64,
-    base_hmac: [u8; 64],
+    base_hmac: Zeroizing<[u8; 64]>,
     next_index: u64,
     data_blocks: u64,
     terminal_authenticated: bool,
@@ -196,9 +197,8 @@ impl<'a, R: Read> Kdbx4AuthenticatedBlockReader<'a, R> {
             ));
         }
 
-        let mut composite = credentials.composite_key()?;
-        let (_cipher_key, base_hmac) = wire::derive_key(&header, &composite, limits)?;
-        composite.zeroize();
+        let composite = Zeroizing::new(credentials.composite_key()?);
+        let (_cipher_key, base_hmac) = wire::derive_key(&header, &composite[..], limits)?;
         cancellation.checkpoint()?;
 
         let mut header_hmac = [0u8; 32];
@@ -415,9 +415,8 @@ impl KdbxFile {
         cancellation.checkpoint()?;
         let _version = header.version;
         if (header.version >> 16) == 3 {
-            let mut composite = credentials.composite_key()?;
-            let (cipher_key, _) = wire::derive_key(&header, &composite, limits)?;
-            composite.zeroize();
+            let composite = Zeroizing::new(credentials.composite_key()?);
+            let (cipher_key, _) = wire::derive_key(&header, &composite[..], limits)?;
             cancellation.checkpoint()?;
             let decrypted = match header.cipher {
                 OuterCipher::Aes => {
@@ -437,10 +436,10 @@ impl KdbxFile {
                     "KDBX 3 stream-start verification failed",
                 ));
             }
-            let hashed = wire::read_hashed_blocks(&decrypted[32..], limits)?;
+            let hashed = Zeroizing::new(wire::read_hashed_blocks(&decrypted[32..], limits)?);
             let payload = match header.compression {
                 WireCompression::None => hashed,
-                WireCompression::GZip => decompress(&hashed, limits)?,
+                WireCompression::GZip => Zeroizing::new(decompress(&hashed, limits)?),
             };
             cancellation.checkpoint()?;
             let inner = wire::InnerHeader {
@@ -481,9 +480,8 @@ impl KdbxFile {
                 "KDBX header hash validation failed",
             ));
         }
-        let mut composite = credentials.composite_key()?;
-        let (cipher_key, base_hmac) = wire::derive_key(&header, &composite, limits)?;
-        composite.zeroize();
+        let composite = Zeroizing::new(credentials.composite_key()?);
+        let (cipher_key, base_hmac) = wire::derive_key(&header, &composite[..], limits)?;
         cancellation.checkpoint()?;
         let expected_header_hmac = wire::header_hmac(&header.raw, &base_hmac)?;
         if !constant_time_equal(&input[hash_end..hmac_end], &expected_header_hmac) {
@@ -496,14 +494,14 @@ impl KdbxFile {
         let decrypted = match header.cipher {
             OuterCipher::Aes => crypto::aes_cbc_decrypt(&cipher_key, &header.iv, &authenticated)?,
             OuterCipher::ChaCha20 => {
-                let mut value = authenticated;
-                crypto::chacha20_transform(&cipher_key, &header.iv, &mut value)?;
+                let mut value = Zeroizing::new(authenticated);
+                crypto::chacha20_transform(&cipher_key[..], &header.iv, &mut value)?;
                 value
             }
         };
         let payload = match header.compression {
             WireCompression::None => decrypted,
-            WireCompression::GZip => decompress(&decrypted, limits)?,
+            WireCompression::GZip => Zeroizing::new(decompress(&decrypted, limits)?),
         };
         cancellation.checkpoint()?;
         let inner = wire::InnerHeader::parse(&payload, limits)?;
@@ -582,10 +580,9 @@ impl KdbxFile {
         fill_random(&mut iv)?;
         fill_random(&mut inner_stream_key)?;
         cancellation.checkpoint()?;
-        let mut composite = credentials.composite_key()?;
+        let composite = Zeroizing::new(credentials.composite_key()?);
         let transformed =
-            derive_transformed_key(&composite, &transform_seed, &kdf_salt, options, limits)?;
-        composite.zeroize();
+            derive_transformed_key(&composite[..], &transform_seed, &kdf_salt, options, limits)?;
         cancellation.checkpoint()?;
         let public_custom_data = effective_public_custom_data(database);
         let header = create_header(
@@ -601,15 +598,13 @@ impl KdbxFile {
                 "KDBX outer header exceeds the configured limit",
             ));
         }
-        let mut cipher_input = master_seed.to_vec();
-        cipher_input.extend_from_slice(&transformed);
-        let cipher_key = crypto::sha256(&cipher_input);
-        cipher_input.zeroize();
-        let mut hmac_input = master_seed.to_vec();
-        hmac_input.extend_from_slice(&transformed);
+        let mut cipher_input = Zeroizing::new(master_seed.to_vec());
+        cipher_input.extend_from_slice(&transformed[..]);
+        let cipher_key = Zeroizing::new(crypto::sha256(&cipher_input));
+        let mut hmac_input = Zeroizing::new(master_seed.to_vec());
+        hmac_input.extend_from_slice(&transformed[..]);
         hmac_input.push(1);
-        let base_hmac = crypto::sha512(&hmac_input);
-        hmac_input.zeroize();
+        let base_hmac = Zeroizing::new(crypto::sha512(&hmac_input));
         let mut stream = crypto::InnerCipher::new(2, &inner_stream_key)?;
         let binaries: Vec<_> = if database.binary_pool.is_empty() {
             database
@@ -626,14 +621,18 @@ impl KdbxFile {
                 .map(|record| (record.data.clone(), record.protected))
                 .collect()
         };
-        let mut payload =
-            crate::xml::write_inner_header(2, &inner_stream_key, &binaries, &mut stream);
+        let mut payload = Zeroizing::new(crate::xml::write_inner_header(
+            2,
+            &inner_stream_key,
+            &binaries,
+            &mut stream,
+        ));
         cancellation.checkpoint()?;
-        let xml = crate::xml::write_database(
+        let xml = Zeroizing::new(crate::xml::write_database(
             database,
             &mut stream,
             crate::xml::BinaryStorage::InnerHeader,
-        )?;
+        )?);
         if xml.len() as u64 > limits.max_xml_chars {
             return Err(KdbxError::resource_limit(
                 "KDBX XML exceeds the configured limit",
@@ -647,14 +646,14 @@ impl KdbxFile {
             ));
         }
         if options.compression == KdbxCompression::GZip {
-            payload = compress(&payload, limits)?;
+            payload = Zeroizing::new(compress(&payload, limits)?);
         }
         cancellation.checkpoint()?;
         let ciphertext = match options.cipher {
             KdbxOuterCipher::Aes => crypto::aes_cbc_encrypt(&cipher_key, &iv, &payload)?,
             KdbxOuterCipher::ChaCha20 => {
-                let mut value = payload;
-                crypto::chacha20_transform(&cipher_key, &iv[..12], &mut value)?;
+                let mut value = payload.to_vec();
+                crypto::chacha20_transform(&cipher_key[..], &iv[..12], &mut value)?;
                 value
             }
         };
@@ -750,31 +749,34 @@ impl KdbxFile {
             ));
         }
         let header_hash = crypto::sha256(&header);
-        let mut composite = credentials.composite_key()?;
-        let transformed =
-            crypto::aes_kdf(&composite, &transform_seed, options.aes_kdf_rounds, limits)?;
-        composite.zeroize();
+        let composite = Zeroizing::new(credentials.composite_key()?);
+        let transformed = Zeroizing::new(crypto::aes_kdf(
+            &composite[..],
+            &transform_seed,
+            options.aes_kdf_rounds,
+            limits,
+        )?);
         let mut stream = crypto::InnerCipher::new(2, &inner_stream_key)?;
-        let xml = crate::xml::write_database_with_header_hash(
+        let xml = Zeroizing::new(crate::xml::write_database_with_header_hash(
             database,
             &mut stream,
             crate::xml::BinaryStorage::LegacyXml,
             &header_hash,
-        )?;
+        )?);
         if xml.len() as u64 > limits.max_xml_chars {
             return Err(KdbxError::resource_limit(
                 "KDBX XML exceeds the configured limit",
             ));
         }
-        let payload = match options.compression {
-            KdbxCompression::None => xml,
+        let payload = Zeroizing::new(match options.compression {
+            KdbxCompression::None => xml.to_vec(),
             KdbxCompression::GZip => compress(&xml, limits)?,
-        };
+        });
         let blocks = wire::write_hashed_blocks(&payload, options.block_bytes, limits)?;
-        let mut plaintext = Vec::with_capacity(stream_start.len() + blocks.len());
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(stream_start.len() + blocks.len()));
         plaintext.extend_from_slice(&stream_start);
         plaintext.extend_from_slice(&blocks);
-        let cipher_key = kdbx_outer_key(&master_seed, &transformed);
+        let cipher_key = Zeroizing::new(kdbx_outer_key(&master_seed, &transformed));
         let encrypted = crypto::aes_cbc_encrypt(&cipher_key, &iv, &plaintext)?;
         let output_size = (header.len() as u64).saturating_add(encrypted.len() as u64);
         if output_size > limits.max_input_bytes {
@@ -970,8 +972,8 @@ fn derive_transformed_key(
     kdf_salt: &[u8; 32],
     options: KdbxWriteOptions,
     limits: &KdbxReadLimits,
-) -> Result<[u8; 32], KdbxError> {
-    match options.kdf {
+) -> Result<Zeroizing<[u8; 32]>, KdbxError> {
+    let key = match options.kdf {
         KdbxKdf::Aes => crypto::aes_kdf(composite, transform_seed, options.aes_kdf_rounds, limits),
         KdbxKdf::Argon2d => crypto::argon2(
             composite,
@@ -991,7 +993,8 @@ fn derive_transformed_key(
             true,
             limits,
         ),
-    }
+    }?;
+    Ok(Zeroizing::new(key))
 }
 
 fn kdbx_outer_key(master_seed: &[u8; 32], transformed: &[u8; 32]) -> [u8; 32] {

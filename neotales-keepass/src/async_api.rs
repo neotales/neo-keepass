@@ -347,9 +347,9 @@ impl<W: KdbxAsyncWrite + ?Sized> Future for KdbxSaveFuture<'_, W> {
 }
 
 fn read_error(_: io::Error) -> KdbxError {
-    KdbxError::new(KdbxFailureKind::Truncated, "unable to read KDBX input")
+    KdbxError::new(KdbxFailureKind::Io, "KDBX stream I/O failed")
 }
 
 fn write_error(_: io::Error) -> KdbxError {
-    KdbxError::new(KdbxFailureKind::Malformed, "KDBX stream I/O failed")
+    KdbxError::new(KdbxFailureKind::Io, "KDBX stream I/O failed")
 }

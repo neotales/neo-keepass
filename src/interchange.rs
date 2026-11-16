@@ -286,6 +286,7 @@ struct EntryWire {
     username: String,
     password: ProtectedWire,
     url: String,
+    override_url: String,
     notes: String,
     icon_id: u32,
     custom_icon_id: String,
@@ -556,6 +557,8 @@ struct EntryInput {
     username: String,
     password: ProtectedInput,
     url: String,
+    #[serde(default)]
+    override_url: String,
     notes: String,
     icon_id: u32,
     custom_icon_id: String,
@@ -909,6 +912,7 @@ fn entry_to_wire(entry: &Entry, depth: usize, budget: &mut ConversionBudget) -> 
         username: entry.username.clone(),
         password: protected_to_wire(&entry.password, budget)?,
         url: entry.url.clone(),
+        override_url: entry.override_url.clone(),
         notes: entry.notes.clone(),
         icon_id: entry.icon_id,
         custom_icon_id: entry.custom_icon_id.to_base64(),
@@ -1214,6 +1218,7 @@ fn entry_from_wire(
         username: wire.username,
         password: protected_from_wire(wire.password, budget)?,
         url: wire.url,
+        override_url: wire.override_url,
         notes: wire.notes,
         icon_id: wire.icon_id,
         custom_icon_id: uuid(&wire.custom_icon_id)?,
@@ -1817,7 +1822,7 @@ mod tests {
     /// this set of keys and no others, so the directive cannot reach the wire
     /// without adding a key here, and a document that omits `ensure` keeps
     /// meaning exactly what it meant before the field existed.
-    const EXPORTED_ENTRY_KEYS: [&str; 19] = [
+    const EXPORTED_ENTRY_KEYS: [&str; 20] = [
         "attachments",
         "auto_type",
         "background_color",
@@ -1829,6 +1834,7 @@ mod tests {
         "icon_id",
         "id",
         "notes",
+        "override_url",
         "password",
         "previous_parent_group_id",
         "quality_check",

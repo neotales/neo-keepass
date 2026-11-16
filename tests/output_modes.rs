@@ -985,10 +985,10 @@ fn env_binds_aliases_and_emits_all_machine_formats() {
 }
 
 #[test]
-fn env_uses_native_standard_projection_while_exec_uses_normalized_field() {
+fn entry_notes_scalar_and_standard_field_round_trip_through_output_bindings() {
     let mut database = KeePassDatabase::default();
     let mut entry = Entry::new("LOGIN");
-    entry.notes = "native-notes".into();
+    entry.notes = "serialized-notes".into();
     entry.set_field(Field::new("Notes", "serialized-notes"));
     database.add_entry(entry);
     let directory = tempfile::tempdir().unwrap();
@@ -1016,7 +1016,7 @@ fn env_uses_native_standard_projection_while_exec_uses_normalized_field() {
             auth[1],
         ],
     );
-    assert_eq!(success(&env), b"export NOTES='';\n");
+    assert_eq!(success(&env), b"export NOTES='serialized-notes';\n");
 
     let exec = run(
         &fixture,
