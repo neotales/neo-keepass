@@ -891,16 +891,21 @@ fn parse_entry(
     }
     for string_node in children(node, "String") {
         let field = parse_field(string_node, stream)?;
-        if let Ok(value) = field.value.reveal_text() {
-            let value = value.as_str().to_owned();
-            match field.key.as_str() {
-                "Title" => entry.title = value,
-                "UserName" => entry.username = value,
-                "URL" => entry.url = value,
-                "Password" => entry.password = field.value.clone(),
-                "Notes" => entry.notes = value,
-                _ => {}
+        match field.key.as_str() {
+            "Password" => entry.password = field.value.clone(),
+            "Title" | "UserName" | "URL" | "Notes" => {
+                if let Ok(value) = field.value.reveal_text() {
+                    let value = value.as_str().to_owned();
+                    match field.key.as_str() {
+                        "Title" => entry.title = value,
+                        "UserName" => entry.username = value,
+                        "URL" => entry.url = value,
+                        "Notes" => entry.notes = value,
+                        _ => unreachable!("matched standard text projection"),
+                    }
+                }
             }
+            _ => {}
         }
         entry.set_field(field);
     }
