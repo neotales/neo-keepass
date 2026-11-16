@@ -19,6 +19,13 @@ age-encrypted exports remain planned scope. The vendored age library is not
 currently wired into user-facing commands. TOTP support is present in the CLI;
 consult command help and tests for exact capabilities and limits.
 
+`init` currently takes the vault master password from an explicit source or a
+non-echoing terminal prompt. `init --size N` creates a separate random entry
+password inside the vault; it does not generate or store the master password.
+There is no OS credential-vault integration in this checkout, so an
+"OS-vault-unavailable" password-backup fallback cannot yet identify a password
+that this application otherwise stores in such a vault.
+
 ## Workspace layout
 
 - `crates/nkeepass/` — CLI/TUI application and integration tests.

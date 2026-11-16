@@ -1,24 +1,18 @@
 # `neotales-x509`
 
-X.509 certificate identifiers, parsing and generation, and the SSH wire
-conversions for certificates and keys.
+X.509 identifiers, certificate/SSH wire conversion, key encodings, and SSH
+private-key conversion for Rust.
 
-X.509 is a large and much-misunderstood format, and most of the difficulty is not
-cryptographic: it is the identifier encoding, the wire format, and the several
-places where a certificate is not quite DER. This crate is the certificate
-surface built on `neotales-crypto`, which is where the algorithms live.
+The crate contains its DER, PEM, SSH wire, bcrypt KDF, and key-conversion code
+locally. It does not depend on a separate `neotales-crypto` package.
 
 ## What it covers
 
-- **Certificate identifiers and names**, including the parsing that distinguishes
-  a distinguished name from a string that merely looks like one.
-- **Certificate parsing and generation**, with a bounded parser.
-- **Public and private key encoding** for Ed25519, ECDSA on P-256, and RSA, in
-  PKCS#8 and the OpenSSH encodings.
-- **SSH wire conversions**, so a certificate or key can be carried in the format
-  an SSH client expects rather than in DER.
-- **The object identifiers** the format needs, exported as named constants and
-  as an `oids` module, so a caller is not embedding `1.3.101.112` as a literal.
+- **OpenSSH certificate and SSH-X.509 wire conversion**, including bounded
+  parsing and writing for supported certificate forms.
+- **SSH keypair conversion** for Ed25519, RSA, and P-256 into self-signed X.509
+  certificates and PKCS#8 material.
+- **PEM parsing/encoding** and an object identifier catalog.
 
 ## What it does not do
 
@@ -27,21 +21,22 @@ surface built on `neotales-crypto`, which is where the algorithms live.
   and to whatever policy library they already use.
 - **No revocation.** Same reason. A CRL or an OCSP response is fetched by
   something that knows the network.
-- **No I/O beyond reading a file the caller names.** Parsing takes bytes.
-- **No algorithm implementation.** The algorithms are in `neotales-crypto`.
+- **No trust-store or revocation policy.** Callers decide whether to trust
+  certificates and how to obtain revocation status.
+- **No network access.** Parsing and generation are local operations.
 
 ## What is verified, and what is not
 
-Encoding and decoding of the supported key and certificate forms, including the
-OpenSSH wire conversions, is covered by the crate's own tests on Linux, Windows
-and macOS, with round trips and bounded parsing.
+The workspace tests cover SSH key conversion, certificate and wire-format
+round trips, validity-time boundaries, and truncation handling. Current local
+verification was on Linux. No normal test invokes `ssh-keygen`/`ssh` for
+external interoperability, and fuzzing is not configured.
 
-**Two things the area README names as gates are not running.** No test in this
-repository invokes `ssh-keygen` or `ssh`, so the OpenSSH encodings have not been
-demonstrated to interoperate with the tool that defines them, and no fuzzing runs
-anywhere in this repository. The support matrix records the interoperation lane
-as an exclusion. Because this crate exists to interoperate with other software,
-that gap is worth more here than it would be elsewhere.
+## Direct dependencies
+
+The manifest lists `aes`, `base64`, `blowfish`, `ctr`, `ed25519-dalek`,
+`ml-dsa`, `p256`, `p384`, `p521`, `rcgen`, `rsa`, `sha2`, `subtle`, `time`,
+and `zeroize`. Exact versions and feature flags are in `Cargo.toml`.
 
 ## Licence
 

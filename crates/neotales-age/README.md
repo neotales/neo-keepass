@@ -1,7 +1,8 @@
 # `neotales-age`
 
 An implementation of the [age](https://age-encryption.org) v1 file encryption
-format for Rust, in pure safe Rust with no external age binary.
+format for Rust. The core format runs in-process; the optional plugin client
+launches the named `age-plugin-<name>` executable as a child process.
 
 age is designed to be hard to misuse. A file is encrypted to *recipients* and
 decrypted by *identities*, the two are asymmetric, and the format has no way to
@@ -18,10 +19,13 @@ password is stretched.
 - **scrypt passphrases.**
 - **SSH keys**, Ed25519 and RSA, so an existing `~/.ssh` identity works.
 - **The binary STREAM payload and strict ASCII armor**, both implemented directly.
-- **Plugins**, as the format specifies them.
+- **Plugins**, including recipient/identity protocol clients and an executable
+  framework. Client calls spawn plugin processes and exchange the age plugin
+  protocol over pipes.
 
-It implements the format itself rather than wrapping another implementation, so
-there is no second age process to agree with and no subprocess to sandbox.
+It implements the format itself rather than wrapping the `age` command-line
+program. Plugin support is the exception to the no-subprocess rule: treat plugin
+executables as external programs and decide explicitly whether to enable them.
 
 ## Example
 
@@ -43,25 +47,40 @@ without being able to read what you wrote.
 
 ## What it does not do
 
-- **It does not wrap another age implementation.** There is no subprocess, so
-  there is also no interoperability layer to be surprised by.
-- **It does not do streaming to a file path.** There are streaming reader and
-  writer types, and opening the file is the caller's decision, because where a
-  decrypted file lands is a decision with consequences.
+- **It does not wrap the `age` CLI.** Its file format implementation is local;
+  only the optional plugin protocol starts child processes.
+- **It does provide streaming and path APIs.** `AgeFile::encrypt_reader`,
+  `decrypt_reader`, and the streaming reader/writer APIs accept caller-owned
+  streams. `AgeFile::encrypt_file` and `decrypt_file` create a temporary output
+  beside the requested destination and rename it into place. Those path
+  functions do not impose the application's owner-only permission or
+  no-clobber policy; callers writing secrets must provide those guarantees.
 - **It has no keyring integration.** An identity is something the caller supplies.
   Where it came from is not this crate's business.
-- **It does not implement age plugins beyond loading and invoking them.**
+- **It does not provide application key storage or recipient discovery.**
+  Applications supply identities and recipients and control any network lookup.
 
 ## What is verified, and what is not
 
-Round trips are covered by the crate's own tests on Linux, Windows and macOS:
-native and hybrid keys, SSH keys, passphrases, the binary payload and the ASCII
-armor, plus parser limits and the identity and recipient syntax the reference
-tool's own test cases cover.
+The workspace tests cover native/hybrid keys, SSH keys, passphrases, binary and
+armored payloads, streaming, plugin protocol surfaces, parser limits, and
+identity/recipient syntax. The current local verification was on Linux.
 
-Interoperation with `rage` is not run by this pipeline. The tests in `tests/interop.rs` are ignored. They need the reference CLI, and this repository does not install it.
+Interoperation with `rage` is not run by the normal workspace test command.
+`tests/interop.rs` contains ignored cases that require the reference CLI; the
+workspace does not install it. The 16,384-bit RSA SSH test is also an ignored
+slow-lane test.
 
-Fuzzing does not run. There is no fuzz target in this repository. The parsers enforce size limits and reject rather than allocate without bound. Bounded is not the same as fuzzed.
+Fuzzing does not run. The parsers enforce size limits, but bounded parsing is
+not a substitute for fuzzing.
+
+## Direct dependencies
+
+Along with the local `neotales-x509` crate, the manifest directly uses `aes`,
+`base64`, `cbc`, `chacha20poly1305`, `ctr`, `des`, `ed25519-dalek`, `getrandom`
+(0.3 and 0.4), `hkdf`, `hmac`, `hpke`, `md-5`, `p256`, `rsa`, `sad-rsa`,
+`scrypt`, `sha2`, `subtle`, `x25519-dalek`, and `zeroize`. The exact versions
+and feature flags are in `Cargo.toml`; `Cargo.lock` pins the workspace graph.
 
 ## Licence
 

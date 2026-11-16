@@ -32,9 +32,9 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use neotales_age::{
     AgeIdentity, AgeKey, AgeRecipient, ClientUi, Confirm, DisplayMessage, Error, Identity,
-    IdentityFactory, Plugin, PluginContext, Recipient, RecipientFactory, RequestValue, Result,
-    Stanza, WaitTimer, bech32, decrypt, encode_identity, encode_recipient, encrypt_with_recipients,
-    parse_plugin_identity, parse_plugin_recipient,
+    IdentityFactory, Plugin, PluginContext, PluginIdentity, Recipient, RecipientFactory,
+    RequestValue, Result, Stanza, WaitTimer, bech32, decrypt, encode_identity, encode_recipient,
+    encrypt_with_recipients, parse_plugin_identity, parse_plugin_recipient,
 };
 // `Recipient::wrap` returns `Result<Vec<Stanza>>`, and the crate exports both,
 // so the recipient below needs no other name. `Identity` asks for
@@ -87,6 +87,19 @@ fn client_callback_types_are_nameable() {
     // `ClientUi` is `Default`, so a caller that wants only some of the four
     // does not have to name the ones it is leaving unset.
     assert!(ClientUi::default().display_message.is_none());
+}
+
+#[test]
+fn plugin_identity_and_identity_recipient_debug_redact_encoded_payloads() {
+    let encoding = encode_identity("test", b"debug-canary").expect("valid encoding");
+    let identity = PluginIdentity::new(&encoding, ClientUi::default()).expect("plugin identity");
+    let recipient = identity.recipient();
+
+    for debug in [format!("{identity:?}"), format!("{recipient:?}")] {
+        assert!(!debug.contains(&encoding));
+        assert!(!debug.contains("debug-canary"));
+        assert!(debug.contains("[REDACTED]"));
+    }
 }
 
 /// A recipient implemented here, by the caller, out of the crate.

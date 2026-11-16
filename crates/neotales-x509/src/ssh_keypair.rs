@@ -51,7 +51,7 @@ const OPENSSH_DERIVED_KEY_LENGTH: usize = 48;
 const MAX_OPENSSH_ENCODED_LENGTH: usize = pem::MAXIMUM_DECODED_LENGTH.div_ceil(3) * 4;
 
 /// The generated X.509 certificate, PKCS#8 private key, and public key.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct X509KeyPair {
     /// The self-signed X.509 certificate in DER form.
     pub certificate_der: Vec<u8>,
@@ -69,6 +69,20 @@ pub struct X509KeyPair {
     pub public_key_der: Vec<u8>,
     /// The SubjectPublicKeyInfo public key in PEM form.
     pub public_key_pem: String,
+}
+
+impl std::fmt::Debug for X509KeyPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("X509KeyPair")
+            .field("certificate_der", &self.certificate_der)
+            .field("certificate_pem", &self.certificate_pem)
+            .field("private_key_der", &"[REDACTED]")
+            .field("private_key_pem", &"[REDACTED]")
+            .field("public_key_der", &self.public_key_der)
+            .field("public_key_pem", &self.public_key_pem)
+            .finish()
+    }
 }
 
 /// Certificate metadata for an SSH-to-X.509 conversion.
@@ -826,7 +840,7 @@ fn skip_line_break(input: &str, index: usize) -> Result<usize, SshKeyError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OPENSSH_MAGIC, SshKeyError, SshKeyToX509, ssh_keypair_to_x509};
+    use super::{OPENSSH_MAGIC, SshKeyError, SshKeyToX509, X509KeyPair, ssh_keypair_to_x509};
     use crate::pem;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
@@ -834,6 +848,23 @@ mod tests {
         SigningKey, VerifyingKey,
         pkcs8::{DecodePrivateKey as _, DecodePublicKey as _},
     };
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn key_pair_debug_redacts_private_der_and_pem() {
+        let pair = X509KeyPair {
+            certificate_der: Vec::new(),
+            certificate_pem: String::new(),
+            private_key_der: Zeroizing::new(b"private-der-canary".to_vec()),
+            private_key_pem: Zeroizing::new("private-pem-canary".to_owned()),
+            public_key_der: Vec::new(),
+            public_key_pem: String::new(),
+        };
+        let debug = format!("{pair:?}");
+        assert!(!debug.contains("private-der-canary"));
+        assert!(!debug.contains("private-pem-canary"));
+        assert!(debug.contains("[REDACTED]"));
+    }
 
     fn ssh_string(value: &[u8]) -> Vec<u8> {
         let length = u32::try_from(value.len()).expect("test SSH value is short");
