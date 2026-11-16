@@ -1,0 +1,10 @@
+[package]
+name = "nkeepass"
+version = "0.0.0-alpha.1"
+edition = "2024"
+license = "MIT"
+description = "Headless KeePass automation CLI and TUI"
+
+# The application source was imported from the Neotales Rust workspace. Its
+# neotales-keepass dependency must be vendored/adapted before this manifest can
+# be built independently.
