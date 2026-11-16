@@ -434,6 +434,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn post_install_sync_failure_reports_installed_file_and_uncertain_durability() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("installed.bin");
@@ -448,6 +449,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn no_clobber_reports_destination_collision_separately_from_install_errors() {
         let directory = tempfile::tempdir().unwrap();
         let occupied = directory.path().join("occupied.bin");
@@ -764,6 +766,18 @@ mod tests {
             after.stdout, before.stdout,
             "refusal must leave the explicit other-principal ACE untouched"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_secret_output_refuses_without_installing_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("secret.bin");
+        assert_eq!(
+            super::write_private_noclobber(&path, b"secret"),
+            Err("owner-only Windows ACL replacement is unsupported")
+        );
+        assert!(!path.exists(), "secret bytes must not be installed");
     }
 
     #[cfg(unix)]

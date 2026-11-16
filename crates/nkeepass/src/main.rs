@@ -7507,6 +7507,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn init_context_persistence_failure_is_partial_success_and_retry_cannot_replace() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("installed.kdbx");
@@ -7550,6 +7551,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn init_durability_failure_adopts_installed_vault_and_retry_cannot_replace() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("installed-after-durability-error.kdbx");
@@ -7597,6 +7599,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn init_durability_and_context_persistence_failures_are_both_reported() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("installed-with-config-error.kdbx");
@@ -8135,6 +8138,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_private_install_refuses_to_clobber_and_leaves_the_original_intact() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("existing.kdbx");
@@ -8156,6 +8160,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_private_install_is_owner_only_before_the_first_byte_is_written() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fresh.kdbx");
@@ -8196,6 +8201,53 @@ mod tests {
             );
         }
         assert_eq!(fs::read(&path).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vault_creation_refuses_without_installing_and_preserves_diagnostic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("unsupported.kdbx");
+        let error = VaultService::default()
+            .create(
+                &path,
+                &mut KdbxCredentials::password("synthetic-test-password").unwrap(),
+                KdbxWriteOptions::default(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            nkeepass::ServiceError::SecureFilePermissionsUnsupported
+        );
+        assert!(
+            error
+                .message()
+                .contains("secure owner-only file writes are unsupported")
+        );
+        assert!(!path.exists(), "refusal must not install the vault");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_output_refuses_without_installing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("unsupported-output.txt");
+        let result = StagedFile::new(
+            &path,
+            InstallDiagnostics {
+                staging: "cannot stage output",
+                permissions: "cannot set output permissions",
+                write: "cannot write output",
+                exists: "output exists",
+                durable: "output durability unconfirmed",
+            },
+        );
+        assert_eq!(
+            result.err().expect("Windows restriction fails closed").0,
+            "owner-only Windows ACL replacement is unsupported"
+        );
+        assert!(!path.exists(), "refusal must not install output");
     }
 
     #[test]

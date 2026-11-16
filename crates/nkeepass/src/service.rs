@@ -125,6 +125,8 @@ pub enum ServiceError {
     CreateExists,
     /// The vault is installed but directory durability could not be confirmed.
     CreateDurability,
+    /// The current platform cannot establish owner-only permissions safely.
+    SecureFilePermissionsUnsupported,
 }
 
 /// Fixed, non-sensitive failure from a whole-vault interchange operation.
@@ -313,7 +315,18 @@ impl ServiceError {
             Self::CreateWrite => "cannot create vault",
             Self::CreateExists => "vault already exists or cannot be created",
             Self::CreateDurability => "vault created but directory durability is unconfirmed",
+            Self::SecureFilePermissionsUnsupported => {
+                "secure owner-only file writes are unsupported on this platform"
+            }
         }
+    }
+}
+
+fn permission_failure(cause: &'static str, fallback: ServiceError) -> ServiceError {
+    if cause == "owner-only Windows ACL replacement is unsupported" {
+        ServiceError::SecureFilePermissionsUnsupported
+    } else {
+        fallback
     }
 }
 
@@ -1751,7 +1764,7 @@ impl VaultService {
         let mut temp =
             tempfile::NamedTempFile::new_in(parent).map_err(|_| ServiceError::SaveStage)?;
         crate::private_file::set_owner_only(temp.path(), "cannot set vault permissions")
-            .map_err(|_| ServiceError::SaveStage)?;
+            .map_err(|cause| permission_failure(cause, ServiceError::SaveStage))?;
         KdbxFile::save(
             &live.database,
             &mut temp,
@@ -3055,7 +3068,7 @@ fn install_new_vault_with_durability(
     let mut staged =
         tempfile::NamedTempFile::new_in(parent).map_err(|_| ServiceError::CreateStage)?;
     crate::private_file::set_owner_only(staged.path(), "cannot set vault permissions")
-        .map_err(|_| ServiceError::CreatePermissions)?;
+        .map_err(|cause| permission_failure(cause, ServiceError::CreatePermissions))?;
     write(&mut staged)?;
     staged
         .as_file()
@@ -7940,5 +7953,20 @@ mod tests {
         let page = scan_page(&root, &mut state).unwrap();
         assert_eq!(page.hits.len(), MAX_RESULTS);
         assert!(state.has_more());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_secure_write_tests {
+    use super::{ServiceError, permission_failure};
+
+    #[test]
+    fn unsupported_secure_permissions_survive_save_and_create_error_mapping() {
+        const PLATFORM_ERROR: &str = "owner-only Windows ACL replacement is unsupported";
+        for fallback in [ServiceError::SaveStage, ServiceError::CreatePermissions] {
+            let error = permission_failure(PLATFORM_ERROR, fallback);
+            assert_eq!(error, ServiceError::SecureFilePermissionsUnsupported);
+            assert!(error.message().contains("secure owner-only file writes"));
+        }
     }
 }
