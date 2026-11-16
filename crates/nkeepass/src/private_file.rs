@@ -2,16 +2,15 @@
 //!
 //! Unix permissions are restricted directly. Windows currently fails closed:
 //! the available command-line ACL update cannot prove that explicit ACEs for
-//! other principals were removed.
+//! other principals were removed. This affects every caller of this module,
+//! including vault/config writes and CLI outputs, not only password backups.
 
 use std::path::Path;
 
 /// Restricts a still-empty file to its owner before secret bytes are written.
 ///
-/// On Windows, this grants access to the account reported by the operating
-/// system, not the caller-controlled `USERNAME` environment variable. The
-/// subprocesses receive a cleared environment so caller variables (including
-/// secret-bearing `--password-env` variables) are not exposed to them.
+/// Windows currently returns an unsupported-operation error because the
+/// available ACL update cannot prove that all other-principal ACEs are absent.
 ///
 /// # Errors
 ///
@@ -84,8 +83,8 @@ fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'sta
     // `icacls /inheritance:r /grant:r` does not remove explicit ACEs for other
     // principals. Until we can replace and verify the complete DACL natively,
     // never claim that an existing Windows file or directory is owner-only.
-    let _ = path;
-    Err(error)
+    let _ = (path, error);
+    Err("owner-only Windows ACL replacement is unsupported")
 }
 
 #[cfg(any(windows, test))]
@@ -716,7 +715,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
         assert_eq!(
             super::set_owner_only(file.path(), "probe ACL failed"),
-            Err("probe ACL failed"),
+            Err("owner-only Windows ACL replacement is unsupported"),
             "Windows DACL changes fail closed until a complete replacement is implemented"
         );
     }
@@ -744,21 +743,26 @@ mod tests {
             grant.status().unwrap().success(),
             "grant explicit Everyone ACE"
         );
+        let inspect_acl = || {
+            std::process::Command::new(&icacls_path)
+                .env_clear()
+                .env("SystemRoot", &system_root)
+                .arg(temp.path())
+                .output()
+                .unwrap()
+        };
+        let before = inspect_acl();
+        assert!(before.status.success());
 
         assert_eq!(
             super::set_owner_only(temp.path(), "owner-only restriction unavailable"),
-            Err("owner-only restriction unavailable")
+            Err("owner-only Windows ACL replacement is unsupported")
         );
-        let listing = std::process::Command::new(&icacls_path)
-            .env_clear()
-            .env("SystemRoot", &system_root)
-            .arg(temp.path())
-            .output()
-            .unwrap();
-        assert!(listing.status.success());
-        assert!(
-            String::from_utf8_lossy(&listing.stdout).contains("S-1-1-0"),
-            "the unrelated explicit ACE remains, so the implementation must fail closed"
+        let after = inspect_acl();
+        assert!(after.status.success());
+        assert_eq!(
+            after.stdout, before.stdout,
+            "refusal must leave the explicit other-principal ACE untouched"
         );
     }
 

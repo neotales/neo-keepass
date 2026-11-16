@@ -4765,7 +4765,7 @@ fn safe_metadata(value: &str) -> bool {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use neotales_keepass::{Entry, Field, KdbxKdf, KdbxWriteOptions};

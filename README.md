@@ -33,10 +33,12 @@ also part of the master credentials, no password-only backup is made, because
 the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
 If backup installation fails, init reports the sanitized cause but leaves the
-already-created vault in place. Password backups currently fail closed on
-Windows because the implementation cannot safely replace and verify the full
-ACL (including explicit grants to other principals); the vault may still be
-created, with an actionable partial-failure diagnostic.
+already-created vault in place. Windows currently does not support secure
+owner-only file writes: the implementation cannot safely replace and verify
+the full ACL (including explicit grants to other principals). This limitation
+applies beyond password backups, including vault creation/mutation, config
+writes, and CLI output files; these operations fail closed with an explicit
+unsupported-operation diagnostic rather than claiming the file is private.
 
 The `get` command can encrypt a selected value to native age or SSH recipients:
 

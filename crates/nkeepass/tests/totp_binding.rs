@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Binding a TOTP code to a child environment or a process.
 //!
 //! The behaviour under test is mostly about what does *not* come out. The OTP

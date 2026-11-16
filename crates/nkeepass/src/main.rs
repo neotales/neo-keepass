@@ -567,6 +567,10 @@ const INIT_OPTIONS: &[HelpOption] = &[
         summary: "Backup errors happen after vault creation; the vault remains installed and the cause is reported.",
     },
     HelpOption {
+        label: "Windows security limitation",
+        summary: "Secure file writes are currently unsupported on Windows, including vaults and backups.",
+    },
+    HelpOption {
         label: "--size N",
         summary: "Store a generated N-character password in a new entry.",
     },
@@ -5919,6 +5923,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn init_password_backup_is_encrypted_private_and_never_clobbers() {
         let home = tempfile::tempdir().expect("isolated home");
         let password = "user-selected-master-password";
@@ -5955,6 +5960,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn concurrent_first_backups_validate_and_reuse_the_winning_identity() {
         let home = tempfile::tempdir().expect("isolated home");
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -5989,6 +5995,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn backup_storage_rejects_symlink_and_non_directory_targets_before_chmod() {
         let home = tempfile::tempdir().expect("isolated home");
         let config_parent = home.path().join("config");

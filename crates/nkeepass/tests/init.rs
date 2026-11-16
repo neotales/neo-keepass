@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Integration coverage for `nkeepass init`.
 //!
 //! The properties asserted here are security properties, not conveniences: a
@@ -518,6 +520,8 @@ fn init_help_succeeds_and_documents_its_flags() {
             "age-encrypted",
             "Partial failure",
             "remains installed",
+            "Windows security limitation",
+            "vaults and backups",
         ] {
             assert!(text.contains(expected), "init {flag} omits {expected}");
         }

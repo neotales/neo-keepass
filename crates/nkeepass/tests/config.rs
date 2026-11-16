@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Integration coverage for the `nkeepass config` command group.
 //!
 //! Two claims are under test, and the second is the one that matters.

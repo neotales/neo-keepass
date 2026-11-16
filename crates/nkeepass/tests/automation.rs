@@ -1,3 +1,4 @@
+#![cfg(unix)]
 #![allow(
     clippy::too_many_lines,
     reason = "end-to-end automation tests intentionally keep setup and assertions together"
