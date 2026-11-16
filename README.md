@@ -22,14 +22,20 @@ supported local key forms and current limitations. TOTP support is present too.
 `init` takes the vault master password from an explicit source or a non-echoing
 terminal prompt. After creating the vault, it stores a password-only unlock
 password as age-encrypted data in a uniquely named file under
-`~/.local/share/nkeepass/`;
-the reusable native age identity is in `~/.config/nkeepass/init-password.agekey`.
+`~/.local/share/nkeepass/`; the reusable native age identity is in
+`~/.config/nkeepass/init-password.agekey`. The `NKEEPASS_CONFIG_DIR` and
+`NKEEPASS_DATA_DIR` app overrides and XDG directory settings select these
+locations.
 Both files are installed privately without overwriting existing files. Keep the
 identity safe: it decrypts the backup. Since this checkout has no OS credential
 vault integration, this file-based backup is the fallback. When a key file is
 also part of the master credentials, no password-only backup is made, because
 the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
+If backup installation fails, init reports the sanitized cause but leaves the
+already-created vault in place. On Windows, an existing identity is reused only
+after its ACL can be restricted to the current account; if that check fails,
+the backup fails closed.
 
 The `get` command can encrypt a selected value to native age or SSH recipients:
 

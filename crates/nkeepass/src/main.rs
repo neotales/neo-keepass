@@ -559,6 +559,14 @@ const FIELD_COMMANDS: &[HelpCommand] = &[
 ];
 const INIT_OPTIONS: &[HelpOption] = &[
     HelpOption {
+        label: "Password persistence",
+        summary: "Password-only master passwords are saved age-encrypted in the data directory; identity is in config.",
+    },
+    HelpOption {
+        label: "Partial failure",
+        summary: "Backup errors happen after vault creation; the vault remains installed and the cause is reported.",
+    },
+    HelpOption {
         label: "--size N",
         summary: "Store a generated N-character password in a new entry.",
     },
@@ -2045,20 +2053,16 @@ fn credentials_with_password(
 /// The identity and ciphertext are installed with owner-only permissions and
 /// create-if-absent semantics. Existing files are never replaced.
 fn backup_init_password(password: &str) -> Result<PathBuf> {
-    let home = env::var_os("HOME").ok_or_else(|| err("cannot resolve home directory"))?;
-    let home = Path::new(&home);
-    let config_root = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
-    let data_root = env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share"));
-    backup_init_password_at(password, &config_root, &data_root)
+    backup_init_password_at(password, &config_dir()?, &data_dir()?)
 }
 
 #[cfg(test)]
 fn backup_init_password_in(password: &str, home: &Path) -> Result<PathBuf> {
-    backup_init_password_at(password, &home.join(".config"), &home.join(".local/share"))
+    backup_init_password_at(
+        password,
+        &home.join("config/nkeepass"),
+        &home.join("data/nkeepass"),
+    )
 }
 
 fn backup_init_password_at(
@@ -2066,61 +2070,21 @@ fn backup_init_password_at(
     config_root: &Path,
     data_root: &Path,
 ) -> Result<PathBuf> {
-    let config = config_root.join("nkeepass");
-    let data = data_root.join("nkeepass");
-    fs::create_dir_all(&config).map_err(|_| err("cannot create password backup directory"))?;
-    fs::create_dir_all(&data).map_err(|_| err("cannot create password backup directory"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o700))
-            .map_err(|_| err("cannot secure password backup directory"))?;
-        fs::set_permissions(&data, fs::Permissions::from_mode(0o700))
-            .map_err(|_| err("cannot secure password backup directory"))?;
-    }
+    ensure_backup_dir(config_root, "cannot prepare password identity directory")?;
+    ensure_backup_dir(data_root, "cannot prepare password backup directory")?;
+    #[cfg(not(any(unix, windows)))]
+    return Err(err(
+        "secure password backup storage is unsupported on this platform",
+    ));
+
+    let config = config_root;
+    let data = data_root;
     let identity_path = config.join("init-password.agekey");
-    let identity_metadata = fs::symlink_metadata(&identity_path);
-    if let Ok(metadata) = &identity_metadata {
-        if !metadata.file_type().is_file() {
-            return Err(err("invalid password backup identity file"));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(err("password backup identity permissions are too broad"));
-            }
-        }
-    } else if identity_metadata
-        .as_ref()
-        .err()
-        .is_none_or(|error| error.kind() != io::ErrorKind::NotFound)
-    {
-        return Err(err("cannot inspect password backup identity"));
-    }
-    if identity_metadata
-        .as_ref()
-        .err()
-        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
-    {
-        let key = neotales_age::AgeKey::generate()
-            .map_err(|_| err("cannot generate password backup identity"))?;
-        let private_key = Zeroizing::new(key.private_key);
-        let identity_bytes = Zeroizing::new(format!("{}\n", private_key.as_str()));
-        nkeepass::private_file::write_private_noclobber(&identity_path, identity_bytes.as_bytes())
-            .map_err(err)?;
-        AgeIdentity::from_private_key(private_key.as_str())
-            .map_err(|_| err("cannot initialize password backup identity"))?;
-    }
-    let identity_text = Zeroizing::new(
-        fs::read_to_string(&identity_path)
-            .map_err(|_| err("cannot read password backup identity"))?,
-    );
-    let identity = AgeIdentity::from_private_key(identity_text.trim())
-        .map_err(|_| err("invalid password backup identity"))?;
+    let identity = load_or_create_backup_identity(&identity_path)?;
+
     let recipient = identity
         .recipient()
-        .map_err(|_| err("invalid password backup identity"))?;
+        .map_err(|_| err("password backup identity is invalid"))?;
     let encrypted = AgeFile::encrypt_armored(password.as_bytes(), &[recipient])
         .map_err(|_| err("cannot encrypt init password"))?;
     let mut suffix = [0_u8; 8];
@@ -2130,8 +2094,79 @@ fn backup_init_password_at(
         write!(name, "{byte:02x}").map_err(|_| err("cannot generate password backup name"))?;
     }
     let target = data.join(format!("init-password-{name}.age"));
-    nkeepass::private_file::write_private_noclobber(&target, encrypted.as_bytes()).map_err(err)?;
+    nkeepass::private_file::write_private_noclobber(&target, encrypted.as_bytes())
+        .map_err(|_| err("cannot install encrypted password backup"))?;
     Ok(target)
+}
+
+fn ensure_backup_dir(path: &Path, diagnostic: &'static str) -> Result<()> {
+    fs::create_dir_all(path).map_err(|_| err(diagnostic))?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| err(diagnostic))?;
+    if !metadata.file_type().is_dir() {
+        return Err(err(
+            "password backup directory must not be a symlink or non-directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|_| err(diagnostic))?;
+    }
+    #[cfg(windows)]
+    nkeepass::private_file::set_owner_only(path, diagnostic).map_err(err)?;
+    Ok(())
+}
+
+fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => return read_backup_identity(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(err("cannot inspect password backup identity")),
+    }
+
+    let key = neotales_age::AgeKey::generate()
+        .map_err(|_| err("cannot generate password backup identity"))?;
+    let private_key = Zeroizing::new(key.private_key);
+    let identity_bytes = Zeroizing::new(format!("{}\n", private_key.as_str()));
+    match nkeepass::private_file::write_private_noclobber(path, identity_bytes.as_bytes()) {
+        Ok(()) => AgeIdentity::from_private_key(private_key.as_str())
+            .map_err(|_| err("cannot initialize password backup identity")),
+        Err(_) => {
+            // Another initializer may have installed the shared identity. Only
+            // adopt it after the same type, permission, and key validation.
+            read_backup_identity(path)
+                .map_err(|_| err("cannot install or validate password backup identity"))
+        }
+    }
+}
+
+fn read_backup_identity(path: &Path) -> Result<AgeIdentity> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| err("cannot inspect password backup identity"))?;
+    if !metadata.file_type().is_file() {
+        return Err(err("password backup identity must be a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(err("password backup identity permissions are too broad"));
+        }
+    }
+    #[cfg(windows)]
+    nkeepass::private_file::set_owner_only(path, "cannot secure password backup identity")
+        .map_err(err)?;
+    #[cfg(not(any(unix, windows)))]
+    return Err(err(
+        "cannot verify password backup identity permissions on this platform",
+    ));
+
+    let identity_text = Zeroizing::new(
+        fs::read_to_string(path).map_err(|_| err("cannot read password backup identity"))?,
+    );
+    AgeIdentity::from_private_key(identity_text.trim())
+        .map_err(|_| err("password backup identity is invalid"))
 }
 
 fn bounded_file(path: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
@@ -4443,26 +4478,38 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     } else {
         Ok(None)
     };
-    let context_set = adopt_after_init_create(
+    let context_result = adopt_after_init_create(
         config,
         &path_text,
         use_default_alias,
         create_result,
         save_config,
-    )?;
-    let password_backup = password_backup.map_err(|_| {
-        err("vault created, but its encrypted password backup could not be installed")
-    })?;
+    );
+    let password_backup = password_backup
+        .map_err(|error| err(format!("encrypted password backup failed: {}", error.0)));
+    let context_set = match (context_result, password_backup) {
+        (Ok(context_set), Ok(backup)) => (context_set, backup),
+        (Err(context_error), Ok(_)) => return Err(context_error),
+        (Ok(_), Err(backup_error)) => {
+            return Err(err(format!("vault created; {}", backup_error.0)));
+        }
+        (Err(context_error), Err(backup_error)) => {
+            return Err(err(format!(
+                "{}; vault created but {}",
+                context_error.0, backup_error.0
+            )));
+        }
+    };
 
     json(&serde_json::json!({
         "operation": "init",
         "path": path_text,
         "source": source,
-        "context_set": context_set,
+        "context_set": context_set.0,
         "kdf": kdf_name(write.kdf),
         "kdf_parameters": kdf_parameters(&write),
         "generated_password": opts.size.is_some(),
-        "password_backup": password_backup.map(|path| path.to_string_lossy().into_owned()),
+        "password_backup": context_set.1.map(|path| path.to_string_lossy().into_owned()),
         "password_backup_skipped": opts.key_file.is_some(),
     }))
 }
@@ -5870,7 +5917,7 @@ mod tests {
                 .windows(password.len())
                 .any(|window| window == password.as_bytes())
         );
-        let identity_path = home.path().join(".config/nkeepass/init-password.agekey");
+        let identity_path = home.path().join("config/nkeepass/init-password.agekey");
         let identity_text = fs::read_to_string(&identity_path).expect("identity");
         let identity = AgeIdentity::from_private_key(identity_text.trim()).expect("parse identity");
         assert_eq!(
@@ -5893,6 +5940,110 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn concurrent_first_backups_validate_and_reuse_the_winning_identity() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = ["concurrent-master-one", "concurrent-master-two"]
+            .into_iter()
+            .map(|password| {
+                let home = home.path().to_path_buf();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let backup = backup_init_password_in(password, &home).expect("backup");
+                    (password, backup)
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("initializer thread"))
+            .collect();
+        let identity_path = home.path().join("config/nkeepass/init-password.agekey");
+        let identity_text = fs::read_to_string(identity_path).expect("shared identity");
+        let identity = AgeIdentity::from_private_key(identity_text.trim()).expect("valid winner");
+        for (password, target) in results {
+            let ciphertext = fs::read(target).expect("encrypted backup");
+            assert_eq!(
+                decrypt_age_input(&ciphertext, std::slice::from_ref(&identity))
+                    .expect("decrypt")
+                    .as_slice(),
+                password.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn backup_storage_rejects_symlink_and_non_directory_targets_before_chmod() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let config_parent = home.path().join("config");
+        fs::create_dir_all(&config_parent).expect("config parent");
+        let destination = home.path().join("unrelated-destination");
+        fs::create_dir(&destination).expect("destination directory");
+        #[cfg(unix)]
+        let original_mode = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(&destination)
+                .expect("target metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&destination, config_parent.join("nkeepass"))
+            .expect("backup directory symlink");
+        #[cfg(windows)]
+        fs::write(config_parent.join("nkeepass"), b"preserve").expect("not a directory");
+        assert!(backup_init_password_in("isolated-password", home.path()).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(destination)
+                    .expect("target metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                original_mode
+            );
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            fs::read(config_parent.join("nkeepass")).expect("preserved file"),
+            b"preserve"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_data_directory_symlink_is_refused_without_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let destination = home.path().join("data-target");
+        fs::create_dir(&destination).expect("target directory");
+        let mode = fs::metadata(&destination)
+            .expect("target metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        fs::create_dir_all(home.path().join("config/nkeepass")).expect("config directory");
+        fs::create_dir_all(home.path().join("data")).expect("data parent");
+        std::os::unix::fs::symlink(&destination, home.path().join("data/nkeepass"))
+            .expect("data directory symlink");
+
+        assert!(backup_init_password_in("isolated-password", home.path()).is_err());
+        assert_eq!(
+            fs::metadata(destination)
+                .expect("target metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            mode
+        );
     }
 
     fn recipient_http_fixture(

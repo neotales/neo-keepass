@@ -71,6 +71,10 @@ fn command(fixture: &Fixture, password: &str) -> Command {
     child
         .current_dir(fixture.root.path())
         .env("HOME", fixture.root.path())
+        .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NKEEPASS_DATA_DIR")
+        .env_remove("XDG_CONFIG_DIR")
+        .env_remove("XDG_DATA_DIR")
         .env("XDG_CONFIG_HOME", fixture.config_home())
         .env("XDG_DATA_HOME", fixture.data_home())
         .env(PASSWORD_ENV, password)
@@ -78,6 +82,65 @@ fn command(fixture: &Fixture, password: &str) -> Command {
         .env_remove("NKEEPASS_VAULT_PATH")
         .stdin(Stdio::null());
     child
+}
+
+#[test]
+fn password_backup_uses_app_specific_directory_overrides() {
+    let fixture = Fixture::new();
+    let vault = fixture.vault("override.kdbx");
+    let config = fixture.root.path().join("override-config");
+    let data = fixture.root.path().join("override-data");
+    let output = command(&fixture, PASSWORD)
+        .env("NKEEPASS_CONFIG_DIR", &config)
+        .env("NKEEPASS_DATA_DIR", &data)
+        .args(with_password(&["init", vault.to_str().unwrap()]))
+        .output()
+        .unwrap();
+    let result = created(&output);
+    let backup = PathBuf::from(result["password_backup"].as_str().unwrap());
+    assert_eq!(backup.parent(), Some(data.as_path()));
+    assert!(config.join("init-password.agekey").is_file());
+
+    let xdg_config = fixture.root.path().join("xdg-config");
+    let xdg_data = fixture.root.path().join("xdg-data");
+    let xdg_vault = fixture.vault("xdg-override.kdbx");
+    let xdg_output = command(&fixture, PASSWORD)
+        .env("XDG_CONFIG_DIR", &xdg_config)
+        .env("XDG_DATA_DIR", &xdg_data)
+        .args(with_password(&["init", xdg_vault.to_str().unwrap()]))
+        .output()
+        .unwrap();
+    let xdg_result = created(&xdg_output);
+    let xdg_backup = PathBuf::from(xdg_result["password_backup"].as_str().unwrap());
+    assert_eq!(
+        xdg_backup.parent(),
+        Some(xdg_data.join("nkeepass").as_path())
+    );
+    assert!(xdg_config.join("nkeepass/init-password.agekey").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_failure_reports_cause_and_leaves_created_vault() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let vault = fixture.vault("partial.kdbx");
+    let data = fixture.root.path().join("backup-data");
+    std::fs::create_dir(&data).unwrap();
+    let target = fixture.root.path().join("do-not-touch");
+    std::fs::create_dir(&target).unwrap();
+    symlink(&target, data.join("nkeepass")).unwrap();
+    let output = command(&fixture, PASSWORD)
+        .env("NKEEPASS_DATA_DIR", data.join("nkeepass"))
+        .args(with_password(&["init", vault.to_str().unwrap()]))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(vault.is_file(), "vault creation is not rolled back");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("vault created"));
+    assert!(diagnostic.contains("must not be a symlink or non-directory"));
 }
 
 fn run(fixture: &Fixture, args: &[&str]) -> Output {
@@ -451,6 +514,10 @@ fn init_help_succeeds_and_documents_its_flags() {
             "--iterations",
             "--parallelism",
             "--size",
+            "Password persistence",
+            "age-encrypted",
+            "Partial failure",
+            "remains installed",
         ] {
             assert!(text.contains(expected), "init {flag} omits {expected}");
         }

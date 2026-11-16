@@ -3288,7 +3288,13 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
         let mut child = Command::new(env!("CARGO_BIN_EXE_nkeepass"));
         child
             .args(args)
+            .env("HOME", tmp.path())
+            .env_remove("NKEEPASS_CONFIG_DIR")
+            .env_remove("NKEEPASS_DATA_DIR")
+            .env_remove("XDG_CONFIG_DIR")
+            .env_remove("XDG_DATA_DIR")
             .env("XDG_CONFIG_HOME", tmp.path())
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
