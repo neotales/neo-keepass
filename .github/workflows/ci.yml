@@ -38,12 +38,16 @@ jobs:
       # Windows runs unsuppressed. Coverage there is narrow by design: the
       # integration test files under crates/nkeepass/tests/ are #![cfg(unix)]
       # (they exercise real file permissions and PTY-style password prompts),
-      # so Windows runs the unit and doc tests only. The platform limitation
-      # remains: owner-only secure writes are unsupported on Windows (README
-      # "Current status"), so the product's vault/config/output writes fail
-      # closed there, and CI currently gives almost no signal about Windows
-      # behavior. Widening Windows coverage means writing cfg(windows) tests,
-      # not silencing this job.
+      # so Windows runs the unit and doc tests only. The first Windows run
+      # failed in this step with exit code 101 (logs need authenticated
+      # access, so the failing test is not identifiable from public data);
+      # the separate Check step below splits compile errors of the
+      # Windows-only cfg(windows) code - which never compiles anywhere else -
+      # from test assertion failures, making the next failure's cause visible
+      # from public step conclusions alone.
+      - name: Check
+        shell: bash
+        run: cargo check --workspace --all-targets
       - name: Test
         shell: bash
         run: cargo test --workspace

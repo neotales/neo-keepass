@@ -50,6 +50,31 @@ job therefore fails until that is resolved. Triage means upgrading the
 dependency or a justified, dated ignore in `audit.toml` — not removing the
 job.
 
+**Audit triage (2026-11-16):** `.cargo/audit.toml` now carries a reviewed,
+dated ignore for RUSTSEC-2023-0071 with the full assessment: `rsa` 0.9.10
+performs no private-key operations in this workspace (all OAEP decryption is
+converted to the Marvin-hardened `sad-rsa` and runs through its blinded
+decrypt path; `rsa` 0.9 is used only for signature verification, OAEP
+encryption, and key parsing). Upgrading to `rsa` 0.10 is not a drop-in fix —
+it removed the `sha2` feature the vendored crates depend on and needs a
+migration of the vendored source, which must follow the vendored crates'
+upstream. The advisory is still printed with this reason on every audit run;
+the ignore must be removed the moment `rsa` 0.9 gains a private-key use or
+the upgrade lands.
+
+**Windows failure of run 43846609261 (first Windows execution):** the `Test`
+step failed with exit code 101. What public data shows and what it cannot:
+the REST log endpoint requires admin rights (403), the web log fragments
+404 anonymously, check-run annotations carry only the exit code, and
+artifacts require authentication (401) — the failing test is not identifiable
+without credentials. Local reproduction is equally blocked: the `ring` and
+`alloca` build scripts cannot run for a Windows target without MSVC/mingw,
+which this machine cannot install. Mitigation in `ci.yml`: the test matrix
+now runs `cargo check --workspace --all-targets` and `cargo test` as separate
+steps, so the next Windows failure is classifiable from public step
+conclusions alone (Windows-only `cfg(windows)` code compiles nowhere else;
+a compile defect fails Check, an assertion failure fails Test).
+
 ## `build.yml` — Linux amd64/arm64 build + packaging
 
 Triggered by tag push `v*` (builds the tag, not the working tree) or manual
