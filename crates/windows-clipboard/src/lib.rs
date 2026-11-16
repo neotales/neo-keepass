@@ -1,7 +1,8 @@
 //! Narrow, audited Win32 clipboard ownership boundary.
 //!
-//! These operations require a console window because `EmptyClipboard` needs an
-//! owner window. In pseudoconsole/no-window environments they fail closed.
+//! These operations pass `GetConsoleWindow()` as the clipboard owner and fail
+//! closed only when it returns null. A non-null result does not establish that
+//! the process is running in a conventional console rather than a pseudoconsole.
 
 #![cfg(windows)]
 #![allow(
@@ -34,7 +35,8 @@ const GMEM_MOVEABLE: u32 = 0x0002;
 ///
 /// A successful write can still be partial from the caller's perspective:
 /// `closed` is false if the clipboard could not be closed, or `sequence` is
-/// `None` if Windows did not provide a usable sequence number.
+/// `None` if Windows did not provide a usable sequence number. A sequence is
+/// still useful for conditional cleanup when `closed` is false.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SetResult {
     /// Sequence number identifying the installed clipboard contents, if available.
@@ -45,20 +47,26 @@ pub struct SetResult {
 
 /// Writes UTF-16 text and captures the clipboard sequence while locked.
 ///
-/// Embedded NULs are rejected. Requires a valid console window; returns an
-/// error when no console window exists. A successful result can still indicate
-/// partial success; clear only when both `closed` is true and `sequence` exists.
+/// Embedded NULs are rejected. Returns an error if `GetConsoleWindow()` is
+/// null or a native clipboard operation fails. Note that Windows may already
+/// have emptied the clipboard before `SetClipboardData` fails; in that case
+/// this returns an error after the previous clipboard contents have been lost.
+///
+/// A successful result may report `closed == false` after the text was written.
+/// If `sequence` is `Some`, the caller can still use it for conditional cleanup;
+/// the application's lease retains that sequence even when close failed.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// # #[cfg(windows)] {
 /// let result = windows_clipboard::set_text_and_get_sequence("secret")?;
-/// if result.closed {
-///     if let Some(sequence) = result.sequence {
-///         let _ = windows_clipboard::clear_if_sequence(sequence)?;
-///     }
+/// if let Some(sequence) = result.sequence {
+///     // The sequence remains usable for conditional cleanup even if `closed`
+///     // is false; a failed close is reported as partial success, not rollback.
+///     let _cleared = windows_clipboard::clear_if_sequence(sequence)?;
 /// }
+/// let _close_succeeded = result.closed;
 /// # }
 /// # Ok::<(), windows_clipboard::ClipboardError>(())
 /// ```
@@ -73,8 +81,7 @@ pub fn set_text_and_get_sequence(value: &str) -> Result<SetResult, ClipboardErro
         .checked_mul(size_of::<u16>())
         .ok_or(ClipboardError)?;
 
-    // GetConsoleWindow provides the owner required by EmptyClipboard;
-    // in pseudoconsole/no-window mode we fail closed.
+    // Pass GetConsoleWindow's result as the owner required by EmptyClipboard.
     // SAFETY: GetConsoleWindow has no preconditions or pointer arguments.
     let owner = unsafe { GetConsoleWindow() };
     if owner.is_null() {
@@ -132,11 +139,11 @@ pub fn set_text_and_get_sequence(value: &str) -> Result<SetResult, ClipboardErro
 /// Clears the clipboard only if its current sequence still equals `expected`.
 ///
 /// The comparison and clear happen while the clipboard is locked, so newer
-/// contents are preserved. Requires a valid console window; returns `Ok(false)`
-/// when the sequence differs.
+/// contents are preserved. Returns an error if `GetConsoleWindow()` is null
+/// or a native clipboard operation fails, and returns `Ok(false)` when the
+/// sequence differs.
 pub fn clear_if_sequence(expected: u32) -> Result<bool, ClipboardError> {
-    // A console window is a valid clipboard owner HWND for this console TUI.
-    // In pseudoconsole/no-window mode there is no valid owner and we fail safe.
+    // Use the HWND reported by GetConsoleWindow as clipboard owner.
     // SAFETY: GetConsoleWindow has no preconditions or pointer arguments.
     let owner = unsafe { GetConsoleWindow() };
     if owner.is_null() {
