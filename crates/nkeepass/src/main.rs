@@ -2268,7 +2268,16 @@ impl RecipientTransport {
 /// Fetches a recipient document while checking the HTTP status independently
 /// of curl's process exit code. The HTTP transport exists only in unit tests.
 fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<String> {
-    let mut command = std::process::Command::new("curl");
+    fetch_recipient_url_with_program(url, transport, std::ffi::OsStr::new("curl"))
+}
+
+/// Fetches a recipient document using the given curl program.
+fn fetch_recipient_url_with_program(
+    url: &str,
+    transport: RecipientTransport,
+    curl_program: &std::ffi::OsStr,
+) -> Result<String> {
+    let mut command = std::process::Command::new(curl_program);
     command.args([
         "--disable",
         "--globoff",
@@ -2301,20 +2310,7 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
         .envs(recipient_curl_windows_environment())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr({
-            #[cfg(test)]
-            {
-                if matches!(transport, RecipientTransport::HttpFixture) {
-                    std::process::Stdio::piped()
-                } else {
-                    std::process::Stdio::null()
-                }
-            }
-            #[cfg(not(test))]
-            {
-                std::process::Stdio::null()
-            }
-        });
+        .stderr(std::process::Stdio::null());
     #[cfg(test)]
     if matches!(transport, RecipientTransport::HttpFixture) {
         // Inject a controlled proxy in the test child so --noproxy is a
@@ -2332,17 +2328,11 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
             if matches!(transport, RecipientTransport::HttpFixture) {
                 return Err(err(&format!(
                     "HTTP fixture curl could not start ({})",
-                    curl_fixture_diagnostic(None, &[])
+                    curl_fixture_diagnostic(None)
                 )));
             }
             return Err(err("HTTPS recipient lookup unavailable"));
         }
-    };
-    #[cfg(test)]
-    let mut fixture_stderr = if matches!(transport, RecipientTransport::HttpFixture) {
-        child.stderr.take()
-    } else {
-        None
     };
     let Some(mut output) = child.stdout.take() else {
         let _ = child.kill();
@@ -2374,15 +2364,9 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
     if !status.success() {
         #[cfg(test)]
         if matches!(transport, RecipientTransport::HttpFixture) {
-            use std::io::Read;
-
-            let mut stderr = Vec::new();
-            if let Some(stderr_pipe) = fixture_stderr.as_mut() {
-                let _ = stderr_pipe.read_to_end(&mut stderr);
-            }
             return Err(err(&format!(
                 "HTTP fixture curl failed ({})",
-                curl_fixture_diagnostic(status.code(), &stderr)
+                curl_fixture_diagnostic(status.code())
             )));
         }
         return Err(err("HTTPS recipient lookup failed"));
@@ -2409,47 +2393,20 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
     String::from_utf8(body.to_vec()).map_err(|_| err("invalid HTTPS recipient response"))
 }
 
-/// Produces test-only curl failure details without exposing arbitrary stderr.
+/// Classifies fixture failures without running another process or retaining
+/// arbitrary diagnostic output.
 #[cfg(test)]
-fn curl_fixture_diagnostic(status: Option<i32>, stderr: &[u8]) -> String {
-    let mut version = std::process::Command::new("curl")
-        .arg("--version")
-        .env_clear()
-        .env("PATH", env::var_os("PATH").unwrap_or_default())
-        .envs(recipient_curl_windows_environment())
-        .output()
-        .ok()
-        .and_then(|output| {
-            String::from_utf8(output.stdout)
-                .ok()?
-                .lines()
-                .next()
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "curl version unavailable".to_owned());
-    version.truncate(160);
-    let error_code = stderr
-        .windows(7)
-        .position(|window| window == b"curl: (")
-        .and_then(|prefix| {
-            let code = stderr[prefix + 7..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_digit());
-            let code = code.copied().collect::<Vec<_>>();
-            std::str::from_utf8(&code)
-                .ok()
-                .and_then(|code| code.parse::<u32>().ok())
-        });
-    let category = match error_code {
-        Some(5 | 6) => "name resolution error",
-        Some(7) => "connection error",
-        Some(1 | 2 | 4 | 48) => "curl configuration or protocol error",
-        Some(_) => "curl transfer error",
-        None => "stderr unavailable or unrecognized",
+fn curl_fixture_diagnostic(exit_code: Option<i32>) -> String {
+    let Some(exit_code) = exit_code else {
+        return "process=not-started; category=executable unavailable".to_owned();
     };
-    format!(
-        "executable=curl (PATH-resolved); version={version}; exit={status:?}; stderr={category} (details redacted)"
-    )
+    let category = match exit_code {
+        1 | 2 | 4 | 48 => "curl configuration or protocol error",
+        5 | 6 => "name resolution error",
+        7 => "connection error",
+        _ => "curl transfer error",
+    };
+    format!("process=exited; exit_code={exit_code}; category={category}")
 }
 
 /// Returns the minimal platform environment needed by curl's Windows TLS
@@ -6318,15 +6275,29 @@ mod tests {
     }
 
     #[test]
-    fn curl_fixture_diagnostic_redacts_stderr_details() {
-        let diagnostic = curl_fixture_diagnostic(
-            Some(7),
-            b"curl: (7) Failed to connect to private-host.example:443",
-        );
-        assert!(diagnostic.contains("executable=curl"));
-        assert!(diagnostic.contains("exit=Some(7)"));
+    fn curl_fixture_diagnostic_classifies_process_exit() {
+        let diagnostic = curl_fixture_diagnostic(Some(7));
+        assert!(diagnostic.contains("exit_code=7"));
         assert!(diagnostic.contains("connection error"));
-        assert!(!diagnostic.contains("private-host.example"));
+        assert_eq!(
+            curl_fixture_diagnostic(None),
+            "process=not-started; category=executable unavailable"
+        );
+    }
+
+    #[test]
+    fn recipient_fixture_reports_missing_curl_without_changing_path() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let missing_program = temp.path().join("curl-that-does-not-exist");
+        let error = fetch_recipient_url_with_program(
+            "http://127.0.0.1:1/keys",
+            RecipientTransport::HttpFixture,
+            missing_program.as_os_str(),
+        )
+        .expect_err("missing executable");
+
+        assert!(error.0.contains("category=executable unavailable"));
+        assert!(!error.0.contains(temp.path().to_string_lossy().as_ref()));
     }
 
     #[test]
