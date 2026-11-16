@@ -2093,11 +2093,34 @@ fn fetch_recipient_source(source: &str) -> Result<String> {
         source.to_owned()
     };
 
+    fetch_recipient_url(&url, RecipientTransport::Https)
+}
+
+#[derive(Clone, Copy)]
+enum RecipientTransport {
+    Https,
+    #[cfg(test)]
+    HttpFixture,
+}
+
+impl RecipientTransport {
+    fn curl_protocol(self) -> &'static str {
+        match self {
+            Self::Https => "=https",
+            #[cfg(test)]
+            Self::HttpFixture => "=http",
+        }
+    }
+}
+
+/// Fetches a recipient document while checking the HTTP status independently
+/// of curl's process exit code. The HTTP transport exists only in unit tests.
+fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<String> {
     let mut command = std::process::Command::new("curl");
     command
         .args([
             "--disable",
-            "--fail",
+            "--globoff",
             "--silent",
             "--show-error",
             "--max-time",
@@ -2107,10 +2130,11 @@ fn fetch_recipient_source(source: &str) -> Result<String> {
             "--max-redirs",
             "0",
             "--proto",
-            "=https",
+            transport.curl_protocol(),
             "--url",
         ])
         .arg(url)
+        .args(["--write-out", "\n%{http_code}"])
         .env_clear()
         .env("PATH", env::var_os("PATH").unwrap_or_default())
         .stdin(std::process::Stdio::null())
@@ -2124,7 +2148,13 @@ fn fetch_recipient_source(source: &str) -> Result<String> {
         let _ = child.wait();
         return Err(err("HTTPS recipient lookup failed"));
     };
-    let bytes = match read_bounded(&mut output, 64 * 1024, "HTTPS recipient lookup failed") {
+    const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
+    const MAX_RESPONSE_WITH_STATUS: u64 = MAX_RESPONSE_BYTES + 4;
+    let bytes = match read_bounded(
+        &mut output,
+        MAX_RESPONSE_WITH_STATUS,
+        "HTTPS recipient lookup failed",
+    ) {
         Ok(bytes) => bytes,
         Err(error) => {
             let _ = child.kill();
@@ -2132,7 +2162,7 @@ fn fetch_recipient_source(source: &str) -> Result<String> {
             return Err(error);
         }
     };
-    if bytes.len() > 64 * 1024 {
+    if bytes.len() as u64 > MAX_RESPONSE_WITH_STATUS {
         let _ = child.kill();
         let _ = child.wait();
         return Err(err("HTTPS recipient response exceeds size limit"));
@@ -2143,7 +2173,26 @@ fn fetch_recipient_source(source: &str) -> Result<String> {
     if !status.success() {
         return Err(err("HTTPS recipient lookup failed"));
     }
-    String::from_utf8(bytes.to_vec()).map_err(|_| err("invalid HTTPS recipient response"))
+    let status_start = bytes
+        .len()
+        .checked_sub(4)
+        .ok_or_else(|| err("HTTPS recipient lookup failed"))?;
+    let suffix = &bytes[status_start..];
+    if suffix[0] != b'\n' || !suffix[1..].iter().all(u8::is_ascii_digit) {
+        return Err(err("HTTPS recipient lookup failed"));
+    }
+    let code = std::str::from_utf8(&suffix[1..])
+        .ok()
+        .and_then(|text| text.parse::<u16>().ok())
+        .ok_or_else(|| err("HTTPS recipient lookup failed"))?;
+    if code < 200 || code >= 300 {
+        return Err(err("HTTPS recipient lookup failed"));
+    }
+    let body = &bytes[..status_start];
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(err("HTTPS recipient response exceeds size limit"));
+    }
+    String::from_utf8(body.to_vec()).map_err(|_| err("invalid HTTPS recipient response"))
 }
 
 /// Restricts discovery URLs to a simple HTTPS authority and path.
@@ -5085,6 +5134,10 @@ fn takes_option_value(option: &str) -> bool {
             | "--password-env"
             | "--password-file"
             | "--key-file"
+            | "--age-recipient"
+            | "-r"
+            | "--age-identity"
+            | "-i"
             | "--size"
             | "--format"
             | "--strategy"
@@ -5685,6 +5738,101 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn recipient_http_fixture(
+        status: &'static str,
+        body: &'static str,
+        location: Option<&'static str>,
+    ) -> (String, std::thread::JoinHandle<(usize, String)>) {
+        use std::{
+            net::TcpListener,
+            sync::{Arc, Mutex},
+            time::{Duration, Instant},
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP fixture");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking HTTP fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let observed = Arc::new(Mutex::new(String::new()));
+        let observed_request = Arc::clone(&observed);
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            let quiet_deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < quiet_deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests += 1;
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .expect("fixture read timeout");
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 1024];
+                        while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                            let count = stream.read(&mut chunk).expect("read HTTP request");
+                            if count == 0 {
+                                break;
+                            }
+                            request.extend_from_slice(&chunk[..count]);
+                            if request.len() > 8192 {
+                                break;
+                            }
+                        }
+                        if requests == 1 {
+                            *observed_request.lock().expect("request lock") =
+                                String::from_utf8_lossy(&request).into_owned();
+                        }
+                        let location = location
+                            .map_or_else(String::new, |value| format!("Location: {value}\r\n"));
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("write HTTP response");
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("HTTP fixture accept failed: {error}"),
+                }
+            }
+            (
+                requests,
+                observed_request.lock().expect("request lock").clone(),
+            )
+        });
+        (format!("http://{address}/keys/{{one,two}}"), server)
+    }
+
+    #[test]
+    fn recipient_fetch_disables_curl_globbing_and_issues_one_request() {
+        let (url, server) = recipient_http_fixture("200 OK", "a valid key list\n", None);
+        assert_eq!(
+            fetch_recipient_url(&url, RecipientTransport::HttpFixture)
+                .expect("controlled HTTP fetch"),
+            "a valid key list\n"
+        );
+        let (requests, request) = server.join().expect("fixture thread");
+        assert_eq!(requests, 1);
+        assert!(
+            request.starts_with("GET /keys/{one,two} HTTP/1.1\r\n"),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn recipient_fetch_rejects_redirect_status_and_discards_its_body() {
+        let (url, server) =
+            recipient_http_fixture("302 Found", "redirect-body-canary", Some("/followed"));
+        let error =
+            fetch_recipient_url(&url, RecipientTransport::HttpFixture).expect_err("reject 302");
+        assert!(!error.0.contains("redirect-body-canary"));
+        let (requests, _) = server.join().expect("fixture thread");
+        assert_eq!(requests, 1);
+    }
+
     #[test]
     fn age_input_and_identity_helpers_round_trip_and_parse_recipient_files() {
         let key = neotales_age::AgeKey::generate().expect("age key");
@@ -6271,6 +6419,24 @@ mod tests {
         assert_eq!(
             help_request(&args(&["secrets", "get", "--key", "--help"])),
             None
+        );
+        assert_eq!(
+            help_request(&args(&["secrets", "get", "-r", "--help"])),
+            None
+        );
+        assert_eq!(
+            help_request(&args(&[
+                "secrets",
+                "get",
+                "--age-recipient",
+                "--help",
+                "--help"
+            ])),
+            Some(args(&["secrets", "get"]))
+        );
+        assert_eq!(
+            help_request(&args(&["secrets", "set", "-i", "--help", "--help"])),
+            Some(args(&["secrets", "set"]))
         );
         assert_eq!(
             help_request(&args(&["exec", "--env", "--help", "--", "tool"])),
