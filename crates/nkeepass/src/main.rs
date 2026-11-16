@@ -5758,8 +5758,15 @@ mod tests {
         let observed_request = Arc::clone(&observed);
         let server = std::thread::spawn(move || {
             let mut requests = 0;
-            let quiet_deadline = Instant::now() + Duration::from_millis(300);
-            while Instant::now() < quiet_deadline {
+            // Allow slow CI scheduling for curl's first connection, then
+            // observe for a short, separate interval to catch duplicate calls.
+            let connection_deadline = Instant::now() + Duration::from_secs(10);
+            let mut quiet_deadline = None;
+            loop {
+                let deadline = quiet_deadline.unwrap_or(connection_deadline);
+                if Instant::now() >= deadline {
+                    break;
+                }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         requests += 1;
@@ -5791,6 +5798,9 @@ mod tests {
                         stream
                             .write_all(response.as_bytes())
                             .expect("write HTTP response");
+                        if quiet_deadline.is_none() {
+                            quiet_deadline = Some(Instant::now() + Duration::from_millis(300));
+                        }
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
