@@ -90,8 +90,13 @@ compile error, or a runtime error.
 
 ## `build.yml` — Linux amd64/arm64 build + packaging
 
-Triggered by tag push `v*` (builds the tag, not the working tree) or manual
-dispatch with an optional `ref`. Matrix: `x86_64-unknown-linux-gnu` (native)
+Triggered by tag push `v*` (builds the tag, not the working tree), manual
+dispatch with an optional `ref`, or pull requests (builds the PR's merge
+commit). The pull-request trigger is the credential-free path to exercise
+the build and packaging jobs in ordinary development: any pull request runs
+them — no tag push, release, or API token required. The `bench` workflow
+stays dispatch-only (benchmarks are expensive). Matrix:
+`x86_64-unknown-linux-gnu` (native)
 and `aarch64-unknown-linux-gnu` (cross-compiled; installs
 `gcc-aarch64-linux-gnu`, needed by `ring`'s build script via `rcgen` →
 `neotales-x509`; strips with `aarch64-linux-gnu-strip`). Produces, per target:
