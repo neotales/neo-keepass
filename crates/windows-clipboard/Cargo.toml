@@ -7,10 +7,32 @@ license.workspace = true
 publish = false
 description = "Audited Win32 clipboard ownership boundary"
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 zeroize.workspace = true
 windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_Memory"] }
 
-
+# Keep this crate's lint policy aligned with the workspace. Cargo cannot
+# override the inherited `unsafe_code = "forbid"` lint, so this FFI boundary
+# copies every other workspace lint and changes only unsafe_code to `allow`.
+# Reconcile this list if the workspace lint policy changes.
 [lints.rust]
 unsafe_code = "allow"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"

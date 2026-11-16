@@ -118,7 +118,7 @@ impl ClipboardAdapter for ArboardAdapter {
 }
 
 #[cfg(windows)]
-use windows_clipboard as windows_clipboard;
+use windows_clipboard;
 
 struct Lease {
     value: Zeroizing<String>,
