@@ -1681,8 +1681,10 @@ fn write_string_field(
         )
         .expect("writing to String cannot fail");
     } else {
-        let text = field.value.reveal_text()?.as_str().to_owned();
-        write!(xml, "<Value>{}</Value>", escape(&text)).expect("writing to String cannot fail");
+        let text = field.value.reveal_text()?;
+        xml.push_str("<Value>");
+        write_escaped(xml, text.as_str());
+        xml.push_str("</Value>");
     }
     xml.push_str("</String>");
     Ok(())
@@ -1711,7 +1713,9 @@ fn write_field_xml(
     } else {
         let text = std::str::from_utf8(value)
             .map_err(|_| KdbxError::malformed("unprotected KDBX field is not UTF-8"))?;
-        write!(xml, "<Value>{}</Value>", escape(text)).expect("writing to String cannot fail");
+        xml.push_str("<Value>");
+        write_escaped(xml, text);
+        xml.push_str("</Value>");
     }
     xml.push_str("</String>");
     Ok(())
@@ -1767,6 +1771,21 @@ fn write_times(xml: &mut String, times: &KeePassTimes) {
 }
 fn write_text(xml: &mut String, name: &str, value: &str) {
     write!(xml, "<{name}>{}</{name}>", escape(value)).expect("writing to String cannot fail");
+}
+fn write_escaped(xml: &mut String, value: &str) {
+    for character in value.chars() {
+        xml.push_str(match character {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&apos;",
+            _ => {
+                xml.push(character);
+                continue;
+            }
+        });
+    }
 }
 fn escape(value: &str) -> String {
     value

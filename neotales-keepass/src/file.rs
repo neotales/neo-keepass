@@ -439,7 +439,7 @@ impl KdbxFile {
             let hashed = Zeroizing::new(wire::read_hashed_blocks(&decrypted[32..], limits)?);
             let payload = match header.compression {
                 WireCompression::None => hashed,
-                WireCompression::GZip => Zeroizing::new(decompress(&hashed, limits)?),
+                WireCompression::GZip => decompress(&hashed, limits)?,
             };
             cancellation.checkpoint()?;
             let inner = wire::InnerHeader {
@@ -501,7 +501,7 @@ impl KdbxFile {
         };
         let payload = match header.compression {
             WireCompression::None => decrypted,
-            WireCompression::GZip => Zeroizing::new(decompress(&decrypted, limits)?),
+            WireCompression::GZip => decompress(&decrypted, limits)?,
         };
         cancellation.checkpoint()?;
         let inner = wire::InnerHeader::parse(&payload, limits)?;
@@ -1300,9 +1300,9 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
             .fold(0, |diff, (a, b)| diff | (a ^ b))
             == 0
 }
-fn decompress(input: &[u8], limits: &KdbxReadLimits) -> Result<Vec<u8>, KdbxError> {
+fn decompress(input: &[u8], limits: &KdbxReadLimits) -> Result<Zeroizing<Vec<u8>>, KdbxError> {
     let decoder = GzDecoder::new(Cursor::new(input));
-    let mut output = Vec::new();
+    let mut output = Zeroizing::new(Vec::new());
     decoder
         .take(limits.max_decompressed_bytes.saturating_add(1))
         .read_to_end(&mut output)

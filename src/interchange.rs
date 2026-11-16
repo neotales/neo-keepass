@@ -892,7 +892,6 @@ fn entry_to_wire(entry: &Entry, depth: usize, budget: &mut ConversionBudget) -> 
     if depth > VAULT_LIMITS.max_depth {
         return Err(too_large());
     }
-    check_standard_projection(entry)?;
     let mut history = Vec::with_capacity(entry.history.len());
     for snapshot in &entry.history {
         history.push(entry_to_wire(snapshot, depth + 1, budget)?);
@@ -906,14 +905,21 @@ fn entry_to_wire(entry: &Entry, depth: usize, budget: &mut ConversionBudget) -> 
             protect_in_memory: field.protect_in_memory,
         });
     }
+    let title = standard_text(entry, "Title", &entry.title)?;
+    let username = standard_text(entry, "UserName", &entry.username)?;
+    let url = standard_text(entry, "URL", &entry.url)?;
+    let notes = standard_text(entry, "Notes", &entry.notes)?;
+    let password = entry
+        .field("Password")
+        .map_or(&entry.password, |field| &field.value);
     Ok(EntryWire {
         id: entry.id.to_base64(),
-        title: entry.title.clone(),
-        username: entry.username.clone(),
-        password: protected_to_wire(&entry.password, budget)?,
-        url: entry.url.clone(),
+        title,
+        username,
+        password: protected_to_wire(password, budget)?,
+        url,
         override_url: entry.override_url.clone(),
-        notes: entry.notes.clone(),
+        notes,
         icon_id: entry.icon_id,
         custom_icon_id: entry.custom_icon_id.to_base64(),
         foreground_color: entry.foreground_color.rgb,
@@ -950,35 +956,17 @@ fn entry_to_wire(entry: &Entry, depth: usize, budget: &mut ConversionBudget) -> 
     })
 }
 
-fn check_standard_projection(entry: &Entry) -> Result<()> {
-    for (_name, projection, bytes) in [
-        ("UserName", entry.username.as_str(), entry.field("UserName")),
-        ("URL", entry.url.as_str(), entry.field("URL")),
-    ] {
-        if let Some(field) = bytes
-            && !projection.is_empty()
-            && field
+fn standard_text(entry: &Entry, key: &str, scalar: &str) -> Result<String> {
+    entry.field(key).map_or_else(
+        || Ok(scalar.to_owned()),
+        |field| {
+            field
                 .value
                 .reveal_text()
-                .map_err(|_| unsupported())?
-                .as_str()
-                != projection
-        {
-            return Err(unsupported());
-        }
-    }
-    if let Some(field) = entry.field("Notes")
-        && !entry.notes.is_empty()
-        && field
-            .value
-            .reveal_text()
-            .map_err(|_| unsupported())?
-            .as_str()
-            != entry.notes
-    {
-        return Err(unsupported());
-    }
-    Ok(())
+                .map(|value| value.as_str().to_owned())
+                .map_err(|_| unsupported())
+        },
+    )
 }
 
 fn protected_to_wire(
@@ -1265,24 +1253,17 @@ fn entry_from_wire(
 fn reconcile_standard_fields(entry: &mut Entry) -> Result<()> {
     let mut fields = BTreeMapAccess::new(&mut entry.fields);
     if let Some(field) = fields.get_mut("Password") {
-        if entry.password.is_empty() {
-            entry.password = field.value.clone();
-        } else if !entry.password.try_eq(&field.value).map_err(|_| invalid())? {
-            return Err(invalid());
-        }
+        entry.password = field.value.clone();
     }
     for (key, projection) in [
+        ("Title", &mut entry.title),
         ("UserName", &mut entry.username),
         ("URL", &mut entry.url),
         ("Notes", &mut entry.notes),
     ] {
         if let Some(field) = fields.get_mut(key) {
             let value = field.value.reveal_text().map_err(|_| invalid())?;
-            if projection.is_empty() {
-                *projection = value.as_str().to_owned();
-            } else if projection.as_str() != value.as_str() {
-                return Err(invalid());
-            }
+            *projection = value.as_str().to_owned();
         }
     }
     drop(fields);
@@ -1554,7 +1535,13 @@ fn validate_entry(
         ));
     }
     counts.entries += 1;
-    for value in [&entry.title, &entry.username, &entry.url, &entry.notes] {
+    for value in [
+        &entry.title,
+        &entry.username,
+        &entry.url,
+        &entry.override_url,
+        &entry.notes,
+    ] {
         if !valid_text(value, limits.max_text_bytes) {
             return Err(InterchangeError(
                 "interchange text exceeds the allowed size",
@@ -1755,6 +1742,87 @@ mod tests {
                 .data,
             b"attachment-secret"
         );
+    }
+
+    #[test]
+    fn standard_title_field_wins_across_snapshot_edit_import_and_kdbx_save() {
+        use neotales_keepass::{KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions};
+
+        let mut database = KeePassDatabase::default();
+        let mut entry = Entry::new("stale scalar title");
+        entry.set_field(Field::new("Title", "canonical field title"));
+        entry.notes = "stale notes projection".into();
+        entry.set_field(Field::new("Notes", "canonical notes"));
+        database.root.entries.push(entry);
+
+        let encoded = encode(&database).expect("export snapshot");
+        let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            wire["database"]["root"]["entries"][0]["title"],
+            "canonical field title"
+        );
+        let mut decoded = decode(&encoded).expect("import snapshot").database;
+        let entry = &decoded.root.entries[0];
+        assert_eq!(entry.title, "canonical field title");
+        assert_eq!(entry.notes, "canonical notes");
+
+        let entry = &mut decoded.root.entries[0];
+        entry.title = "stale edited projection".into();
+        entry.set_field(Field::new("Title", "edited canonical title"));
+        let encoded = encode(&decoded).expect("export edited snapshot");
+        let imported = decode(&encoded).expect("reimport edited snapshot").database;
+        assert_eq!(imported.root.entries[0].title, "edited canonical title");
+
+        let mut kdbx = Vec::new();
+        KdbxFile::save(
+            &imported,
+            &mut kdbx,
+            &mut KdbxCredentials::password("test-password").unwrap(),
+            KdbxWriteOptions {
+                aes_kdf_rounds: 8,
+                ..KdbxWriteOptions::default()
+            },
+            &KdbxReadLimits::default(),
+        )
+        .expect("save imported snapshot");
+        let reopened =
+            KdbxFile::load_password(kdbx.as_slice(), "test-password", &KdbxReadLimits::default())
+                .expect("reopen KDBX");
+        assert_eq!(reopened.root.entries[0].title, "edited canonical title");
+        assert_eq!(
+            reopened.root.entries[0]
+                .field("Title")
+                .unwrap()
+                .value
+                .reveal_text()
+                .unwrap()
+                .as_str(),
+            "edited canonical title"
+        );
+    }
+
+    #[test]
+    fn override_url_obeys_interchange_text_limit_on_export_and_import() {
+        let mut database = fixture();
+        database.root.entries[0].override_url = "long override".into();
+        let limits = Limits {
+            max_text_bytes: 8,
+            ..VAULT_LIMITS
+        };
+        let error = encode_with_limits(&database, limits).unwrap_err();
+        assert_eq!(error.message(), "interchange text exceeds the allowed size");
+
+        database.root.entries[0].override_url = "short".into();
+        let encoded = encode(&database).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        document["database"]["root"]["entries"][0]["override_url"] =
+            serde_json::Value::String("long override".into());
+        let input = serde_json::to_vec(&document).unwrap();
+        let error = match decode_with_limits(&input, limits) {
+            Ok(_) => panic!("oversized override URL was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.message(), "interchange text exceeds the allowed size");
     }
 
     /// The message a document was refused with, without requiring `Debug` on

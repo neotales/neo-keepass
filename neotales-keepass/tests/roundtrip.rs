@@ -381,6 +381,22 @@ fn standard_entry_fields_round_trip_with_documented_field_precedence() {
     entry.set_field(Field::new("URL", "https://field.example"));
     database.root.entries.push(entry);
 
+    let xml = String::from_utf8(
+        neotales_keepass::KdbxXml::export(&database).expect("export standard XML"),
+    )
+    .expect("XML is UTF-8");
+    assert!(xml.contains("<String><Key>Title</Key><Value>field title</Value></String>"));
+    assert!(xml.contains("<String><Key>Notes</Key><Value>field notes</Value></String>"));
+    assert!(xml.contains("<OverrideURL>{USERNAME}</OverrideURL>"));
+    let entry_xml = xml
+        .split("<Entry>")
+        .nth(1)
+        .unwrap()
+        .split("</Entry>")
+        .next()
+        .unwrap();
+    assert!(!entry_xml.contains("<Name>"));
+
     let mut bytes = Vec::new();
     KdbxFile::save_default(&database, &mut bytes, "pw").expect("save standard fields");
     let loaded = KdbxFile::load_password(bytes.as_slice(), "pw", &KdbxReadLimits::default())
