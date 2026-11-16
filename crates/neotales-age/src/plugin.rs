@@ -997,19 +997,6 @@ fn read_stanza(input: &mut (impl BufRead + ?Sized)) -> Result<Stanza> {
         }
         encoded.push_str(body_line);
         if body_line.len() < 64 {
-            let mut separator = String::new();
-            if input.read_line(&mut separator)? == 0 {
-                return Err(AgeError::Truncated);
-            }
-            let separator = separator
-                .strip_suffix('\n')
-                .ok_or_else(|| plugin_protocol_error("unterminated plugin body"))?;
-            let separator = separator.strip_suffix('\r').unwrap_or(separator);
-            if !separator.is_empty() {
-                return Err(plugin_protocol_error(
-                    "short plugin body line was not final",
-                ));
-            }
             break;
         }
     }
@@ -1160,7 +1147,7 @@ mod tests {
             }));
         let recipient = encode_recipient("test", &[]).expect("recipient encoding");
         let input = format!(
-            "-> add-recipient {recipient}\n\n-> wrap-file-key\n{}\n\n-> extension-labels\n\n-> done\n\n-> ok\n\n-> ok\n\n",
+            "-> add-recipient {recipient}\n\n-> wrap-file-key\n{}\n-> extension-labels\n\n-> done\n\n-> ok\n\n-> ok\n\n",
             crate::codec::encode_raw(&[0u8; 16])
         );
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -1189,7 +1176,7 @@ mod tests {
             }));
         let identity = encode_identity("test", &[]).expect("identity encoding");
         let input = format!(
-            "-> add-identity {identity}\n\n-> recipient-stanza 0 test\n{}\n\n-> done\n\n-> ok\n\n",
+            "-> add-identity {identity}\n\n-> recipient-stanza 0 test\n{}\n-> done\n\n-> ok\n\n",
             crate::codec::encode_raw(&[0u8; 16])
         );
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -1215,8 +1202,8 @@ mod tests {
     }
 
     #[test]
-    fn body_short_line_ends_body_and_preserves_following_stanza() {
-        let mut input = io::Cursor::new(b"-> value\nc2hvcnQ\n\n-> next\n\n".to_vec());
+    fn body_short_line_ends_body_without_separator_and_preserves_next_stanza() {
+        let mut input = io::Cursor::new(b"-> value\nc2hvcnQ\n-> next\n\n".to_vec());
         let body = super::read_stanza(&mut input).expect("short final body line");
         assert_eq!(body.body, b"short");
         assert_eq!(
@@ -1228,15 +1215,31 @@ mod tests {
     }
 
     #[test]
+    fn standalone_short_body_ends_at_end_of_input() {
+        let mut input = io::Cursor::new(b"-> value\nc2hvcnQ\n".to_vec());
+        assert_eq!(
+            super::read_stanza(&mut input)
+                .expect("short final body line")
+                .body,
+            b"short"
+        );
+    }
+
+    #[test]
     fn body_lines_longer_than_64_characters_are_rejected() {
         let input = format!("-> value\n{}\n\n", "A".repeat(65));
         assert!(super::read_stanza(&mut io::Cursor::new(input.into_bytes())).is_err());
     }
 
     #[test]
-    fn a_short_body_line_cannot_be_followed_by_more_body_data() {
+    fn short_body_line_cannot_be_followed_by_more_body_data() {
         let input = b"-> value\nc2hvcnQ\nAAAA\n\n".to_vec();
-        assert!(super::read_stanza(&mut io::Cursor::new(input)).is_err());
+        let mut input = io::Cursor::new(input);
+        assert_eq!(
+            super::read_stanza(&mut input).expect("first stanza").body,
+            b"short"
+        );
+        assert!(super::read_stanza(&mut input).is_err());
     }
 
     #[test]

@@ -280,7 +280,7 @@ fn plugin_recipient_factory_wraps_a_real_file_key() {
     // Add the recipient, offer it a 16-byte file key to wrap, then acknowledge
     // the stanza the plugin writes back.
     let input = format!(
-        "-> add-recipient {encoding}\n\n-> wrap-file-key\n{}\n\n-> done\n\n-> ok\n\n",
+        "-> add-recipient {encoding}\n\n-> wrap-file-key\n{}\n-> done\n\n-> ok\n\n",
         STANDARD_NO_PAD.encode([0x5au8; 16])
     );
     let output = Arc::new(Mutex::new(Vec::new()));
@@ -356,7 +356,7 @@ fn plugin_identity_factory_unwraps_a_real_file_key() {
     let file_key = [0x5au8; 16];
     let stanza = recipient.wrap(&file_key).expect("wrap");
     let input = format!(
-        "-> add-identity {encoding}\n\n-> recipient-stanza 0 {kind} {share}\n{body}\n\n-> done\n\n-> ok\n\n",
+        "-> add-identity {encoding}\n\n-> recipient-stanza 0 {kind} {share}\n{body}\n-> done\n\n-> ok\n\n",
         kind = stanza.r#type,
         share = stanza.args[0],
         body = STANDARD_NO_PAD.encode(&stanza.body),
