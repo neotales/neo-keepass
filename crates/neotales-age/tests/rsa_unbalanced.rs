@@ -3,15 +3,11 @@
 use neotales_age::{AgeFile, AgeIdentity, AgeRecipient};
 use zeroize::Zeroizing;
 
-const PRIVATE_PKCS1: &str =
-    include_str!("../../../testdata/rsa-unbalanced/rsa-unbalanced-pkcs1.pem");
-const PRIVATE_PKCS8: &str =
-    include_str!("../../../testdata/rsa-unbalanced/rsa-unbalanced-pkcs8.pem");
-const PRIVATE_OPENSSH: &str =
-    include_str!("../../../testdata/rsa-unbalanced/rsa-unbalanced-openssh.pem");
-const PRIVATE_ENCRYPTED: &str =
-    include_str!("../../../testdata/rsa-unbalanced/rsa-unbalanced-encrypted.pem");
-const PUBLIC_SSH: &str = include_str!("../../../testdata/rsa-unbalanced/rsa-unbalanced.pub");
+const PRIVATE_PKCS1: &str = include_str!("data/rsa-unbalanced-pkcs1.pem");
+const PRIVATE_PKCS8: &str = include_str!("data/rsa-unbalanced-pkcs8.pem");
+const PRIVATE_OPENSSH: &str = include_str!("data/rsa-unbalanced-openssh.pem");
+const PRIVATE_ENCRYPTED: &str = include_str!("data/rsa-unbalanced-encrypted.pem");
+const PUBLIC_SSH: &str = include_str!("data/rsa-unbalanced.pub");
 const PASSPHRASE: &[u8] = b"unbalanced-test-pass";
 
 #[test]

@@ -926,6 +926,8 @@ mod tests {
         SigningKey, VerifyingKey,
         pkcs8::{DecodePrivateKey as _, DecodePublicKey as _},
     };
+    use rsa::pkcs1::der::{Decode as _, asn1::AsUintRef as _};
+    use rsa::traits::{PrivateKeyParts as _, PublicKeyParts as _};
     use rsa::{PrivateKey, pkcs1::EncodeRsaPrivateKey as _, pkcs8::EncodePrivateKey as _};
     use sha2::Digest as _;
     use zeroize::Zeroizing;
@@ -999,6 +1001,70 @@ mod tests {
             assert_eq!(
                 crate::ssh_cert::verify_rsa(&public_key, &blob, b"modified signed bytes"),
                 Err(crate::ssh_cert::CertificateError::InvalidSignature)
+            );
+        }
+    }
+
+    #[test]
+    fn internal_rsa_parsers_preserve_unbalanced_fixture_components() {
+        const PKCS1_PEM: &str = include_str!("../tests/data/rsa-unbalanced-pkcs1.pem");
+        const PKCS8_PEM: &str = include_str!("../tests/data/rsa-unbalanced-pkcs8.pem");
+        const OPENSSH_PEM: &str = include_str!("../tests/data/rsa-unbalanced-openssh.pem");
+
+        let pkcs1_der =
+            crate::pem::decode(PKCS1_PEM, "RSA PRIVATE KEY").expect("test PKCS#1 fixture PEM");
+        let expected =
+            rsa::pkcs1::RsaPrivateKeyRef::from_der(&pkcs1_der).expect("test PKCS#1 fixture DER");
+        let parsed_pkcs1 = super::rsa_private_key_from_pkcs1(&pkcs1_der)
+            .expect("internal PKCS#1 parser accepts unbalanced fixture");
+
+        let pkcs8_der =
+            crate::pem::decode(PKCS8_PEM, "PRIVATE KEY").expect("test PKCS#8 fixture PEM");
+        let ParsedPrivateKey::Rsa(parsed_pkcs8) =
+            super::parse_pkcs8_private(&Zeroizing::new(pkcs8_der))
+                .expect("internal PKCS#8 parser accepts unbalanced fixture")
+        else {
+            panic!("PKCS#8 fixture should parse as RSA");
+        };
+
+        let openssh_blob =
+            super::decode_openssh_pem(OPENSSH_PEM).expect("test OpenSSH fixture PEM");
+        let ParsedPrivateKey::Rsa(parsed_openssh) =
+            super::parse_openssh_private(&openssh_blob, None)
+                .expect("internal OpenSSH parser accepts unbalanced fixture")
+        else {
+            panic!("OpenSSH fixture should parse as RSA");
+        };
+
+        for parsed in [&parsed_pkcs1, &parsed_pkcs8, &parsed_openssh] {
+            assert_eq!(
+                super::rsa_uint_to_be(parsed.n().as_ref()),
+                expected.modulus.as_uint_ref().as_bytes()
+            );
+            assert_eq!(
+                super::rsa_uint_to_be(parsed.e()),
+                expected.public_exponent.as_uint_ref().as_bytes()
+            );
+            assert_eq!(
+                super::rsa_uint_to_be(parsed.d()),
+                expected.private_exponent.as_uint_ref().as_bytes()
+            );
+            assert_eq!(parsed.primes().len(), 2);
+            assert_eq!(
+                super::rsa_uint_to_be(parsed.primes()[0].as_ref()),
+                expected.prime1.as_uint_ref().as_bytes()
+            );
+            assert_eq!(
+                super::rsa_uint_to_be(parsed.primes()[1].as_ref()),
+                expected.prime2.as_uint_ref().as_bytes()
+            );
+            assert_eq!(
+                parsed
+                    .primes()
+                    .iter()
+                    .map(|prime| prime.as_ref().bit_width())
+                    .collect::<Vec<_>>(),
+                [512, 1536]
             );
         }
     }

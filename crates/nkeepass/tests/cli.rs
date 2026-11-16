@@ -968,6 +968,17 @@ fn shortcuts_fields_attachments_and_exec() {
             .output()
             .unwrap()
     };
+    let assert_command_success = |action: &str, output: std::process::Output| {
+        let temp_path = tmp.path().display().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .replace(&temp_path, "<test-temp>")
+            .replace("test-password", "<redacted>");
+        assert!(
+            output.status.success(),
+            "{action} failed with status {}: {stderr}",
+            output.status
+        );
+    };
     let value_file = tmp.path().join("value.txt");
     let auth = ["--password-env", "TEST_VAULT_PASSWORD"];
     let out = run(&["ls", auth[0], auth[1]]);
@@ -1135,7 +1146,8 @@ fn shortcuts_fields_attachments_and_exec() {
         .success()
     );
     std::fs::write(&value_file, "attachment-sentinel").unwrap();
-    assert!(
+    assert_command_success(
+        "attachment add --key LOGIN",
         run(&[
             "attachment",
             "add",
@@ -1146,10 +1158,8 @@ fn shortcuts_fields_attachments_and_exec() {
             "--file",
             value_file.to_str().unwrap(),
             auth[0],
-            auth[1]
-        ])
-        .status
-        .success()
+            auth[1],
+        ]),
     );
     let file = tmp.path().join("output.txt");
     let attachment_get = run(&[
@@ -1352,10 +1362,9 @@ fn shortcuts_fields_attachments_and_exec() {
     let duplicate_path = run(&["get", "--key", "collision", auth[0], auth[1]]);
     assert!(!duplicate_path.status.success());
     assert!(duplicate_path.stdout.is_empty());
-    assert!(
-        run(&["ensure", "--key", "New", auth[0], auth[1]])
-            .status
-            .success()
+    assert_command_success(
+        "ensure --key New",
+        run(&["ensure", "--key", "New", auth[0], auth[1]]),
     );
     assert!(
         run(&["rm", "--key", "New", "--yes", auth[0], auth[1]])
