@@ -90,11 +90,24 @@ compile error, or a runtime error.
 
 ## `build.yml` — Linux amd64/arm64 build + packaging
 
-Triggered by tag push `v*` (builds the tag, not the working tree), manual
-dispatch with an optional `ref`, or pull requests (builds the PR's merge
-commit). The pull-request trigger is the credential-free path to exercise
-the build and packaging jobs in ordinary development: any pull request runs
-them — no tag push, release, or API token required. The `bench` workflow
+Triggered by tag push `v*`, manual dispatch with an optional `ref`, or pull
+requests. Event-to-checkout semantics:
+
+- `pull_request`: builds the event's `github.sha` — the PR's **merge
+  commit** (head merged into the target branch at trigger time). If the PR
+  has merge conflicts, the merge ref does not exist and the workflow cannot
+  run. Builds of pull requests from forks or by first-time contributors are
+  subject to GitHub's untrusted-PR rules (maintainer approval before first
+  run; no secrets — this workflow uses none); the checkout persists no
+  credentials.
+- `push` (tag): builds the tag's commit (`github.sha`), not a movable ref —
+  a moved or deleted tag cannot change what a started run built.
+- `workflow_dispatch`: an explicit `ref` input selects the branch, tag, or
+  SHA; an empty input defaults to `github.sha` (the dispatched branch head).
+
+The pull-request trigger is the credential-free path to exercise the build
+and packaging jobs in ordinary development: any pull request runs them — no
+tag push, release, or API token required. The `bench` workflow
 stays dispatch-only (benchmarks are expensive). Matrix:
 `x86_64-unknown-linux-gnu` (native)
 and `aarch64-unknown-linux-gnu` (cross-compiled; installs

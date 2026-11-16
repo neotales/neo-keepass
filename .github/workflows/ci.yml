@@ -30,7 +30,11 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
+      # Untrusted pull-request code is compiled and run by this job; the
+      # checkout token must not persist into those steps.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.98.1" # matches rust-toolchain.toml
@@ -68,7 +72,11 @@ jobs:
     name: fmt and clippy
     runs-on: ubuntu-24.04
     steps:
+      # Untrusted pull-request code is compiled and run by this job; the
+      # checkout token must not persist into those steps.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.98.1"
@@ -86,7 +94,11 @@ jobs:
     name: packaging self-tests
     runs-on: ubuntu-24.04
     steps:
+      # Untrusted pull-request code is compiled and run by this job; the
+      # checkout token must not persist into those steps.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.98.1"
@@ -103,7 +115,11 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-24.04
     steps:
+      # Untrusted pull-request code is compiled and run by this job; the
+      # checkout token must not persist into those steps.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.98.1"

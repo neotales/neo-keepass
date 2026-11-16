@@ -69,6 +69,12 @@ SELFTEST_CASES = [
     ("echo ${{ format('it''s {0}', github.ref) }}", "echo " + PLACEHOLDER),
     ("a ${{ x }} b ${{ y }}", f"a {PLACEHOLDER} b {PLACEHOLDER}"),
     ("echo ${{ matrix.target }}", "echo " + PLACEHOLDER),
+    # The build.yml checkout selector: parenthesised boolean chain with an
+    # empty-string fallback, no quotes inside the expression.
+    (
+        "echo ${{ (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}",
+        "echo " + PLACEHOLDER,
+    ),
     # Unterminated: left verbatim.
     ("echo ${{ oops", "echo ${{ oops"),
 ]
