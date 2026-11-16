@@ -33,6 +33,15 @@ esac
 pkgver=${version//-/.}
 sum=$(sha256sum "$tarball" | cut -d' ' -f1)
 
+# Never embed the caller-supplied tarball name in the generated PKGBUILD: a
+# crafted filename could inject shell into it. The source entry always uses a
+# canonical, script-derived name; the tarball is copied to that name.
+canonical="nkeepass-${version}-${triple}.tar.gz"
+if [ "$(basename "$tarball")" != "$canonical" ] && [ "$(basename "$tarball")" != "nkeepass-${pkgver}-${triple}.tar.gz" ]; then
+    echo "pacman/build.sh: tarball must be named $canonical (got $(basename "$tarball"))" >&2
+    exit 1
+fi
+
 stage=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-pacman.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
@@ -51,7 +60,7 @@ provides=('nkeepass')
 conflicts=('nkeepass')
 options=('!debug')
 sha256sums=('${sum}')
-source=("$(basename "$tarball")")
+source=('${canonical}')
 
 package() {
     # makepkg runs package() inside \$srcdir after extracting the tarball,
@@ -63,9 +72,8 @@ package() {
 }
 EOF
 
-# makepkg refuses unsafe directory permissions and extracts the tarball's
-# top-level directory into src/.
-cp "$tarball" "$stage/"
+# Copy under the canonical name; the source entry references only that name.
+cp "$tarball" "$stage/$canonical"
 (cd "$stage" && makepkg -f >/dev/null)
 mv "$stage"/nkeepass-*.pkg.tar.* "$out_dir/"
 echo "pacman/build.sh: wrote $out_dir/nkeepass-*.pkg.tar.* (pkgver ${pkgver}, arch ${pkg_arch})"

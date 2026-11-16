@@ -15,7 +15,17 @@ Triggered on push to `main`/`dev`, pull requests, and manual dispatch.
 |-----|--------|------|
 | `test` | `ubuntu-24.04`, `macos-15`, `windows-2025` | `cargo test --workspace` |
 | `lint` | `ubuntu-24.04` | `cargo fmt --check`, `cargo clippy --workspace --all-targets` |
+| `packaging-tests` | `ubuntu-24.04` | builds the release binary, runs `packaging/test.sh` (real `dpkg-deb` builder path) |
 | `audit` | `ubuntu-24.04` | `cargo audit` against the pinned `Cargo.lock` |
+
+**Unix gating of the test matrix:** every integration test file under
+`crates/nkeepass/tests/` is `#![cfg(unix)]` — they exercise real file
+permissions and terminal password prompts that this checkout does not emulate
+elsewhere. The Windows job therefore runs the unit and doc tests only and can
+pass while knowing little about Windows behavior. The platform limitation is
+unchanged (owner-only secure writes are unsupported on Windows; README
+"Current status"); widening Windows coverage means writing `cfg(windows)`
+tests, not claiming this job provides it.
 
 **Windows coverage:** the Windows test job runs unsuppressed. Coverage there
 is gated by the documented platform limitation (README "Current status"):
@@ -43,13 +53,20 @@ and `aarch64-unknown-linux-gnu` (cross-compiled; installs
 
 - `nkeepass-<version>-<target>.tar.gz` / `.zip` (`packaging/scripts/archive.sh`)
 - `nkeepass-<version>-<deb-arch>.deb` (`packaging/deb/build.sh`, amd64/arm64)
-- validated by `packaging/validate.sh` before upload: every target must have
-  the complete set of formats, the shipped binary's ELF architecture must
-  match the triple, deb metadata (package/version/architecture) must match,
-  and the native target's binary is smoke-run with `--help`. On hosts without
-  dpkg tooling the deb is validated structurally via `ar`(1) + `tar`(1);
-  `packaging/test.sh` covers the negative cases (wrong ELF arch, wrong deb
-  arch/version, missing formats).
+- validated by `packaging/validate.sh --binary <built>` before upload: every
+  target must have the complete set of formats with the expected names, the
+  binary in EACH container (tar, zip, deb) is extracted and must be a regular
+  non-symlink file with the right ELF architecture, and all containers must
+  carry the identical binary (sha256 equal to each other and to the binary
+  just built). Deb metadata (package/version/architecture) is checked with
+  dpkg-deb on the ubuntu runner. The native target's binary is smoke-run with
+  `--help` under `timeout` only after all checks for that target passed — a
+  binary that failed any check is never executed. On hosts without dpkg
+  tooling the deb metadata is validated structurally via `ar`(1) + `tar`(1);
+  `packaging/test.sh` covers the negative cases (wrong ELF architecture,
+  wrong deb architecture/version, missing formats, wrong payload binary, and
+  a hostile pacman tarball filename that must never reach the generated
+  PKGBUILD).
 
 The binary is stripped before packaging. Artifacts are uploaded as
 `nkeepass-<target>`. Nothing is attached to a GitHub release.
@@ -77,11 +94,13 @@ See `packaging/README.md` for the per-target status table. Summary:
 tar.gz/zip/deb are functional and validated in `build.yml` (deb built with
 `dpkg-deb` on the ubuntu runner); pacman packages are built by
 `packaging/pacman/build.sh` with `makepkg` on Arch hosts — tested locally,
-not built in CI (ubuntu runners have no makepkg); the rpm spec is real
-metadata but requires `rpmbuild`, which neither CI nor this machine has, so
-it is wired but never built here; the winget manifest and choco nuspec are
-stubs with explicit placeholders and are not submittable or buildable
-packages.
+not built in CI (ubuntu runners have no makepkg). The builder rejects any
+tarball whose basename is not the canonical `nkeepass-<version>-<triple>`
+name, so nothing from the caller-supplied path can reach the generated
+PKGBUILD. The rpm spec is real metadata but requires `rpmbuild`, which
+neither CI nor this machine has, so it is wired but never built here; the
+winget manifest and choco nuspec are stubs with explicit placeholders and are
+not submittable or buildable packages.
 
 ## Verified locally vs. not
 
@@ -96,9 +115,10 @@ cargo audit run.
 
 Not verifiable locally: the aarch64 cross-check compiles only up to the
 missing `aarch64-linux-gnu-gcc` (cannot install the cross toolchain without
-sudo); `dpkg-deb` is absent on this Arch-based machine, so the real
-`dpkg-deb` path of `validate.sh` is exercised only on the ubuntu CI runner —
-locally the structural `ar`+`tar` fallback path is what runs; `actionlint` is
-not installed, so workflow validation is YAML parsing plus manual review;
-and the workflows themselves have not been executed on GitHub yet. First run
-of `build.yml` on a tag is the real test.
+sudo); `dpkg-deb` is absent on this Arch-based machine (searched `/usr`,
+`/opt`, and `~/.local`; no system package was installed), so the real
+`dpkg-deb` path of `validate.sh`/`test.sh` runs only on the ubuntu CI runner
+— locally the structural `ar`+`tar` fallback is what runs; `actionlint` is
+not installed here, so workflow validation is YAML parsing plus manual
+review; and the workflows themselves have not been executed on GitHub yet.
+First run of `build.yml` on a tag is the real test.

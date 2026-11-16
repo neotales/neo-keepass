@@ -49,5 +49,5 @@ Description: Headless KeePass automation CLI and TUI
 EOF
 
 dpkg-deb --root-owner-group --build "$stage/$pkg_root" \
-    "$out_dir/${pkg_root}.deb"
-echo "deb/build.sh: wrote $out_dir/${pkg_root}.deb"
+    "$out_dir/nkeepass-${version}-${deb_arch}.deb"
+echo "deb/build.sh: wrote $out_dir/nkeepass-${version}-${deb_arch}.deb"

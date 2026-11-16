@@ -1,14 +1,13 @@
 name: ci
 
-# Test matrix across Windows/Linux/macOS, lint, and crate vulnerability audit.
+# Test matrix across Windows/Linux/macOS, lint, packaging self-tests, and
+# crate vulnerability audit.
 #
-# Windows caveat (documented, not suppressed): this checkout does not support
-# owner-only secure writes on Windows - see README "Current status". Vault
-# creation/mutation, config writes, and output-file tests can fail there by
-# design because the code fails closed with an explicit
-# unsupported-operation diagnostic. The Windows job is allowed to fail CI
-# until that platform limitation is resolved; its failures are still reported
-# and must not be silenced by skipping tests.
+# Windows note: the integration tests under crates/nkeepass/tests/ are
+# #![cfg(unix)], so the Windows job runs the unit and doc tests only. The
+# product-level limitation stands (owner-only secure writes are unsupported
+# on Windows, README "Current status"); this job does not yet claim Windows
+# coverage beyond that.
 on:
   push:
     branches: [main, dev]
@@ -36,14 +35,15 @@ jobs:
         with:
           toolchain: "1.98.1" # matches rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # Windows runs unsuppressed. Windows coverage is gated by the documented
-      # platform limitation (README "Current status"): owner-only secure
-      # writes are unsupported, so tests exercising vault creation/mutation,
-      # config writes, and output files fail closed with an explicit
-      # unsupported-operation diagnostic. No Windows run has executed yet, so
-      # the outcome is unobserved, not known; the job stays unsuppressed so
-      # the first runs report exactly which scenarios fail. Do not add
-      # continue-on-error or skip lists to silence them.
+      # Windows runs unsuppressed. Coverage there is narrow by design: the
+      # integration test files under crates/nkeepass/tests/ are #![cfg(unix)]
+      # (they exercise real file permissions and PTY-style password prompts),
+      # so Windows runs the unit and doc tests only. The platform limitation
+      # remains: owner-only secure writes are unsupported on Windows (README
+      # "Current status"), so the product's vault/config/output writes fail
+      # closed there, and CI currently gives almost no signal about Windows
+      # behavior. Widening Windows coverage means writing cfg(windows) tests,
+      # not silencing this job.
       - name: Test
         shell: bash
         run: cargo test --workspace
@@ -62,6 +62,23 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets
+
+  packaging-tests:
+    name: packaging self-tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build release binary
+        run: cargo build --release -p nkeepass
+      # On ubuntu, dpkg-deb is available, so the positive deb is built by the
+      # real builder and its metadata checked by dpkg-deb. The pacman builder
+      # is skipped there (no makepkg) and exercised on Arch hosts instead.
+      - name: Packaging self-tests
+        run: packaging/test.sh target/release/nkeepass
 
   audit:
     name: cargo audit
