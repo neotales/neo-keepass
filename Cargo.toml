@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/nkeepass",
+    "crates/windows-clipboard",
     "crates/neotales-keepass",
     "crates/neotales-age",
     "crates/neotales-x509",

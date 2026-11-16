@@ -35,7 +35,8 @@ harness = false
 
 [target.'cfg(windows)'.dependencies]
 known-folders = "1.4.2"
-windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_Memory"] }
+windows-clipboard = { path = "../windows-clipboard" }
+
 
 [lints]
 workspace = true
