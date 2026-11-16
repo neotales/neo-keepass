@@ -2269,22 +2269,28 @@ impl RecipientTransport {
 /// of curl's process exit code. The HTTP transport exists only in unit tests.
 fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<String> {
     let mut command = std::process::Command::new("curl");
+    command.args([
+        "--disable",
+        "--globoff",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "5",
+        "--max-filesize",
+        "65536",
+        "--max-redirs",
+        "0",
+        "--proto",
+        transport.curl_protocol(),
+    ]);
+    // A local HTTP fixture must connect directly even on runners whose curl
+    // installation is configured with a system proxy.
+    #[cfg(test)]
+    if let RecipientTransport::HttpFixture = transport {
+        command.args(["--noproxy", "*"]);
+    }
     command
-        .args([
-            "--disable",
-            "--globoff",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "5",
-            "--max-filesize",
-            "65536",
-            "--max-redirs",
-            "0",
-            "--proto",
-            transport.curl_protocol(),
-            "--url",
-        ])
+        .arg("--url")
         .arg(url)
         .args(["--write-out", "\n%{http_code}"])
         .env_clear()
