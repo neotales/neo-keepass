@@ -36,12 +36,14 @@ jobs:
         with:
           toolchain: "1.98.1" # matches rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # Windows runs unsuppressed. Expect red on windows-2025 until the
-      # platform limitation is resolved: owner-only secure writes are
-      # unsupported on Windows (see README "Current status"), so tests that
-      # exercise vault creation/mutation, config writes, or output files fail
-      # closed with the explicit unsupported-operation diagnostic. Do not add
-      # continue-on-error or skip lists here; the failure is the signal.
+      # Windows runs unsuppressed. Windows coverage is gated by the documented
+      # platform limitation (README "Current status"): owner-only secure
+      # writes are unsupported, so tests exercising vault creation/mutation,
+      # config writes, and output files fail closed with an explicit
+      # unsupported-operation diagnostic. No Windows run has executed yet, so
+      # the outcome is unobserved, not known; the job stays unsuppressed so
+      # the first runs report exactly which scenarios fail. Do not add
+      # continue-on-error or skip lists to silence them.
       - name: Test
         shell: bash
         run: cargo test --workspace
@@ -72,8 +74,10 @@ jobs:
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-audit
-      # The lockfile is pinned, so advisory results are deterministic for a
-      # given commit. This fails when there are vulnerabilities or unmaintained
-      # crates with an RUSTSEC advisory; triage in Cargo.toml/Cargo.lock.
+      # The lockfile pins the audited inputs, but results depend on the
+      # advisory database at run time, so findings are not reproducible across
+      # time. The job fails when cargo audit reports vulnerabilities; triage
+      # means upgrading the dependency or a justified, dated ignore in
+      # audit.toml — not removing the job.
       - name: cargo audit
         run: cargo audit

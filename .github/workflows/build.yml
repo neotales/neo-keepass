@@ -35,9 +35,11 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             deb_arch: amd64
             cross: false
+            strip: strip
           - target: aarch64-unknown-linux-gnu
             deb_arch: arm64
             cross: true
+            strip: aarch64-linux-gnu-strip
     env:
       # Cross-linker only affects the aarch64 target; the native build ignores it.
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
@@ -60,7 +62,7 @@ jobs:
       - name: Build release
         run: cargo build --release -p nkeepass --target ${{ matrix.target }}
       - name: Strip binary
-        run: strip "target/${{ matrix.target }}/release/nkeepass"
+        run: ${{ matrix.strip }} "target/${{ matrix.target }}/release/nkeepass"
       - name: Package (tar.gz, zip, deb)
         run: |
           version=$(packaging/scripts/version.sh)
@@ -73,7 +75,7 @@ jobs:
             "target/${{ matrix.target }}/release/nkeepass" \
             "$version" "${{ matrix.deb_arch }}" "$dist"
       - name: Validate artifacts
-        run: packaging/validate.sh "$PWD/dist"
+        run: packaging/validate.sh "$PWD/dist" "$(packaging/scripts/version.sh)" "${{ matrix.target }}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nkeepass-${{ matrix.target }}

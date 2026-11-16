@@ -1,16 +1,24 @@
 # RPM spec for nkeepass. Build on a machine with rpm tooling:
-#   rpmbuild -bb --define "_version <version>" packaging/rpm/nkeepass.spec
-# pointing the sources at the tar.gz produced by packaging/scripts/archive.sh.
-# Not built in CI: no rpm toolchain is assumed on the CI runners.
-%global _binary_payload w9.xzdio
+#   rpmbuild -bb packaging/rpm/nkeepass.spec
+# with the tar.gz produced by packaging/scripts/archive.sh for
+# x86_64-unknown-linux-gnu placed in the rpmbuild SOURCES directory.
+# Not built in CI and not built here: no rpm toolchain is assumed on the CI
+# runners or this machine. The spec is real metadata, not a stub: versions
+# derive from the crate version below.
+#
+# RPM forbids dashes in Version:, so the crate's 0.0.0-alpha.25 is translated
+# to 0.0.0.alpha.25 for the Version tag while Source0 keeps the dashed name
+# the archive script produces.
+%global crate_version 0.0.0-alpha.25
+%global crate_version_dots %(v=%{crate_version}; echo "${v//-/.}")
 
 Name:           nkeepass
-Version:        %{_version}
+Version:        %{crate_version_dots}
 Release:        1%{?dist}
 Summary:        Headless KeePass automation CLI and TUI
 License:        MIT
 URL:            https://github.com/neotales/neokeepass
-Source0:        nkeepass-%{version}-linux.tar.gz
+Source0:        nkeepass-%{crate_version}-x86_64-unknown-linux-gnu.tar.gz
 BuildArch:      x86_64
 
 %description
@@ -31,5 +39,5 @@ install -D -m 644 LICENSE.md %{buildroot}%{_docdir}/nkeepass/LICENSE.md
 %license %{_docdir}/nkeepass/LICENSE.md
 
 %changelog
-* Mon Nov 16 2026 Neotales Packaging <maintainers@neotales.invalid> - %{version}-1
-- Foundation spec; built locally from the archive tarball, not published.
+* Mon Nov 16 2026 Neotales Packaging <maintainers@neotales.invalid> - %{crate_version_dots}-1
+- Initial wiring; built locally from the archive tarball, not published.

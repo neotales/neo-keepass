@@ -7,10 +7,15 @@
 //!
 //! - `glob` pattern compilation and matching (pure CPU, no I/O), because
 //!   `secrets ls` runs patterns against every listed path.
-//! - Vault create/open round trips against the pinned `KDBX_LIMITS` policy,
-//!   using a deliberately cheap AES-KDF round count so the measurement is
-//!   dominated by serialization, not KDF work. KDF cost itself is bounded by
-//!   `KDBX_LIMITS` and is not the subject of these benches.
+//! - Vault create/open round trips against the pinned `KDBX_LIMITS` policy.
+//!   Honest caveat: these are end-to-end benchmarks that include real file
+//!   I/O -- `vault/create` writes to a temp directory and unlinks the file
+//!   inside the timed loop (create refuses to clobber), and `vault/open`
+//!   reads the file back from disk. The numbers therefore measure
+//!   serialization plus the benchmark host's local disk, not pure CPU work.
+//!   A cheap AES-KDF round count keeps KDF cost out of the measurement;
+//!   KDF cost itself is bounded by `KDBX_LIMITS` and is not the subject of
+//!   these benches.
 //!
 //! `vault/create` unlinks the produced file inside the timed loop because
 //! `VaultService::create` installs with a no-clobber guarantee; the unlink is
