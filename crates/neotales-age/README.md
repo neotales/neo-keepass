@@ -78,9 +78,18 @@ not a substitute for fuzzing.
 
 Along with the local `neotales-x509` crate, the manifest directly uses `aes`,
 `base64`, `cbc`, `chacha20poly1305`, `ctr`, `des`, `ed25519-dalek`, `getrandom`
-(0.3 and 0.4), `hkdf`, `hmac`, `hpke`, `md-5`, `p256`, `rsa`, `sad-rsa`,
-`scrypt`, `sha2`, `subtle`, `x25519-dalek`, and `zeroize`. The exact versions
+(0.3 and 0.4), `hkdf`, `hmac`, `hpke`, `md-5`, `p256`, `rsa`, `scrypt`,
+`sha2`, `subtle`, `x25519-dalek`, and `zeroize`. The exact versions
 and feature flags are in `Cargo.toml`; `Cargo.lock` pins the workspace graph.
+
+### RSA type compatibility
+
+The RSA key-taking API uses upstream `rsa` 0.10 types. Callers migrating from
+`rsa` 0.9 must update imports and key construction from `RsaPrivateKey`,
+`RsaPublicKey`, and `BigUint` to `PrivateKey`, `PublicKey`, and
+`crypto_bigint::BoxedUint` (re-exported as `rsa::BoxedUint`). This is a
+source-breaking dependency change; SSH wire encoding and the 16,384-bit SSH
+modulus policy are unchanged.
 
 ## Licence
 

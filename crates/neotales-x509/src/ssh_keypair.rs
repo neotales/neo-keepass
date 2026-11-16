@@ -13,15 +13,16 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use subtle::ConstantTimeEq;
 
 use crate::{openssh_bcrypt, pem};
-use p256::elliptic_curve::sec1::ToSec1Point as _;
+use p256::elliptic_curve::{
+    bigint::{ByteOrder, Encoding},
+    sec1::ToSec1Point as _,
+};
 use p256::{PublicKey as P256PublicKey, SecretKey as P256SecretKey};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 use rsa::pkcs1::DecodeRsaPrivateKey as _;
-use rsa::pkcs8::{
-    DecodePrivateKey as _, EncodePrivateKey as _, EncodePublicKey as _, PrivateKeyInfo, Version,
-};
-use rsa::traits::{PrivateKeyParts as _, PublicKeyParts as _};
-use rsa::{BigUint, RsaPrivateKey, RsaPublicKey};
+use rsa::pkcs8::{PrivateKeyInfoRef, Version};
+use rsa::traits::PublicKeyParts as _;
+use rsa::{BoxedUint, PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
 use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
@@ -296,7 +297,7 @@ fn parse_pkcs1_private(der: &Zeroizing<Vec<u8>>) -> Result<ParsedPrivateKey, Ssh
 
 fn parse_pkcs8_private(der: &Zeroizing<Vec<u8>>) -> Result<ParsedPrivateKey, SshKeyError> {
     let info =
-        PrivateKeyInfo::try_from(der.as_slice()).map_err(|_| SshKeyError::InvalidPrivateKey)?;
+        PrivateKeyInfoRef::try_from(der.as_slice()).map_err(|_| SshKeyError::InvalidPrivateKey)?;
     let oid = info.algorithm.oid.as_bytes();
 
     if oid == ED25519_OID {
@@ -534,14 +535,18 @@ fn parse_openssh_rsa(reader: &mut SshReader<'_>) -> Result<ParsedPrivateKey, Ssh
         vec![(*prime1).clone(), (*prime2).clone()],
     )
     .map_err(|_| SshKeyError::InvalidPrivateKey)?;
-    let coefficient = key.qinv().ok_or(SshKeyError::InvalidPrivateKey)?;
-    let coefficient = coefficient
-        .to_biguint()
+    let coefficient = key
+        .crt_coefficient()
         .ok_or(SshKeyError::InvalidPrivateKey)?;
     let coefficient = Zeroizing::new(coefficient);
     // The coefficient is private; use the public modulus width for a
     // fixed-size comparison.
-    let modulus_len = key.n().to_bytes_be().len();
+    let modulus_len = key
+        .n()
+        .as_ref()
+        .to_bytes(ByteOrder::BigEndian)
+        .as_ref()
+        .len();
     if !big_uints_equal_constant_time(&coefficient, &inverse_q_mod_p, modulus_len) {
         return Err(SshKeyError::InvalidPrivateKey);
     }
@@ -549,12 +554,12 @@ fn parse_openssh_rsa(reader: &mut SshReader<'_>) -> Result<ParsedPrivateKey, Ssh
     Ok(ParsedPrivateKey::Rsa(key))
 }
 
-fn big_uints_equal_constant_time(left: &BigUint, right: &BigUint, width: usize) -> bool {
+fn big_uints_equal_constant_time(left: &BoxedUint, right: &BoxedUint, width: usize) -> bool {
     if width == 0 {
         return false;
     }
-    let left_bytes = Zeroizing::new(left.to_bytes_be());
-    let right_bytes = Zeroizing::new(right.to_bytes_be());
+    let left_bytes = Zeroizing::new(left.to_bytes(ByteOrder::BigEndian).as_ref().to_vec());
+    let right_bytes = Zeroizing::new(right.to_bytes(ByteOrder::BigEndian).as_ref().to_vec());
     let Some(left_offset) = width.checked_sub(left_bytes.len()) else {
         return false;
     };
@@ -612,11 +617,47 @@ fn parse_openssh_p256(reader: &mut SshReader<'_>) -> Result<ParsedPrivateKey, Ss
     Ok(ParsedPrivateKey::P256(secret_key))
 }
 
-fn read_private_mpint(reader: &mut SshReader<'_>) -> Result<Zeroizing<BigUint>, SshKeyError> {
+fn read_private_mpint(reader: &mut SshReader<'_>) -> Result<Zeroizing<BoxedUint>, SshKeyError> {
     let bytes = reader
         .read_positive_mpint()
         .ok_or(SshKeyError::InvalidPrivateKey)?;
-    Ok(Zeroizing::new(BigUint::from_bytes_be(bytes)))
+    if bytes.len() > 2048 {
+        return Err(SshKeyError::InvalidPrivateKey);
+    }
+    let precision = u32::try_from(
+        bytes
+            .len()
+            .checked_mul(8)
+            .ok_or(SshKeyError::InvalidPrivateKey)?,
+    )
+    .map_err(|_| SshKeyError::InvalidPrivateKey)?;
+    Ok(Zeroizing::new(
+        BoxedUint::from_be_slice(bytes, precision).map_err(|_| SshKeyError::InvalidPrivateKey)?,
+    ))
+}
+
+fn uint_from_be(bytes: &[u8]) -> Result<BoxedUint, SshKeyError> {
+    if bytes.is_empty() || bytes.len() > 2048 {
+        return Err(SshKeyError::InvalidPrivateKey);
+    }
+    let precision = u32::try_from(
+        bytes
+            .len()
+            .checked_mul(8)
+            .ok_or(SshKeyError::InvalidPrivateKey)?,
+    )
+    .map_err(|_| SshKeyError::InvalidPrivateKey)?;
+    BoxedUint::from_be_slice(bytes, precision).map_err(|_| SshKeyError::InvalidPrivateKey)
+}
+
+pub(crate) fn rsa_uint_to_be(value: &BoxedUint) -> Vec<u8> {
+    let bytes = value.to_bytes(ByteOrder::BigEndian);
+    let bytes = bytes.as_ref();
+    let first_nonzero = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len());
+    bytes.get(first_nonzero..).unwrap_or_default().to_vec()
 }
 
 fn parse_authorized_public_key(line: &str) -> Result<PublicKeyMaterial, SshKeyError> {
@@ -669,9 +710,10 @@ fn parse_public_blob(blob: &[u8]) -> Result<PublicKeyMaterial, PublicBlobError> 
             let modulus = reader
                 .read_positive_mpint()
                 .ok_or(PublicBlobError::Invalid)?;
-            let key = RsaPublicKey::new(
-                BigUint::from_bytes_be(modulus),
-                BigUint::from_bytes_be(exponent),
+            let key = RsaPublicKey::new_with_size_limits(
+                uint_from_be(modulus).map_err(|_| PublicBlobError::Invalid)?,
+                uint_from_be(exponent).map_err(|_| PublicBlobError::Invalid)?,
+                1024..=16_384,
             )
             .map_err(|_| PublicBlobError::Invalid)?;
             rsa_public_key_material(&key)
@@ -700,8 +742,8 @@ fn parse_public_blob(blob: &[u8]) -> Result<PublicKeyMaterial, PublicBlobError> 
 
 fn rsa_public_key_material(key: &RsaPublicKey) -> PublicKeyMaterial {
     PublicKeyMaterial::Rsa {
-        modulus: key.n().to_bytes_be(),
-        exponent: key.e().to_bytes_be(),
+        modulus: rsa_uint_to_be(key.n().as_ref()),
+        exponent: rsa_uint_to_be(key.e()),
     }
 }
 
@@ -840,7 +882,10 @@ fn skip_line_break(input: &str, index: usize) -> Result<usize, SshKeyError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OPENSSH_MAGIC, SshKeyError, SshKeyToX509, X509KeyPair, ssh_keypair_to_x509};
+    use super::{
+        OPENSSH_MAGIC, ParsedPrivateKey, SshKeyError, SshKeyToX509, X509KeyPair,
+        ssh_keypair_to_x509,
+    };
     use crate::pem;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
@@ -848,6 +893,8 @@ mod tests {
         SigningKey, VerifyingKey,
         pkcs8::{DecodePrivateKey as _, DecodePublicKey as _},
     };
+    use rsa::{PrivateKey, pkcs1::EncodeRsaPrivateKey as _, pkcs8::EncodePrivateKey as _};
+    use sha2::Digest as _;
     use zeroize::Zeroizing;
 
     #[test]
@@ -864,6 +911,47 @@ mod tests {
         assert!(!debug.contains("private-der-canary"));
         assert!(!debug.contains("private-pem-canary"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn rsa_pkcs_conversions_and_sha2_ssh_signatures_round_trip() {
+        let mut rng = getrandom_v04::rand_core::UnwrapErr(getrandom_v04::SysRng);
+        let private_key = PrivateKey::new(&mut rng, 2048).expect("test RSA key generation");
+
+        let pkcs8 = private_key
+            .to_pkcs8_der()
+            .expect("RSA key should encode as PKCS#8");
+        let parsed_pkcs8 = super::parse_pkcs8_private(&Zeroizing::new(pkcs8.as_bytes().to_vec()))
+            .expect("PKCS#8 RSA key should parse");
+        assert!(matches!(parsed_pkcs8, ParsedPrivateKey::Rsa(_)));
+
+        let pkcs1 = private_key
+            .to_pkcs1_der()
+            .expect("RSA key should encode as PKCS#1");
+        let parsed_pkcs1 = super::parse_pkcs1_private(&Zeroizing::new(pkcs1.as_bytes().to_vec()))
+            .expect("PKCS#1 RSA key should parse");
+        assert!(matches!(parsed_pkcs1, ParsedPrivateKey::Rsa(_)));
+
+        let public_key = private_key.to_public_key();
+        let message = b"SSH RSA signature verification";
+        for (algorithm, digest, padding) in [
+            (
+                "rsa-sha2-256",
+                sha2::Sha256::digest(message).to_vec(),
+                rsa::Pkcs1v15Sign::new::<sha2::Sha256>(),
+            ),
+            (
+                "rsa-sha2-512",
+                sha2::Sha512::digest(message).to_vec(),
+                rsa::Pkcs1v15Sign::new::<sha2::Sha512>(),
+            ),
+        ] {
+            let signature = private_key.sign(padding, &digest).expect("RSA signing");
+            let mut blob = ssh_string(algorithm.as_bytes());
+            blob.extend_from_slice(&ssh_string(&signature));
+            crate::ssh_cert::verify_rsa(&public_key, &blob, message)
+                .expect("SHA-2 SSH RSA signature should verify");
+        }
     }
 
     fn ssh_string(value: &[u8]) -> Vec<u8> {

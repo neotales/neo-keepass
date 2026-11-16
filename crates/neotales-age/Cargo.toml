@@ -26,8 +26,7 @@ hmac.workspace = true
 hpke.workspace = true
 md-5.workspace = true
 p256.workspace = true
-rsa = { workspace = true, features = ["sha2"] }
-sad-rsa = { workspace = true, features = ["sha2"] }
+rsa = { workspace = true }
 scrypt.workspace = true
 sha2 = "0.11"
 subtle.workspace = true

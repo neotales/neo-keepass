@@ -26,6 +26,7 @@ use rsa;
 use rsa::traits::PublicKeyParts as _;
 use sha2::{self, Digest};
 
+use crate::ssh_keypair::rsa_uint_to_be;
 pub use crate::ssh_wire::WireError;
 use crate::ssh_wire::{Reader, Writer};
 
@@ -698,7 +699,7 @@ struct ParsedCriticalOptions {
 enum PublicKeyKind {
     Mldsa(&'static str, Vec<u8>),
     Ed25519(ed25519_dalek::VerifyingKey),
-    Rsa(rsa::RsaPublicKey),
+    Rsa(rsa::PublicKey),
     EcdsaP256(p256::ecdsa::VerifyingKey),
     EcdsaP384(p384::ecdsa::VerifyingKey),
     EcdsaP521(p521::ecdsa::VerifyingKey),
@@ -1142,16 +1143,31 @@ fn decode_ed25519_public_key(blob: &[u8]) -> Result<(Vec<u8>, PublicKeyKind), Ce
 fn decode_rsa_components(
     exponent: &[u8],
     modulus: &[u8],
-) -> Result<(Vec<u8>, rsa::RsaPublicKey), CertificateError> {
+) -> Result<(Vec<u8>, rsa::PublicKey), CertificateError> {
     if !is_positive_mpint(exponent) || !is_positive_mpint(modulus) {
         return Err(CertificateError::InvalidPublicKey);
     }
-    let key = rsa::RsaPublicKey::new(
-        rsa::BigUint::from_bytes_be(modulus),
-        rsa::BigUint::from_bytes_be(exponent),
+    let key = rsa::PublicKey::new_with_size_limits(
+        rsa_uint_from_be(modulus)?,
+        rsa_uint_from_be(exponent)?,
+        1024..=16_384,
     )
     .map_err(|_| CertificateError::InvalidPublicKey)?;
     Ok((encode_rsa_blob(&key)?, key))
+}
+
+fn rsa_uint_from_be(bytes: &[u8]) -> Result<rsa::BoxedUint, CertificateError> {
+    if bytes.is_empty() || bytes.len() > 2048 {
+        return Err(CertificateError::InvalidPublicKey);
+    }
+    let precision = u32::try_from(
+        bytes
+            .len()
+            .checked_mul(8)
+            .ok_or(CertificateError::InvalidPublicKey)?,
+    )
+    .map_err(|_| CertificateError::InvalidPublicKey)?;
+    rsa::BoxedUint::from_be_slice(bytes, precision).map_err(|_| CertificateError::InvalidPublicKey)
 }
 
 fn decode_rsa_public_key(blob: &[u8]) -> Result<(Vec<u8>, PublicKeyKind), CertificateError> {
@@ -1169,11 +1185,11 @@ fn decode_rsa_public_key(blob: &[u8]) -> Result<(Vec<u8>, PublicKeyKind), Certif
     Ok((canonical_blob, PublicKeyKind::Rsa(key)))
 }
 
-fn encode_rsa_blob(key: &rsa::RsaPublicKey) -> Result<Vec<u8>, CertificateError> {
+fn encode_rsa_blob(key: &rsa::PublicKey) -> Result<Vec<u8>, CertificateError> {
     let mut writer = Writer::new();
     writer.write_string(SSH_RSA)?;
-    write_positive_mpint(&mut writer, &key.e().to_bytes_be())?;
-    write_positive_mpint(&mut writer, &key.n().to_bytes_be())?;
+    write_positive_mpint(&mut writer, &rsa_uint_to_be(key.e()))?;
+    write_positive_mpint(&mut writer, &rsa_uint_to_be(key.n().as_ref()))?;
     Ok(writer.into_bytes())
 }
 
@@ -1278,8 +1294,8 @@ fn verify_ed25519(
         .map_err(|_| CertificateError::InvalidSignature)
 }
 
-fn verify_rsa(
-    key: &rsa::RsaPublicKey,
+pub(crate) fn verify_rsa(
+    key: &rsa::PublicKey,
     signature_blob: &[u8],
     signed_bytes: &[u8],
 ) -> Result<(), CertificateError> {
@@ -1297,7 +1313,7 @@ fn verify_rsa(
         RSA_SHA2_256 => {
             let digest = sha2::Sha256::digest(signed_bytes);
             key.verify(
-                rsa::Pkcs1v15Sign::new::<rsa::sha2::Sha256>(),
+                rsa::Pkcs1v15Sign::new::<sha2::Sha256>(),
                 digest.as_slice(),
                 signature,
             )
@@ -1305,7 +1321,7 @@ fn verify_rsa(
         RSA_SHA2_512 => {
             let digest = sha2::Sha512::digest(signed_bytes);
             key.verify(
-                rsa::Pkcs1v15Sign::new::<rsa::sha2::Sha512>(),
+                rsa::Pkcs1v15Sign::new::<sha2::Sha512>(),
                 digest.as_slice(),
                 signature,
             )
