@@ -2289,6 +2289,10 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
         .args(["--write-out", "\n%{http_code}"])
         .env_clear()
         .env("PATH", env::var_os("PATH").unwrap_or_default())
+        // Keep the Windows installation root available to curl's native
+        // certificate-store and CA bundle discovery without inheriting the
+        // caller's environment.
+        .envs(recipient_curl_windows_environment())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -2345,6 +2349,22 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
         return Err(err("HTTPS recipient response exceeds size limit"));
     }
     String::from_utf8(body.to_vec()).map_err(|_| err("invalid HTTPS recipient response"))
+}
+
+/// Returns the minimal platform environment needed by curl's Windows TLS
+/// certificate lookup. No caller-controlled variables are inherited.
+#[cfg(windows)]
+fn recipient_curl_windows_environment() -> impl Iterator<Item = (&'static str, std::ffi::OsString)>
+{
+    env::var_os("SystemRoot")
+        .map(|system_root| ("SystemRoot", system_root))
+        .into_iter()
+}
+
+#[cfg(not(windows))]
+fn recipient_curl_windows_environment() -> impl Iterator<Item = (&'static str, std::ffi::OsString)>
+{
+    std::iter::empty()
 }
 
 /// Restricts discovery URLs to a simple HTTPS authority and path.
@@ -6156,6 +6176,43 @@ mod tests {
         assert!(
             request.starts_with("GET /keys/{one,two} HTTP/1.1\r\n"),
             "{request}"
+        );
+    }
+
+    #[test]
+    fn recipient_curl_child_environment_is_minimal() {
+        // Assert on std::process::Command's effective child environment. This
+        // catches accidental re-inheritance while remaining independent of
+        // credentials in the test runner's environment.
+        let mut command = std::process::Command::new("curl");
+        command
+            .env_clear()
+            .env("PATH", env::var_os("PATH").unwrap_or_default())
+            .envs(recipient_curl_windows_environment());
+        let environment: Vec<_> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(environment.iter().any(|(name, value)| {
+            name == "PATH"
+                && value.as_deref() == Some(env::var("PATH").unwrap_or_default().as_str())
+        }));
+        if cfg!(windows) {
+            assert!(environment.iter().any(|(name, value)| {
+                name == "SystemRoot" && value.as_deref() == env::var("SystemRoot").ok().as_deref()
+            }));
+        } else {
+            assert_eq!(environment.len(), 1);
+        }
+        assert!(
+            environment
+                .iter()
+                .all(|(name, _)| { name == "PATH" || cfg!(windows) && name == "SystemRoot" })
         );
     }
 
