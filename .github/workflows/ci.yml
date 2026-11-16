@@ -141,10 +141,8 @@ jobs:
         with:
           tool: cargo-audit
       # The lockfile pins the audited inputs, but results depend on the
-      # advisory database at run time, so findings are not reproducible across
-      # time. The job fails when cargo audit reports vulnerabilities, as it
-      # does today on RUSTSEC-2023-0071 (see docs/ci-cd.md for the reviewed
-      # reachability and the unresolved upgrade). The fix is upgrading the
-      # dependency — not an ignore, and not removing the job.
+      # advisory database at run time, so findings can change over time. The
+      # current lockfile has no known findings in the audit database; keep the
+      # job unsuppressed so future vulnerable dependencies fail visibly.
       - name: cargo audit
         run: cargo audit

@@ -98,6 +98,14 @@ slower than the ordinary balanced-prime path. Multi-prime PKCS#1 keys are not
 supported by upstream `rsa 0.10`; the age SSH RSA import accepts two-prime
 OpenSSH keys.
 
+Performance observations are single debug-mode measurements, not benchmarks:
+the reported 16,384-bit SSH round trip changed from about 6 seconds before the
+upstream migration to about 45 seconds afterward. In one local run, 2,048-bit
+key generation plus an age round trip took about 349 ms, and the same probe at
+4,096 bits took about 13.1 seconds. The 2,048/4,096 measurements include key
+generation and each has only one sample; they are not portable performance
+claims.
+
 ## Licence
 
 MIT. See [LICENSE.md](LICENSE.md).

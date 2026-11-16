@@ -43,30 +43,12 @@ executed at the time of writing, so the actual outcome is unobserved; the job
 is left unsuppressed so the first runs report exactly which scenarios fail.
 Do not silence them with `continue-on-error` or `#[cfg(windows)]` skips.
 
-**Audit:** `cargo audit` scans the pinned `Cargo.lock` and currently reports
-one vulnerability, RUSTSEC-2023-0071 (`rsa 0.9.10`, Marvin Attack; patched
-only in the 0.10 line). The `audit` job is left failing on it honestly:
-there is no suppression in this repository. The exact state, reviewed
-2026-11-16:
-
-- Reachability: `rsa` 0.9.10 is on the decryption path. The vendored crates
-  use it for key parsing/serialization (`PrivateKeyParts` reads of `d` and
-  the primes) whose secret-dependent private-key preprocessing feeds the
-  hardened implementation, plus public-key verification and OAEP encryption.
-  The blinded private-key exponentiation itself runs in the maintained
-  `sad-rsa` fork (`decrypt_blinded`), so the advisory's unblinded-decrypt
-  oracle is not directly present — but secret-dependent private-key
-  preprocessing does run in `rsa` 0.9 code, and that is exactly what a
-  "public-key only" claim would wave away.
-- Exploitability: **no proven exploit** has been demonstrated for this
-  usage; the exposure is an unquantified subset of the advisory's attack
-  class, not a clear absence of it.
-- Upgrade: unresolved. `rsa` 0.10.0 (the patched line) removed the `sha2`
-  feature the vendored crates depend on and requires migrating the vendored
-  `neotales-age`/`neotales-x509` source, which must follow those crates'
-  upstream. Until that migration lands, the advisory stands and the audit
-  job fails. Do not add an ignore; do not describe the advisory as resolved
-  or accepted.
+**Audit:** `cargo audit` scans the pinned `Cargo.lock` against the advisory
+database available at run time; the database is not pinned, so results can
+change over time. A fresh local audit on 2026-11-16 scanned 325 dependencies
+and exited 0 with no findings. The RSA migration is complete: the lockfile
+uses upstream `rsa 0.10.0`, with no dependency fork or advisory ignore.
+The CI job stays unsuppressed so future findings fail visibly.
 
 **Windows failure of run 43846609261 (first Windows execution):** the `Test`
 step failed with exit code 101. What public data shows and what it cannot:
@@ -178,8 +160,7 @@ modified/missing pacman payload, hostile pacman filename, smoke-withheld
 markers — all caught, run both with the structural ar+tar deb fallback and
 with a temporary real `dpkg-deb` via PATH), workflow run-block checking
 (`scripts/check-workflows.sh`, incl. expression-scanner selftest), and
-`cargo audit` (currently exits 1 on RUSTSEC-2023-0071 — the honest result;
-there is no ignore in this repository).
+`cargo audit` (2026-11-16: exited 0, 325 dependencies scanned, no findings).
 
 Not verifiable locally: the aarch64 cross-check compiles only up to the
 missing `aarch64-linux-gnu-gcc` (cannot install the cross toolchain without

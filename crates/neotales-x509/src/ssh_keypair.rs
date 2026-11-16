@@ -137,6 +137,12 @@ impl std::error::Error for SshKeyError {}
 /// encrypted with bcrypt key derivation and AES-256-CTR. The resulting
 /// certificate is self-signed by the converted private key.
 ///
+/// RSA private-key parsing accepts the unbalanced two-prime inputs supported
+/// by upstream `rsa`, but certificate signing is delegated to `rcgen`/`ring`.
+/// That backend rejects strongly asymmetric RSA prime widths, so an RSA key
+/// can parse and match its public key yet fail conversion with
+/// [`SshKeyError::InvalidPrivateKey`].
+///
 /// # Errors
 ///
 /// Returns [`SshKeyError`] when private or public key parsing fails, an
