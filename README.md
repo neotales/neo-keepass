@@ -6,13 +6,23 @@ A Rust KeePass CLI/TUI application. This repository starts from the existing
 
 ## Current status
 
-The imported CLI and interactive terminal browser cover vault navigation and
-entry operations. This initial standalone checkout does **not** yet include a
-GPUI desktop application (`nkeepassui`). Passkeys, TOTP, HIBP checks, icons,
-SSH-agent integration, and age-encrypted exports are not claimed as implemented;
-these remain planned scope. See the application module and its tests for the
-currently implemented behavior.
+The CLI and interactive terminal browser cover vault navigation and entry
+operations; `tests/` exercises the imported application behavior. KDBX parsing
+and writing are delegated to the vendored `neotales-keepass` crate. Its source
+and MIT license are included in `neotales-keepass/`.
 
-The upstream source depends on the `neotales-keepass` workspace crate. That
-crate is not vendored into this repository yet, so a self-contained Cargo build
-is not currently available.
+This checkout does **not** yet include a GPUI desktop application
+(`nkeepassui`). Passkeys, HIBP checks, icons, SSH-agent integration, and
+age-encrypted exports remain planned scope. TOTP support is present in the
+imported CLI surface; consult command help and tests for exact capabilities and
+limits.
+
+## Build and test
+
+Rust 1.98.1 is pinned in `rust-toolchain.toml`.
+
+```sh
+cargo build --workspace
+cargo test --workspace
+cargo run -- --help
+```
