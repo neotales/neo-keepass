@@ -24,20 +24,33 @@ trap 'rm -rf "$work"' EXIT
 pass=0
 failcount=0
 
+LAST_OUTPUT=""
 expect_fail() { # expect_fail <expected-reason-substring> <label> <cmd...>
     local reason=$1 label=$2
     shift 2
-    local out status=0
-    out=$("$@" 2>&1) || status=$?
+    local status=0
+    LAST_OUTPUT=$("$@" 2>&1) || status=$?
     if [ "$status" -eq 0 ]; then
         echo "FAIL (not caught): $label"
         failcount=$((failcount + 1))
-    elif echo "$out" | grep -q -- "$reason"; then
+    elif echo "$LAST_OUTPUT" | grep -q -- "$reason"; then
         echo "ok   (caught, reason '$reason'): $label"
         pass=$((pass + 1))
     else
         echo "FAIL (caught for the wrong reason; expected '$reason'):"
-        echo "$out" | grep FAIL | head -3 | sed 's/^/       /'
+        echo "$LAST_OUTPUT" | grep FAIL | head -3 | sed 's/^/       /'
+        failcount=$((failcount + 1))
+    fi
+}
+
+# Asserts the validator's most recent output reported it skipped the smoke
+# run: a failed check must prevent execution of the payload.
+expect_smoke_skipped() { # <label>
+    if echo "$LAST_OUTPUT" | grep -q "skip smoke run"; then
+        echo "ok   (smoke skipped): $1"
+        pass=$((pass + 1))
+    else
+        echo "FAIL (smoke not skipped): $1"
         failcount=$((failcount + 1))
     fi
 }
@@ -114,6 +127,7 @@ make_fake_deb "$neg/nkeepass-${version}-amd64.deb" "$version" arm64
 expect_fail "deb metadata mismatch: Package=nkeepass Version=$version Architecture=arm64 (want nkeepass/$version/amd64)" \
     "wrong deb architecture is rejected" \
     bash "$repo/packaging/validate.sh" "$neg" "$version" x86_64-unknown-linux-gnu
+expect_smoke_skipped "wrong deb architecture prevents smoke execution"
 
 echo "== negative: deb with wrong version metadata (arch left correct)"
 neg="$work/wrong-version"
@@ -122,6 +136,20 @@ make_fake_deb "$neg/nkeepass-${version}-amd64.deb" "9.9.9" amd64
 expect_fail "deb metadata mismatch: Package=nkeepass Version=9.9.9 Architecture=amd64 (want nkeepass/$version/amd64)" \
     "wrong deb version is rejected" \
     bash "$repo/packaging/validate.sh" "$neg" "$version" x86_64-unknown-linux-gnu
+expect_smoke_skipped "wrong deb version prevents smoke execution"
+
+echo "== negative: tar member is a symlink, not a regular file"
+neg="$work/symlink"
+bash "$repo/packaging/scripts/archive.sh" "$binary" "$version" x86_64-unknown-linux-gnu "$neg" >/dev/null
+build_positive_deb "$neg"
+link_stage="$neg/nkeepass-${version}-x86_64-unknown-linux-gnu"
+mkdir -p "$link_stage"
+ln -s "$binary" "$link_stage/nkeepass"
+cp "$repo/README.md" "$repo/LICENSE.md" "$link_stage/"
+tar -czf "$neg/nkeepass-${version}-x86_64-unknown-linux-gnu.tar.gz" -C "$neg" "nkeepass-${version}-x86_64-unknown-linux-gnu"
+expect_fail "is a symlink" "symlink tar member is rejected" \
+    bash "$repo/packaging/validate.sh" "$neg" "$version" x86_64-unknown-linux-gnu
+expect_smoke_skipped "symlink member prevents smoke execution"
 
 echo "== negative: missing zip format (deb left in place)"
 neg="$work/missing-formats"
@@ -163,6 +191,29 @@ if command -v makepkg >/dev/null; then
         echo "ok   (no injection): $marker was not created anywhere under ${TMPDIR:-/tmp}"
         pass=$((pass + 1))
     fi
+fi
+
+if command -v makepkg >/dev/null; then
+    echo "== negative: pacman package with modified payload (harmless marker ELF)"
+    neg="$work/pacman-modified"
+    mkdir -p "$neg"
+    cp -a "$pos/." "$neg/"
+    pkg="nkeepass-$(echo "$version" | tr '-' '.')-1-x86_64.pkg.tar.zst"
+    extract="$neg/repack"
+    mkdir -p "$extract"
+    tar --zstd -xf "$neg/$pkg" -C "$extract"
+    cp /bin/true "$extract/usr/bin/nkeepass"
+    (cd "$extract" && tar --zstd -cf "$neg/$pkg" .PKGINFO .MTREE .BUILDINFO usr)
+    expect_fail "pacman payload modified" \
+        "modified pacman payload (harmless marker ELF) is rejected" \
+        bash "$repo/packaging/validate.sh" --binary "$binary" "$neg" "$version" x86_64-unknown-linux-gnu
+
+    echo "== negative: pacman package with missing payload"
+    rm -rf "$extract/usr/bin"
+    (cd "$extract" && tar --zstd -cf "$neg/$pkg" .PKGINFO .MTREE .BUILDINFO usr)
+    expect_fail "pacman payload" \
+        "missing pacman payload is rejected" \
+        bash "$repo/packaging/validate.sh" --binary "$binary" "$neg" "$version" x86_64-unknown-linux-gnu
 fi
 
 if [ "$failcount" -ne 0 ]; then

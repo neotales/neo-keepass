@@ -58,13 +58,15 @@ url='https://github.com/neotales/neokeepass'
 license=('MIT')
 provides=('nkeepass')
 conflicts=('nkeepass')
-options=('!debug')
+options=('!debug' '!strip')
 sha256sums=('${sum}')
 source=('${canonical}')
 
 package() {
     # makepkg runs package() inside \$srcdir after extracting the tarball,
     # which contains a single top-level directory named after the archive.
+    # !strip keeps the payload byte-identical to the tarball binary, which
+    # validate.sh asserts by hash.
     local src="\$srcdir/nkeepass-${version}-${triple}"
     install -D -m 755 "\$src/nkeepass" "\${pkgdir}/usr/bin/nkeepass"
     install -D -m 644 "\$src/README.md" "\${pkgdir}/usr/share/doc/nkeepass/README.md"

@@ -26,7 +26,7 @@ KeePass CLI/TUI for vault navigation and entry operations. KDBX parsing is
 delegated to the vendored neotales-keepass crate.
 
 %prep
-%setup -q -c -n nkeepass-%{crate_version}-x86_64-unknown-linux-gnu
+%setup -q -n nkeepass-%{crate_version}-x86_64-unknown-linux-gnu
 
 %install
 install -D -m 755 nkeepass %{buildroot}%{_bindir}/nkeepass

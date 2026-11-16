@@ -27,6 +27,13 @@ unchanged (owner-only secure writes are unsupported on Windows; README
 "Current status"); widening Windows coverage means writing `cfg(windows)`
 tests, not claiming this job provides it.
 
+**Workflow run blocks:** `scripts/check-workflows.sh` (run in the `lint` job)
+fails any `run:` block that uses a backslash line continuation outside a
+block scalar — YAML plain scalars fold the newline into a space, turning a
+trailing backslash into an escaped space, which is valid bash with the wrong
+semantics — and `bash -n`-checks every rendered `run:` with `${{ }}`
+expressions substituted.
+
 **Windows coverage:** the Windows test job runs unsuppressed. Coverage there
 is gated by the documented platform limitation (README "Current status"):
 owner-only secure file writes are unsupported, so tests exercising vault

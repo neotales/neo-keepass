@@ -30,12 +30,16 @@ only ever become CI workflow artifacts.
 - `validate.sh` — validates artifacts: complete format set per target with
   expected names, per-container binary extraction (regular file, not a
   symlink, ELF architecture vs triple), sha256 equality across tar/zip/deb
-  and vs `--binary` when given, deb/pacman metadata, and a timeout-bounded
-  smoke-run of the native binary only after all checks pass. Without
-  arguments, manifest syntax and version consistency only.
+  and vs `--binary` when given, deb/pacman metadata, pacman payload checks
+  (regular, ELF, hash identical to the tarball binary — makepkg strip/debug
+  stay disabled so no transform is in play), and a timeout-bounded smoke-run
+  of the native binary only after ALL checks for that target pass,
+  metadata included. Without arguments, manifest syntax and version
+  consistency only.
 - `test.sh` — self-tests: positive path (real `dpkg-deb` builder when
   available, otherwise a fixture in real Debian structure) plus negative
   cases with asserted rejection reasons (wrong ELF architecture, wrong deb
-  architecture/version, missing formats, wrong payload binary, hostile
-  pacman filename).
+  architecture/version, missing formats, wrong payload binary, symlink tar
+  member, modified/missing pacman payload, hostile pacman filename) and
+  smoke-skip assertions proving metadata/binary failures prevent execution.
 - `rpm/`, `winget/`, `choco/` — manifests as described above.

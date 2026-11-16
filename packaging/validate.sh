@@ -156,6 +156,8 @@ extract_binary_from_deb() {
 }
 
 check_deb_metadata() { # check_deb_metadata <deb> <expected-version> <expected-arch>
+    # Returns 0 when the metadata is right; any failure must prevent the
+    # smoke run for this target.
     local deb=$1 version=$2 arch=$3
     if command -v dpkg-deb >/dev/null; then
         local pkg gotver gotarch
@@ -164,10 +166,10 @@ check_deb_metadata() { # check_deb_metadata <deb> <expected-version> <expected-a
         gotarch=$(dpkg-deb -f "$deb" Architecture 2>/dev/null || true)
         if [ "$pkg" = nkeepass ] && [ "$gotver" = "$version" ] && [ "$gotarch" = "$arch" ]; then
             record ok "deb metadata: Package=$pkg Version=$gotver Architecture=$gotarch"
-        else
-            record fail "deb metadata mismatch: Package=$pkg Version=$gotver Architecture=$gotarch (want nkeepass/$version/$arch)"
+            return 0
         fi
-        return
+        record fail "deb metadata mismatch: Package=$pkg Version=$gotver Architecture=$gotarch (want nkeepass/$version/$arch)"
+        return 1
     fi
 
     # Structural fallback without dpkg tooling: a deb is an ar archive with
@@ -176,19 +178,19 @@ check_deb_metadata() { # check_deb_metadata <deb> <expected-version> <expected-a
     members=$(ar t "$deb" 2>/dev/null || true)
     if ! echo "$members" | grep -qx 'debian-binary'; then
         record fail "deb structure: no debian-binary member in $deb"
-        return
+        return 1
     fi
     ctl=$(echo "$members" | grep -E '^control\.tar(\.[a-z0-9]+)$' | head -n1 || true)
     if [ -z "$ctl" ]; then
         record fail "deb structure: no control.tar.* member in $deb"
-        return
+        return 1
     fi
     tflags=$(tar_flags_for_member "$ctl")
     ctl_listing=$(ar p "$deb" "$ctl" | tar $tflags -tf - 2>/dev/null || true)
     ctlfile=$(echo "$ctl_listing" | grep -E '^\./?control$' | head -n1 || true)
     if [ -z "$ctlfile" ]; then
         record fail "deb structure: no control file in $deb"
-        return
+        return 1
     fi
     control=$(ar p "$deb" "$ctl" | tar $tflags -xOf - "$ctlfile" 2>/dev/null || true)
     pkg=$(echo "$control" | sed -n 's/^Package: *//p')
@@ -196,12 +198,13 @@ check_deb_metadata() { # check_deb_metadata <deb> <expected-version> <expected-a
     gotarch=$(echo "$control" | sed -n 's/^Architecture: *//p')
     if [ "$pkg" = nkeepass ] && [ "$gotver" = "$version" ] && [ "$gotarch" = "$arch" ]; then
         record ok "deb metadata (structural): Package=$pkg Version=$gotver Architecture=$gotarch"
-    else
-        record fail "deb metadata mismatch: Package=$pkg Version=$gotver Architecture=$gotarch (want nkeepass/$version/$arch)"
+        return 0
     fi
+    record fail "deb metadata mismatch: Package=$pkg Version=$gotver Architecture=$gotarch (want nkeepass/$version/$arch)"
+    return 1
 }
 
-check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> <triple>...
+check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [arch=expected-hash ...]
     local dir=$1 version=$2
     shift 2
     local pkgver=${version//-/.}
@@ -212,7 +215,7 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> <triple>...
         echo "skip pacman package check (none present; built on Arch only)"
         return
     fi
-    local p flags listing info gotname gotver gotarch
+    local p flags listing info gotname gotver gotarch member_line type_char
     for p in "${pkgs[@]}"; do
         case $p in
         *.tar.gz) flags=-z ;;
@@ -222,8 +225,8 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> <triple>...
         esac
         # Capture listings before grepping: grep -q exits early, the producer
         # gets SIGPIPE, and pipefail would turn that into a false negative.
-        listing=$(tar $flags -tf "$p" 2>/dev/null || true)
-        if ! echo "$listing" | grep -qx '.PKGINFO'; then
+        listing=$(tar $flags -tvf "$p" 2>/dev/null || true)
+        if ! echo "$listing" | grep -q '\.PKGINFO$'; then
             record fail "$(basename "$p") has no .PKGINFO"
             continue
         fi
@@ -237,16 +240,53 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> <triple>...
             record fail "pacman package metadata mismatch: pkgname=$gotname pkgver=$gotver (want nkeepass/$pkgver)"
             continue
         fi
-        # The package architecture must map back to an expected triple.
-        local arch_ok=0 triple
+        # The package architecture must map back to an expected triple, which
+        # also pins the expected ELF machine and payload hash.
+        local triple found_machine="" found_hash=""
         for triple in "$@"; do
-            [ "$(pkg_arch_for_triple "$triple")" = "$gotarch" ] && arch_ok=1
+            [ "$(pkg_arch_for_triple "${triple%%=*}")" = "$gotarch" ] || continue
+            found_machine=$(elf_machine_for_triple "${triple%%=*}")
+            found_hash=${triple#*=}
         done
-        if [ "$arch_ok" = 1 ]; then
-            record ok "pacman package metadata: pkgname=$gotname pkgver=$gotver arch=$gotarch"
-        else
+        if [ -z "$found_machine" ]; then
             record fail "pacman package arch $gotarch does not map to any expected triple"
+            continue
         fi
+        record ok "pacman package metadata: pkgname=$gotname pkgver=$gotver arch=$gotarch"
+
+        # Payload must be present, a regular file (not a symlink), the right
+        # ELF architecture, and byte-identical to the tarball binary (the
+        # builder disables makepkg's strip/debug transforms for this).
+        member_line=$(echo "$listing" | grep -E 'usr/bin/nkeepass$' | head -n1 || true)
+        if [ -z "$member_line" ]; then
+            record fail "pacman payload: $(basename "$p") does not contain usr/bin/nkeepass"
+            continue
+        fi
+        type_char=$(echo "$member_line" | cut -c1)
+        if [ "$type_char" != "-" ]; then
+            record fail "pacman payload: usr/bin/nkeepass is not a regular file (type '$type_char')"
+            continue
+        fi
+        local payload="$work-pacman-payload.$$"
+        if ! tar $flags -xOf "$p" usr/bin/nkeepass > "$payload" 2>/dev/null; then
+            record fail "pacman payload: could not extract usr/bin/nkeepass from $(basename "$p")"
+            rm -f "$payload"
+            continue
+        fi
+        local payload_hash
+        if payload_hash=$(binary_sha_or_reason "$payload" "$found_machine" "pacman payload"); then
+            record ok "pacman payload is a regular $found_machine ELF"
+        else
+            record fail "pacman payload check failed (reason above)"
+            rm -f "$payload"
+            continue
+        fi
+        if [ "$payload_hash" != "$found_hash" ]; then
+            record fail "pacman payload modified: sha256 ${payload_hash:0:12}... != expected ${found_hash:0:12}... (makepkg strip/debug must stay disabled)"
+        else
+            record ok "pacman payload matches the tarball binary (sha256)"
+        fi
+        rm -f "$payload"
     done
 }
 
@@ -254,6 +294,9 @@ check_artifacts() {
     local dir=$1 version=$2
     shift 2
     local triple
+    # Collected as "<triple>=<tar-sha256>" pairs; pacman packages are checked
+    # against the matching triple's hash after all triples are processed.
+    local arch_hashes_list=""
 
     for triple in "$@"; do
         local machine debarch base
@@ -273,7 +316,7 @@ check_artifacts() {
         work=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-validate.XXXXXX")
         local bin_tar="$work/from-tar" bin_zip="$work/from-zip" bin_deb="$work/from-deb"
         local smoke=1 tar_hash zip_hash deb_hash tar_extracted=0 zip_extracted=0
-        local tar_member="$base/nkeepass"
+        local tar_member="$base/nkeepass" arch_hashes=""
 
         # Extract the binary from each container. Extraction is into a fresh
         # temp dir, members are named exactly, and nothing is executed here.
@@ -332,6 +375,7 @@ check_artifacts() {
         # built binary when one was supplied.
         if [ -n "$tar_hash" ] && [ "$tar_hash" = "$zip_hash" ] && [ "$tar_hash" = "$deb_hash" ]; then
             record ok "$base binary is identical (sha256) in tar.gz, zip, and deb"
+            arch_hashes="${triple}=${tar_hash}"
             if [ -n "$expected_binary" ]; then
                 local want
                 want=$(sha256sum "$expected_binary" | cut -d' ' -f1)
@@ -347,7 +391,12 @@ check_artifacts() {
             smoke=0
         fi
 
-        check_deb_metadata "$deb" "$version" "$debarch"
+        # Metadata failure must prevent the smoke run for this target.
+        if check_deb_metadata "$deb" "$version" "$debarch"; then
+            :
+        else
+            smoke=0
+        fi
 
         # Smoke-run only the native target and only when every check above
         # passed for this triple. The run is bounded by timeout.
@@ -362,9 +411,11 @@ check_artifacts() {
             echo "skip smoke run for $base (a check failed; failed binaries are never executed)"
         fi
         rm -rf "$work"
+        arch_hashes_list="$arch_hashes_list ${triple}=${tar_hash}"
     done
 
-    check_pacman_artifacts "$dir" "$version" "$@"
+    # shellcheck disable=SC2086 # word splitting of the arch=hash pairs is intended
+    check_pacman_artifacts "$dir" "$version" $arch_hashes_list
 }
 
 if [ $# -gt 0 ]; then
