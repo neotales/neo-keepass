@@ -2255,6 +2255,13 @@ enum RecipientTransport {
     HttpFixture,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum CurlFixtureProcess {
+    CouldNotStart,
+    Completed(Option<i32>),
+}
+
 impl RecipientTransport {
     fn curl_protocol(self) -> &'static str {
         match self {
@@ -2328,7 +2335,7 @@ fn fetch_recipient_url_with_program(
             if matches!(transport, RecipientTransport::HttpFixture) {
                 return Err(err(&format!(
                     "HTTP fixture curl could not start ({})",
-                    curl_fixture_diagnostic(None)
+                    curl_fixture_diagnostic(CurlFixtureProcess::CouldNotStart)
                 )));
             }
             return Err(err("HTTPS recipient lookup unavailable"));
@@ -2366,7 +2373,7 @@ fn fetch_recipient_url_with_program(
         if matches!(transport, RecipientTransport::HttpFixture) {
             return Err(err(&format!(
                 "HTTP fixture curl failed ({})",
-                curl_fixture_diagnostic(status.code())
+                curl_fixture_diagnostic(CurlFixtureProcess::Completed(status.code()))
             )));
         }
         return Err(err("HTTPS recipient lookup failed"));
@@ -2396,17 +2403,24 @@ fn fetch_recipient_url_with_program(
 /// Classifies fixture failures without running another process or retaining
 /// arbitrary diagnostic output.
 #[cfg(test)]
-fn curl_fixture_diagnostic(exit_code: Option<i32>) -> String {
-    let Some(exit_code) = exit_code else {
-        return "process=not-started; category=executable unavailable".to_owned();
-    };
-    let category = match exit_code {
-        1 | 2 | 4 | 48 => "curl configuration or protocol error",
-        5 | 6 => "name resolution error",
-        7 => "connection error",
-        _ => "curl transfer error",
-    };
-    format!("process=exited; exit_code={exit_code}; category={category}")
+fn curl_fixture_diagnostic(process: CurlFixtureProcess) -> String {
+    match process {
+        CurlFixtureProcess::CouldNotStart => {
+            "process=not-started; category=executable unavailable".to_owned()
+        }
+        CurlFixtureProcess::Completed(None) => {
+            "process=completed_without_exit_code; category=abnormal termination".to_owned()
+        }
+        CurlFixtureProcess::Completed(Some(exit_code)) => {
+            let category = match exit_code {
+                1 | 2 | 4 | 48 => "curl configuration or protocol error",
+                5 | 6 => "name resolution error",
+                7 => "connection error",
+                _ => "curl transfer error",
+            };
+            format!("process=exited; exit_code={exit_code}; category={category}")
+        }
+    }
 }
 
 /// Returns the minimal platform environment needed by curl's Windows TLS
@@ -6276,12 +6290,16 @@ mod tests {
 
     #[test]
     fn curl_fixture_diagnostic_classifies_process_exit() {
-        let diagnostic = curl_fixture_diagnostic(Some(7));
+        let diagnostic = curl_fixture_diagnostic(CurlFixtureProcess::Completed(Some(7)));
         assert!(diagnostic.contains("exit_code=7"));
         assert!(diagnostic.contains("connection error"));
         assert_eq!(
-            curl_fixture_diagnostic(None),
+            curl_fixture_diagnostic(CurlFixtureProcess::CouldNotStart),
             "process=not-started; category=executable unavailable"
+        );
+        assert_eq!(
+            curl_fixture_diagnostic(CurlFixtureProcess::Completed(None)),
+            "process=completed_without_exit_code; category=abnormal termination"
         );
     }
 
@@ -6297,6 +6315,30 @@ mod tests {
         .expect_err("missing executable");
 
         assert!(error.0.contains("category=executable unavailable"));
+        assert!(!error.0.contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recipient_fixture_reports_signal_termination_separately_from_spawn_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let program = temp.path().join("curl-terminated-by-signal");
+        fs::write(&program, "#!/bin/sh\nkill -TERM $$\n").expect("write curl fixture");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700))
+            .expect("make curl fixture executable");
+
+        let error = fetch_recipient_url_with_program(
+            "http://127.0.0.1:1/keys",
+            RecipientTransport::HttpFixture,
+            program.as_os_str(),
+        )
+        .expect_err("signal-terminated executable");
+
+        assert!(error.0.contains("process=completed_without_exit_code"));
+        assert!(error.0.contains("category=abnormal termination"));
+        assert!(!error.0.contains("process=not-started"));
         assert!(!error.0.contains(temp.path().to_string_lossy().as_ref()));
     }
 
