@@ -76,13 +76,17 @@ artifacts require authentication (401) — the failing test is not identifiable
 without credentials. Local reproduction is equally blocked: the `ring` and
 `alloca` build scripts cannot run for a Windows target without MSVC/mingw,
 which this machine cannot install. Mitigation in `ci.yml`: the test matrix
-runs three steps — `Check` (`cargo check --all-targets`), `Test compile`
-(`cargo test --no-run`, which fully builds the test binaries including build
-scripts and linking), and `Test` (execution). This **narrows, but does not
-conclusively distinguish**, the cause: a Check failure is a compile defect
-(Windows-only `cfg(windows)` code compiles nowhere else); a Test-compile
-failure is a test-binary build/link defect; only a failure of the final
-Test step with both predecessors green is a test assertion failure.
+runs three steps — `Check` (`cargo check --all-targets`: type-checks every
+target including the Windows-only `cfg(windows)` code and runs dependency
+build scripts, but does not link), `Test compile` (`cargo test --no-run`:
+fully builds the test binaries including linking, but does not compile
+doctests), and `Test` (compiles and runs lib/bin/integration tests plus
+doctests; runtime errors and doctest compile errors surface only here).
+This **narrows, but does not conclusively distinguish**, the cause: a Check
+failure is a compile defect (Windows-only `cfg(windows)` code compiles
+nowhere else); a Test-compile failure is a test-binary build/link defect; a
+Test failure with both predecessors green is an assertion failure, a doctest
+compile error, or a runtime error.
 
 ## `build.yml` — Linux amd64/arm64 build + packaging
 

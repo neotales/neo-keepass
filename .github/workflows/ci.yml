@@ -42,13 +42,18 @@ jobs:
       # failed in the Test step with exit code 101 (logs need authenticated
       # access, so the failing test is not identifiable from public data).
       # The three steps narrow, but do not conclusively distinguish, the
-      # cause: Check type-checks everything including Windows-only
-      # cfg(windows) code (which never compiles anywhere else); Test
-      # --no-run fully compiles the test binaries (build scripts and linking
-      # are only exercised here, not by check); Test then runs them. A Check
-      # failure is a compile defect; a Test --no-run failure is a test-binary
-      # build/link defect; only a failure of the final Test step, with the
-      # earlier two green, is a test assertion failure.
+      # cause, and their boundaries are not what they may look like: Check
+      # (cargo check --all-targets) type-checks every target including the
+      # Windows-only cfg(windows) code - which never compiles anywhere else -
+      # and does run dependency build scripts, but does not link. Test
+      # compile (cargo test --no-run) fully builds the test binaries
+      # including linking, but does not compile doctests. Test compiles and
+      # runs the lib/bin/integration tests and additionally compiles and
+      # runs doctests, so runtime failures and doctest compile errors both
+      # surface only here. A Check failure is a compile defect; a
+      # Test-compile failure is a test-binary build/link defect; a Test
+      # failure with both predecessors green is an assertion failure, a
+      # doctest compile error, or a runtime error.
       - name: Check
         shell: bash
         run: cargo check --workspace --all-targets
