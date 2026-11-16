@@ -2094,8 +2094,15 @@ fn backup_init_password_at(
         write!(name, "{byte:02x}").map_err(|_| err("cannot generate password backup name"))?;
     }
     let target = data.join(format!("init-password-{name}.age"));
-    nkeepass::private_file::write_private_noclobber(&target, encrypted.as_bytes())
-        .map_err(|_| err("cannot install encrypted password backup"))?;
+    nkeepass::private_file::write_private_noclobber(&target, encrypted.as_bytes()).map_err(
+        |cause| match cause {
+            "output installed but directory durability is unconfirmed" => err(
+                "encrypted password backup was installed but directory durability is unconfirmed",
+            ),
+            "output exists" => err("encrypted password backup target already exists"),
+            _ => err("cannot install encrypted password backup"),
+        },
+    )?;
     Ok(target)
 }
 
@@ -2132,12 +2139,17 @@ fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
     match nkeepass::private_file::write_private_noclobber(path, identity_bytes.as_bytes()) {
         Ok(()) => AgeIdentity::from_private_key(private_key.as_str())
             .map_err(|_| err("cannot initialize password backup identity")),
-        Err(_) => {
+        Err("output exists") => {
             // Another initializer may have installed the shared identity. Only
             // adopt it after the same type, permission, and key validation.
             read_backup_identity(path)
                 .map_err(|_| err("cannot install or validate password backup identity"))
         }
+        Err("output installed but directory durability is unconfirmed") => Err(err(
+            "password backup identity was installed but directory durability is unconfirmed",
+        )),
+        Err("cannot install output") => Err(err("cannot install password backup identity")),
+        Err(_) => Err(err("cannot install password backup identity")),
     }
 }
 

@@ -33,9 +33,10 @@ also part of the master credentials, no password-only backup is made, because
 the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
 If backup installation fails, init reports the sanitized cause but leaves the
-already-created vault in place. On Windows, an existing identity is reused only
-after its ACL can be restricted to the current account; if that check fails,
-the backup fails closed.
+already-created vault in place. Password backups currently fail closed on
+Windows because the implementation cannot safely replace and verify the full
+ACL (including explicit grants to other principals); the vault may still be
+created, with an actionable partial-failure diagnostic.
 
 The `get` command can encrypt a selected value to native age or SSH recipients:
 

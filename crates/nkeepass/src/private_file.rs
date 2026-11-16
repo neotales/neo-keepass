@@ -1,4 +1,8 @@
 //! Owner-only permissions for files that may contain secrets.
+//!
+//! Unix permissions are restricted directly. Windows currently fails closed:
+//! the available command-line ACL update cannot prove that explicit ACEs for
+//! other principals were removed.
 
 use std::path::Path;
 
@@ -25,6 +29,14 @@ pub fn set_owner_only(path: &Path, error: &'static str) -> Result<(), &'static s
 /// Returns a fixed diagnostic if staging, permission restriction, writing,
 /// syncing, or no-clobber installation fails.
 pub fn write_private_noclobber(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
+    write_private_noclobber_with(path, bytes, sync_parent_directory)
+}
+
+fn write_private_noclobber_with(
+    path: &Path,
+    bytes: &[u8],
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), &'static str> {
     use std::io::Write;
 
     let parent = path
@@ -40,13 +52,24 @@ pub fn write_private_noclobber(path: &Path, bytes: &[u8]) -> Result<(), &'static
         .as_file()
         .sync_all()
         .map_err(|_| "cannot sync output")?;
-    staging
-        .persist_noclobber(path)
-        .map_err(|_| "output exists or cannot be installed")?;
-    #[cfg(unix)]
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| "output installed but directory durability is unconfirmed")?;
+    staging.persist_noclobber(path).map_err(|error| {
+        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+            "output exists"
+        } else {
+            "cannot install output"
+        }
+    })?;
+    sync_parent(parent).map_err(|_| "output installed but directory durability is unconfirmed")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -58,41 +81,11 @@ fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'sta
 
 #[cfg(windows)]
 fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'static str> {
-    // Do not trust USERNAME, SystemRoot, or PATH: all are caller-controlled.
-    // Resolve the system directory through the safe known-folder wrapper and
-    // launch the tools only from that absolute directory.
-    let system_directory = known_folders::get_known_folder_path(known_folders::KnownFolder::System)
-        .filter(|directory| directory.is_absolute())
-        .ok_or(error)?;
-    let Some((system_root, whoami, executable)) = windows_tool_paths(&system_directory) else {
-        return Err(error);
-    };
-    if !whoami.is_file() || !executable.is_file() {
-        return Err(error);
-    }
-    let identity = bounded_command_output(
-        &mut whoami_command(&whoami, &system_root),
-        MAX_WHOAMI_OUTPUT_BYTES,
-        CHILD_TIMEOUT,
-    );
-    let sid = match identity {
-        Some(output) => {
-            let text = std::str::from_utf8(&output).ok();
-            text.and_then(windows_sid_from_whoami_csv)
-        }
-        None => return Err(error),
-    };
-    let Some(sid) = sid else {
-        return Err(error);
-    };
-    let status = run_command_with_timeout(
-        &mut icacls_command(&executable, &system_root, path, &sid),
-        CHILD_TIMEOUT,
-    );
-    match status {
-        Some(status) if status.success() => Ok(()),
-        _ => Err(error),
-    }
+    // `icacls /inheritance:r /grant:r` does not remove explicit ACEs for other
+    // principals. Until we can replace and verify the complete DACL natively,
+    // never claim that an existing Windows file or directory is owner-only.
+    let _ = path;
+    Err(error)
 }
 
 #[cfg(any(windows, test))]
@@ -412,7 +405,7 @@ fn icacls_command(
 
 #[cfg(not(any(unix, windows)))]
 fn set_owner_only_platform(_path: &Path, _error: &'static str) -> Result<(), &'static str> {
-    Ok(())
+    Err("owner-only permissions are unsupported on this platform")
 }
 
 #[cfg(test)]
@@ -420,9 +413,10 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
 
-    use super::{set_owner_only, write_private_noclobber};
+    use super::{set_owner_only, write_private_noclobber, write_private_noclobber_with};
 
     #[test]
+    #[cfg(unix)]
     fn private_output_is_owner_only_and_never_clobbers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sensitive.bin");
@@ -441,6 +435,38 @@ mod tests {
     }
 
     #[test]
+    fn post_install_sync_failure_reports_installed_file_and_uncertain_durability() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("installed.bin");
+        let result = write_private_noclobber_with(&path, b"complete", |_| {
+            Err(std::io::Error::other("injected sync failure"))
+        });
+        assert_eq!(
+            result,
+            Err("output installed but directory durability is unconfirmed")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"complete");
+    }
+
+    #[test]
+    fn no_clobber_reports_destination_collision_separately_from_install_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("occupied.bin");
+        std::fs::write(&occupied, b"keep").unwrap();
+        assert_eq!(
+            write_private_noclobber(&occupied, b"replacement"),
+            Err("output exists")
+        );
+        let missing_parent = directory.path().join("missing").join("output.bin");
+        assert_eq!(
+            write_private_noclobber(&missing_parent, b"new"),
+            Err("cannot stage output")
+        );
+        assert_eq!(std::fs::read(occupied).unwrap(), b"keep");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn restricts_the_empty_staging_file_before_first_byte() {
         let temp = tempfile::tempdir().unwrap();
         let mut file = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
@@ -686,60 +712,54 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn forged_systemroot_cannot_redirect_windows_tool_paths() {
-        const PROBE: &str = "NKEEPASS_SYSTEMROOT_PROBE_PATH";
-        if let Some(path) = std::env::var_os(PROBE) {
-            super::set_owner_only(Path::new(&path), "probe ACL failed").unwrap();
-            return;
-        }
-
         let temp = tempfile::tempdir().unwrap();
         let file = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
-        let forged_system_root = temp.path().join("forged-system-root");
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "private_file::tests::forged_systemroot_cannot_redirect_windows_tool_paths",
-                "--nocapture",
-            ])
-            .env(PROBE, file.path())
-            .env("SystemRoot", &forged_system_root)
-            .env("USERNAME", "forged-acl-account")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let mut child = command.spawn().unwrap();
-        let status = super::wait_for_child(&mut child, std::time::Duration::from_secs(15))
-            .expect("wait for nested ACL probe")
-            .expect("Windows ACL probe timed out");
-        assert!(status.success(), "Windows ACL probe failed: {status}");
+        assert_eq!(
+            super::set_owner_only(file.path(), "probe ACL failed"),
+            Err("probe ACL failed"),
+            "Windows DACL changes fail closed until a complete replacement is implemented"
+        );
     }
 
     #[cfg(windows)]
     #[test]
-    fn native_windows_acl_tools_run_with_bounded_timeouts() {
+    fn explicit_other_principal_grant_is_not_mistaken_for_owner_only() {
         let system_directory =
             known_folders::get_known_folder_path(known_folders::KnownFolder::System)
                 .expect("Windows system directory");
-        let (system_root, whoami_path, icacls_path) =
+        let (system_root, _, icacls_path) =
             super::windows_tool_paths(&system_directory).expect("absolute system directory");
-        let whoami = super::bounded_command_output(
-            &mut super::whoami_command(&whoami_path, &system_root),
-            super::MAX_WHOAMI_OUTPUT_BYTES,
-            super::CHILD_TIMEOUT,
-        )
-        .expect("whoami succeeds within its output and time bounds");
-        let text = std::str::from_utf8(&whoami).expect("whoami output is UTF-8");
-        let sid = super::windows_sid_from_whoami_csv(text)
-            .expect("whoami reports the authenticated user's SID");
-
         let temp = tempfile::NamedTempFile::new().unwrap();
-        let result = super::run_command_with_timeout(
-            &mut super::icacls_command(&icacls_path, &system_root, temp.path(), &sid),
-            super::CHILD_TIMEOUT,
-        )
-        .expect("icacls ships with Windows and completes within its timeout");
-        assert!(result.success(), "icacls failed: status={result:?}");
+        let mut grant = std::process::Command::new(&icacls_path);
+        grant
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .arg(temp.path())
+            .arg("/grant")
+            .arg("*S-1-1-0:(F)")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        assert!(
+            grant.status().unwrap().success(),
+            "grant explicit Everyone ACE"
+        );
+
+        assert_eq!(
+            super::set_owner_only(temp.path(), "owner-only restriction unavailable"),
+            Err("owner-only restriction unavailable")
+        );
+        let listing = std::process::Command::new(&icacls_path)
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .arg(temp.path())
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        assert!(
+            String::from_utf8_lossy(&listing.stdout).contains("S-1-1-0"),
+            "the unrelated explicit ACE remains, so the implementation must fail closed"
+        );
     }
 
     #[cfg(unix)]
