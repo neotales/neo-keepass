@@ -70,6 +70,7 @@ fn command(fixture: &Fixture, password: &str) -> Command {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkeepass"));
     child
         .current_dir(fixture.root.path())
+        .env("HOME", fixture.root.path())
         .env("XDG_CONFIG_HOME", fixture.config_home())
         .env("XDG_DATA_HOME", fixture.data_home())
         .env(PASSWORD_ENV, password)
@@ -185,6 +186,28 @@ fn creates_a_vault_that_reopens_with_the_same_password() {
     assert_eq!(result["source"], "argument");
     assert_eq!(result["kdf"], "aes");
     assert_eq!(result["generated_password"], false);
+    let backup = PathBuf::from(
+        result["password_backup"]
+            .as_str()
+            .expect("reported backup path"),
+    );
+    assert_eq!(
+        backup.parent(),
+        Some(fixture.data_home().join("nkeepass").as_path())
+    );
+    assert!(
+        backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("init-password-") && name.ends_with(".age"))
+    );
+    assert!(backup.is_file());
+    assert!(
+        fixture
+            .config_home()
+            .join("nkeepass/init-password.agekey")
+            .is_file()
+    );
     // Nothing had chosen a vault yet, so the new one becomes the context.
     assert_eq!(result["context_set"], true);
     assert!(std::fs::metadata(&vault).unwrap().len() > 0);

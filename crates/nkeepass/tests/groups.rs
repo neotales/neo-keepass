@@ -7,6 +7,7 @@ fn cli(home: &Path, vault: &Path, args: &[&str]) -> Output {
         .args(args)
         .args(["--password-env", "GROUP_TEST_PASSWORD"])
         .env("GROUP_TEST_PASSWORD", "test-password")
+        .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
         .env_remove("NKEEPASS_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")

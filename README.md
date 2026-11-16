@@ -19,13 +19,17 @@ automatic recipient discovery remain planned scope. Basic age encryption and
 decryption are wired into `get` and `set`; consult command help below for
 supported local key forms and current limitations. TOTP support is present too.
 
-`init` currently takes the vault master password from an explicit source or a
-non-echoing terminal prompt. `init --size N` creates a separate random entry
-password inside the vault; it does not generate or store the master password.
-There is no OS credential-vault integration. As a result, init cannot safely
-create an automatic age-encrypted master-password backup: it does not own a
-generated master password, and silently backing up a caller-provided password
-would violate the explicit-source contract.
+`init` takes the vault master password from an explicit source or a non-echoing
+terminal prompt. After creating the vault, it stores a password-only unlock
+password as age-encrypted data in a uniquely named file under
+`~/.local/share/nkeepass/`;
+the reusable native age identity is in `~/.config/nkeepass/init-password.agekey`.
+Both files are installed privately without overwriting existing files. Keep the
+identity safe: it decrypts the backup. Since this checkout has no OS credential
+vault integration, this file-based backup is the fallback. When a key file is
+also part of the master credentials, no password-only backup is made, because
+the password alone cannot unlock that vault. `init --size N` creates a separate
+random entry password; it does not generate or store the master password.
 
 The `get` command can encrypt a selected value to native age or SSH recipients:
 
