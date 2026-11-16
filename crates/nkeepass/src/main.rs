@@ -2301,10 +2301,39 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
         .envs(recipient_curl_windows_environment())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr({
+            #[cfg(test)]
+            {
+                if matches!(transport, RecipientTransport::HttpFixture) {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                }
+            }
+            #[cfg(not(test))]
+            {
+                std::process::Stdio::null()
+            }
+        });
+    #[cfg(test)]
+    if matches!(transport, RecipientTransport::HttpFixture) {
+        // Inject a controlled proxy in the test child so --noproxy is a
+        // load-bearing condition, not an unexercised defensive option.
+        let proxy = url
+            .get("http://".len()..)
+            .and_then(|tail| tail.find('/').map(|end| end + "http://".len()))
+            .map_or(url, |end| &url[..end]);
+        command.env("http_proxy", proxy);
+    }
     let mut child = command
         .spawn()
         .map_err(|_| err("HTTPS recipient lookup unavailable"))?;
+    #[cfg(test)]
+    let mut fixture_stderr = if matches!(transport, RecipientTransport::HttpFixture) {
+        child.stderr.take()
+    } else {
+        None
+    };
     let Some(mut output) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -2333,6 +2362,19 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
         .wait()
         .map_err(|_| err("HTTPS recipient lookup failed"))?;
     if !status.success() {
+        #[cfg(test)]
+        if matches!(transport, RecipientTransport::HttpFixture) {
+            use std::io::Read;
+
+            let mut stderr = Vec::new();
+            if let Some(stderr_pipe) = fixture_stderr.as_mut() {
+                let _ = stderr_pipe.read_to_end(&mut stderr);
+            }
+            return Err(err(&format!(
+                "HTTP fixture curl failed ({})",
+                curl_fixture_diagnostic(status.code(), &stderr)
+            )));
+        }
         return Err(err("HTTPS recipient lookup failed"));
     }
     let status_start = bytes
@@ -2355,6 +2397,49 @@ fn fetch_recipient_url(url: &str, transport: RecipientTransport) -> Result<Strin
         return Err(err("HTTPS recipient response exceeds size limit"));
     }
     String::from_utf8(body.to_vec()).map_err(|_| err("invalid HTTPS recipient response"))
+}
+
+/// Produces test-only curl failure details without exposing arbitrary stderr.
+#[cfg(test)]
+fn curl_fixture_diagnostic(status: Option<i32>, stderr: &[u8]) -> String {
+    let mut version = std::process::Command::new("curl")
+        .arg("--version")
+        .env_clear()
+        .env("PATH", env::var_os("PATH").unwrap_or_default())
+        .envs(recipient_curl_windows_environment())
+        .output()
+        .ok()
+        .and_then(|output| {
+            String::from_utf8(output.stdout)
+                .ok()?
+                .lines()
+                .next()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "curl version unavailable".to_owned());
+    version.truncate(160);
+    let error_code = stderr
+        .windows(7)
+        .position(|window| window == b"curl: (")
+        .and_then(|prefix| {
+            let code = stderr[prefix + 7..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit());
+            let code = code.copied().collect::<Vec<_>>();
+            std::str::from_utf8(&code)
+                .ok()
+                .and_then(|code| code.parse::<u32>().ok())
+        });
+    let category = match error_code {
+        Some(5 | 6) => "name resolution error",
+        Some(7) => "connection error",
+        Some(1 | 2 | 4 | 48) => "curl configuration or protocol error",
+        Some(_) => "curl transfer error",
+        None => "stderr unavailable or unrecognized",
+    };
+    format!(
+        "executable=curl (PATH-resolved); version={version}; exit={status:?}; stderr={category} (details redacted)"
+    )
 }
 
 /// Returns the minimal platform environment needed by curl's Windows TLS
@@ -6220,6 +6305,18 @@ mod tests {
                 .iter()
                 .all(|(name, _)| { name == "PATH" || cfg!(windows) && name == "SystemRoot" })
         );
+    }
+
+    #[test]
+    fn curl_fixture_diagnostic_redacts_stderr_details() {
+        let diagnostic = curl_fixture_diagnostic(
+            Some(7),
+            b"curl: (7) Failed to connect to private-host.example:443",
+        );
+        assert!(diagnostic.contains("executable=curl"));
+        assert!(diagnostic.contains("exit=Some(7)"));
+        assert!(diagnostic.contains("connection error"));
+        assert!(!diagnostic.contains("private-host.example"));
     }
 
     #[test]
