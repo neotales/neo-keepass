@@ -14,6 +14,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 python3 - "$repo" <<'PY'
 import os
+import re
 import subprocess
 import sys
 
@@ -24,6 +25,9 @@ wf_dir = os.path.join(repo, ".github", "workflows")
 problems = 0
 
 PLACEHOLDER = "CI_EXPRESSION_PLACEHOLDER"
+# Complete GitHub expression tokens only; non-greedy so two adjacent
+# expressions never bleed into each other.
+EXPRESSION = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
 
 for name in sorted(os.listdir(wf_dir)):
     if not (name.endswith(".yml") or name.endswith(".yaml")):
@@ -48,7 +52,7 @@ for name in sorted(os.listdir(wf_dir)):
     collect(doc)
 
     for i, run in enumerate(runs):
-        rendered = run.replace("${{", PLACEHOLDER).replace("}}", "")
+        rendered = EXPRESSION.sub(PLACEHOLDER, run)
         label = f"{name} run[{i}]"
         # Folded/plain scalars turn a line-leading continuation into
         # backslash-space, which silently changes shell semantics.

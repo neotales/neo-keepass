@@ -55,15 +55,43 @@ expect_smoke_skipped() { # <label>
     fi
 }
 
+# Asserts the validator's most recent output shows the smoke run happened.
+expect_smoke_ran() { # <label>
+    if echo "$LAST_OUTPUT" | grep -q "smoke run:.*exits 0"; then
+        echo "ok   (smoke ran): $1"
+        pass=$((pass + 1))
+    else
+        echo "FAIL (smoke did not run): $1"
+        failcount=$((failcount + 1))
+    fi
+}
+
+# Asserts the validator's most recent output shows the smoke run was
+# withheld because a validation elsewhere failed (deferred-smoke property).
+expect_smoke_withheld() { # <label>
+    if echo "$LAST_OUTPUT" | grep -q "smoke run:"; then
+        echo "FAIL (smoke ran despite failure): $1"
+        failcount=$((failcount + 1))
+    elif echo "$LAST_OUTPUT" | grep -q "skip smoke run (validation failed"; then
+        echo "ok   (smoke withheld): $1"
+        pass=$((pass + 1))
+    else
+        echo "FAIL (no withheld-smoke marker): $1"
+        failcount=$((failcount + 1))
+    fi
+}
+
 expect_pass() { # expect_pass <label> <cmd...>
     local label=$1
     shift
-    if "$@" >/dev/null 2>&1; then
+    local status=0
+    LAST_OUTPUT=$("$@" 2>&1) || status=$?
+    if [ "$status" -eq 0 ]; then
         echo "ok   (passed): $label"
         pass=$((pass + 1))
     else
         echo "FAIL: $label"
-        bash "$@" 2>&1 | grep FAIL | head -5 | sed 's/^/       /'
+        echo "$LAST_OUTPUT" | grep FAIL | head -5 | sed 's/^/       /'
         failcount=$((failcount + 1))
     fi
 }
@@ -112,6 +140,7 @@ else
 fi
 expect_pass "positive dir validates" \
     bash "$repo/packaging/validate.sh" --binary "$binary" "$pos" "$version" x86_64-unknown-linux-gnu
+expect_smoke_ran "positive validation ends in the native smoke run"
 
 echo "== negative: aarch64-named archive containing an x86_64 binary"
 neg="$work/wrong-elf"
@@ -207,6 +236,7 @@ if command -v makepkg >/dev/null; then
     expect_fail "pacman payload modified" \
         "modified pacman payload (harmless marker ELF) is rejected" \
         bash "$repo/packaging/validate.sh" --binary "$binary" "$neg" "$version" x86_64-unknown-linux-gnu
+    expect_smoke_withheld "invalid pacman payload defers the smoke run"
 
     echo "== negative: pacman package with missing payload"
     rm -rf "$extract/usr/bin"
@@ -215,6 +245,18 @@ if command -v makepkg >/dev/null; then
         "missing pacman payload is rejected" \
         bash "$repo/packaging/validate.sh" --binary "$binary" "$neg" "$version" x86_64-unknown-linux-gnu
 fi
+
+echo "== regression: invalid manifest defers the smoke run even with perfect artifacts"
+neg="$work/invalid-manifest"
+mkdir -p "$neg"
+cp -a "$repo/packaging" "$neg/packaging"
+# Corrupt the nuspec XML only; artifacts stay the known-good positive set.
+printf '<?xml version="1.0"?><package><unclosed>' > "$neg/packaging/choco/nkeepass.nuspec"
+expect_fail "choco nuspec is not well-formed XML" \
+    "invalid manifest is rejected" \
+    env NEOKEEPASS_VALIDATE_MANIFEST_ROOT="$neg/packaging" \
+    bash "$repo/packaging/validate.sh" --binary "$binary" "$pos" "$version" x86_64-unknown-linux-gnu
+expect_smoke_withheld "invalid manifest defers the smoke run"
 
 if [ "$failcount" -ne 0 ]; then
     echo "packaging tests failed: $failcount uncaught case(s)"

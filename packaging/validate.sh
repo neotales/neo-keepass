@@ -11,19 +11,38 @@
 # extracted and checked: regular file, not a symlink, ELF architecture
 # matching the triple, and a sha256 equal across all containers and, when
 # --binary is given, equal to the expected built binary. Deb metadata
-# (package/version/architecture) and pacman metadata (.PKGINFO, when pacman
-# artifacts are present) are checked; the pacman package architecture must map
-# to one of the expected triples. dpkg-deb is used when available; otherwise
-# deb metadata is checked structurally via ar(1) + tar(1). The native
-# target's binary is smoke-run with --help under timeout(1) ONLY after every
-# check for that target has passed; a binary that failed any check is never
-# executed.
+# (package/version/architecture) and pacman metadata and payload (regular
+# file, ELF architecture, sha256 identical to the tarball binary; the builder
+# disables makepkg's strip/debug transforms) are checked. dpkg-deb is used
+# when available; otherwise deb metadata is checked structurally via ar(1) +
+# tar(1).
+#
+# The native target's binary is smoke-run with --help under timeout(1) only
+# after ALL of the following succeeded: manifest checks, every container
+# check for every target, and the pacman checks. Any validation failure
+# anywhere defers the smoke run entirely — a failing artifact is never
+# executed. All extracted payloads live in fresh mktemp -d directories
+# (0700, owned by this process), never in predictable sibling paths that a
+# pre-planted symlink could redirect.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
+# Test override: point manifest checks at a copy (tests corrupt fixtures
+# without touching the repo). Defaults to this checkout.
+manifest_root=${NEOKEEPASS_VALIDATE_MANIFEST_ROOT:-$repo/packaging}
 fail=0
 errors=()
 expected_binary=""
+
+# Session-private scratch dir for anything that is later executed. Fresh,
+# 0700, owned by this process; cleaned on exit.
+session_dir=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-validate-session.XXXXXX")
+trap 'rm -rf "$session_dir"' EXIT
+
+# Set by check_artifacts when the native target passed every container check:
+# the verified binary is staged here for the deferred smoke run.
+smoke_binary=""
+smoke_triple=""
 
 # ---- argument parsing ------------------------------------------------------
 while [ $# -gt 0 ] && [ "$1" = --binary ]; do
@@ -86,20 +105,20 @@ check_manifests() {
     local version=${1:-}
 
     # rpm spec: real metadata; keep the crate version pinned in one place.
-    if grep -q -- "%global crate_version ${version}" "$repo/packaging/rpm/nkeepass.spec" 2>/dev/null; then
+    if grep -q -- "%global crate_version ${version}" "$manifest_root/rpm/nkeepass.spec" 2>/dev/null; then
         record ok "rpm spec crate_version is ${version}"
     else
         record fail "rpm spec crate_version does not match ${version}"
     fi
 
-    if grep -q -- "$version" "$repo/packaging/choco/nkeepass.nuspec" 2>/dev/null; then
+    if grep -q -- "$version" "$manifest_root/choco/nkeepass.nuspec" 2>/dev/null; then
         record ok "choco nuspec mentions version $version"
     else
         record fail "choco nuspec does not mention crate version $version"
     fi
 
     # nuspec: XML well-formed.
-    if python3 -c "import xml.etree.ElementTree as ET; ET.parse('$repo/packaging/choco/nkeepass.nuspec')" 2>/dev/null; then
+    if python3 -c "import xml.etree.ElementTree as ET; ET.parse('$manifest_root/choco/nkeepass.nuspec')" 2>/dev/null; then
         record ok "choco nuspec is well-formed XML"
     else
         record fail "choco nuspec is not well-formed XML"
@@ -107,7 +126,7 @@ check_manifests() {
 
     # winget manifest: YAML if a parser is available, else skipped.
     if python3 -c "import yaml" 2>/dev/null; then
-        if python3 -c "import yaml; yaml.safe_load(open('$repo/packaging/winget/Neotales.nkeepass.yaml'))" 2>/dev/null; then
+        if python3 -c "import yaml; yaml.safe_load(open('$manifest_root/winget/Neotales.nkeepass.yaml'))" 2>/dev/null; then
             record ok "winget manifest is valid YAML"
         else
             record fail "winget manifest is not valid YAML"
@@ -141,7 +160,9 @@ binary_sha_or_reason() {
 }
 
 # extract_binary_from_deb <deb> <dest>: streams the data archive's binary out
-# without unpacking the whole archive.
+# without unpacking the whole archive. <dest> must already live inside a
+# fresh, private directory; the redirect must never follow a pre-planted
+# symlink.
 extract_binary_from_deb() {
     local deb=$1 dest=$2 members dat tflags binmember
     members=$(ar t "$deb" 2>/dev/null || true)
@@ -156,8 +177,8 @@ extract_binary_from_deb() {
 }
 
 check_deb_metadata() { # check_deb_metadata <deb> <expected-version> <expected-arch>
-    # Returns 0 when the metadata is right; any failure must prevent the
-    # smoke run for this target.
+    # Returns 0 when the metadata is right; any failure counts as a
+    # validation failure and defers the smoke run.
     local deb=$1 version=$2 arch=$3
     if command -v dpkg-deb >/dev/null; then
         local pkg gotver gotarch
@@ -204,7 +225,7 @@ check_deb_metadata() { # check_deb_metadata <deb> <expected-version> <expected-a
     return 1
 }
 
-check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [arch=expected-hash ...]
+check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [triple=expected-hash ...]
     local dir=$1 version=$2
     shift 2
     local pkgver=${version//-/.}
@@ -254,9 +275,9 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [arch=expect
         fi
         record ok "pacman package metadata: pkgname=$gotname pkgver=$gotver arch=$gotarch"
 
-        # Payload must be present, a regular file (not a symlink), the right
-        # ELF architecture, and byte-identical to the tarball binary (the
-        # builder disables makepkg's strip/debug transforms for this).
+        # Payload must be present and a regular file (tar type '-'), the
+        # right ELF architecture, and byte-identical to the tarball binary
+        # (the builder disables makepkg's strip/debug transforms for this).
         member_line=$(echo "$listing" | grep -E 'usr/bin/nkeepass$' | head -n1 || true)
         if [ -z "$member_line" ]; then
             record fail "pacman payload: $(basename "$p") does not contain usr/bin/nkeepass"
@@ -267,18 +288,22 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [arch=expect
             record fail "pacman payload: usr/bin/nkeepass is not a regular file (type '$type_char')"
             continue
         fi
-        local payload="$work-pacman-payload.$$"
+        # Extract into a fresh private directory. The payload path inside it
+        # is fixed, but the directory is brand-new and 0700, so no planted
+        # symlink can exist and the redirect cannot write through one.
+        local payload_dir payload payload_hash
+        payload_dir=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-pacman-payload.XXXXXX")
+        payload="$payload_dir/payload"
         if ! tar $flags -xOf "$p" usr/bin/nkeepass > "$payload" 2>/dev/null; then
             record fail "pacman payload: could not extract usr/bin/nkeepass from $(basename "$p")"
-            rm -f "$payload"
+            rm -rf "$payload_dir"
             continue
         fi
-        local payload_hash
         if payload_hash=$(binary_sha_or_reason "$payload" "$found_machine" "pacman payload"); then
             record ok "pacman payload is a regular $found_machine ELF"
         else
             record fail "pacman payload check failed (reason above)"
-            rm -f "$payload"
+            rm -rf "$payload_dir"
             continue
         fi
         if [ "$payload_hash" != "$found_hash" ]; then
@@ -286,7 +311,7 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [arch=expect
         else
             record ok "pacman payload matches the tarball binary (sha256)"
         fi
-        rm -f "$payload"
+        rm -rf "$payload_dir"
     done
 }
 
@@ -315,8 +340,8 @@ check_artifacts() {
         local work
         work=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-validate.XXXXXX")
         local bin_tar="$work/from-tar" bin_zip="$work/from-zip" bin_deb="$work/from-deb"
-        local smoke=1 tar_hash zip_hash deb_hash tar_extracted=0 zip_extracted=0
-        local tar_member="$base/nkeepass" arch_hashes=""
+        local checks_ok=1 tar_hash zip_hash deb_hash tar_extracted=0 zip_extracted=0
+        local tar_member="$base/nkeepass"
 
         # Extract the binary from each container. Extraction is into a fresh
         # temp dir, members are named exactly, and nothing is executed here.
@@ -325,18 +350,18 @@ check_artifacts() {
             tar_extracted=1
         else
             record fail "tar.gz does not contain $tar_member as a regular member"
-            smoke=0
+            checks_ok=0
         fi
         if unzip -q -o "$zipfile" "$tar_member" -d "$work" 2>/dev/null \
             && mv "$work/$tar_member" "$bin_zip" 2>/dev/null; then
             zip_extracted=1
         else
             record fail "zip does not contain $tar_member as a regular member"
-            smoke=0
+            checks_ok=0
         fi
         if ! extract_binary_from_deb "$deb" "$bin_deb"; then
             record fail "deb data archive does not contain usr/bin/nkeepass"
-            smoke=0
+            checks_ok=0
         fi
 
         # Per-container binary checks. record() runs in this shell.
@@ -346,7 +371,7 @@ check_artifacts() {
                 record ok "$base tar.gz binary is a regular $machine ELF"
             else
                 record fail "$base tar.gz binary check failed (reason above)"
-                smoke=0
+                checks_ok=0
                 tar_hash=""
             fi
         fi
@@ -356,7 +381,7 @@ check_artifacts() {
                 record ok "$base zip binary is a regular $machine ELF"
             else
                 record fail "$base zip binary check failed (reason above)"
-                smoke=0
+                checks_ok=0
                 zip_hash=""
             fi
         fi
@@ -366,7 +391,7 @@ check_artifacts() {
                 record ok "$base deb binary is a regular $machine ELF"
             else
                 record fail "$base deb binary check failed (reason above)"
-                smoke=0
+                checks_ok=0
                 deb_hash=""
             fi
         fi
@@ -375,7 +400,7 @@ check_artifacts() {
         # built binary when one was supplied.
         if [ -n "$tar_hash" ] && [ "$tar_hash" = "$zip_hash" ] && [ "$tar_hash" = "$deb_hash" ]; then
             record ok "$base binary is identical (sha256) in tar.gz, zip, and deb"
-            arch_hashes="${triple}=${tar_hash}"
+            arch_hashes_list="$arch_hashes_list ${triple}=${tar_hash}"
             if [ -n "$expected_binary" ]; then
                 local want
                 want=$(sha256sum "$expected_binary" | cut -d' ' -f1)
@@ -383,32 +408,30 @@ check_artifacts() {
                     record ok "$base binary matches the expected built binary"
                 else
                     record fail "$base binary does not match the expected built binary"
-                    smoke=0
+                    checks_ok=0
                 fi
             fi
         elif [ -n "$tar_hash" ] || [ -n "$zip_hash" ] || [ -n "$deb_hash" ]; then
             record fail "$base binary hashes differ across containers (tar=${tar_hash:-none} zip=${zip_hash:-none} deb=${deb_hash:-none})"
-            smoke=0
+            checks_ok=0
         fi
 
-        # Metadata failure must prevent the smoke run for this target.
+        # Metadata failure counts as a validation failure.
         if check_deb_metadata "$deb" "$version" "$debarch"; then
             :
         else
-            smoke=0
+            checks_ok=0
         fi
 
-        # Smoke-run only the native target and only when every check above
-        # passed for this triple. The run is bounded by timeout.
-        if [ "$smoke" = 1 ] && [ "$(uname -s)" = Linux ] \
+        # Stage the native target's verified binary for the deferred smoke
+        # run, which happens in the caller only after every validation
+        # everywhere succeeded. The stage copy lands in the session's private
+        # directory; nothing here is executed.
+        if [ "$checks_ok" = 1 ] && [ "$(uname -s)" = Linux ] \
             && [ "$(uname -m)" = "$(pkg_arch_for_triple "$triple")" ]; then
-            if timeout 10 "$bin_tar" --help >/dev/null 2>&1; then
-                record ok "smoke run: $base binary --help exits 0 (timeout 10s)"
-            else
-                record fail "smoke run: $base binary --help failed or timed out"
-            fi
-        elif [ "$smoke" = 0 ]; then
-            echo "skip smoke run for $base (a check failed; failed binaries are never executed)"
+            cp "$bin_tar" "$session_dir/smoke-binary"
+            smoke_binary="$session_dir/smoke-binary"
+            smoke_triple=$triple
         fi
         rm -rf "$work"
         arch_hashes_list="$arch_hashes_list ${triple}=${tar_hash}"
@@ -416,6 +439,21 @@ check_artifacts() {
 
     # shellcheck disable=SC2086 # word splitting of the arch=hash pairs is intended
     check_pacman_artifacts "$dir" "$version" $arch_hashes_list
+}
+
+# Deferred smoke run: only reachable when every manifest check, every
+# container check for every target, and every pacman check passed.
+run_smoke() {
+    if [ "$fail" -ne 0 ]; then
+        echo "skip smoke run (validation failed; payloads are never executed)"
+        return
+    fi
+    [ -n "$smoke_binary" ] || return
+    if timeout 10 "$smoke_binary" --help >/dev/null 2>&1; then
+        record ok "smoke run: $smoke_triple binary --help exits 0 (timeout 10s)"
+    else
+        record fail "smoke run: $smoke_triple binary --help failed or timed out"
+    fi
 }
 
 if [ $# -gt 0 ]; then
@@ -434,6 +472,7 @@ else
     [ -n "$version" ] || { echo "FAIL version.sh produced no version" >&2; exit 1; }
     check_manifests "$version"
 fi
+run_smoke
 
 if [ "$fail" -ne 0 ]; then
     echo "validation failed: ${#errors[@]} problem(s)"
