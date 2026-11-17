@@ -451,6 +451,17 @@ _nkeepass_complete() {
         if [[ "$current_owner" == bin ]]; then
             local file_name='' file_path_before_current='' found_separator=false candidate
             local current_path="$current"
+            local bin_word="$current" current_quote='' whole_assignment=false
+            case "$bin_word" in
+                \'*) current_quote=single; bin_word="${bin_word:1}" ;;
+                \"*) current_quote=double; bin_word="${bin_word:1}" ;;
+            esac
+            if (( bin_value_start < 0 )) && [[ "$bin_word" == *=* ]]; then
+                file_name="${bin_word%%=*}"
+                current_path="${bin_word#*=}"
+                found_separator=true
+                whole_assignment=true
+            fi
             if (( bin_value_start >= 0 )); then
                 for ((scan = bin_value_start; scan < COMP_CWORD; scan++)); do
                     element="${COMP_WORDS[scan]}"
@@ -483,9 +494,29 @@ _nkeepass_complete() {
                 && [[ "$current_owner" == bin ]]; then
                 COMPREPLY=()
                 while IFS= read -r candidate; do
-                    COMPREPLY+=("${candidate#"$file_path_before_current"}")
+                    if [[ "$whole_assignment" == true ]]; then
+                        local assignment="$file_name=${candidate#"$file_path_before_current"}"
+                        local escaped
+                        case "$current_quote" in
+                            single) escaped="${assignment//\'/\'\\\'\'}" ;;
+                            double)
+                                escaped="${assignment//\\/\\\\}"
+                                escaped="${escaped//\$/\\$}"
+                                escaped="${escaped//\`/\\\`}"
+                                escaped="${escaped//\"/\\\"}"
+                                ;;
+                            *) printf -v escaped '%q' "$assignment" ;;
+                        esac
+                        COMPREPLY+=("$escaped")
+                    else
+                        COMPREPLY+=("${candidate#"$file_path_before_current"}")
+                    fi
                 done < <(compgen -f -- "$file_path_before_current$current_path")
-                compopt -o filenames -o nospace 2>/dev/null || true
+                if [[ "$whole_assignment" == true ]]; then
+                    compopt -o noquote -o nospace 2>/dev/null || true
+                else
+                    compopt -o filenames -o nospace 2>/dev/null || true
+                fi
                 return
             fi
         fi
@@ -1896,11 +1927,15 @@ mod tests {
                 "nkeepass set --bin payload=space",
                 vec!["set", "--bin", "payload=space name.bin"],
                 "space name.bin",
+                "default",
+                "",
             ),
             (
                 "nkeepass set --bin payload=danger-",
                 vec!["set", "--bin", "payload=danger-$(touch injected).bin"],
                 "danger-$(touch injected).bin",
+                "default",
+                "",
             ),
             (
                 "nkeepass --password-env TEST set -b payload=ticks",
@@ -1912,17 +1947,21 @@ mod tests {
                     "payload=ticks-`touch injected`.bin",
                 ],
                 "ticks-`touch injected`.bin",
+                "default",
+                "",
             ),
             (
-                "nkeepass --password-file ./credential set --bin payload=space",
+                "nkeepass set --password-file ./credential --bin payload=space",
                 vec![
+                    "set",
                     "--password-file",
                     "./credential",
-                    "set",
                     "--bin",
                     "payload=space name.bin",
                 ],
                 "space name.bin",
+                "default",
+                "",
             ),
             (
                 "nkeepass set -F Password --bin payload=apostrophe",
@@ -1934,6 +1973,8 @@ mod tests {
                     "payload=apostrophe-'single'.bin",
                 ],
                 "apostrophe-'single'.bin",
+                "default",
+                "",
             ),
             (
                 "nkeepass set --bin first=old --bin payload=semi-",
@@ -1945,30 +1986,62 @@ mod tests {
                     "payload=semi-;touch injected;.bin",
                 ],
                 "semi-;touch injected;.bin",
+                "default",
+                "",
             ),
             (
                 "nkeepass set --bin payload=equals=",
                 vec!["set", "--bin", "payload=equals=more=equals.bin"],
                 "equals=more=equals.bin",
+                "default",
+                "",
+            ),
+            (
+                "nkeepass set --bin 'payload=space",
+                vec!["set", "--bin", "payload=space name.bin"],
+                "space name.bin",
+                "default",
+                "",
+            ),
+            (
+                "nkeepass set --bin \"payload=danger-",
+                vec!["set", "--bin", "payload=danger-$(touch injected).bin"],
+                "danger-$(touch injected).bin",
+                "default",
+                "",
+            ),
+            (
+                "nkeepass set --bin payload=semi-",
+                vec!["set", "--bin", "payload=semi-;touch injected;.bin"],
+                "semi-;touch injected;.bin",
+                "exclude_equals",
+                "",
+            ),
+            (
+                "nkeepass set --bin 'payload=apostrophe",
+                vec!["set", "--bin", "payload=apostrophe-'single'.bin"],
+                "apostrophe-'single'.bin",
+                "exclude_equals",
+                "",
             ),
         ];
-        for (_, _, filename) in &cases {
+        for (_, _, filename, _, _) in &cases {
             std::fs::write(directory.path().join(filename), b"").unwrap();
         }
         let completion_path = directory.path().join("nkeepass.bash");
         std::fs::write(&completion_path, bash).unwrap();
 
-        for (line, expected_args, expected_filename) in &cases {
+        for (line, expected_args, expected_filename, wordbreaks, close_quote) in &cases {
             let script = r#"
-import os, pty, select, sys, time
-directory, completion, line, expected_args = sys.argv[1:]
+import os, pty, select, sys, time, signal
+directory, completion, line, expected_args, wordbreaks, close_quote = sys.argv[1:]
 import json
 expected_args = json.loads(expected_args)
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(directory)
     os.execvp("bash", ["bash", "--noprofile", "--norc", "-i"])
-def drain(timeout=0.5):
+def drain(timeout=0.15):
     end = time.monotonic() + timeout
     data = b""
     while time.monotonic() < end:
@@ -1977,20 +2050,33 @@ def drain(timeout=0.5):
             try: data += os.read(fd, 65536)
             except OSError: break
     return data
-drain()
+transcript = drain()
+if wordbreaks == "exclude_equals":
+    os.write(fd, b'COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"\n')
+    transcript += drain()
 os.write(fd, b"nkeepass() { printf '%s\\0' \"$@\" > args.bin; }; source " +
          completion.encode() + b"\n")
-drain()
+transcript += drain()
 os.write(fd, line.encode() + b"\t")
 result = drain()
+transcript += result
 no_match = b"\x07" in result
 if no_match:
     os.write(fd, b"\x03")
 else:
-    os.write(fd, b"\n")
-    drain()
+    os.write(fd, close_quote.encode() + b"\n")
+    transcript += drain()
 os.write(fd, b"exit\n")
-os.waitpid(pid, 0)
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    waited, _ = os.waitpid(pid, os.WNOHANG)
+    if waited == pid:
+        break
+    time.sleep(0.02)
+else:
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    raise SystemExit("timed out waiting for interactive bash; PTY transcript: " + repr(transcript))
 if no_match:
     raise SystemExit("Readline found no matching file")
 with open(os.path.join(directory, "args.bin"), "rb") as stream:
@@ -2005,6 +2091,8 @@ if actual != [arg.encode() for arg in expected_args]:
                 .arg(&completion_path)
                 .arg(line)
                 .arg(serde_json::to_string(&expected_args).unwrap())
+                .arg(wordbreaks)
+                .arg(close_quote)
                 .output()
                 .expect("python3 PTY driver should run");
             assert!(
