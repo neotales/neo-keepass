@@ -3429,6 +3429,13 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
 }
 
 fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
+    if opts.age_encrypt
+        || opts.age_decrypt
+        || !opts.age_recipients.is_empty()
+        || opts.age_identity.is_some()
+    {
+        return Err(err("age options are not supported for automation commands"));
+    }
     let unexpected = opts.field.is_some()
         || opts.name.is_some()
         || opts.output.is_some()
