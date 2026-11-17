@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 
 use neotales_keepass::{
     Attachment, Entry, Field, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxTimestamp,
-    KdbxWriteOptions, KeePassDatabase, ProtectedValue, VariantValue,
+    KdbxWriteOptions, KdbxXml, KeePassDatabase, ProtectedValue, VariantValue,
 };
 use tempfile::TempDir;
 
@@ -1876,4 +1876,165 @@ fn sync_honours_the_directive_without_touching_the_rest_of_the_vault() {
         original.password.reveal_text().unwrap().as_str(),
         ENTRY_SECRET
     );
+}
+
+#[test]
+fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
+    let mut plain = KeePassDatabase::default();
+    plain.root.entries.push(Entry::new("XML fixture"));
+    let xml = KdbxXml::export(&plain).unwrap();
+    let xml_directory = tempfile::tempdir().unwrap();
+    let xml_path = xml_directory.path().join("subset.xml");
+    std::fs::write(&xml_path, xml).unwrap();
+
+    let empty = TestVault::new("empty.kdbx", &KeePassDatabase::default());
+    let home = tempfile::tempdir().unwrap();
+    let imported = run(
+        &empty.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            xml_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    assert_eq!(load(&empty.path).root.entries[0].title, "XML fixture");
+
+    let mut protected_xml = KdbxXml::export(&plain).unwrap();
+    let marker = b"<Value>";
+    // Replacing an unprotected field marker with KeePass's protected marker
+    // checks that XML parsing rejects protected payloads before vault mutation.
+    if let Some(index) = protected_xml
+        .windows(marker.len())
+        .position(|window| window == marker)
+    {
+        protected_xml.splice(
+            index..index + marker.len(),
+            b"<Value Protected=\"True\">".iter().copied(),
+        );
+    }
+    let protected_xml_path = xml_directory.path().join("protected.xml");
+    std::fs::write(&protected_xml_path, protected_xml).unwrap();
+    let reject_protected = run(
+        &empty.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            protected_xml_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--replace",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!reject_protected.status.success());
+    assert_eq!(load(&empty.path).root.entries[0].title, "XML fixture");
+
+    let source = TestVault::new("plain.kdbx", &plain);
+    let denied_path = home.path().join("denied.xml");
+    let denied = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            denied_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!denied.status.success());
+    assert!(!denied_path.exists());
+
+    let output_path = home.path().join("allowed.xml");
+    let allowed = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert!(std::fs::read(&output_path).unwrap().starts_with(b"<?xml"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&output_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let overwrite = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!overwrite.status.success());
+
+    let mut protected = KeePassDatabase::default();
+    let mut entry = Entry::new("protected");
+    entry.password = ProtectedValue::from_text(ENTRY_SECRET);
+    protected.root.entries.push(entry);
+    let protected_vault = TestVault::new("protected.kdbx", &protected);
+    let unsupported_path = home.path().join("unsupported.xml");
+    let unsupported = run(
+        &protected_vault.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            unsupported_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!unsupported.status.success());
+    assert!(!unsupported_path.exists());
+    assert_no_disclosure(&unsupported, ENTRY_SECRET);
 }

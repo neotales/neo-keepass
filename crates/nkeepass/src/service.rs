@@ -12,7 +12,7 @@ use crate::glob::Glob;
 use crate::{automation, interchange};
 use neotales_keepass::{
     Entry, Field, Group, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxUuid, KdbxWriteOptions,
-    KeePassDatabase, KeePassXcOtp, OtpKind, OtpSecret, ProtectedValue, SecretBytes, Totp,
+    KdbxXml, KeePassDatabase, KeePassXcOtp, OtpKind, OtpSecret, ProtectedValue, SecretBytes, Totp,
     TotpParameters,
 };
 
@@ -1670,6 +1670,71 @@ impl VaultService {
         let bytes = interchange::encode(&live.database)
             .map_err(|error| AutomationError::fixed(error.message()))?;
         Ok(ExportSnapshot(bytes))
+    }
+
+    /// Exports the open database as unprotected KeePass XML.
+    ///
+    /// The core XML writer rejects protected values and public outer-header
+    /// custom data; this method preserves those fail-closed checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vault is locked or its contents cannot be
+    /// represented by the unprotected XML subset.
+    pub fn export_keepass_xml(&self) -> Result<ExportSnapshot, AutomationError> {
+        let live = self
+            .session
+            .as_ref()
+            .ok_or_else(|| AutomationError::fixed("vault is locked"))?;
+        let bytes = KdbxXml::export(&live.database).map_err(|_| {
+            AutomationError::fixed(
+                "vault contains data that the unprotected KeePass XML subset cannot represent",
+            )
+        })?;
+        Ok(ExportSnapshot(bytes.into()))
+    }
+
+    /// Replaces the open database from unprotected KeePass XML.
+    ///
+    /// XML imports are deliberately limited to the subset supported by
+    /// [`KdbxXml`]. Protected XML values and non-lossless model data fail
+    /// closed; a nonempty target requires explicit replacement authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vault is locked, XML is invalid/unsupported, or
+    /// replacement was not authorized for a nonempty target.
+    pub fn import_keepass_xml(
+        &mut self,
+        input: &[u8],
+        replace: bool,
+        dry_run: bool,
+    ) -> Result<(), AutomationError> {
+        let live = self
+            .session
+            .as_ref()
+            .ok_or_else(|| AutomationError::fixed("vault is locked"))?;
+        validate_unique_object_ids(&live.database)
+            .map_err(|error| AutomationError::fixed(error.message()))?;
+        let database = KdbxXml::import(input, &crate::KDBX_LIMITS)
+            .map_err(|_| AutomationError::fixed("invalid or unsupported KeePass XML"))?;
+        validate_unique_object_ids(&database)
+            .map_err(|error| AutomationError::fixed(error.message()))?;
+        validate_unique_field_names(&database)
+            .map_err(|error| AutomationError::fixed(error.message()))?;
+        if !replace && !automation::tree_is_empty(&live.database) {
+            return Err(AutomationError::fixed(
+                "target vault is not empty; use --replace to authorize replacement",
+            ));
+        }
+        if !dry_run {
+            self.session
+                .as_mut()
+                .ok_or_else(|| AutomationError::fixed("vault is locked"))?
+                .database = database;
+            self.invalidate_references();
+        }
+        Ok(())
     }
 
     /// Merges a complete bounded interchange snapshot into the live session

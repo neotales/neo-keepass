@@ -59,6 +59,12 @@ decrypts armored or binary age input before updating the field. Identity files
 may contain native age identities or unencrypted SSH private keys. Encrypted
 SSH identities are not supported yet.
 
+KeePass XML is an explicit limited interchange format, not the default JSON
+snapshot format. Export requires `--format keepass-xml --allow-plaintext` and
+refuses vaults containing protected values (including ordinary passwords).
+See [the KeePass XML interchange notes](docs/keepass-xml-interchange.md) for
+limits and security behavior.
+
 ## Workspace layout
 
 - `crates/nkeepass/` — CLI/TUI application and integration tests.
