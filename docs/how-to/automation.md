@@ -6,14 +6,36 @@ Protect them like the vault itself and avoid printing their contents.
 
 ## Set fields from JSON
 
-Create a JSON file with the fields to set. Then run:
+Create `entry.json` with the fields to set. This example contains only public
+sample data:
+
+```json
+{
+  "fields": [
+    {
+      "key": "UserName",
+      "value": "demo-user"
+    },
+    {
+      "key": "Environment",
+      "value": "example",
+      "protected": false,
+      "protect_in_memory": false
+    }
+  ]
+}
+```
+
+Apply the document:
 
 ```sh
-nkeepass secrets setx --key 'Services/Example' --file entry.json
+nkeepass secrets setx --key 'Demo/Example' --file entry.json
 ```
 
 The CLI validates the bounded JSON input and applies the selected fields as
-one update. Add `--dry-run` to validate and report without saving.
+one update. The entry must already exist. Add `--dry-run` to validate and
+report without saving. The complete schema and size limits are in the
+[setx reference](../reference/automation.md#setx).
 
 ## Export a snapshot
 

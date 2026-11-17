@@ -1,5 +1,10 @@
 # Attachments, groups, and custom fields
 
+These routes accept the shared vault credential options described in
+[vault credentials](credentials.md).
+Each route also accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may
+precede the command.
+
 ## Attachments
 
 The group name is `attachment`. `attachments` is an alias.
@@ -96,8 +101,9 @@ Reveals one custom field. The format defaults to `text`; supported formats
 match `secrets get`. Named formats require `--name`. `--is-output` is valid
 only for `azure-devops`. `reveal` aliases `get`.
 
-`field get` does not accept age options. Its generated help currently lists
-the shared `get` flags, but the command rejects them. Use
+`field get` does not accept `--age-encrypt`, `-r` or `--age-recipient`, or
+`--output`. Its generated help lists those inherited `get` flags, but the
+command rejects them. Use
 `nkeepass secrets get --key PATH --field FIELD --age-encrypt ...` when you
 need encrypted output.
 
@@ -110,9 +116,9 @@ nkeepass field set --key PATH --field FIELD (--file PATH | --stdin)
 Reads one value and sets the custom field. Exactly one input source is
 required. `edit` aliases `set`.
 
-`field set` does not accept age options. Its generated help currently lists
-the shared `set` flags, but the command rejects age decryption for this
-route. To decrypt input before updating a custom field, use
+`field set` does not accept `--age-decrypt`, `-i`, or `--age-identity`. Its
+generated help lists those inherited `set` flags, but the command rejects
+them. To decrypt input before updating a custom field, use
 `nkeepass secrets set --key PATH --field FIELD --age-decrypt
 --age-identity PATH --file CIPHERTEXT`.
 

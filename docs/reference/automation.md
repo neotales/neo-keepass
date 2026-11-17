@@ -3,6 +3,10 @@
 The `automation` group provides `setx`, `import`, `export`, and `sync`.
 The same operations are available as `secrets` subcommands and root
 shortcuts. Inputs are bounded; interchange files can contain secret values.
+These routes accept the shared vault credential options described in
+[vault credentials](credentials.md).
+Each route also accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may
+precede the command.
 
 ## `setx`
 
@@ -13,6 +17,35 @@ nkeepass automation setx --key PATH (--file PATH | --stdin) [--dry-run]
 Reads bounded JSON and sets the entry's exact supplied fields as one update.
 Exactly one input source is required. `--dry-run` validates and reports
 without saving. `--key` is required.
+
+The document has one required top-level property, `fields`. Its value is a
+non-empty array of objects. Every object requires a string `key` and string
+`value`. The optional `protected` and `protect_in_memory` properties are
+booleans. Unknown properties are rejected at both object levels. Field keys
+must be unique and non-empty.
+
+```json
+{
+  "fields": [
+    {
+      "key": "UserName",
+      "value": "demo-user"
+    },
+    {
+      "key": "Environment",
+      "value": "example",
+      "protected": false,
+      "protect_in_memory": false
+    }
+  ]
+}
+```
+
+The file may be at most 1 MiB and nesting may not exceed 8 levels. A document
+may contain 1 to 256 fields. Each key is limited to 16 KiB of text, and each
+value is limited to 1 MiB. If `protected` is omitted, password and custom
+fields default to protected while `UserName`, `URL`, and `Notes` default to
+unprotected. If `protect_in_memory` is omitted, it uses the `protected` value.
 
 ## `import`
 

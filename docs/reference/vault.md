@@ -2,23 +2,31 @@
 
 These commands select a vault and manage names for vaults or entries. Vault
 selection follows the precedence in [choose the active vault](../how-to/vault-selection.md).
+Every route accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may precede
+the command. Credential flags apply to `init` as listed in
+[vault credentials](credentials.md).
 
 ## `init`
 
 Create a KDBX 4.1 vault.
 
 ```text
-nkeepass init [PATH] [--size N] [--kdf aes|argon2d|argon2id]
+nkeepass [--vault PATH] init [PATH] [--size N] [--kdf aes|argon2d|argon2id]
               [--memory KIB] [--iterations N] [--parallelism N]
 ```
 
 If `PATH` is omitted, the selected vault path is used. Init refuses to
 overwrite an existing vault. A positional relative `PATH` is resolved from
 the current working directory. If you pass both a positional path and
-`--vault`, init refuses the ambiguous target. After creation, init selects the
-new vault as the current context when no explicit target was supplied.
-Without an explicit credential source or `NKEEPASS_PASSWORD`, init prompts
-without echo.
+`--vault`, init refuses the ambiguous target. After creation, init tries to
+select the new vault only when no current context is set. It does not replace
+a context you already chose. If init selects the new vault, the JSON result
+has `"context_set": true`; otherwise it has `"context_set": false`. With no
+explicit target, init uses or creates the `default` vault alias unless that
+name already refers elsewhere. An explicit target can become the current
+value when no context exists.
+See [vault credentials](credentials.md) for credential sources, key files,
+and their conflicts.
 
 | Option | Meaning |
 | --- | --- |
@@ -27,13 +35,14 @@ without echo.
 | `--password-file PATH` | Read one password line from a file. |
 | `--key-file PATH` | Add a key-file credential component. |
 | `--password VALUE` | Compatibility option. Exposes the password in process listings and shell history. |
-| `--size N` | Generate an N-character password for a new entry. Does not generate the master password. |
+| `--size N` | Generate a 1 to 4096 character password for a new entry. Does not generate the master password. |
 | `--kdf aes\|argon2d\|argon2id` | Select the KDF. Default is `aes`. |
-| `--memory KIB` | Set Argon2 memory cost. Only valid with Argon2. |
-| `--iterations N` | Set AES rounds or Argon2 time cost, according to the KDF. |
-| `--parallelism N` | Set Argon2 lanes. Only valid with Argon2. |
+| `--memory KIB` | Set Argon2 memory cost from 1 to 65,536 KiB. Default is 65,536 KiB. Only valid with Argon2. |
+| `--iterations N` | Set AES rounds from 1 to 100,000,000 or Argon2 time cost from 1 to 10. Defaults are 600,000 AES rounds or 10 Argon2 passes. |
+| `--parallelism N` | Set Argon2 lanes from 1 to 16. Default is 1. Only valid with Argon2. |
 
-The CLI rejects KDF values outside its own read policy. On password-only init,
+The CLI rejects KDF values outside its own read policy. The Argon2 memory,
+time, and combined-work limits apply together. On password-only init,
 it writes an age-encrypted password backup after creating the vault. The
 identity needed to decrypt the backup is stored separately. A backup failure
 does not remove the vault. Secure owner-only writes are unsupported on

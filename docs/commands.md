@@ -41,6 +41,8 @@ Root `get`, `getx`, `search`, `show`, `set`, `ensure`, `otp`, `setx`,
 `import`, `export`, `sync`, and `env` are shortcuts for the same `secrets`
 subcommand. The aliases `field-get`, `field-set`, and `attachment-add` are
 internal dispatch action names, not public command routes.
+`__complete` is a private protocol used by generated shell completion, not a
+public command.
 
 Entry selection has one option spelling: `--key PATH`. `PATH` may be an entry
 path or a configured entry alias. There is no `--entry`, `--selector`, or

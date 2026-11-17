@@ -1,5 +1,9 @@
 # Configuration, child processes, completion, and root commands
 
+Every route accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may precede
+the command. Password flags are available only on credential routes. See
+[vault credentials](credentials.md) for the exact route matrix.
+
 ## `tui`
 
 ```text
@@ -8,7 +12,9 @@ nkeepass tui PATH
 
 Opens the interactive terminal browser for the supplied vault path. This
 command requires exactly one path argument. It does not use the active-vault
-selection; pass the path to the vault you want to open.
+selection; pass the path to the vault you want to open. The global `--vault`
+flag is accepted before `tui` but does not replace the required positional
+path.
 
 ## `config`
 
@@ -21,6 +27,21 @@ nkeepass config ls [GLOB] [--json]
 Lists supported configuration keys and values. `--json` emits one JSON
 record per key. `list` aliases `ls`.
 
+The only keys are `aliases`, `current`, and `default_vault`. `aliases` is a
+map managed by the `alias` commands; each record has a `kind` (`vault` or
+`entry`), a string `target`, and an optional string `field`. `config set
+aliases ...` and `config rm aliases` are refused. Alias names contain at most
+128 ASCII letters, digits, hyphens, or underscores.
+
+`current` and `default_vault` are optional string vault selectors. Each must
+be an absolute normalized vault path or an existing vault alias. Empty values
+and paths containing terminal-control characters are refused.
+
+In text output, an unset scalar appears as its key alone. In `--json` output,
+an unset scalar has a `null` value. The `aliases` value is a map in JSON
+listing output. `config get aliases` prints one JSON record per alias;
+use `alias ls`, `alias set`, or `alias rm` to manage entries.
+
 ### `config get`
 
 ```text
@@ -28,6 +49,8 @@ nkeepass config get KEY
 ```
 
 Prints one configured scalar value. `show` aliases `get`.
+The key must be `current` or `default_vault`. `aliases` is map-valued and
+cannot be read as one scalar.
 
 ### `config set`
 
@@ -36,7 +59,9 @@ nkeepass config set KEY VALUE
 ```
 
 Sets one supported configuration value. Unknown or invalid keys fail rather
-than being added.
+than being added. Only `current` and `default_vault` are scalar settings.
+Each value must resolve to an absolute normalized vault path or an existing
+vault alias. Use `context` or `alias` commands for alias management.
 
 ### `config rm`
 
@@ -44,7 +69,8 @@ than being added.
 nkeepass config rm KEY
 ```
 
-Clears one configured scalar value. `remove` aliases `rm`.
+Clears a set `current` or `default_vault` value. It fails when the scalar is
+unset. `aliases` is managed with `alias` commands. `remove` aliases `rm`.
 
 ## `exec`
 
@@ -54,16 +80,39 @@ nkeepass exec [--key PATH [--field FIELD] --env NAME]...
 ```
 
 Each binding selects an entry and maps one field to a child environment
-variable. Repeat the binding sequence for more values. Omit `--field` to use
-the command's default field. The `--` separator marks the child command and
-its arguments.
+variable. At least one `--key` binding is required, and each binding needs
+exactly one matching `--env NAME`. Repeat the binding sequence for more
+values. Omit `--field` to select the `Password` field. Set `--field otp` to
+pass a TOTP code instead; HOTP is refused. The `--` separator marks the child
+command and its arguments.
 
-Credential options are `--password-env NAME`, `--password-stdin`,
-`--password-file PATH`, `--key-file PATH`, and the unsafe compatibility
-option `--password VALUE`. The child receives a fixed allowlist of environment
+See [vault credentials](credentials.md) for accepted password sources and
+their precedence. The child receives a fixed allowlist of environment
 variables, not the full parent environment. `NKEEPASS_*` variables are not
 passed through. The selected secret is visible to the child and to processes
-it starts, so run only trusted programs. `x` aliases `exec`.
+it starts, so run only trusted programs. The CLI refuses an output variable
+that already exists in the parent environment. Names must be unique and use
+ASCII letters, digits, and underscores; the first character must be a letter
+or underscore. `NKEEPASS_PASSWORD` and the environment variable selected by
+`--password-env` are reserved.
+
+This example uses the public `demo-user` value from the tutorial. It prompts
+for the vault password without placing it in the command. Run it in Bash:
+
+```bash
+(
+  read -r -s -p 'Vault master password: ' DEMO_MASTER
+  printf '\n'
+  export DEMO_MASTER
+  unset DEMO_USERNAME
+  nkeepass exec --key 'Demo/Example' --field UserName --env DEMO_USERNAME \
+    --password-env DEMO_MASTER -- \
+    sh -c 'printf "%s\n" "$DEMO_USERNAME"'
+)
+```
+
+The child prints `demo-user`. The subshell keeps `DEMO_MASTER` out of the
+parent shell after the command exits. `x` aliases `exec`.
 
 ## `completion`
 
@@ -107,6 +156,11 @@ These root commands are shortcuts for `secrets` commands:
 | `sync` | `secrets sync` |
 | `env` | `secrets env` |
 
+Each shortcut accepts the same command-specific flags as its `secrets`
+equivalent, along with the shared flags and credential options listed in
+[vault credentials](credentials.md). The operation rejects flags that do not
+apply to it.
+
 ## Global flags
 
 `-h` and `--help` print help for the selected command. `-V PATH` and
@@ -115,8 +169,6 @@ version information. The only other short options are `-r` for
 `--age-recipient` and `-i` for `--age-identity`. Other options use their
 long spelling.
 
-`--password-env NAME` and `--password-stdin` select the master password
-source. `NKEEPASS_PASSWORD` is the default environment source; an explicit
-source takes precedence. `NKEEPASS_SECRET` is not an alias. Password prompts
-do not echo. Do not use `--password VALUE` for real credentials because
-process listings and shell history can expose it.
+Password options are available only on vault-opening or vault-creation
+commands. See [vault credentials](credentials.md) for route coverage,
+precedence, stdin conflicts, and safe source choices.

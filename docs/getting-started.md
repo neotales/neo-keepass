@@ -7,10 +7,12 @@ command line.
 Use a new directory so `init` cannot affect an existing vault:
 
 ```sh
-mkdir -p "$HOME/nkeepass-demo"
+mkdir "$HOME/nkeepass-demo"
 chmod 700 "$HOME/nkeepass-demo"
 nkeepass init "$HOME/nkeepass-demo/demo.kdbx"
 ```
+
+If that directory already exists, choose another new name.
 
 Type a strong master password at the prompt. On success, the vault is created
 at the path you supplied. `init` refuses to overwrite an existing vault.
@@ -28,16 +30,19 @@ nkeepass --vault "$HOME/nkeepass-demo/demo.kdbx" \
 The command creates `Demo/Example` if it does not exist. It does not replace
 an existing entry.
 
-Set a sample username. `set` reads the field value from stdin, so it does not
-appear in shell history:
+Set a sample username from a file. This leaves stdin attached to the terminal
+for the hidden master-password prompt:
 
 ```sh
-printf '%s' 'demo-user' | nkeepass --vault "$HOME/nkeepass-demo/demo.kdbx" \
-  secrets set --key 'Demo/Example' --field UserName --stdin
+printf '%s' 'demo-user' > "$HOME/nkeepass-demo/username.txt"
+nkeepass --vault "$HOME/nkeepass-demo/demo.kdbx" \
+  secrets set --key 'Demo/Example' --field UserName \
+  --file "$HOME/nkeepass-demo/username.txt"
 ```
 
-The command prompts for the master password. The field is stored in the vault.
-This sample value is public test data, not a credential.
+The command prompts for the master password and stores the field in the vault.
+This sample value is public test data, not a credential. If your environment
+sets `NKEEPASS_PASSWORD`, the CLI uses it instead of prompting.
 
 Read it back:
 

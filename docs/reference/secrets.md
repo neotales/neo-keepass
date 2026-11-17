@@ -3,11 +3,14 @@
 Every command below operates on the selected vault. Use `--key PATH` to
 select an entry. A key can be a slash-separated entry path or an entry alias.
 Use `--field FIELD` where a command reads or changes one field.
+Every route accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may precede
+the command. The shared credential flags also apply. See
+[vault credentials](credentials.md) for the complete flag set and placement.
 
 Entry path segments match ASCII case-insensitively. You may include or omit
 the root group name. The CLI rejects `.` and `..`, empty segments, and
-ambiguous matches. It also refuses a selector that collides with an entry
-alias.
+ambiguous matches. If a selector is also an entry alias name but resolves to
+a different existing entry path, the CLI refuses it as ambiguous.
 
 ## List and search
 
@@ -58,6 +61,11 @@ Named formats validate variable names and values before writing output.
 `--is-output` applies only to `azure-devops`. Output goes to stdout and
 contains the selected values. Treat it as plaintext secret output.
 
+With `--format json`, `env` prints a JSON object whose property names are the
+requested `--name` values and whose values are the selected text. With
+`--format null`, it writes each name, a NUL byte, the value, and another NUL
+byte. `null` means NUL-delimited output, not suppressed output.
+
 ## Read selected values
 
 ### `secrets get`
@@ -74,9 +82,12 @@ Named formats require `--name NAME`. `--is-output` is valid only with
 `azure-devops`.
 
 `--age-encrypt` requires one or more recipients via repeated `-r` or
-`--age-recipient`. `--output PATH` writes ciphertext to a private, no-clobber
-file; otherwise ciphertext goes to stdout. Without encryption, the selected
-value is printed as plaintext. Do not route it to logs.
+`--age-recipient`. Age encryption requires the `text` format, which is also
+the default. Do not combine it with `--name` or `--is-output`. `--output PATH`
+is valid only with `--age-encrypt`; it writes ciphertext to a private,
+no-clobber file. Without `--output`, ciphertext goes to stdout. Without age
+encryption, the selected value is printed as plaintext. Do not route it to
+logs.
 
 ### `secrets getx`
 
@@ -84,8 +95,13 @@ value is printed as plaintext. Do not route it to logs.
 nkeepass secrets getx --key PATH [--field FIELD] [--format json]
 ```
 
-Reveals selected data as JSON. `--field` defaults to `Password`. Only JSON
-format is accepted. It does not accept `--name` or `--is-output`.
+Reveals the selected field as a JSON object of the form
+`{"value":"field text"}`. `--field` defaults to `Password`. Only JSON format
+is accepted. It does not accept `--name` or `--is-output`.
+
+For `get`, `--format json` has the same `{"value":"field text"}` shape.
+`--format null` writes the field bytes followed by one NUL byte. It does not
+suppress output.
 
 ### `secrets otp`
 
@@ -94,8 +110,9 @@ nkeepass secrets otp --key PATH [--format FORMAT] [--name NAME] [--is-output]
 ```
 
 Generates and prints a TOTP code. It does not reveal the seed and refuses
-HOTP entries. `--format` defaults to `text`; named formats require `--name`.
-`--is-output` requires `azure-devops`.
+HOTP entries. `--format` defaults to `text`; the other formats are `json`,
+`null`, and the named formats listed for `secrets get`. Named formats require
+`--name`. `--is-output` requires `azure-devops`.
 
 ## Change entries and fields
 
@@ -103,15 +120,15 @@ HOTP entries. `--format` defaults to `text`; named formats require `--name`.
 
 ```text
 nkeepass secrets set --key PATH [--field FIELD] (--file PATH | --stdin)
-  [--age-decrypt --age-identity PATH]
+  [--age-decrypt -i PATH]
 ```
 
 Reads one value from a file or stdin and updates the selected field. Exactly
 one input source is required. `--field` defaults to `Password`. With
-`--age-decrypt`, the input must be age ciphertext and `--age-identity` is
-required. The CLI supports native age identities and unencrypted SSH private
-keys, not encrypted SSH keys. This command saves the vault; malformed input or
-credential failures prevent the update.
+`--age-decrypt`, the input must be age ciphertext and `-i` or
+`--age-identity PATH` is required. The CLI supports native age identities and
+unencrypted SSH private keys, not encrypted SSH keys. This command saves the
+vault; malformed input or credential failures prevent the update.
 
 ### `secrets ensure`
 
@@ -120,8 +137,8 @@ nkeepass secrets ensure --key PATH [--size N] [--dry-run]
 ```
 
 Creates a missing entry and its parent groups, but keeps an existing entry
-unchanged. `--size N` generates the new entry's password. `--dry-run`
-validates and reports without saving.
+unchanged. `--size N` generates a 1 to 4096 character password for the new
+entry. `--dry-run` validates and reports without saving.
 
 ### `secrets rm`
 
@@ -133,6 +150,51 @@ Removes an entry. This command refuses `--field`; it does not delete a field.
 `--yes` is required unconditionally. The command does not prompt. To remove a
 custom field, use `field rm`.
 
+## Interchange commands
+
+These commands have the same behavior as the matching `automation`
+subcommands. The shared credential flags also apply.
+
+### `secrets setx`
+
+```text
+nkeepass secrets setx --key PATH (--file PATH | --stdin) [--dry-run]
+```
+
+Reads bounded JSON for one existing entry and applies its fields as one
+update. Exactly one input source is required. `--dry-run` validates and
+reports without saving. See the [setx JSON schema and example](automation.md#setx).
+
+### `secrets import`
+
+```text
+nkeepass secrets import (--file PATH | --stdin) [--replace] [--dry-run]
+```
+
+Reads an interchange snapshot. Exactly one input source is required.
+`--replace` permits replacing a non-empty vault. `--dry-run` validates and
+reports without saving.
+
+### `secrets export`
+
+```text
+nkeepass secrets export --output PATH
+```
+
+Writes an interchange snapshot to a private, no-clobber file. `--output` is
+required, and an existing destination is not overwritten.
+
+### `secrets sync`
+
+```text
+nkeepass secrets sync (--file PATH | --stdin)
+  [--strategy newest|source] [--dry-run]
+```
+
+Synchronizes an interchange snapshot with the vault. Exactly one input source
+is required. `--strategy` defaults to `newest`; `source` is the other
+accepted value. `--dry-run` reports without saving.
+
 ## Output formats and credentials
 
 Named formats emit a variable name and a value. Names must meet the target
@@ -140,13 +202,9 @@ format's rules. Azure DevOps output requires `--is-output` to mark an output
 variable. The CLI rejects disallowed line breaks and heredoc delimiters rather
 than producing malformed output.
 
-Vault credentials use the global options `--password-env NAME` and
-`--password-stdin`, or the `NKEEPASS_PASSWORD` environment variable, then a
-non-echoing prompt when no source is set. Commands that expose credential
-options also accept `--password-file PATH` and `--key-file PATH`.
-`--password VALUE` is unsafe because process listings and shell history may
-expose it. Do not combine `--password-stdin` with `--stdin`; stdin cannot
-carry both the master password and a value.
+These commands accept the shared vault credential options. See
+[vault credentials](credentials.md) for source precedence, route availability,
+and the `--password-stdin` versus `--stdin` conflict.
 
 ## Aliases
 
