@@ -107,7 +107,8 @@ the clipboard is conditionally cleared after 30 seconds only if its ownership
 sequence still matches this write. Other desktop backends do not provide a
 safe atomic clear, so the value may remain according to that backend's
 clipboard behavior. Clipboard failures and partial writes use static
-diagnostics; no selected value is written to stdout or included in errors.
+diagnostics; a failed timed clear explicitly warns that the copied secret may
+remain. No selected value is written to stdout or included in errors.
 
 ### `secrets getx`
 

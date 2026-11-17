@@ -3079,6 +3079,11 @@ fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
         ClipboardCopyOutcome::MayHaveCopied => {
             return Err(err("clipboard write may have been incomplete"));
         }
+        ClipboardCopyOutcome::TimedClearFailed => {
+            return Err(err(
+                "clipboard could not be cleared; the copied secret may remain",
+            ));
+        }
         ClipboardCopyOutcome::Copied => {}
     }
     if !cfg!(windows) && !cfg!(target_os = "linux") {

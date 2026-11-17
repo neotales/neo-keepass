@@ -36,6 +36,7 @@ pub(crate) enum ClipboardCopyOutcome {
     Copied,
     MayHaveCopied,
     RejectedNul,
+    TimedClearFailed,
 }
 
 /// Small injectable surface used by the lease and its tests.
@@ -231,7 +232,9 @@ where
     if lease.has_lease() && (owner_must_live || lease.supports_timed_clear()) {
         wait(ttl);
         if lease.supports_timed_clear() {
-            let _ = lease.tick(Instant::now() + ttl)?;
+            if lease.tick(Instant::now() + ttl).is_err() {
+                return Ok(ClipboardCopyOutcome::TimedClearFailed);
+            }
         }
     }
     Ok(outcome)
@@ -512,5 +515,22 @@ mod tests {
             Ok(ClipboardCopyOutcome::MayHaveCopied)
         );
         assert!(waited);
+    }
+
+    #[test]
+    fn timed_clear_failure_reports_that_the_copy_may_remain() {
+        let outcome = copy_with_lifetime(
+            MockClipboard {
+                timed_clear: true,
+                fail_clear: true,
+                ..MockClipboard::default()
+            },
+            Zeroizing::new("secret".to_owned()),
+            Duration::from_secs(30),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome, ClipboardCopyOutcome::TimedClearFailed);
     }
 }

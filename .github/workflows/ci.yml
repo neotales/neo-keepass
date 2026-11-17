@@ -22,6 +22,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  completion-interpreters:
+    name: completion interpreters (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    env:
+      NKEEPASS_REQUIRE_COMPLETION_SHELLS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zsh=5.9-6ubuntu2
+          zsh --version | grep -F 'zsh 5.9'
+      - name: Require pinned runner PowerShell
+        run: >-
+          pwsh -NoProfile -Command 'if ($PSVersionTable.PSVersion.Major -ne 7)
+          { throw "PowerShell 7 is required for completion validation" };
+          $PSVersionTable.PSVersion.ToString()'
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+      - name: Run generated shell syntax tests
+        run: cargo test -p nkeepass --bin nkeepass generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed
+
   rsa-slow-lane:
     name: RSA 16,384-bit slow lane
     runs-on: ubuntu-24.04

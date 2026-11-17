@@ -697,6 +697,10 @@ fn copy_password(app: &mut App) {
         Ok(ClipboardCopyOutcome::RejectedNul) => {
             app.status = "Password contains NUL; it was not copied".into();
         }
+        Ok(ClipboardCopyOutcome::TimedClearFailed) => {
+            app.clipboard_may_contain_password = true;
+            app.status = "Clipboard could not be cleared; the copied password may remain".into();
+        }
         Err(_) => app.status = "Clipboard unavailable; password was not copied".into(),
     }
 }

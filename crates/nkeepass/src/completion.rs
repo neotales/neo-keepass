@@ -363,62 +363,129 @@ _nkeepass_complete() {
     local index=1 element position
     local -a vault_args=()
     current="${COMP_WORDS[COMP_CWORD]}"
-    local file_name='' file_path='' file_prefix='' bin_index=-1
-    local route_command='' route_action='' scan=1 argument_context=true
+    local route_command='' route_action='' command_index=-1 action_index=-1
+    local scan=1 option_value
     while (( scan < COMP_CWORD )); do
         element="${COMP_WORDS[scan]}"
-        if [[ "$element" == -- ]]; then
-            argument_context=false
-            break
-        fi
+        [[ "$element" == -- ]] && break
         if [[ -z "$route_command" ]]; then
             case "$element" in
                 --vault|-V|--password|--password-env|--password-file|--key-file)
-                    ((scan += 2))
-                    continue
-                    ;;
-                --password-stdin)
                     ((scan++))
+                    if (( scan < COMP_CWORD )); then
+                        ((scan++))
+                        while (( scan + 1 < COMP_CWORD )) && [[ "${COMP_WORDS[scan]}" == = ]]; do
+                            ((scan += 2))
+                        done
+                    fi
                     continue
                     ;;
-                *) route_command="$element" ;;
+                --password-stdin) ((scan++)); continue ;;
             esac
-        elif [[ "$route_command" == secrets && -z "$route_action" ]]; then
-            route_action="$element"
+            route_command="$element"
+            command_index=$scan
+            ((scan++))
+            if [[ "$route_command" == secrets ]]; then
+                (( scan < COMP_CWORD )) || break
+                route_action="${COMP_WORDS[scan]}"
+                action_index=$scan
+                ((scan++))
+            fi
+            break
         fi
-        if [[ "$element" == --bin || "$element" == -b ]]; then
-            bin_index=$scan
-        fi
-        ((scan++))
     done
-    if [[ "$route_command" == secrets && "$route_action" == set ]] \
-        || [[ "$route_command" == set && -z "$route_action" ]]; then
-        if [[ "$current" == *=* ]]; then
-            file_name="${current%%=*}"
-            file_path="${current#*=}"
-            file_prefix="$file_name="
-        elif (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == = ]]; then
-            file_name="${COMP_WORDS[COMP_CWORD - 2]-}"
-            file_path="$current"
-            file_prefix=''
+
+    local args_index=$((command_index + 1))
+    if [[ "$route_command" == secrets ]]; then
+        args_index=$((action_index + 1))
+    fi
+    local pending_owner='' value_owner='' value_start=-1 last_value_equals=false
+    local bin_value_start=-1
+    if { [[ "$route_command" == set && -z "$route_action" ]] \
+        || [[ "$route_command" == secrets && "$route_action" == set ]]; } \
+        && (( command_index >= 0 )); then
+        for ((scan = args_index; scan < COMP_CWORD; scan++)); do
+            element="${COMP_WORDS[scan]}"
+            if [[ -n "$pending_owner" ]]; then
+                value_owner="$pending_owner"
+                pending_owner=''
+                value_start=$scan
+                last_value_equals=false
+                if [[ "$value_owner" == bin ]]; then
+                    bin_value_start=$scan
+                fi
+                continue
+            fi
+            if [[ "$element" == = && -n "$value_owner" ]]; then
+                last_value_equals=true
+                continue
+            fi
+            if [[ "$last_value_equals" == true && -n "$value_owner" ]]; then
+                last_value_equals=false
+                continue
+            fi
+            value_owner=''
+            case "$element" in
+                --) break ;;
+                --bin|-b) pending_owner=bin ;;
+                --key|-k) pending_owner=key ;;
+                --field|-F) pending_owner=field ;;
+                --file|-f) pending_owner=file ;;
+                --username) pending_owner=username ;;
+                --url) pending_owner=url ;;
+                --notes) pending_owner=notes ;;
+                --password) pending_owner=password ;;
+                --password-env) pending_owner=password-env ;;
+                --password-file) pending_owner=password-file ;;
+                --key-file) pending_owner=key-file ;;
+                --age-identity|-i) pending_owner=age-identity ;;
+                --age-recipient|-r) pending_owner=age-recipient ;;
+                --output) pending_owner=output ;;
+            esac
+        done
+
+        local current_owner="$pending_owner"
+        if [[ -z "$current_owner" ]]; then
+            current_owner="$value_owner"
         fi
-        if (( bin_index >= 0 )) && [[ "$argument_context" == true ]] \
-            && [[ -n "$file_name" ]] && [[ "$current" != --* ]]; then
-            local file_arg=true
-            for ((scan = bin_index + 1; scan < COMP_CWORD; scan++)); do
-                case "${COMP_WORDS[scan]}" in
-                    --bin|-b|--notes|--username|--url|--file|--stdin|--key|--field|--)
-                        file_arg=false
-                        ;;
-                esac
-            done
-            if [[ "$file_arg" == true ]]; then
-                local candidate
+        if [[ "$current_owner" == bin ]]; then
+            local file_name='' file_path_before_current='' found_separator=false candidate
+            local current_path="$current"
+            if (( bin_value_start >= 0 )); then
+                for ((scan = bin_value_start; scan < COMP_CWORD; scan++)); do
+                    element="${COMP_WORDS[scan]}"
+                    if [[ "$found_separator" == false ]]; then
+                        if [[ "$element" == *=* ]]; then
+                            file_name="${element%%=*}"
+                            file_path_before_current="${element#*=}"
+                            found_separator=true
+                        elif [[ "$element" == = ]]; then
+                            file_name="${COMP_WORDS[scan - 1]-}"
+                            found_separator=true
+                        fi
+                    elif [[ "$element" == = ]]; then
+                        file_path_before_current+="="
+                    else
+                        file_path_before_current+="$element"
+                    fi
+                done
+            fi
+            if [[ "$current" == = ]]; then
+                current_path=''
+                if [[ "$found_separator" == false ]] && (( bin_value_start > 0 )); then
+                    file_name="${COMP_WORDS[COMP_CWORD - 1]-}"
+                    found_separator=true
+                else
+                    file_path_before_current+="="
+                fi
+            fi
+            if [[ "$found_separator" == true ]] && [[ "$current" != --* ]] \
+                && [[ "$current_owner" == bin ]]; then
                 COMPREPLY=()
                 while IFS= read -r candidate; do
-                    COMPREPLY+=("$file_prefix$candidate")
-                done < <(compgen -f -- "$file_path")
-                compopt -o nospace 2>/dev/null || true
+                    COMPREPLY+=("${candidate#"$file_path_before_current"}")
+                done < <(compgen -f -- "$file_path_before_current$current_path")
+                compopt -o filenames -o nospace 2>/dev/null || true
                 return
             fi
         fi
@@ -604,7 +671,7 @@ _nkeepass_complete() {
     esac
     COMPREPLY=( $(compgen -W "$choices" -- "$current") )
 }
-complete -F _nkeepass_complete nkeepass
+complete -o filenames -F _nkeepass_complete nkeepass
 "#;
 
 const POSIX_SH: &str = r#"# Static nkeepass completion for POSIX sh. Dynamic queries return metadata only and never secrets.
@@ -1662,7 +1729,8 @@ mod tests {
         assert!(bash.contains("position -eq 1"));
         assert!(bash.contains("position -eq 3"));
         assert!(bash.contains("__complete vaults \"$current\""));
-        assert!(bash.contains("COMP_WORDS[COMP_CWORD - 2]"));
+        assert!(bash.contains("compopt -o filenames -o nospace"));
+        assert!(bash.contains("COMP_WORDS[scan - 1]"));
 
         let sh = generate("sh").unwrap();
         assert!(sh.contains("VAULT_OPTION VAULT_PATH"));
@@ -1755,12 +1823,20 @@ mod tests {
     #[test]
     fn generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed() {
         let directory = tempfile::tempdir().unwrap();
+        let require_interpreters = std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some();
+        let zsh_available = std::process::Command::new("zsh")
+            .arg("--version")
+            .output()
+            .is_ok();
+        if !zsh_available {
+            eprintln!("SKIP: zsh completion syntax test; zsh is not installed");
+            assert!(
+                !require_interpreters,
+                "required zsh interpreter is unavailable"
+            );
+        }
         for (shell, script, arguments) in [("zsh", generate("zsh").unwrap(), vec!["-n"])] {
-            if std::process::Command::new(shell)
-                .arg("--version")
-                .output()
-                .is_ok()
-            {
+            if zsh_available {
                 let path = directory.path().join("completion.zsh");
                 std::fs::write(&path, script).unwrap();
                 let output = std::process::Command::new(shell)
@@ -1783,6 +1859,13 @@ mod tests {
                 .status()
                 .is_ok()
         });
+        if shell.is_none() {
+            eprintln!("SKIP: PowerShell completion syntax test; pwsh is not installed");
+            assert!(
+                !require_interpreters,
+                "required PowerShell interpreter is unavailable"
+            );
+        }
         if let Some(shell) = shell {
             let path = directory.path().join("completion.ps1");
             std::fs::write(&path, generate("powershell").unwrap()).unwrap();
@@ -1803,51 +1886,164 @@ mod tests {
     }
 
     #[test]
-    fn bash_binary_completion_preserves_prefix_and_rejects_non_set_contexts() {
+    #[cfg(unix)]
+    fn bash_binary_completion_uses_readline_quoting_for_hostile_filenames() {
         let bash = generate("bash").unwrap();
-        let Ok(directory) = tempfile::tempdir() else {
-            panic!("temporary directory should be available");
-        };
-        std::fs::write(directory.path().join("payload-one.bin"), b"").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("injected");
+        let cases = [
+            (
+                "nkeepass set --bin payload=space",
+                vec!["set", "--bin", "payload=space name.bin"],
+                "space name.bin",
+            ),
+            (
+                "nkeepass set --bin payload=danger-",
+                vec!["set", "--bin", "payload=danger-$(touch injected).bin"],
+                "danger-$(touch injected).bin",
+            ),
+            (
+                "nkeepass --password-env TEST set -b payload=ticks",
+                vec![
+                    "--password-env",
+                    "TEST",
+                    "set",
+                    "-b",
+                    "payload=ticks-`touch injected`.bin",
+                ],
+                "ticks-`touch injected`.bin",
+            ),
+            (
+                "nkeepass --password-file ./credential set --bin payload=space",
+                vec![
+                    "--password-file",
+                    "./credential",
+                    "set",
+                    "--bin",
+                    "payload=space name.bin",
+                ],
+                "space name.bin",
+            ),
+            (
+                "nkeepass set -F Password --bin payload=apostrophe",
+                vec![
+                    "set",
+                    "-F",
+                    "Password",
+                    "--bin",
+                    "payload=apostrophe-'single'.bin",
+                ],
+                "apostrophe-'single'.bin",
+            ),
+            (
+                "nkeepass set --bin first=old --bin payload=semi-",
+                vec![
+                    "set",
+                    "--bin",
+                    "first=old",
+                    "--bin",
+                    "payload=semi-;touch injected;.bin",
+                ],
+                "semi-;touch injected;.bin",
+            ),
+            (
+                "nkeepass set --bin payload=equals=",
+                vec!["set", "--bin", "payload=equals=more=equals.bin"],
+                "equals=more=equals.bin",
+            ),
+        ];
+        for (_, _, filename) in &cases {
+            std::fs::write(directory.path().join(filename), b"").unwrap();
+        }
+        let completion_path = directory.path().join("nkeepass.bash");
+        std::fs::write(&completion_path, bash).unwrap();
+
+        for (line, expected_args, expected_filename) in &cases {
+            let script = r#"
+import os, pty, select, sys, time
+directory, completion, line, expected_args = sys.argv[1:]
+import json
+expected_args = json.loads(expected_args)
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(directory)
+    os.execvp("bash", ["bash", "--noprofile", "--norc", "-i"])
+def drain(timeout=0.5):
+    end = time.monotonic() + timeout
+    data = b""
+    while time.monotonic() < end:
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if ready:
+            try: data += os.read(fd, 65536)
+            except OSError: break
+    return data
+drain()
+os.write(fd, b"nkeepass() { printf '%s\\0' \"$@\" > args.bin; }; source " +
+         completion.encode() + b"\n")
+drain()
+os.write(fd, line.encode() + b"\t")
+result = drain()
+no_match = b"\x07" in result
+if no_match:
+    os.write(fd, b"\x03")
+else:
+    os.write(fd, b"\n")
+    drain()
+os.write(fd, b"exit\n")
+os.waitpid(pid, 0)
+if no_match:
+    raise SystemExit("Readline found no matching file")
+with open(os.path.join(directory, "args.bin"), "rb") as stream:
+    actual = stream.read().split(b"\0")[:-1]
+if actual != [arg.encode() for arg in expected_args]:
+    raise SystemExit("completion produced unexpected literal argv: " + repr(actual))
+"#;
+            let output = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(script)
+                .arg(directory.path())
+                .arg(&completion_path)
+                .arg(line)
+                .arg(serde_json::to_string(&expected_args).unwrap())
+                .output()
+                .expect("python3 PTY driver should run");
+            assert!(
+                output.status.success(),
+                "Readline PTY failed for {expected_filename:?}: {}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(!marker.exists(), "completion executed an injected command");
+            let _ = std::fs::remove_file(directory.path().join("args.bin"));
+        }
+    }
+
+    #[test]
+    fn bash_filename_completion_does_not_cross_command_or_option_value_boundaries() {
+        let bash = generate("bash").unwrap();
         let script = format!(
             r#"{bash}
-COMP_WORDBREAKS=' = '
-original_wordbreaks=$COMP_WORDBREAKS
-COMP_WORDS=(nkeepass set --bin payload = ./payload)
-COMP_CWORD=5
-_nkeepass_complete
-[[ "${{COMPREPLY[*]}}" == "./payload-one.bin" ]] || exit 11
-[[ "$COMP_WORDBREAKS" == "$original_wordbreaks" ]] || exit 12
-COMP_WORDS=(nkeepass set --bin payload=./payload)
-COMP_CWORD=3
-_nkeepass_complete
-[[ "${{COMPREPLY[*]}}" == "payload=./payload-one.bin" ]] || exit 13
-COMP_WORDS=(nkeepass exec -- set --bin payload = ./payload)
+COMP_WORDS=(nkeepass exec -- set --bin payload = candidate)
 COMP_CWORD=7
 _nkeepass_complete
-[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 14
-COMP_WORDS=(nkeepass set --bin first=old --notes ./payload)
-COMP_CWORD=5
-_nkeepass_complete
-[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 15
-COMP_WORDS=(nkeepass set -- --bin payload = ./payload)
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 1
+COMP_WORDS=(nkeepass set -- --bin payload = candidate)
 COMP_CWORD=6
 _nkeepass_complete
-[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 16
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 2
+COMP_WORDS=(nkeepass set --notes --bin payload = candidate)
+COMP_CWORD=6
+_nkeepass_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 3
 "#
         );
         let output = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(script)
-            .current_dir(directory.path())
+            .args(["-c", &script])
             .output()
             .expect("bash should run");
         assert!(
             output.status.success(),
-            "bash completion behavior failed ({}): stdout={} stderr={}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
+            "Bash option ownership failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

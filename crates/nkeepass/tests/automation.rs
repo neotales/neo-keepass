@@ -880,6 +880,25 @@ fn get_clipboard_never_writes_the_selected_secret_to_stdout_or_diagnostics() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains(ENTRY_SECRET));
+    if output.status.success() {
+        if cfg!(target_os = "linux") {
+            assert!(stderr.contains("keeping clipboard available for up to 30 seconds"));
+        } else {
+            assert!(stderr.contains("clipboard may retain the secret"));
+        }
+    } else {
+        assert!(
+            [
+                "nkeepass: clipboard is unavailable\n",
+                "nkeepass: value cannot be copied to clipboard\n",
+                "nkeepass: clipboard write may have been incomplete\n",
+                "nkeepass: clipboard could not be cleared; the copied secret may remain\n",
+            ]
+            .iter()
+            .any(|diagnostic| stderr == *diagnostic),
+            "unexpected clipboard failure diagnostic: {stderr:?}"
+        );
+    }
 }
 
 #[test]
@@ -1012,11 +1031,23 @@ fn failed_set_batches_never_persist_staged_mutations() {
         too_many,
     ];
 
-    for arguments in cases {
+    let expected_errors = [
+        "title cannot be changed through set",
+        "duplicate attachment name",
+        "cannot read input file",
+        "field specified more than once",
+        "input exceeds size limit",
+        "too many attachment inputs",
+    ];
+    for (arguments, expected_error) in cases.into_iter().zip(expected_errors) {
         let refs: Vec<&str> = arguments.iter().map(String::as_str).collect();
         let output = run(&vault.path, home.path(), &refs);
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            format!("nkeepass: {expected_error}\n").as_bytes()
+        );
         assert_eq!(std::fs::read(&vault.path).unwrap(), original);
         let unchanged = load(&vault.path);
         assert_eq!(unchanged.root.entries[0].username, "automation-user");
