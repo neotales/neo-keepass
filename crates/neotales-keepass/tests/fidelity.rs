@@ -153,8 +153,38 @@ fn xml_allows_legal_whitespace_and_comments_outside_document_element() {
         format!("{xml}x"),
         format!("&#65;{xml}"),
         format!("{xml}&amp;"),
+        format!("&#32;{xml}"),
+        format!("{xml}&#xA;"),
     ] {
         assert!(KdbxXml::import(malformed.as_bytes(), &KdbxReadLimits::default()).is_err());
+    }
+}
+
+#[test]
+fn history_limits_reject_malformed_ranges_and_preserve_minus_one_sentinel() {
+    let xml = String::from_utf8(KdbxXml::export(&KeePassDatabase::default()).unwrap()).unwrap();
+    let with_limits = xml.replace(
+        "<Meta>",
+        "<Meta><HistoryMaxItems>-1</HistoryMaxItems><HistoryMaxSize>0</HistoryMaxSize>",
+    );
+    let loaded = KdbxXml::import(with_limits.as_bytes(), &KdbxReadLimits::default()).unwrap();
+    assert_eq!(loaded.meta.history_max_items, Some(-1));
+    assert_eq!(loaded.meta.history_max_size, Some(0));
+    let saved = KdbxXml::export(&loaded).unwrap();
+    let saved = std::str::from_utf8(&saved).unwrap();
+    assert!(saved.contains("<HistoryMaxItems>-1</HistoryMaxItems>"));
+    assert!(saved.contains("<HistoryMaxSize>0</HistoryMaxSize>"));
+
+    for (element, value) in [
+        ("HistoryMaxItems", "bad"),
+        ("HistoryMaxSize", "bad"),
+        ("HistoryMaxItems", "-2"),
+        ("HistoryMaxSize", "-2"),
+        ("HistoryMaxItems", "9223372036854775808"),
+        ("HistoryMaxSize", "9223372036854775808"),
+    ] {
+        let invalid = xml.replace("<Meta>", &format!("<Meta><{element}>{value}</{element}>"));
+        assert!(KdbxXml::import(invalid.as_bytes(), &KdbxReadLimits::default()).is_err());
     }
 }
 

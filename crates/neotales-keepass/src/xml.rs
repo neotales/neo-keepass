@@ -139,9 +139,9 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                 };
                 if let Some(parent) = stack.last_mut() {
                     parent.text.push_str(&resolved);
-                } else if !resolved.chars().all(is_xml_whitespace) {
+                } else {
                     return Err(KdbxError::malformed(
-                        "non-whitespace entity outside KDBX XML document element",
+                        "entity reference outside KDBX XML document element",
                     ));
                 }
             }
@@ -558,10 +558,10 @@ fn parse_meta(
         meta.protect_notes = memory_protection_value(memory, "ProtectNotes", None)?;
     }
     if let Some(value) = text(node, "HistoryMaxItems") {
-        meta.history_max_items = value.parse().ok();
+        meta.history_max_items = Some(parse_history_limit(value)?);
     }
     if let Some(value) = text(node, "HistoryMaxSize") {
-        meta.history_max_size = value.parse().ok();
+        meta.history_max_size = Some(parse_history_limit(value)?);
     }
     if let Some(value) = text(node, "RecycleBinEnabled") {
         meta.recycle_bin_enabled = value == "True";
@@ -581,6 +581,22 @@ fn parse_meta(
     }
     database.meta = meta;
     Ok(())
+}
+
+fn parse_history_limit(value: &str) -> Result<i64, KdbxError> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(KdbxError::malformed("invalid KeePass history limit"));
+    }
+    let value = value
+        .parse::<i64>()
+        .map_err(|_| KdbxError::malformed("invalid KeePass history limit"))?;
+    if value < -1 {
+        return Err(KdbxError::malformed(
+            "KeePass history limit is out of range",
+        ));
+    }
+    Ok(value)
 }
 
 fn memory_protection_value(
@@ -662,11 +678,11 @@ fn parse_legacy_binaries(
             data = decompress_binary(&data, limits)?;
         }
         check_binary_size(data.len(), limits)?;
-        legacy.push(data.clone());
         decoded.push((id, data, protected));
     }
     decoded.sort_by_key(|(id, _, _)| *id);
     for (id, data, protected) in decoded {
+        legacy.push(data.clone());
         let index = add_binary(&mut database.binary_pool, data, protected, limits)?;
         legacy_references.insert(id, index);
     }

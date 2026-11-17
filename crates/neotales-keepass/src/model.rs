@@ -1096,9 +1096,9 @@ pub struct KeePassMeta {
     /// Database times.
     pub times: KeePassTimes,
     /// Maintenance history limit.
-    pub history_max_items: Option<u64>,
+    pub history_max_items: Option<i64>,
     /// History max size.
-    pub history_max_size: Option<u64>,
+    pub history_max_size: Option<i64>,
     /// Whether memory protection is enabled.
     pub memory_protection: bool,
     /// Whether the recycle bin is enabled.

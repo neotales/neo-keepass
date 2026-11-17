@@ -1471,8 +1471,8 @@ mod tests {
         let mut file = header;
         file.extend_from_slice(&encrypted);
         let loaded = KdbxFile::load_password(file.as_slice(), "fixture-password", &limits).unwrap();
-        assert_eq!(loaded.meta.legacy_binaries[0], secret);
-        assert_eq!(loaded.meta.legacy_binaries[1], second);
+        assert_eq!(loaded.meta.legacy_binaries[0], second);
+        assert_eq!(loaded.meta.legacy_binaries[1], secret);
         assert_eq!(loaded.binary_pool.records()[0].data, second);
         assert_eq!(loaded.binary_pool.records()[1].data, secret);
         assert!(loaded.binary_pool.records()[1].protected);

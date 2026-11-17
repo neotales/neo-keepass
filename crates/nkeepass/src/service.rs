@@ -5480,24 +5480,42 @@ mod tests {
             .unwrap()
             .reference();
 
-        let depth = crate::KDBX_LIMITS.max_xml_depth - 3 - 2 + 1;
-        let mut source = KeePassDatabase::default();
-        source.root.id = KdbxUuid::from_bytes([0xff; 16]);
-        let mut xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
-        let close = xml.rfind("</Group>").unwrap();
-        let nested = (1..=depth)
-            .rev()
-            .map(|index| {
-                let mut id = [0_u8; 16];
-                id[..std::mem::size_of::<usize>()].copy_from_slice(&index.to_le_bytes());
-                format!(
-                    "<Group><UUID>{}</UUID><Name>deep-{index}</Name>",
-                    KdbxUuid::from_bytes(id).to_base64()
-                )
-            })
-            .collect::<String>();
-        let closings = "</Group>".repeat(depth);
-        xml.insert_str(close, &format!("{nested}{closings}"));
+        let nested_group_xml = |depth: usize| {
+            let mut source = KeePassDatabase::default();
+            source.root.id = KdbxUuid::from_bytes([0xff; 16]);
+            let mut xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+            let close = xml.rfind("</Group>").unwrap();
+            let nested = (1..=depth)
+                .rev()
+                .map(|index| {
+                    let mut id = [0_u8; 16];
+                    id[..std::mem::size_of::<usize>()].copy_from_slice(&index.to_le_bytes());
+                    format!(
+                        "<Group><UUID>{}</UUID><Name>deep-{index}</Name>",
+                        KdbxUuid::from_bytes(id).to_base64()
+                    )
+                })
+                .collect::<String>();
+            let closings = "</Group>".repeat(depth);
+            xml.insert_str(close, &format!("{nested}{closings}"));
+            xml
+        };
+        let boundary = nested_group_xml(crate::KDBX_LIMITS.max_xml_depth - 3 - 2);
+        service
+            .import_keepass_xml(
+                boundary.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .expect("max save-depth boundary must be accepted as a dry run");
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+        assert_eq!(
+            service.selected_entry(&existing_ref).unwrap().title(),
+            "existing"
+        );
+        let beyond = nested_group_xml(crate::KDBX_LIMITS.max_xml_depth - 3 - 2 + 1);
 
         for options in [
             ImportOptions {
@@ -5510,7 +5528,9 @@ mod tests {
             },
         ] {
             assert!(
-                service.import_keepass_xml(xml.as_bytes(), options).is_err(),
+                service
+                    .import_keepass_xml(beyond.as_bytes(), options)
+                    .is_err(),
                 "depth beyond the save model limit must be rejected"
             );
             assert_eq!(service.export_snapshot().unwrap().bytes(), before);
@@ -5519,6 +5539,92 @@ mod tests {
                 "existing"
             );
         }
+    }
+
+    #[test]
+    fn keepass_xml_import_sorts_reversed_legacy_binary_ids_before_save() {
+        let mut source = KeePassDatabase::default();
+        let id_zero = source.binary_pool.add(b"legacy-zero".to_vec(), false);
+        let id_one = source.binary_pool.add(b"legacy-one".to_vec(), false);
+        let mut entry = Entry::new("attachments");
+        entry.attachments.push(neotales_keepass::Attachment {
+            name: "zero.bin".into(),
+            reference: id_zero,
+        });
+        entry.attachments.push(neotales_keepass::Attachment {
+            name: "one.bin".into(),
+            reference: id_one,
+        });
+        source.root.add_entry(entry);
+
+        let xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+        let binaries_start = xml.find("<Binaries>").unwrap() + "<Binaries>".len();
+        let binaries_end = xml.find("</Binaries>").unwrap();
+        let section = &xml[binaries_start..binaries_end];
+        let zero_start = section.find("<Binary ID=\"0\"").unwrap();
+        let zero_end =
+            section[zero_start..].find("</Binary>").unwrap() + zero_start + "</Binary>".len();
+        let one_start = section.find("<Binary ID=\"1\"").unwrap();
+        let one_end =
+            section[one_start..].find("</Binary>").unwrap() + one_start + "</Binary>".len();
+        let reversed = format!(
+            "{}{}{}{}{}",
+            &xml[..binaries_start],
+            &section[one_start..one_end],
+            &section[zero_start..zero_end],
+            &xml[binaries_end..],
+            ""
+        );
+
+        let (_directory, path) = vault();
+        let mut service = VaultService::default();
+        service
+            .open(&path, &mut credentials(), &crate::KDBX_LIMITS)
+            .unwrap();
+        let before = service.export_snapshot().unwrap().bytes().to_vec();
+        service
+            .import_keepass_xml(
+                reversed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+
+        service
+            .import_keepass_xml(
+                reversed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+        service.save(&path, &mut credentials()).unwrap();
+        let reopened = KdbxFile::open(File::open(&path).unwrap(), "service-test-password").unwrap();
+        let attachments = &reopened.root.entries[0].attachments;
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            reopened.binary_pool.records()[attachments[0].reference].data,
+            b"legacy-zero"
+        );
+        assert_eq!(
+            reopened.binary_pool.records()[attachments[1].reference].data,
+            b"legacy-one"
+        );
+        let reexported = KdbxXml::export(&reopened).unwrap();
+        let reimported = KdbxXml::import(&reexported, &crate::KDBX_LIMITS).unwrap();
+        let attachments = &reimported.root.entries[0].attachments;
+        assert_eq!(
+            reimported.binary_pool.records()[attachments[0].reference].data,
+            b"legacy-zero"
+        );
+        assert_eq!(
+            reimported.binary_pool.records()[attachments[1].reference].data,
+            b"legacy-one"
+        );
     }
 
     #[test]
