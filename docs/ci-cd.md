@@ -201,16 +201,21 @@ Verification before anything is executed or uploaded:
      `--help` under ONE deadline that encompasses execution, stream
      completion and cleanup: process wait, pipe drains and cleanup are
      all bounded, and on expiry the whole process tree is killed. On
-     Windows the child is created SUSPENDED, assigned to a kill-on-close
-     job object BEFORE its first instruction runs, and only then resumed —
-     a suspended process cannot spawn descendants, so there is no window
-     in which anything can be outside the job; the job handle is closed
-     in a finally that also terminates the child and closes every native
-     handle, so a descendant that outlives the parent while holding the
-     redirected pipes cannot survive the harness (the escapee's death is
-     asserted natively on Windows via a PID recorded by the fixture).
-     Non-Windows smoke runs are a test seam: bounded waits, best-effort
-     tree kill.
+     Windows the child is born INTO a kill-on-close job object
+     (create-time assignment via `PROC_THREAD_ATTRIBUTE_JOB_LIST`, the
+     strongest OS mechanism — no assignment race and no
+     assign-after-create compatibility call), stdin is a real handle to
+     NUL, and the job handle is closed in a finally that also terminates
+     the child and closes every native handle, so a descendant that
+     outlives the parent while holding the redirected pipes cannot
+     survive the harness (the escapee's death is asserted natively on
+     Windows via a PID the fixture always records). If the host refuses
+     job membership, the run DEGRADES honestly: a warning is printed,
+     containment is reported as `none` in the smoke-ok line, and
+     uncontained undrained pipe handles are deliberately leaked rather
+     than closed against a possible block — containment is never claimed
+     when the OS did not grant it. Non-Windows smoke runs are a test
+     seam: bounded waits, best-effort tree kill.
 
 A binary that failed any check is never executed, and a mismatching
 artifact never reaches upload.
@@ -332,14 +337,23 @@ on every host with the exact source the Windows runner compiles, so C#
 syntax errors there fail on the Linux dev host too (the CS1529 class:
 a using clause after a type declaration broke only the Windows
 concatenation and was invisible locally until the first runner run).
-What a Linux host still cannot do is EXECUTE the Windows-only runner:
-`JobOps.RunBounded` (CreateProcessW with CREATE_SUSPENDED, assignment to
-the kill-on-close job before the first instruction, ResumeThread, raw
-pipe drains) is compile-checked locally and exercised only by the pwsh
-fixtures' logic on non-Windows hosts; its native behavior — STARTUPINFO
-marshaling, job semantics, and the console's propagation of redirected
-std handles to grandchildren, which the orphan fixture relies on to
-build the pipe-holding escapee — is first observed on the
-`windows-2025` runner. The same holds for the negative test that needs
-symlink creation where unavailable. The suite reports these skips by
-name instead of passing silently.
+The first native Windows execution of the smoke harness (run
+44201279798, commit fd61b0f) failed every `-Smoke` test while every
+byte-level zip/SHA256SUMS test passed: the smoke harness's process
+machinery — not the archive checks — was broken on Windows. Raw step
+logs are not retrievable without credentials (only "exit code 1" is
+public), so the mechanism was rebuilt against the known Windows-only
+failure classes rather than against a known error: the child is created
+into the job at birth (PROC_THREAD_ATTRIBUTE_JOB_LIST) instead of
+assign-after-start, stdin is a real NUL handle instead of NULL (a NULL
+stdin breaks .NET CLI startup on Windows), the STARTUPINFOEXW is
+marshaled manually into zero-filled unmanaged memory, every failure
+carries its Win32 error code, and job-membership refusal degrades
+honestly (warned, reported as containment none) instead of failing
+every smoke run. The orphan fixture always records why it could not
+spawn. What a Linux host still cannot do is EXECUTE any of this: the
+rebuilt machinery is compile-checked locally and its first native
+observation is the next windows-2025 run — if a smoke test fails again,
+the diagnostics now name the exact Win32 error. The same holds for the
+negative test that needs symlink creation where unavailable. The suite
+reports these skips by name instead of passing silently.

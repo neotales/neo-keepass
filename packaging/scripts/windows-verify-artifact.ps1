@@ -49,14 +49,18 @@
 #      completion and cleanup. Nothing waits indefinitely: process wait,
 #      stdout/stderr drains and cleanup are all bounded by the deadline;
 #      on expiry the whole process tree is killed. On Windows the child
-#      is created SUSPENDED, assigned to a kill-on-close job object
-#      BEFORE its first instruction runs, and only then resumed — there
-#      is no window in which the child or any descendant can be outside
-#      the job, so a descendant that outlives the parent while holding
-#      the redirected pipes is terminated when the job handle closes.
-#      Every native handle is closed on every error path. On non-Windows
-#      hosts tree kill is best-effort but every wait stays bounded, so
-#      the harness itself can never hang.
+#      is born INTO a kill-on-close job object (create-time assignment
+#      via PROC_THREAD_ATTRIBUTE_JOB_LIST) — no window exists in which
+#      the child or any descendant can be outside the job, so a
+#      descendant that outlives the parent while holding the redirected
+#      pipes is terminated when the job handle closes; stdin is a real
+#      handle to NUL. If the host refuses job membership, the run
+#      DEGRADES honestly: a warning is printed, containment is reported
+#      as none, and uncontained undrained pipe handles are deliberately
+#      leaked rather than closed against a possible block. Every native
+#      handle is closed on every other error path. On non-Windows hosts
+#      tree kill is best-effort but every wait stays bounded, so the
+#      harness itself can never hang.
 #
 # Usage:
 #   windows-verify-artifact.ps1 -Zip <zip> -BuiltExe <exe> -Version <v> `
@@ -296,16 +300,6 @@ public static class JobOps {
         public UIntPtr PeakProcessMemoryUsed;
         public UIntPtr PeakJobMemoryUsed;
     }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct STARTUPINFOW {
-        public uint cb;
-        public string lpReserved;
-        public string lpDesktop;
-        public string lpTitle;
-        public uint dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
-        public ushort wShowWindow, cbReserved2;
-        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
-    }
     [StructLayout(LayoutKind.Sequential)]
     struct PROCESS_INFORMATION {
         public IntPtr hProcess, hThread;
@@ -323,17 +317,13 @@ public static class JobOps {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, int cbJobObjectInfoLength);
     [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
-    [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr hObject);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool CreateProcessW(string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFOW lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+    static extern bool CreateProcessW(string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, IntPtr lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CreatePipe(out IntPtr hReadPipe, out IntPtr hWritePipe, ref SECURITY_ATTRIBUTES lpPipeAttributes, uint nSize);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern uint ResumeThread(IntPtr hThread);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -342,14 +332,30 @@ public static class JobOps {
     static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(IntPtr hFile, [Out] byte[] lpBuffer, uint nNumberOfBytesToRead, out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags, IntPtr dwAttribute, ref IntPtr lpValue, IntPtr cbSize, IntPtr lpPrevValue, IntPtr lpReturnSize);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, ref SECURITY_ATTRIBUTES lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
-    const uint CREATE_SUSPENDED = 0x00000004;
     const uint CREATE_NO_WINDOW = 0x08000000;
+    const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     const uint STARTF_USESTDHANDLES = 0x00000100;
     const uint HANDLE_FLAG_INHERIT = 0x00000001;
     const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00000200;
     const uint WAIT_OBJECT_0 = 0x00000000;
     const uint WAIT_TIMEOUT = 0x00000102;
+    const uint GENERIC_READ = 0x80000000;
+    const uint GENERIC_WRITE = 0x40000000;
+    const uint FILE_SHARE_READ = 0x00000001;
+    const uint FILE_SHARE_WRITE = 0x00000002;
+    const uint OPEN_EXISTING = 3;
+    const long PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x00020013;
+    // STARTUPINFOEXW on x64: STARTUPINFOW (104 bytes) + lpAttributeList (8).
+    const int STARTUPINFOEXW_SIZE = 112;
 
     public struct RunResult {
         public int ExitCode;
@@ -357,6 +363,8 @@ public static class JobOps {
         public string StdErr;
         public string ErrorKind;
         public string ErrorDetail;
+        public bool Contained;
+        public string Warning;
     }
 
     static Exception Win32Error(string what) {
@@ -429,16 +437,24 @@ public static class JobOps {
     public static RunResult RunBounded(string filePath, string[] arguments, int timeoutMs) {
         var r = new RunResult();
         r.ErrorKind = "";
+        r.Warning = "";
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        IntPtr job = IntPtr.Zero, outR = IntPtr.Zero, outW = IntPtr.Zero, errR = IntPtr.Zero, errW = IntPtr.Zero;
-        IntPtr thread = IntPtr.Zero, process = IntPtr.Zero;
+        IntPtr job = IntPtr.Zero, attrList = IntPtr.Zero, siMem = IntPtr.Zero;
+        IntPtr outR = IntPtr.Zero, outW = IntPtr.Zero, errR = IntPtr.Zero, errW = IntPtr.Zero;
+        IntPtr stdinH = IntPtr.Zero, thread = IntPtr.Zero, process = IntPtr.Zero;
         Task<string> outTask = null, errTask = null;
-        bool started = false;
+        bool started = false, childInJob = false, outDrained = false, errDrained = false;
         try {
-            // The job exists BEFORE the process: with CREATE_SUSPENDED the
-            // child cannot run — so cannot spawn descendants — until it is
-            // assigned to the job and resumed.
-            job = CreateKillOnCloseJob();
+            // Kill-on-close job FIRST. If the environment forbids job
+            // objects, run DEGRADED — bounded and tree-killed, reported as
+            // not contained — never claiming containment the OS did not
+            // grant.
+            try {
+                job = CreateKillOnCloseJob();
+            } catch (Exception e) {
+                r.Warning = "job creation failed (" + e.Message + ")";
+                job = IntPtr.Zero;
+            }
 
             var sa = new SECURITY_ATTRIBUTES();
             sa.nLength = (uint)Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
@@ -449,30 +465,66 @@ public static class JobOps {
             // The write ends cross to the child; the read ends must not.
             if (!SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0)) throw Win32Error("SetHandleInformation");
             if (!SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0)) throw Win32Error("SetHandleInformation");
+            // stdin is a REAL handle to NUL (inheritable): a NULL stdin is
+            // legal for CreateProcessW but has broken .NET CLI startup in
+            // the wild, and the smoke target is a .NET CLI.
+            stdinH = CreateFileW("NUL", GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, ref sa, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (stdinH == new IntPtr(-1)) stdinH = IntPtr.Zero;
 
-            var si = new STARTUPINFOW();
-            si.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFOW));
-            si.lpReserved = null; si.lpDesktop = null; si.lpTitle = null; si.lpReserved2 = IntPtr.Zero;
-            si.hStdInput = IntPtr.Zero;
-            si.hStdOutput = outW;
-            si.hStdError = errW;
-            si.dwFlags = STARTF_USESTDHANDLES;
+            // STARTUPINFOEXW, written MANUALLY into zero-filled unmanaged
+            // memory (no marshaler ref-string behavior in play): cb = the
+            // EX size, dwFlags at +60, the std handles at +80/+88/+96, and
+            // the attribute list pointer at +104.
+            siMem = Marshal.AllocHGlobal(STARTUPINFOEXW_SIZE);
+            for (int o = 0; o < STARTUPINFOEXW_SIZE; o += 8) Marshal.WriteInt64(siMem, o, 0);
+            Marshal.WriteInt32(siMem, 60, unchecked((int)STARTF_USESTDHANDLES));
+            Marshal.WriteIntPtr(siMem, 80, stdinH);
+            Marshal.WriteIntPtr(siMem, 88, outW);
+            Marshal.WriteIntPtr(siMem, 96, errW);
+
+            uint flags = CREATE_NO_WINDOW;
+            if (job != IntPtr.Zero) {
+                // Create-time job assignment (PROC_THREAD_ATTRIBUTE_JOB_LIST):
+                // the process is born into the job — no assignment race, no
+                // AssignProcessToJobObject compatibility call.
+                IntPtr size = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                attrList = Marshal.AllocHGlobal((int)size);
+                if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref size)) throw Win32Error("InitializeProcThreadAttributeList");
+                if (!UpdateProcThreadAttribute(attrList, 0, (IntPtr)PROC_THREAD_ATTRIBUTE_JOB_LIST, ref job,
+                        (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero)) throw Win32Error("UpdateProcThreadAttribute");
+                Marshal.WriteIntPtr(siMem, 104, attrList);
+                Marshal.WriteInt32(siMem, 0, STARTUPINFOEXW_SIZE);
+                flags |= EXTENDED_STARTUPINFO_PRESENT;
+            } else {
+                Marshal.WriteInt32(siMem, 0, 104);
+            }
 
             var cmd = new StringBuilder(Quote(filePath));
             for (int i = 0; i < arguments.Length; i++) { cmd.Append(' '); cmd.Append(Quote(arguments[i])); }
 
             PROCESS_INFORMATION pi;
             if (!CreateProcessW(filePath, cmd.ToString(), IntPtr.Zero, IntPtr.Zero, true,
-                    CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi))
-                throw Win32Error("CreateProcessW");
+                    flags, IntPtr.Zero, null, siMem, out pi)) {
+                int err = Marshal.GetLastWin32Error();
+                if (job != IntPtr.Zero && err == 5 /* ERROR_ACCESS_DENIED */) {
+                    // The environment refused job membership. Retry DEGRADED
+                    // (plain STARTUPINFOW, no job): the run stays bounded
+                    // and is reported as not contained.
+                    r.Warning = "job assignment refused (Win32 error " + err + "): running WITHOUT job containment";
+                    Marshal.WriteInt32(siMem, 0, 104);
+                    Marshal.WriteIntPtr(siMem, 104, IntPtr.Zero);
+                    if (!CreateProcessW(filePath, cmd.ToString(), IntPtr.Zero, IntPtr.Zero, true,
+                            CREATE_NO_WINDOW, IntPtr.Zero, null, siMem, out pi)) throw Win32Error("CreateProcessW");
+                } else {
+                    throw Win32Error("CreateProcessW (with job attribute " + (job != IntPtr.Zero ? "set" : "unset") + ", flags 0x" + flags.ToString("X") + ")");
+                }
+            }
             process = pi.hProcess;
             thread = pi.hThread;
-
-            if (!AssignProcessToJobObject(job, process)) throw Win32Error("AssignProcessToJobObject");
-            if (ResumeThread(thread) == 0xFFFFFFFFu) throw Win32Error("ResumeThread");
+            childInJob = job != IntPtr.Zero && r.Warning.Length == 0;
             started = true;
-            if (!CloseHandle(thread)) throw Win32Error("CloseHandle");
-            thread = IntPtr.Zero;
 
             // The parent must drop its own copies of the write ends, or
             // the drains below never complete even after the whole tree
@@ -491,9 +543,16 @@ public static class JobOps {
             }
             if (w != WAIT_OBJECT_0) throw Win32Error("WaitForSingleObject");
 
-            if (!outTask.Wait(RemainingMs(deadline)) || !errTask.Wait(RemainingMs(deadline))) {
+            if (!outTask.Wait(RemainingMs(deadline))) {
                 r.ErrorKind = "drain";
-                r.ErrorDetail = "redirected output did not drain within the deadline after exit (orphaned descendant holding pipes)";
+                r.ErrorDetail = "stdout drain";
+            } else { outDrained = true; }
+            if (r.ErrorKind.Length == 0 && !errTask.Wait(RemainingMs(deadline))) {
+                r.ErrorKind = "drain";
+                r.ErrorDetail = "stderr drain";
+            } else if (r.ErrorKind.Length == 0) { errDrained = true; }
+            if (r.ErrorKind.Length != 0) {
+                r.ErrorDetail = "redirected output did not drain within the deadline after exit (orphaned descendant holding pipes): " + r.ErrorDetail;
                 return r; // finally closes the job, which removes the escapee
             }
 
@@ -526,13 +585,30 @@ public static class JobOps {
             // 3. The drains unblocked by (2); join briefly, never hang.
             if (outTask != null) outTask.Wait(2000);
             if (errTask != null) errTask.Wait(2000);
-            // 4. Every remaining native handle, on every path.
+            if (outTask != null && outTask.IsCompleted) outDrained = true;
+            if (errTask != null && errTask.IsCompleted) errDrained = true;
+            // 4. Every remaining native handle, on every path. The read
+            // ends are closed only when nothing can still be blocked
+            // reading them: uncontained and undrained, they are leaked
+            // deliberately (reclaimed at process exit) rather than risk a
+            // CloseHandle that blocks on the escapee's open handles.
+            if (attrList != IntPtr.Zero) DeleteProcThreadAttributeList(attrList);
+            if (attrList != IntPtr.Zero) Marshal.FreeHGlobal(attrList);
+            if (siMem != IntPtr.Zero) Marshal.FreeHGlobal(siMem);
+            if (stdinH != IntPtr.Zero) CloseHandle(stdinH);
             if (thread != IntPtr.Zero) CloseHandle(thread);
             if (outW != IntPtr.Zero) CloseHandle(outW);
             if (errW != IntPtr.Zero) CloseHandle(errW);
-            if (outR != IntPtr.Zero) CloseHandle(outR);
-            if (errR != IntPtr.Zero) CloseHandle(errR);
+            bool closeReads = childInJob || (outDrained && errDrained);
+            if (closeReads) {
+                if (outR != IntPtr.Zero) CloseHandle(outR);
+                if (errR != IntPtr.Zero) CloseHandle(errR);
+            } else if (outR != IntPtr.Zero || errR != IntPtr.Zero) {
+                r.Warning = (r.Warning.Length > 0 ? r.Warning + "; " : r.Warning)
+                    + "uncontained and undrained: read handles leaked deliberately (reclaimed at process exit)";
+            }
             if (process != IntPtr.Zero) CloseHandle(process);
+            r.Contained = started && childInJob;
         }
     }
 }
@@ -566,6 +642,9 @@ public static class JobOps {
         )
         if ($isWindowsHost) {
             $r = [JobOps]::RunBounded($FilePath, $Arguments, $TimeoutSeconds * 1000)
+            if ($r.Warning) {
+                Write-Host "windows-verify: WARNING smoke containment degraded: $($r.Warning)"
+            }
             if ($r.ErrorKind -eq 'timeout') {
                 throw ("windows-verify: smoke run exceeded {0}s and was killed (whole tree): {1} {2}" -f
                     $TimeoutSeconds, $FilePath, ($Arguments -join ' '))
@@ -583,9 +662,10 @@ public static class JobOps {
                     $r.ErrorKind, $r.ErrorDetail, $FilePath, ($Arguments -join ' '))
             }
             return [pscustomobject]@{
-                ExitCode = $r.ExitCode
-                StdOut   = $r.StdOut
-                StdErr   = $r.StdErr
+                ExitCode  = $r.ExitCode
+                StdOut    = $r.StdOut
+                StdErr    = $r.StdErr
+                Contained = [bool]$r.Contained
             }
         }
         # Non-Windows: test seam only (a real PE cannot run here). Bounded
@@ -620,9 +700,10 @@ public static class JobOps {
                     $FilePath, ($Arguments -join ' '))
             }
             return [pscustomobject]@{
-                ExitCode = $p.ExitCode
-                StdOut   = $outTask.Result
-                StdErr   = $errTask.Result
+                ExitCode  = $p.ExitCode
+                StdOut    = $outTask.Result
+                StdErr    = $errTask.Result
+                Contained = $false
             }
         } finally {
             if ($p -and -not $p.HasExited) { Stop-Tree $p }
@@ -922,16 +1003,19 @@ try {
         } else {
             $extractedExe
         }
+        $contained = $true
         if ($PSBoundParameters.ContainsKey('SmokeArguments')) {
             # Test-only: a single invocation with explicit arguments.
             $r = Invoke-Bounded -FilePath $runTarget -Arguments $SmokeArguments `
                 -TimeoutSeconds $SmokeTimeoutSeconds
+            if (-not $r.Contained) { $contained = $false }
             if ($r.ExitCode -ne 0) {
                 throw ("windows-verify: smoke run exited {0}" -f $r.ExitCode)
             }
         } else {
             $versionRun = Invoke-Bounded -FilePath $runTarget -Arguments @('--version') `
                 -TimeoutSeconds $SmokeTimeoutSeconds
+            if (-not $versionRun.Contained) { $contained = $false }
             if ($versionRun.ExitCode -ne 0) {
                 throw ("windows-verify: smoke --version exited {0}" -f $versionRun.ExitCode)
             }
@@ -941,11 +1025,13 @@ try {
             }
             $helpRun = Invoke-Bounded -FilePath $runTarget -Arguments @('--help') `
                 -TimeoutSeconds $SmokeTimeoutSeconds
+            if (-not $helpRun.Contained) { $contained = $false }
             if ($helpRun.ExitCode -ne 0) {
                 throw ("windows-verify: smoke --help exited {0}" -f $helpRun.ExitCode)
             }
         }
-        Write-Host "windows-verify: smoke ok (bounded ${SmokeTimeoutSeconds}s, tree-kill + job close): $runTarget"
+        Write-Host ("windows-verify: smoke ok (bounded {0}s, tree-kill, containment: {1}): {2}" -f
+            $SmokeTimeoutSeconds, $(if ($contained) { 'job' } else { 'none (degraded, warned above)' }), $runTarget)
     }
 
     Write-Host "windows-verify: ok  artifact verified: $Zip"

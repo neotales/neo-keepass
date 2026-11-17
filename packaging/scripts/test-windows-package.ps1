@@ -964,14 +964,19 @@ try {
     # inherits the redirected pipes and outlives it. The harness must fail
     # BOUNDED (never hang on the drain), kill what it can reach, and — on
     # Windows — remove the escapee via the kill-on-close job. The fixture
-    # records the descendant's PID so the Windows-native cleanup can be
-    # asserted directly: after the harness returns, the escapee must be
-    # gone.
+    # ALWAYS writes the pid file (the failure reason when it could not
+    # spawn) so a Windows-native failure diagnoses itself instead of
+    # crashing the suite on a missing file.
     $orphanFixture = Join-Path $work 'orphan-child.ps1'
     $orphanPidFile = Join-Path $work 'orphan-grandchild.pid'
     [IO.File]::WriteAllText($orphanFixture, "param(`$Pwsh, `$PidFile)`n" +
-        "`$g = Start-Process -FilePath `$Pwsh -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 15') -PassThru`n" +
-        "[IO.File]::WriteAllText(`$PidFile, `$g.Id)`n" +
+        "try {`n" +
+        "  `$g = Start-Process -FilePath `$Pwsh -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 15') -PassThru`n" +
+        "  [IO.File]::WriteAllText(`$PidFile, `$g.Id)`n" +
+        "} catch {`n" +
+        "  [IO.File]::WriteAllText(`$PidFile, 'ERROR: ' + `$_.Exception.Message)`n" +
+        "  exit 0`n" +
+        "}`n" +
         "exit 0`n")
     $cmd = "& '$verify' -Zip '$zip' -BuiltExe '$peX64' -Version '$version' -Triple '$triple' " +
         "-Smoke -SmokeExeOverride '$selfPwsh' " +
@@ -983,10 +988,29 @@ try {
         'verify: orphaned pipe-holding descendant detected and failed bounded'
     Assert-True ($sw.Elapsed.TotalSeconds -lt 30) 'verify: orphan case returned well within the deadline (no indefinite wait)'
     if ($isWinHost) {
-        $escapeePid = [IO.File]::ReadAllText($orphanPidFile).Trim()
-        Start-Sleep -Milliseconds 500
-        $survivor = Get-Process -Id $escapeePid -ErrorAction SilentlyContinue
-        Assert-True ($null -eq $survivor) 'verify: Windows kill-on-close job removed the pipe-holding escapee (no survivor)'
+        $pidFileText = if (Test-Path -LiteralPath $orphanPidFile -PathType Leaf) {
+            [IO.File]::ReadAllText($orphanPidFile).Trim()
+        } else {
+            '<missing - fixture child never ran to the write>'
+        }
+        $degraded = $r.StdOut -match 'containment degraded'
+        if ($pidFileText -match '^ERROR') {
+            Assert-True $false "verify: orphan fixture could not spawn the escapee on Windows: $pidFileText"
+        } elseif ($pidFileText -match '<missing') {
+            Assert-True $false "verify: orphan fixture never wrote the escapee PID (smoke child did not run); verify stderr: $($r.StdErr)"
+        } elseif ($degraded) {
+            # The host refused job containment (warned): the escapee CANNOT
+            # be asserted dead. Honest skip, never a false pass.
+            Write-Host 'skip verify: escapee survival not assertable - job containment degraded on this host'
+        } else {
+            Start-Sleep -Milliseconds 500
+            $survivor = Get-Process -Id $pidFileText -ErrorAction SilentlyContinue
+            if ($null -ne $survivor) {
+                Assert-True $false 'verify: pipe-holding escapee SURVIVED the harness on Windows (kill-on-close job did not remove it)'
+            } else {
+                Write-Host 'ok   verify: Windows kill-on-close job removed the pipe-holding escapee (no survivor)'
+            }
+        }
     }
 
     if ($script:failures -gt 0) {

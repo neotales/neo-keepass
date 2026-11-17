@@ -120,11 +120,12 @@ jobs:
       # canonical dist zip to BE the checked zip, and smoke-run the
       # EXTRACTED exe (--version, --help) under one deadline covering
       # execution, stream completion and cleanup — whole-tree kill on
-      # expiry and, on Windows, a kill-on-close job object the child is
-      # assigned to while still suspended, so a descendant that outlives
-      # the parent cannot outlive the harness. A binary that failed any
-      # check is never executed, and a mismatching artifact never reaches
-      # upload.
+      # expiry, the whole tree is killed — on Windows the child is born
+      # into a kill-on-close job object (create-time assignment), stdin is
+      # a real NUL handle, and a host that refuses job membership degrades
+      # the run honestly (warned, containment reported as none). A binary
+      # that failed any check is never executed, and a mismatching
+      # artifact never reaches upload.
       - name: Package and verify artifact
         shell: bash
         run: |
