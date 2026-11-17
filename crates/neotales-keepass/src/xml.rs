@@ -85,11 +85,23 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                     parent
                         .text
                         .push_str(&text.xml_content(XmlVersion::Implicit1_0));
+                } else if !text
+                    .xml_content(XmlVersion::Implicit1_0)
+                    .chars()
+                    .all(is_xml_whitespace)
+                {
+                    return Err(KdbxError::malformed(
+                        "non-whitespace text outside KDBX XML document element",
+                    ));
                 }
             }
             Event::CData(data) => {
                 if let Some(parent) = stack.last_mut() {
                     parent.text.push_str(data.as_ref());
+                } else {
+                    return Err(KdbxError::malformed(
+                        "CDATA outside KDBX XML document element",
+                    ));
                 }
             }
             Event::End(_) => {
@@ -127,6 +139,10 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                 };
                 if let Some(parent) = stack.last_mut() {
                     parent.text.push_str(&resolved);
+                } else if !resolved.chars().all(is_xml_whitespace) {
+                    return Err(KdbxError::malformed(
+                        "non-whitespace entity outside KDBX XML document element",
+                    ));
                 }
             }
             Event::DocType(_) => {
@@ -141,6 +157,10 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
         return Err(KdbxError::malformed("unterminated KDBX XML"));
     }
     root.ok_or_else(|| KdbxError::malformed("KDBX XML has no document element"))
+}
+
+fn is_xml_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\n' | '\r')
 }
 
 fn node_from_start(start: &BytesStart<'_>) -> Result<XmlNode, KdbxError> {
@@ -530,20 +550,12 @@ fn parse_meta(
     }
     if let Some(memory) = child(node, "MemoryProtection") {
         meta.memory_protection = true;
-        meta.protect_password =
-            text(memory, "ProtectPassword").is_some_and(|value| value == "True");
-        meta.protect_title = text(memory, "ProtectTitle").is_some_and(|value| value == "True");
-        if child(memory, "ProtectUserName").is_some() && child(memory, "ProtectUsername").is_some()
-        {
-            return Err(KdbxError::malformed(
-                "duplicate KeePass username protection setting",
-            ));
-        }
-        meta.protect_username = text(memory, "ProtectUserName")
-            .or_else(|| text(memory, "ProtectUsername"))
-            .is_some_and(|value| value == "True");
-        meta.protect_url = text(memory, "ProtectURL").is_some_and(|value| value == "True");
-        meta.protect_notes = text(memory, "ProtectNotes").is_some_and(|value| value == "True");
+        meta.protect_password = memory_protection_value(memory, "ProtectPassword", None)?;
+        meta.protect_title = memory_protection_value(memory, "ProtectTitle", None)?;
+        meta.protect_username =
+            memory_protection_value(memory, "ProtectUserName", Some("ProtectUsername"))?;
+        meta.protect_url = memory_protection_value(memory, "ProtectURL", None)?;
+        meta.protect_notes = memory_protection_value(memory, "ProtectNotes", None)?;
     }
     if let Some(value) = text(node, "HistoryMaxItems") {
         meta.history_max_items = value.parse().ok();
@@ -569,6 +581,37 @@ fn parse_meta(
     }
     database.meta = meta;
     Ok(())
+}
+
+fn memory_protection_value(
+    node: &XmlNode,
+    canonical: &str,
+    alias: Option<&str>,
+) -> Result<bool, KdbxError> {
+    fn parse(value: &str) -> Result<bool, KdbxError> {
+        match value {
+            "True" | "true" | "1" => Ok(true),
+            "False" | "false" | "0" => Ok(false),
+            _ => Err(KdbxError::malformed(
+                "invalid KeePass memory-protection boolean",
+            )),
+        }
+    }
+
+    let canonical_value = text(node, canonical).map(parse).transpose()?;
+    let alias_value = alias
+        .and_then(|name| text(node, name))
+        .map(parse)
+        .transpose()?;
+    if canonical_value
+        .zip(alias_value)
+        .is_some_and(|(left, right)| left != right)
+    {
+        return Err(KdbxError::malformed(
+            "conflicting KeePass username protection settings",
+        ));
+    }
+    Ok(canonical_value.or(alias_value).unwrap_or(false))
 }
 
 fn parse_custom_icon(
@@ -778,6 +821,9 @@ fn parse_group(
         group.icon_id = value
             .parse()
             .map_err(|_| KdbxError::malformed("invalid group IconID"))?;
+    }
+    if let Some(value) = text(node, "CustomIconUUID") {
+        group.custom_icon_id = KdbxUuid::from_base64(value)?;
     }
     if let Some(value) = text(node, "Tags") {
         group.tags = value

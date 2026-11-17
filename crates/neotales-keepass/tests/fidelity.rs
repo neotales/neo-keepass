@@ -94,10 +94,76 @@ fn unprotected_field_protect_in_memory_and_username_setting_round_trip() {
 }
 
 #[test]
+fn memory_protection_settings_require_valid_booleans_and_nonconflicting_aliases() {
+    let mut database = KeePassDatabase::default();
+    database.meta.memory_protection = true;
+    let xml = String::from_utf8(KdbxXml::export(&database).unwrap()).unwrap();
+    for setting in [
+        "ProtectPassword",
+        "ProtectTitle",
+        "ProtectUserName",
+        "ProtectURL",
+        "ProtectNotes",
+    ] {
+        let invalid = xml.replace(
+            &format!("<{setting}>False</{setting}>"),
+            &format!("<{setting}>sometimes</{setting}>"),
+        );
+        assert!(KdbxXml::import(invalid.as_bytes(), &KdbxReadLimits::default()).is_err());
+    }
+
+    let conflicting = xml.replace(
+        "</MemoryProtection>",
+        "<ProtectUsername>True</ProtectUsername></MemoryProtection>",
+    );
+    assert!(KdbxXml::import(conflicting.as_bytes(), &KdbxReadLimits::default()).is_err());
+
+    let matching_aliases = xml.replace(
+        "<ProtectUserName>False</ProtectUserName>",
+        "<ProtectUserName>True</ProtectUserName><ProtectUsername>True</ProtectUsername>",
+    );
+    let loaded = KdbxXml::import(matching_aliases.as_bytes(), &KdbxReadLimits::default()).unwrap();
+    assert!(loaded.can_save_losslessly);
+    assert!(loaded.meta.protect_username);
+}
+
+#[test]
+fn xml_allows_legal_whitespace_and_comments_outside_document_element() {
+    let database = KeePassDatabase::default();
+    let xml = String::from_utf8(KdbxXml::export(&database).unwrap()).unwrap();
+    let declaration_end = xml.find("?>").unwrap() + 2;
+    let legal = format!(
+        "{} \t\r\n<!-- before root -->{} \n<!-- after root -->\r\n",
+        &xml[..declaration_end],
+        &xml[declaration_end..]
+    );
+    assert!(KdbxXml::import(legal.as_bytes(), &KdbxReadLimits::default()).is_ok());
+
+    let without_declaration = &xml[declaration_end..];
+    assert!(
+        KdbxXml::import(
+            format!(" \r\n{without_declaration}\t\n").as_bytes(),
+            &KdbxReadLimits::default()
+        )
+        .is_ok()
+    );
+
+    for malformed in [
+        format!("x{xml}"),
+        format!("{xml}x"),
+        format!("&#65;{xml}"),
+        format!("{xml}&amp;"),
+    ] {
+        assert!(KdbxXml::import(malformed.as_bytes(), &KdbxReadLimits::default()).is_err());
+    }
+}
+
+#[test]
 fn metadata_custom_icons_and_custom_data_round_trip_through_xml() {
     let icon_id = KdbxUuid::from_bytes([0x11; 16]);
     let mut database = KeePassDatabase::default();
     database.root.id = KdbxUuid::from_bytes([0x01; 16]);
+    database.root.custom_icon_id = icon_id;
     database.meta.generator = "KeePassXC".into();
     database.meta.name = "Metadata".into();
     database.meta.description = "Preserved <metadata>".into();
@@ -133,6 +199,7 @@ fn metadata_custom_icons_and_custom_data_round_trip_through_xml() {
     let loaded = KdbxXml::import(&xml, &KdbxReadLimits::default()).unwrap();
     assert_eq!(loaded.meta, database.meta);
     assert_eq!(loaded.root.id, database.root.id);
+    assert_eq!(loaded.root.custom_icon_id, icon_id);
     assert_eq!(loaded.root.entries[0].id, database.root.entries[0].id);
     assert_eq!(loaded.root.entries[0].icon_id, 17);
     assert_eq!(loaded.root.entries[0].custom_icon_id, icon_id);
@@ -140,6 +207,27 @@ fn metadata_custom_icons_and_custom_data_round_trip_through_xml() {
         loaded.root.entries[0].custom_data,
         database.root.entries[0].custom_data
     );
+
+    let limits = KdbxReadLimits::default();
+    let mut kdbx = Vec::new();
+    KdbxFile::save(
+        &loaded,
+        &mut kdbx,
+        &mut neotales_keepass::KdbxCredentials::password("custom-icon-test").unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &limits,
+    )
+    .unwrap();
+    let reopened = KdbxFile::load_password(kdbx.as_slice(), "custom-icon-test", &limits).unwrap();
+    assert_eq!(reopened.root.custom_icon_id, icon_id);
+    assert_eq!(reopened.meta.custom_icons[0].uuid, icon_id);
+    let reexported = KdbxXml::export(&reopened).unwrap();
+    let reimported = KdbxXml::import(&reexported, &limits).unwrap();
+    assert_eq!(reimported.root.custom_icon_id, icon_id);
+    assert_eq!(reimported.meta.custom_icons[0].uuid, icon_id);
 }
 
 #[test]

@@ -1726,10 +1726,8 @@ impl VaultService {
                 "KeePass XML contains unsupported data that cannot be saved losslessly",
             ));
         }
-        validate_unique_object_ids(&database)
-            .map_err(|error| AutomationError::fixed(error.message()))?;
-        validate_unique_field_names(&database)
-            .map_err(|error| AutomationError::fixed(error.message()))?;
+        validate_save_model(&database)
+            .map_err(|_| AutomationError::fixed("KeePass XML database cannot be saved safely"))?;
         if !options.replace && !automation::tree_is_empty(&live.database) {
             return Err(AutomationError::fixed(
                 "target vault is not empty; use --replace to authorize replacement",
@@ -5424,6 +5422,10 @@ mod tests {
             "<FutureExtension>unsupported</FutureExtension></Entry>",
         );
         let mut service = service_with_database(target);
+        let existing_ref = service
+            .resolve_entry(SessionId(1), "existing")
+            .unwrap()
+            .reference();
 
         for options in [
             ImportOptions {
@@ -5443,6 +5445,10 @@ mod tests {
                 "KeePass XML contains unsupported data that cannot be saved losslessly"
             );
             assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+            assert_eq!(
+                service.selected_entry(&existing_ref).unwrap().title(),
+                "existing"
+            );
         }
 
         let valid_xml = KdbxXml::export(&source).unwrap();
@@ -5456,6 +5462,63 @@ mod tests {
             )
             .unwrap();
         assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+        assert_eq!(
+            service.selected_entry(&existing_ref).unwrap().title(),
+            "existing"
+        );
+    }
+
+    #[test]
+    fn keepass_xml_import_validates_save_depth_before_dry_run_or_mutation() {
+        let mut target = KeePassDatabase::default();
+        target.root.id = KdbxUuid::from_bytes([0xff; 16]);
+        target.root.add_entry(Entry::new("existing"));
+        let before = snapshot(&target);
+        let mut service = service_with_database(target);
+        let existing_ref = service
+            .resolve_entry(SessionId(1), "existing")
+            .unwrap()
+            .reference();
+
+        let depth = crate::KDBX_LIMITS.max_xml_depth - 3 - 2 + 1;
+        let mut source = KeePassDatabase::default();
+        source.root.id = KdbxUuid::from_bytes([0xff; 16]);
+        let mut xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+        let close = xml.rfind("</Group>").unwrap();
+        let nested = (1..=depth)
+            .rev()
+            .map(|index| {
+                let mut id = [0_u8; 16];
+                id[..std::mem::size_of::<usize>()].copy_from_slice(&index.to_le_bytes());
+                format!(
+                    "<Group><UUID>{}</UUID><Name>deep-{index}</Name>",
+                    KdbxUuid::from_bytes(id).to_base64()
+                )
+            })
+            .collect::<String>();
+        let closings = "</Group>".repeat(depth);
+        xml.insert_str(close, &format!("{nested}{closings}"));
+
+        for options in [
+            ImportOptions {
+                replace: true,
+                dry_run: true,
+            },
+            ImportOptions {
+                replace: true,
+                dry_run: false,
+            },
+        ] {
+            assert!(
+                service.import_keepass_xml(xml.as_bytes(), options).is_err(),
+                "depth beyond the save model limit must be rejected"
+            );
+            assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+            assert_eq!(
+                service.selected_entry(&existing_ref).unwrap().title(),
+                "existing"
+            );
+        }
     }
 
     #[test]
