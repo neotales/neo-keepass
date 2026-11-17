@@ -242,8 +242,8 @@ struct MetaWire {
     protect_url: bool,
     protect_notes: bool,
     times: TimesWire,
-    history_max_items: Option<u64>,
-    history_max_size: Option<u64>,
+    history_max_items: Option<i64>,
+    history_max_size: Option<i64>,
     memory_protection: bool,
     recycle_bin_enabled: bool,
     recycle_bin_uuid: String,
@@ -513,8 +513,8 @@ struct MetaInput {
     protect_url: bool,
     protect_notes: bool,
     times: TimesInput,
-    history_max_items: Option<u64>,
-    history_max_size: Option<u64>,
+    history_max_items: Option<i64>,
+    history_max_size: Option<i64>,
     memory_protection: bool,
     recycle_bin_enabled: bool,
     recycle_bin_uuid: String,
@@ -1384,8 +1384,6 @@ impl SecretB64 {
         let count = self
             .0
             .len()
-            .checked_sub(padding)
-            .ok_or_else(invalid)?
             .checked_div(4)
             .ok_or_else(invalid)?
             .checked_mul(3)
@@ -1412,6 +1410,9 @@ struct StructuralCounts {
 }
 
 fn validate_model(database: &KeePassDatabase, limits: Limits) -> Result<()> {
+    if !neotales_keepass::history_limits_valid(&database.meta) {
+        return Err(invalid());
+    }
     let mut counts = StructuralCounts {
         binary_bytes: 0,
         ..StructuralCounts::default()
@@ -1681,6 +1682,22 @@ pub(crate) fn stats(database: &KeePassDatabase) -> DatabaseStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_base64_length_hint_matches_decoding_for_short_lengths() {
+        for length in 0..=64 {
+            let bytes: Vec<u8> = (0..length).map(|index| index as u8).collect();
+            let encoded = SecretB64::from_bytes(&bytes);
+            assert_eq!(encoded.decoded_len_hint().unwrap(), length);
+            assert_eq!(encoded.decode().unwrap().as_slice(), bytes);
+        }
+        for encoded in ["YQ==", "Yg=="] {
+            let value = SecretB64(Zeroizing::new(encoded.to_owned()));
+            assert_eq!(value.decoded_len_hint().unwrap(), 1);
+            assert_eq!(value.decode().unwrap().as_slice().len(), 1);
+        }
+    }
+
     fn fixture() -> KeePassDatabase {
         let mut database = KeePassDatabase::default();
         let reference = database

@@ -56,7 +56,7 @@ pub use model::{
     KeePassDatabase, KeePassEntry, KeePassField, KeePassGroup, KeePassMeta, KeePassTimes,
     MemoryPinningPolicy, MemoryPinningStatus, MemoryProtectionError, MemoryProtectionProvider,
     MergeStrategy, ProtectedValue, SecretBytes, SecretString, VariantDictionary,
-    VariantDictionaryItem, VariantValue,
+    VariantDictionaryItem, VariantValue, history_limits_valid,
 };
 pub use otp::{
     Hotp, HotpParameters, KeePassXcOtp, OtpAlgorithm, OtpDigits, OtpKind, OtpSecret, OtpUri, Totp,

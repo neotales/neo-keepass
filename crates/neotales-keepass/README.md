@@ -263,8 +263,11 @@ processing attacker-controlled vaults and keep the defaults for local files.
 - Password, composite, inner-stream, and protected-value buffers are zeroized
   on a best-effort basis. `ProtectedValue` intentionally does not claim that
   text is pinned or that an operating system can guarantee swapping behavior.
-- Plain `KdbxXml` import/export is for unprotected values only. Protected KDBX
-  values require a real KDBX inner stream; there is no plaintext fallback.
+- `KdbxXml::export` is restrictive and rejects protected values by default.
+  Callers may deliberately select `KdbxXml::export_allow_plaintext` to emit
+  protected text fields (including passwords) as unprotected XML text. That
+  opt-in does not support protected binary attachments or other unsupported
+  data; those remain fail-closed. XML import accepts only unprotected values.
 - This is not a full-fidelity KeePass implementation. KDBX 3.0 writing,
   challenge-response credentials, platform key stores, unknown extension
   preservation, and several schema fields remain unsupported or fail closed.

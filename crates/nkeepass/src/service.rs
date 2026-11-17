@@ -12,7 +12,7 @@ use crate::glob::Glob;
 use crate::{automation, interchange};
 use neotales_keepass::{
     Entry, Field, Group, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxUuid, KdbxWriteOptions,
-    KeePassDatabase, KeePassXcOtp, OtpKind, OtpSecret, ProtectedValue, SecretBytes, Totp,
+    KdbxXml, KeePassDatabase, KeePassXcOtp, OtpKind, OtpSecret, ProtectedValue, SecretBytes, Totp,
     TotpParameters,
 };
 
@@ -1670,6 +1670,100 @@ impl VaultService {
         let bytes = interchange::encode(&live.database)
             .map_err(|error| AutomationError::fixed(error.message()))?;
         Ok(ExportSnapshot(bytes))
+    }
+
+    /// Exports the open database as unprotected KeePass XML.
+    ///
+    /// The core XML writer rejects protected values and public outer-header
+    /// custom data; this method preserves those fail-closed checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vault is locked or its contents cannot be
+    /// represented by the unprotected XML subset.
+    pub fn export_keepass_xml(&self) -> Result<ExportSnapshot, AutomationError> {
+        let live = self
+            .session
+            .as_ref()
+            .ok_or_else(|| AutomationError::fixed("vault is locked"))?;
+        let bytes = KdbxXml::export(&live.database).map_err(|_| {
+            AutomationError::fixed(
+                "vault contains data that the unprotected KeePass XML subset cannot represent",
+            )
+        })?;
+        Ok(ExportSnapshot(bytes.into()))
+    }
+
+    /// Exports the open database as unprotected KeePass XML.
+    ///
+    /// Unlike [`Self::export_keepass_xml`], this explicitly reveals protected
+    /// values. Callers must obtain plaintext-export authorization before using
+    /// this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vault is locked or its contents cannot be
+    /// represented by the supported XML subset.
+    pub fn export_keepass_xml_allow_plaintext(&self) -> Result<ExportSnapshot, AutomationError> {
+        let live = self
+            .session
+            .as_ref()
+            .ok_or_else(|| AutomationError::fixed("vault is locked"))?;
+        let bytes = KdbxXml::export_allow_plaintext(&live.database).map_err(|_| {
+            AutomationError::fixed(
+                "vault contains data that the KeePass XML subset cannot represent",
+            )
+        })?;
+        Ok(ExportSnapshot(bytes.into()))
+    }
+
+    /// Replaces the open database from unprotected KeePass XML.
+    ///
+    /// XML imports are deliberately limited to the subset supported by
+    /// [`KdbxXml`]. Protected XML values and non-lossless model data fail
+    /// closed; a nonempty target requires explicit replacement authorization.
+    /// A successful non-dry-run import mutates the live in-memory session and
+    /// invalidates its existing references. A dry run validates the complete
+    /// XML document and authorization without mutating the session. The CLI
+    /// persists a successful mutation after this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vault is locked, XML is invalid/unsupported, or
+    /// replacement was not authorized for a nonempty target.
+    pub fn import_keepass_xml(
+        &mut self,
+        input: &[u8],
+        options: ImportOptions,
+    ) -> Result<(), AutomationError> {
+        let live = self
+            .session
+            .as_ref()
+            .ok_or_else(|| AutomationError::fixed("vault is locked"))?;
+        validate_unique_object_ids(&live.database)
+            .map_err(|error| AutomationError::fixed(error.message()))?;
+        let database = KdbxXml::import(input, &crate::KDBX_LIMITS)
+            .map_err(|_| AutomationError::fixed("invalid or unsupported KeePass XML"))?;
+        if !database.can_save_losslessly {
+            return Err(AutomationError::fixed(
+                "KeePass XML contains unsupported data that cannot be saved losslessly",
+            ));
+        }
+        validate_save_model(&database)
+            .map_err(|_| AutomationError::fixed("KeePass XML database cannot be saved safely"))?;
+        if !options.replace && !automation::tree_is_empty(&live.database) {
+            return Err(AutomationError::fixed(
+                "target vault is not empty; use --replace to authorize replacement",
+            ));
+        }
+        if !options.dry_run {
+            self.session
+                .as_mut()
+                .ok_or_else(|| AutomationError::fixed("vault is locked"))?
+                .database = database;
+            self.invalidate_references();
+        }
+        Ok(())
     }
 
     /// Merges a complete bounded interchange snapshot into the live session
@@ -3781,6 +3875,9 @@ fn validate_xml_depth(root: &Group) -> Result<(), ServiceError> {
 }
 
 fn validate_save_model(database: &KeePassDatabase) -> Result<(), ServiceError> {
+    if !neotales_keepass::history_limits_valid(&database.meta) {
+        return Err(ServiceError::Save);
+    }
     validate_xml_depth(&database.root)?;
     validate_unique_object_ids(database)?;
     validate_unique_field_names(database)?;
@@ -5336,6 +5433,359 @@ mod tests {
             "target vault is not empty; use --replace to authorize replacement"
         );
         assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+    }
+
+    #[test]
+    fn keepass_xml_import_rejects_lossy_input_without_mutating_even_on_dry_run() {
+        let mut target = KeePassDatabase::default();
+        target.root.add_entry(Entry::new("existing"));
+        let before = snapshot(&target);
+        let mut source = KeePassDatabase::default();
+        source.root.add_entry(Entry::new("incoming"));
+        let xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+        let lossy_xml = xml.replace(
+            "</Entry>",
+            "<FutureExtension>unsupported</FutureExtension></Entry>",
+        );
+        let mut service = service_with_database(target);
+        let existing_ref = service
+            .resolve_entry(SessionId(1), "existing")
+            .unwrap()
+            .reference();
+
+        for options in [
+            ImportOptions {
+                replace: true,
+                dry_run: true,
+            },
+            ImportOptions {
+                replace: true,
+                dry_run: false,
+            },
+        ] {
+            let error = service
+                .import_keepass_xml(lossy_xml.as_bytes(), options)
+                .unwrap_err();
+            assert_eq!(
+                error.message(),
+                "KeePass XML contains unsupported data that cannot be saved losslessly"
+            );
+            assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+            assert_eq!(
+                service.selected_entry(&existing_ref).unwrap().title(),
+                "existing"
+            );
+        }
+
+        let valid_xml = KdbxXml::export(&source).unwrap();
+        service
+            .import_keepass_xml(
+                &valid_xml,
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+        assert_eq!(
+            service.selected_entry(&existing_ref).unwrap().title(),
+            "existing"
+        );
+    }
+
+    #[test]
+    fn keepass_xml_import_validates_save_depth_before_dry_run_or_mutation() {
+        let mut target = KeePassDatabase::default();
+        target.root.id = KdbxUuid::from_bytes([0xff; 16]);
+        target.root.add_entry(Entry::new("existing"));
+        let before = snapshot(&target);
+        let mut service = service_with_database(target);
+        let existing_ref = service
+            .resolve_entry(SessionId(1), "existing")
+            .unwrap()
+            .reference();
+
+        let nested_group_xml = |depth: usize| {
+            let mut source = KeePassDatabase::default();
+            source.root.id = KdbxUuid::from_bytes([0xff; 16]);
+            let mut xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+            let close = xml.rfind("</Group>").unwrap();
+            let nested = (1..=depth)
+                .rev()
+                .map(|index| {
+                    let mut id = [0_u8; 16];
+                    id[..std::mem::size_of::<usize>()].copy_from_slice(&index.to_le_bytes());
+                    format!(
+                        "<Group><UUID>{}</UUID><Name>deep-{index}</Name>",
+                        KdbxUuid::from_bytes(id).to_base64()
+                    )
+                })
+                .collect::<String>();
+            let closings = "</Group>".repeat(depth);
+            xml.insert_str(close, &format!("{nested}{closings}"));
+            xml
+        };
+        let boundary = nested_group_xml(crate::KDBX_LIMITS.max_xml_depth - 3 - 2);
+        service
+            .import_keepass_xml(
+                boundary.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .expect("max save-depth boundary must be accepted as a dry run");
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+        assert_eq!(
+            service.selected_entry(&existing_ref).unwrap().title(),
+            "existing"
+        );
+        let beyond = nested_group_xml(crate::KDBX_LIMITS.max_xml_depth - 3 - 2 + 1);
+
+        for options in [
+            ImportOptions {
+                replace: true,
+                dry_run: true,
+            },
+            ImportOptions {
+                replace: true,
+                dry_run: false,
+            },
+        ] {
+            assert!(
+                service
+                    .import_keepass_xml(beyond.as_bytes(), options)
+                    .is_err(),
+                "depth beyond the save model limit must be rejected"
+            );
+            assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+            assert_eq!(
+                service.selected_entry(&existing_ref).unwrap().title(),
+                "existing"
+            );
+        }
+    }
+
+    #[test]
+    fn keepass_xml_import_sorts_reversed_legacy_binary_ids_before_save() {
+        let mut source = KeePassDatabase::default();
+        let id_zero = source.binary_pool.add(b"legacy-zero".to_vec(), false);
+        let id_one = source.binary_pool.add(b"legacy-one".to_vec(), false);
+        let mut entry = Entry::new("attachments");
+        entry.attachments.push(neotales_keepass::Attachment {
+            name: "zero.bin".into(),
+            reference: id_zero,
+        });
+        entry.attachments.push(neotales_keepass::Attachment {
+            name: "one.bin".into(),
+            reference: id_one,
+        });
+        source.root.add_entry(entry);
+
+        let xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+        let binaries_start = xml.find("<Binaries>").unwrap() + "<Binaries>".len();
+        let binaries_end = xml.find("</Binaries>").unwrap();
+        let section = &xml[binaries_start..binaries_end];
+        let zero_start = section.find("<Binary ID=\"0\"").unwrap();
+        let zero_end =
+            section[zero_start..].find("</Binary>").unwrap() + zero_start + "</Binary>".len();
+        let one_start = section.find("<Binary ID=\"1\"").unwrap();
+        let one_end =
+            section[one_start..].find("</Binary>").unwrap() + one_start + "</Binary>".len();
+        let reversed = format!(
+            "{}{}{}{}{}",
+            &xml[..binaries_start],
+            &section[one_start..one_end],
+            &section[zero_start..zero_end],
+            &xml[binaries_end..],
+            ""
+        );
+
+        let (_directory, path) = vault();
+        let mut service = VaultService::default();
+        service
+            .open(&path, &mut credentials(), &crate::KDBX_LIMITS)
+            .unwrap();
+        let before = service.export_snapshot().unwrap().bytes().to_vec();
+        service
+            .import_keepass_xml(
+                reversed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+
+        service
+            .import_keepass_xml(
+                reversed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+        service.save(&path, &mut credentials()).unwrap();
+        let reopened = KdbxFile::open(File::open(&path).unwrap(), "service-test-password").unwrap();
+        let attachments = &reopened.root.entries[0].attachments;
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            reopened.binary_pool.records()[attachments[0].reference].data,
+            b"legacy-zero"
+        );
+        assert_eq!(
+            reopened.binary_pool.records()[attachments[1].reference].data,
+            b"legacy-one"
+        );
+        let reexported = KdbxXml::export(&reopened).unwrap();
+        let reimported = KdbxXml::import(&reexported, &crate::KDBX_LIMITS).unwrap();
+        let attachments = &reimported.root.entries[0].attachments;
+        assert_eq!(
+            reimported.binary_pool.records()[attachments[0].reference].data,
+            b"legacy-zero"
+        );
+        assert_eq!(
+            reimported.binary_pool.records()[attachments[1].reference].data,
+            b"legacy-one"
+        );
+    }
+
+    #[test]
+    fn keepass_xml_import_normalizes_mixed_declared_and_inline_binaries() {
+        let mut source = KeePassDatabase::default();
+        let declared = source.binary_pool.add(b"declared-payload".to_vec(), false);
+        let mut entry = Entry::new("mixed attachments");
+        entry.attachments.push(neotales_keepass::Attachment {
+            name: "declared.bin".into(),
+            reference: declared,
+        });
+        source.root.add_entry(entry);
+        let xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+        let mixed = xml.replacen(
+            "</Entry>",
+            "<Binary><Key>inline.bin</Key><Value>aW5saW5lLXBheWxvYWQ=</Value></Binary></Entry>",
+            1,
+        );
+
+        let (_directory, path) = vault();
+        let mut service = VaultService::default();
+        service
+            .open(&path, &mut credentials(), &crate::KDBX_LIMITS)
+            .unwrap();
+        let before = service.export_snapshot().unwrap().bytes().to_vec();
+        service
+            .import_keepass_xml(
+                mixed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+        service
+            .import_keepass_xml(
+                mixed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+        service.save(&path, &mut credentials()).unwrap();
+        let reopened = KdbxFile::open(File::open(&path).unwrap(), "service-test-password").unwrap();
+        assert_eq!(reopened.root.entries[0].attachments.len(), 2);
+        for attachment in &reopened.root.entries[0].attachments {
+            let data = &reopened.binary_pool.records()[attachment.reference].data;
+            match attachment.name.as_str() {
+                "declared.bin" => assert_eq!(data, b"declared-payload"),
+                "inline.bin" => assert_eq!(data, b"inline-payload"),
+                other => panic!("unexpected attachment name: {other}"),
+            }
+        }
+        let exported = KdbxXml::export(&reopened).unwrap();
+        let round_trip = KdbxXml::import(&exported, &crate::KDBX_LIMITS).unwrap();
+        assert_eq!(round_trip.root.entries[0].attachments.len(), 2);
+        assert_eq!(round_trip.meta.legacy_binaries.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_history_limits_validate_before_mutation_and_round_trip_boundaries() {
+        let (_directory, path) = vault();
+        let mut service = VaultService::default();
+        service
+            .open(&path, &mut credentials(), &crate::KDBX_LIMITS)
+            .unwrap();
+        let original_snapshot = service.export_snapshot().unwrap().bytes().to_vec();
+        let original_disk = std::fs::read(&path).unwrap();
+        let base = String::from_utf8(original_snapshot.clone()).unwrap();
+        assert!(base.contains("\"history_max_items\":null"));
+        assert!(base.contains("\"history_max_size\":null"));
+
+        for (field, value) in [
+            ("history_max_items", "-2"),
+            ("history_max_items", "2147483648"),
+            ("history_max_size", "-2"),
+        ] {
+            let invalid = base.replacen(
+                &format!("\"{field}\":null"),
+                &format!("\"{field}\":{value}"),
+                1,
+            );
+            assert_ne!(invalid, base);
+            for dry_run in [true, false] {
+                assert!(
+                    service
+                        .import_snapshot(
+                            invalid.as_bytes(),
+                            ImportOptions {
+                                replace: true,
+                                dry_run,
+                            },
+                        )
+                        .is_err(),
+                    "invalid {field}={value} must be rejected"
+                );
+                assert_eq!(
+                    service.export_snapshot().unwrap().bytes(),
+                    original_snapshot
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), original_disk);
+            }
+        }
+
+        for (items, size) in [("-1", "9223372036854775807"), ("2147483647", "-1")] {
+            let mut valid = base.replacen(
+                "\"history_max_items\":null",
+                &format!("\"history_max_items\":{items}"),
+                1,
+            );
+            valid = valid.replacen(
+                "\"history_max_size\":null",
+                &format!("\"history_max_size\":{size}"),
+                1,
+            );
+            service
+                .import_snapshot(
+                    valid.as_bytes(),
+                    ImportOptions {
+                        replace: true,
+                        dry_run: false,
+                    },
+                )
+                .unwrap();
+            service.save(&path, &mut credentials()).unwrap();
+            let reopened =
+                KdbxFile::open(File::open(&path).unwrap(), "service-test-password").unwrap();
+            assert_eq!(
+                reopened.meta.history_max_items,
+                Some(items.parse().unwrap())
+            );
+            assert_eq!(reopened.meta.history_max_size, Some(size.parse().unwrap()));
+        }
     }
 
     #[test]

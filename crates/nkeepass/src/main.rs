@@ -344,11 +344,25 @@ const IMPORT_OPTIONS: &[HelpOption] = &[
         summary: "Allow replacing a non-empty vault.",
     },
     DRY_RUN_OPTION,
+    HelpOption {
+        label: "--format keepass-xml",
+        summary: "Import KeePass XML instead of the default JSON snapshot.",
+    },
 ];
-const EXPORT_OPTIONS: &[HelpOption] = &[HelpOption {
-    label: "--output PATH",
-    summary: "Write the interchange snapshot to this private output file.",
-}];
+const EXPORT_OPTIONS: &[HelpOption] = &[
+    HelpOption {
+        label: "--output PATH",
+        summary: "Write the interchange snapshot to this private output file.",
+    },
+    HelpOption {
+        label: "--format keepass-xml",
+        summary: "Export KeePass XML instead of the default JSON snapshot.",
+    },
+    HelpOption {
+        label: "--allow-plaintext",
+        summary: "Acknowledge that KeePass XML is unencrypted plaintext.",
+    },
+];
 const SYNC_OPTIONS: &[HelpOption] = &[
     FILE_OPTION,
     STDIN_OPTION,
@@ -1818,6 +1832,7 @@ struct Options<'a> {
     yes: bool,
     dry_run: bool,
     replace: bool,
+    allow_plaintext: bool,
     size: Option<usize>,
     glob: Option<&'a str>,
     format: Option<&'a str>,
@@ -1906,6 +1921,7 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             "--yes" if !opts.yes => opts.yes = true,
             "--dry-run" if !opts.dry_run => opts.dry_run = true,
             "--replace" if !opts.replace => opts.replace = true,
+            "--allow-plaintext" if !opts.allow_plaintext => opts.allow_plaintext = true,
             "--size" if opts.size.is_none() => opts.size = Some(count(value, "invalid size")?),
             "--format" if opts.format.is_none() => opts.format = value,
             "--is-output" if !opts.is_output => opts.is_output = true,
@@ -3130,39 +3146,79 @@ fn service_automation_operation(
         let (result, changed) = match action {
             "import" => {
                 let input = automation_input(opts, interchange::VAULT_LIMITS.max_bytes)?;
-                let report = service
-                    .import_snapshot(
-                        &input,
-                        nkeepass::ImportOptions {
-                            replace: opts.replace,
-                            dry_run: opts.dry_run,
-                        },
+                if let Some(format) = opts.format {
+                    if format != "keepass-xml" {
+                        return Err(err("unsupported import format"));
+                    }
+                    service
+                        .import_keepass_xml(
+                            &input,
+                            nkeepass::ImportOptions {
+                                replace: opts.replace,
+                                dry_run: opts.dry_run,
+                            },
+                        )
+                        .map_err(|error| err(error.message()))?;
+                    (
+                        serde_json::json!({
+                            "operation": "import",
+                            "format": "keepass-xml",
+                            "dry_run": opts.dry_run,
+                        }),
+                        !opts.dry_run,
                     )
-                    .map_err(|error| err(error.message()))?;
-                (
-                    serde_json::json!({
-                        "operation": "import",
-                        "dry_run": report.dry_run,
-                        "replaced": report.replaced,
-                        "groups": report.groups,
-                        "entries": report.entries,
-                        "history_entries": report.history_entries,
-                        "fields": report.fields,
-                        "attachments": report.attachments,
-                        "protected_values": report.protected_values,
-                        "binary_records": report.binary_records,
-                        "binary_bytes": report.binary_bytes,
-                        "passwords_generated": report.passwords_generated,
-                        "passwords_kept": report.passwords_kept,
-                        "passwords_pending": report.passwords_pending,
-                    }),
-                    !opts.dry_run,
-                )
+                } else {
+                    let report = service
+                        .import_snapshot(
+                            &input,
+                            nkeepass::ImportOptions {
+                                replace: opts.replace,
+                                dry_run: opts.dry_run,
+                            },
+                        )
+                        .map_err(|error| err(error.message()))?;
+                    (
+                        serde_json::json!({
+                            "operation": "import",
+                            "dry_run": report.dry_run,
+                            "replaced": report.replaced,
+                            "groups": report.groups,
+                            "entries": report.entries,
+                            "history_entries": report.history_entries,
+                            "fields": report.fields,
+                            "attachments": report.attachments,
+                            "protected_values": report.protected_values,
+                            "binary_records": report.binary_records,
+                            "binary_bytes": report.binary_bytes,
+                            "passwords_generated": report.passwords_generated,
+                            "passwords_kept": report.passwords_kept,
+                            "passwords_pending": report.passwords_pending,
+                        }),
+                        !opts.dry_run,
+                    )
+                }
             }
             "export" => {
-                let snapshot = service
-                    .export_snapshot()
-                    .map_err(|error| err(error.message()))?;
+                let xml = opts.format == Some("keepass-xml");
+                if opts.format.is_some() && !xml {
+                    return Err(err("unsupported export format"));
+                }
+                if xml && !opts.allow_plaintext {
+                    return Err(err(
+                        "KeePass XML export is plaintext; pass --allow-plaintext to confirm",
+                    ));
+                }
+                if !xml && opts.allow_plaintext {
+                    return Err(err(
+                        "--allow-plaintext is only valid with --format keepass-xml",
+                    ));
+                }
+                let snapshot = if xml {
+                    service.export_keepass_xml_allow_plaintext()
+                } else {
+                    service.export_snapshot()
+                }
+                .map_err(|error| err(error.message()))?;
                 write_private_output(
                     opts.output.ok_or_else(|| err("--output required"))?,
                     snapshot.bytes(),
@@ -3170,8 +3226,8 @@ fn service_automation_operation(
                 (
                     serde_json::json!({
                         "operation": "export",
-                        "format": interchange::FORMAT,
-                        "version": interchange::VERSION,
+                        "format": if xml { "keepass-xml" } else { interchange::FORMAT },
+                        "version": if xml { None } else { Some(interchange::VERSION) },
                         "bytes": snapshot.bytes().len(),
                     }),
                     false,
@@ -3442,12 +3498,13 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
         || opts.yes
         || opts.size.is_some()
         || opts.glob.is_some()
-        || opts.format.is_some()
         || opts.is_output;
     match action {
         "setx" => {
             if opts.key.is_none()
                 || unexpected
+                || opts.format.is_some()
+                || opts.allow_plaintext
                 || opts.replace
                 || opts.strategy.is_some()
                 || usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1
@@ -3458,6 +3515,7 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
         "import" => {
             if opts.key.is_some()
                 || unexpected
+                || opts.allow_plaintext
                 || opts.strategy.is_some()
                 || usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1
             {
@@ -3475,7 +3533,6 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.replace
                 || opts.size.is_some()
                 || opts.glob.is_some()
-                || opts.format.is_some()
                 || opts.strategy.is_some()
                 || opts.is_output
             {
@@ -3486,6 +3543,8 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
             if opts.key.is_some()
                 || unexpected
                 || opts.replace
+                || opts.format.is_some()
+                || opts.allow_plaintext
                 || usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1
             {
                 return Err(err("invalid sync option"));

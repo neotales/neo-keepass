@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 
 use neotales_keepass::{
     Attachment, Entry, Field, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxTimestamp,
-    KdbxWriteOptions, KeePassDatabase, ProtectedValue, VariantValue,
+    KdbxWriteOptions, KdbxXml, KeePassDatabase, ProtectedValue, VariantValue,
 };
 use tempfile::TempDir;
 
@@ -1938,4 +1938,296 @@ fn sync_honours_the_directive_without_touching_the_rest_of_the_vault() {
         original.password.reveal_text().unwrap().as_str(),
         ENTRY_SECRET
     );
+}
+
+#[test]
+fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
+    let mut plain = KeePassDatabase::default();
+    let mut xml_entry = Entry::new("XML fixture");
+    xml_entry.username = "synthetic-user".into();
+    xml_entry.url = "https://example.invalid".into();
+    xml_entry.notes = "synthetic ordinary notes".into();
+    xml_entry.password = ProtectedValue::from_text("synthetic-xml-secret");
+    xml_entry.fields.push(neotales_keepass::Field {
+        key: "Synthetic protected field".into(),
+        value: ProtectedValue::from_text("synthetic-field-secret"),
+        protected: true,
+        protect_in_memory: false,
+    });
+    plain.root.entries.push(xml_entry);
+    assert!(KdbxXml::export(&plain).is_err());
+    let mut import_fixture = KeePassDatabase::default();
+    import_fixture.root.entries.push(Entry::new("XML fixture"));
+    let xml = KdbxXml::export(&import_fixture).unwrap();
+    let xml_directory = tempfile::tempdir().unwrap();
+    let xml_path = xml_directory.path().join("subset.xml");
+    std::fs::write(&xml_path, &xml).unwrap();
+
+    let empty = TestVault::new("empty.kdbx", &KeePassDatabase::default());
+    let home = tempfile::tempdir().unwrap();
+    let imported = run(
+        &empty.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            xml_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    assert_eq!(load(&empty.path).root.entries[0].title, "XML fixture");
+
+    let xml_text = String::from_utf8(xml).unwrap();
+    let title_start = xml_text.find("<String><Key>Title</Key>").unwrap();
+    let title_end =
+        xml_text[title_start..].find("</String>").unwrap() + title_start + "</String>".len();
+    let duplicate_title = xml_text[title_start..title_end].to_owned();
+    let duplicate_xml = xml_text.replacen("</Entry>", &format!("{duplicate_title}</Entry>"), 1);
+    let protected_xml = xml_text.replacen("<Value>", "<Value Protected=\"True\">", 1);
+    let unknown_xml = xml_text.replacen(
+        "</Entry>",
+        "<FutureExtension>value</FutureExtension></Entry>",
+        1,
+    );
+    let two_roots = format!("{xml_text}<KeePassFile/>");
+    let bad_inputs = [duplicate_xml, protected_xml, unknown_xml, two_roots];
+    for (index, bad_xml) in bad_inputs.iter().enumerate() {
+        let bad_path = xml_directory.path().join(format!("invalid-{index}.xml"));
+        std::fs::write(&bad_path, bad_xml).unwrap();
+        let before = std::fs::read(&empty.path).unwrap();
+        let rejected = run(
+            &empty.path,
+            home.path(),
+            &[
+                "secrets",
+                "import",
+                "--file",
+                bad_path.to_str().unwrap(),
+                "--format",
+                "keepass-xml",
+                "--replace",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+        );
+        assert!(!rejected.status.success());
+        assert!(!String::from_utf8_lossy(&rejected.stdout).contains("XML fixture"));
+        assert_eq!(std::fs::read(&empty.path).unwrap(), before);
+    }
+
+    let before_dry_run = std::fs::read(&empty.path).unwrap();
+    let dry_run = run(
+        &empty.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            xml_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--replace",
+            "--dry-run",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(dry_run.status.success());
+    assert_eq!(std::fs::read(&empty.path).unwrap(), before_dry_run);
+
+    let mut replacement = KeePassDatabase::default();
+    replacement.root.entries.push(Entry::new("Replacement"));
+    let replacement_path = xml_directory.path().join("replacement.xml");
+    std::fs::write(&replacement_path, KdbxXml::export(&replacement).unwrap()).unwrap();
+    let replace = run(
+        &empty.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            replacement_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--replace",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(replace.status.success());
+    assert_eq!(load(&empty.path).root.entries[0].title, "Replacement");
+
+    let source = TestVault::new("plain.kdbx", &plain);
+    let denied_path = home.path().join("denied.xml");
+    let denied = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            denied_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!denied.status.success());
+    assert!(!denied_path.exists());
+
+    let output_path = home.path().join("allowed.xml");
+    let allowed = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert!(std::fs::read(&output_path).unwrap().starts_with(b"<?xml"));
+    let exported = std::fs::read(&output_path).unwrap();
+    assert!(
+        exported
+            .windows(b"synthetic-xml-secret".len())
+            .any(|w| w == b"synthetic-xml-secret")
+    );
+    let roundtrip_vault = TestVault::new("xml-roundtrip.kdbx", &KeePassDatabase::default());
+    let roundtrip = run(
+        &roundtrip_vault.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            output_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(roundtrip.status.success(), "XML round-trip import failed");
+    let roundtripped = load(&roundtrip_vault.path);
+    let entry = &roundtripped.root.entries[0];
+    assert_eq!(
+        entry.password.reveal_text().unwrap().as_str(),
+        "synthetic-xml-secret"
+    );
+    assert_eq!(entry.username, "synthetic-user");
+    assert_eq!(entry.url, "https://example.invalid");
+    assert_eq!(entry.notes, "synthetic ordinary notes");
+    assert_eq!(
+        entry
+            .field("Synthetic protected field")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "synthetic-field-secret"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&output_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let overwrite = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!overwrite.status.success());
+
+    let mut protected = KeePassDatabase::default();
+    protected
+        .binary_pool
+        .add(b"synthetic protected binary".to_vec(), true);
+    let protected_vault = TestVault::new("protected.kdbx", &protected);
+    let unsupported_path = home.path().join("unsupported.xml");
+    let unsupported = run(
+        &protected_vault.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            unsupported_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!unsupported.status.success());
+    assert!(!unsupported_path.exists());
+    assert_no_disclosure(&unsupported, "synthetic protected binary");
+}
+
+#[test]
+fn keepass_xml_rejects_xml10_control_without_installing_output() {
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("synthetic invalid XML");
+    entry.password = ProtectedValue::from_text("synthetic\0xml-value");
+    database.root.entries.push(entry);
+    let source = TestVault::new("invalid-xml-character.kdbx", &database);
+    let home = tempfile::tempdir().unwrap();
+    let output = home.path().join("invalid-character.xml");
+    let result = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            output.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!result.status.success());
+    assert!(!output.exists());
+    assert_no_disclosure(&result, "synthetic\0xml-value");
 }

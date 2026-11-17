@@ -8,6 +8,7 @@ use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::crypto::InnerCipher;
 use crate::error::KdbxError;
@@ -57,6 +58,11 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                 if let Some(parent) = stack.last_mut() {
                     parent.children.push(node);
                 } else {
+                    if root.is_some() {
+                        return Err(KdbxError::malformed(
+                            "KDBX XML must contain exactly one document element",
+                        ));
+                    }
                     root = Some(node);
                 }
             }
@@ -80,11 +86,23 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                     parent
                         .text
                         .push_str(&text.xml_content(XmlVersion::Implicit1_0));
+                } else if !text
+                    .xml_content(XmlVersion::Implicit1_0)
+                    .chars()
+                    .all(is_xml_whitespace)
+                {
+                    return Err(KdbxError::malformed(
+                        "non-whitespace text outside KDBX XML document element",
+                    ));
                 }
             }
             Event::CData(data) => {
                 if let Some(parent) = stack.last_mut() {
                     parent.text.push_str(data.as_ref());
+                } else {
+                    return Err(KdbxError::malformed(
+                        "CDATA outside KDBX XML document element",
+                    ));
                 }
             }
             Event::End(_) => {
@@ -94,6 +112,11 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                 if let Some(parent) = stack.last_mut() {
                     parent.children.push(node);
                 } else {
+                    if root.is_some() {
+                        return Err(KdbxError::malformed(
+                            "KDBX XML must contain exactly one document element",
+                        ));
+                    }
                     root = Some(node);
                 }
             }
@@ -117,6 +140,10 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                 };
                 if let Some(parent) = stack.last_mut() {
                     parent.text.push_str(&resolved);
+                } else {
+                    return Err(KdbxError::malformed(
+                        "entity reference outside KDBX XML document element",
+                    ));
                 }
             }
             Event::DocType(_) => {
@@ -131,6 +158,10 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
         return Err(KdbxError::malformed("unterminated KDBX XML"));
     }
     root.ok_or_else(|| KdbxError::malformed("KDBX XML has no document element"))
+}
+
+fn is_xml_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\n' | '\r')
 }
 
 fn node_from_start(start: &BytesStart<'_>) -> Result<XmlNode, KdbxError> {
@@ -226,6 +257,7 @@ fn analyze_losslessness(root: &XmlNode) -> Result<bool, KdbxError> {
             "MemoryProtection" => &[
                 "ProtectTitle",
                 "ProtectUserName",
+                "ProtectUsername",
                 "ProtectPassword",
                 "ProtectURL",
                 "ProtectNotes",
@@ -425,6 +457,14 @@ pub(crate) fn parse_database(
         }
     }
     resolve_attachments(&database.root, &database.binary_pool)?;
+    if legacy_binary_references {
+        database.meta.legacy_binaries = database
+            .binary_pool
+            .records()
+            .iter()
+            .map(|record| record.data.clone())
+            .collect();
+    }
     Ok(database)
 }
 
@@ -519,19 +559,18 @@ fn parse_meta(
     }
     if let Some(memory) = child(node, "MemoryProtection") {
         meta.memory_protection = true;
-        meta.protect_password =
-            text(memory, "ProtectPassword").is_some_and(|value| value == "True");
-        meta.protect_title = text(memory, "ProtectTitle").is_some_and(|value| value == "True");
+        meta.protect_password = memory_protection_value(memory, "ProtectPassword", None)?;
+        meta.protect_title = memory_protection_value(memory, "ProtectTitle", None)?;
         meta.protect_username =
-            text(memory, "ProtectUsername").is_some_and(|value| value == "True");
-        meta.protect_url = text(memory, "ProtectURL").is_some_and(|value| value == "True");
-        meta.protect_notes = text(memory, "ProtectNotes").is_some_and(|value| value == "True");
+            memory_protection_value(memory, "ProtectUserName", Some("ProtectUsername"))?;
+        meta.protect_url = memory_protection_value(memory, "ProtectURL", None)?;
+        meta.protect_notes = memory_protection_value(memory, "ProtectNotes", None)?;
     }
     if let Some(value) = text(node, "HistoryMaxItems") {
-        meta.history_max_items = value.parse().ok();
+        meta.history_max_items = Some(parse_history_limit(value, i64::from(i32::MAX))?);
     }
     if let Some(value) = text(node, "HistoryMaxSize") {
-        meta.history_max_size = value.parse().ok();
+        meta.history_max_size = Some(parse_history_limit(value, i64::MAX)?);
     }
     if let Some(value) = text(node, "RecycleBinEnabled") {
         meta.recycle_bin_enabled = value == "True";
@@ -551,6 +590,53 @@ fn parse_meta(
     }
     database.meta = meta;
     Ok(())
+}
+
+fn parse_history_limit(value: &str, maximum: i64) -> Result<i64, KdbxError> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(KdbxError::malformed("invalid KeePass history limit"));
+    }
+    let value = value
+        .parse::<i64>()
+        .map_err(|_| KdbxError::malformed("invalid KeePass history limit"))?;
+    if value < -1 || value > maximum {
+        return Err(KdbxError::malformed(
+            "KeePass history limit is out of range",
+        ));
+    }
+    Ok(value)
+}
+
+fn memory_protection_value(
+    node: &XmlNode,
+    canonical: &str,
+    alias: Option<&str>,
+) -> Result<bool, KdbxError> {
+    fn parse(value: &str) -> Result<bool, KdbxError> {
+        match value {
+            "True" | "true" | "1" => Ok(true),
+            "False" | "false" | "0" => Ok(false),
+            _ => Err(KdbxError::malformed(
+                "invalid KeePass memory-protection boolean",
+            )),
+        }
+    }
+
+    let canonical_value = text(node, canonical).map(parse).transpose()?;
+    let alias_value = alias
+        .and_then(|name| text(node, name))
+        .map(parse)
+        .transpose()?;
+    if canonical_value
+        .zip(alias_value)
+        .is_some_and(|(left, right)| left != right)
+    {
+        return Err(KdbxError::malformed(
+            "conflicting KeePass username protection settings",
+        ));
+    }
+    Ok(canonical_value.or(alias_value).unwrap_or(false))
 }
 
 fn parse_custom_icon(
@@ -601,11 +687,11 @@ fn parse_legacy_binaries(
             data = decompress_binary(&data, limits)?;
         }
         check_binary_size(data.len(), limits)?;
-        legacy.push(data.clone());
         decoded.push((id, data, protected));
     }
     decoded.sort_by_key(|(id, _, _)| *id);
     for (id, data, protected) in decoded {
+        legacy.push(data.clone());
         let index = add_binary(&mut database.binary_pool, data, protected, limits)?;
         legacy_references.insert(id, index);
     }
@@ -892,8 +978,12 @@ fn parse_entry(
     if let Some(times) = child(node, "Times") {
         entry.times = parse_times(times)?;
     }
+    let mut field_names = std::collections::BTreeSet::new();
     for string_node in children(node, "String") {
         let field = parse_field(string_node, stream)?;
+        if !field_names.insert(field.key.clone()) {
+            return Err(KdbxError::malformed("duplicate KeePass entry String field"));
+        }
         match field.key.as_str() {
             "Password" => entry.password = field.value.clone(),
             "Title" | "UserName" | "URL" | "Notes" => {
@@ -1104,20 +1194,21 @@ impl KdbxXml {
     /// Returns unsupported when protected fields or binaries require a KDBX
     /// inner stream.
     pub fn export(database: &KeePassDatabase) -> Result<Vec<u8>, KdbxError> {
-        if !database.public_custom_data.items().is_empty()
-            || !database.typed_public_custom_data.is_empty()
-        {
-            return Err(KdbxError::unsupported(
-                "plain XML cannot represent public outer-header custom data",
-            ));
-        }
-        if has_protected_values(database) {
-            return Err(KdbxError::unsupported(
-                "plain XML cannot represent protected values",
-            ));
-        }
-        let mut stream = InnerCipher::new(2, &[0; 64])?;
-        write_database(database, &mut stream, BinaryStorage::LegacyXml)
+        export_xml(database, false)
+    }
+
+    /// Exports KeePass XML with protected fields written as plaintext.
+    ///
+    /// This explicit path is intended only for callers that have separately
+    /// obtained authorization to create a plaintext export. Protected binary
+    /// data and other unsupported model data remain rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns unsupported when binary data or other model data cannot be
+    /// represented, or an error if revealing a field fails.
+    pub fn export_allow_plaintext(database: &KeePassDatabase) -> Result<Vec<u8>, KdbxError> {
+        export_xml(database, true)
     }
 
     /// Imports an unprotected KDBX XML document.
@@ -1142,6 +1233,38 @@ impl KdbxXml {
         };
         parse_database(data, &inner, &[], 0, true, None, limits)
     }
+}
+
+fn export_xml(database: &KeePassDatabase, allow_plaintext: bool) -> Result<Vec<u8>, KdbxError> {
+    if !database.public_custom_data.items().is_empty()
+        || !database.typed_public_custom_data.is_empty()
+    {
+        return Err(KdbxError::unsupported(
+            "plain XML cannot represent public outer-header custom data",
+        ));
+    }
+    if (has_protected_values(database) && !allow_plaintext)
+        || (allow_plaintext && has_protected_binaries(database))
+    {
+        return Err(KdbxError::unsupported(
+            "plain XML cannot represent protected values or binaries",
+        ));
+    }
+    let mut stream = InnerCipher::new(2, &[0; 64])?;
+    write_database_with_plaintext_mode(
+        database,
+        &mut stream,
+        BinaryStorage::LegacyXml,
+        allow_plaintext,
+    )
+}
+
+fn has_protected_binaries(database: &KeePassDatabase) -> bool {
+    database
+        .binary_pool
+        .records()
+        .iter()
+        .any(|record| record.protected)
 }
 
 fn has_protected_values(database: &KeePassDatabase) -> bool {
@@ -1174,7 +1297,16 @@ pub(crate) fn write_database(
     stream: &mut InnerCipher,
     storage: BinaryStorage,
 ) -> Result<Vec<u8>, KdbxError> {
-    write_database_inner(database, stream, storage, None)
+    write_database_inner(database, stream, storage, None, false)
+}
+
+fn write_database_with_plaintext_mode(
+    database: &KeePassDatabase,
+    stream: &mut InnerCipher,
+    storage: BinaryStorage,
+    allow_plaintext: bool,
+) -> Result<Vec<u8>, KdbxError> {
+    write_database_inner(database, stream, storage, None, allow_plaintext)
 }
 
 pub(crate) fn write_database_with_header_hash(
@@ -1183,7 +1315,7 @@ pub(crate) fn write_database_with_header_hash(
     storage: BinaryStorage,
     header_hash: &[u8; 32],
 ) -> Result<Vec<u8>, KdbxError> {
-    write_database_inner(database, stream, storage, Some(header_hash))
+    write_database_inner(database, stream, storage, Some(header_hash), false)
 }
 
 fn write_database_inner(
@@ -1191,10 +1323,17 @@ fn write_database_inner(
     stream: &mut InnerCipher,
     storage: BinaryStorage,
     header_hash: Option<&[u8; 32]>,
+    allow_plaintext: bool,
 ) -> Result<Vec<u8>, KdbxError> {
     if !database.can_save_losslessly {
         return Err(KdbxError::unsupported(
             "document cannot be saved losslessly",
+        ));
+    }
+    if !crate::history_limits_valid(&database.meta) {
+        return Err(KdbxError::new(
+            crate::KdbxFailureKind::InvalidArgument,
+            "history limit is outside the KeePass range",
         ));
     }
     if !legacy_binary_state_is_consistent(database) {
@@ -1223,7 +1362,9 @@ fn write_database_inner(
             "KDBX XML tags must be nonempty and cannot contain semicolons",
         ));
     }
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile><Meta>");
+    let mut xml = Zeroizing::new(String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile><Meta>",
+    ));
     let generator = if database.meta.generator.is_empty() {
         "Neotales KeePass Rust"
     } else {
@@ -1353,7 +1494,7 @@ fn write_database_inner(
         write_legacy_binaries(&mut xml, database, stream)?;
     }
     xml.push_str("</Meta><Root>");
-    write_group(&mut xml, &database.root, &mut *stream)?;
+    write_group(&mut xml, &database.root, &mut *stream, allow_plaintext)?;
     if !database.deleted_objects.is_empty() {
         xml.push_str("<DeletedObjects>");
         for deleted in &database.deleted_objects {
@@ -1368,7 +1509,12 @@ fn write_database_inner(
         xml.push_str("</DeletedObjects>");
     }
     xml.push_str("</Root></KeePassFile>");
-    Ok(xml.into_bytes())
+    if matches!(storage, BinaryStorage::LegacyXml) && !xml.chars().all(xml_1_0_character) {
+        return Err(KdbxError::malformed(
+            "XML export contains a character forbidden by XML 1.0",
+        ));
+    }
+    Ok(std::mem::take(&mut *xml).into_bytes())
 }
 
 fn write_memory_protection(xml: &mut String, meta: &KeePassMeta) {
@@ -1384,7 +1530,7 @@ fn write_memory_protection(xml: &mut String, meta: &KeePassMeta) {
     for (name, enabled) in [
         ("ProtectPassword", meta.protect_password),
         ("ProtectTitle", meta.protect_title),
-        ("ProtectUsername", meta.protect_username),
+        ("ProtectUserName", meta.protect_username),
         ("ProtectURL", meta.protect_url),
         ("ProtectNotes", meta.protect_notes),
     ] {
@@ -1535,7 +1681,12 @@ fn write_legacy_binaries(
     Ok(())
 }
 
-fn write_group(xml: &mut String, group: &Group, stream: &mut InnerCipher) -> Result<(), KdbxError> {
+fn write_group(
+    xml: &mut String,
+    group: &Group,
+    stream: &mut InnerCipher,
+    allow_plaintext: bool,
+) -> Result<(), KdbxError> {
     xml.push_str("<Group>");
     write_text(xml, "UUID", &group.id.to_base64());
     write_text(xml, "Name", &group.name);
@@ -1576,15 +1727,20 @@ fn write_group(xml: &mut String, group: &Group, stream: &mut InnerCipher) -> Res
     }
     write_custom_data(xml, &group.custom_data, false);
     for entry in &group.entries {
-        write_entry(xml, entry, stream)?;
+        write_entry(xml, entry, stream, allow_plaintext)?;
     }
     for child in &group.groups {
-        write_group(xml, child, stream)?;
+        write_group(xml, child, stream, allow_plaintext)?;
     }
     xml.push_str("</Group>");
     Ok(())
 }
-fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Result<(), KdbxError> {
+fn write_entry(
+    xml: &mut String,
+    entry: &Entry,
+    stream: &mut InnerCipher,
+    allow_plaintext: bool,
+) -> Result<(), KdbxError> {
     xml.push_str("<Entry>");
     write_text(xml, "UUID", &entry.id.to_base64());
     write_text(xml, "OverrideURL", &entry.override_url);
@@ -1606,17 +1762,51 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
     if !entry.tags.is_empty() {
         write_text(xml, "Tags", &entry.tags.join(";"));
     }
-    write_standard_field(xml, entry, "Title", entry.title.as_bytes(), stream)?;
-    write_standard_field(xml, entry, "UserName", entry.username.as_bytes(), stream)?;
-    write_standard_field(xml, entry, "URL", entry.url.as_bytes(), stream)?;
+    write_standard_field(
+        xml,
+        entry,
+        "Title",
+        entry.title.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
+    write_standard_field(
+        xml,
+        entry,
+        "UserName",
+        entry.username.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
+    write_standard_field(
+        xml,
+        entry,
+        "URL",
+        entry.url.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
     if let Some(field) = entry.field("Password") {
-        write_string_field(xml, field, stream)?;
+        write_string_field(xml, field, stream, allow_plaintext)?;
     } else if !entry.password.is_empty() {
-        entry.password.with_revealed_bytes(|password| {
-            write_field_xml(xml, "Password", password, true, false, stream)
-        })??;
+        if allow_plaintext {
+            entry.password.with_revealed_text(|password| {
+                write_field_xml(xml, "Password", password.as_bytes(), false, false, stream)
+            })??;
+        } else {
+            entry.password.with_revealed_bytes(|password| {
+                write_field_xml(xml, "Password", password, true, false, stream)
+            })??;
+        }
     }
-    write_standard_field(xml, entry, "Notes", entry.notes.as_bytes(), stream)?;
+    write_standard_field(
+        xml,
+        entry,
+        "Notes",
+        entry.notes.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
     for field in &entry.fields {
         if matches!(
             field.key.as_str(),
@@ -1624,7 +1814,7 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
         ) {
             continue;
         }
-        write_string_field(xml, field, stream)?;
+        write_string_field(xml, field, stream, allow_plaintext)?;
     }
     for attachment in &entry.attachments {
         write!(
@@ -1669,7 +1859,7 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
     if !entry.history.is_empty() {
         xml.push_str("<History>");
         for snapshot in &entry.history {
-            write_entry(xml, snapshot, stream)?;
+            write_entry(xml, snapshot, stream, allow_plaintext)?;
         }
         xml.push_str("</History>");
     }
@@ -1683,9 +1873,10 @@ fn write_standard_field(
     key: &str,
     fallback: &[u8],
     stream: &mut InnerCipher,
+    allow_plaintext: bool,
 ) -> Result<(), KdbxError> {
     if let Some(field) = entry.field(key) {
-        write_string_field(xml, field, stream)
+        write_string_field(xml, field, stream, allow_plaintext)
     } else if key == "Title" || !fallback.is_empty() {
         write_field_xml(xml, key, fallback, false, false, stream)
     } else {
@@ -1697,10 +1888,11 @@ fn write_string_field(
     xml: &mut String,
     field: &Field,
     stream: &mut InnerCipher,
+    allow_plaintext: bool,
 ) -> Result<(), KdbxError> {
     xml.push_str("<String>");
     write_text(xml, "Key", &field.key);
-    if field.protected {
+    if field.protected && !allow_plaintext {
         let encoded = field.value.with_revealed_bytes(|bytes| {
             stream.transform(bytes);
             STANDARD.encode(bytes)
@@ -1713,7 +1905,11 @@ fn write_string_field(
         .expect("writing to String cannot fail");
     } else {
         let text = field.value.reveal_text()?;
-        xml.push_str("<Value>");
+        if field.protect_in_memory {
+            xml.push_str("<Value ProtectInMemory=\"True\">");
+        } else {
+            xml.push_str("<Value>");
+        }
         write_escaped(xml, text.as_str());
         xml.push_str("</Value>");
     }
@@ -1830,6 +2026,7 @@ fn write_escaped(xml: &mut String, value: &str) {
             '>' => "&gt;",
             '"' => "&quot;",
             '\'' => "&apos;",
+            '\r' => "&#13;",
             _ => {
                 xml.push(character);
                 continue;
@@ -1844,4 +2041,10 @@ fn escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+        .replace('\r', "&#13;")
+}
+
+fn xml_1_0_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+        || matches!(character, '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
 }
