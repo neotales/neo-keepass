@@ -77,10 +77,9 @@ cargo test --workspace
 cargo run -p nkeepass -- --help
 ```
 
-The complete command inventory, aliases, input/output contracts, safe usage
-examples, age support, and current limitations are in
-[the command reference](docs/commands.md). Run any command with `--help` for
-the exact options accepted by the built revision.
+Start with the [documentation index](docs/README.md) for a tutorial, task
+guides, and separate command references. The [alias index](docs/commands.md)
+maps alternate command and option spellings to those references.
 
 CI/CD, packaging, and benchmarks are documented in `docs/ci-cd.md`; packaging
 artifact status is in `packaging/README.md`.
