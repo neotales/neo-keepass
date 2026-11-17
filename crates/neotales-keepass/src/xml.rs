@@ -761,6 +761,9 @@ fn parse_group(
             .parse()
             .map_err(|_| KdbxError::malformed("invalid group IconID"))?;
     }
+    if let Some(value) = text(node, "CustomIconUUID") {
+        group.custom_icon_id = KdbxUuid::from_base64(value)?;
+    }
     if let Some(value) = text(node, "Tags") {
         group.tags = value
             .split(';')
@@ -1580,6 +1583,9 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
         &entry.previous_parent_group_id.to_base64(),
     );
     write_times(xml, &entry.times);
+    if !entry.tags.is_empty() {
+        write_text(xml, "Tags", &entry.tags.join(";"));
+    }
     write_standard_field(xml, entry, "Title", entry.title.as_bytes(), stream)?;
     write_standard_field(xml, entry, "UserName", entry.username.as_bytes(), stream)?;
     write_standard_field(xml, entry, "URL", entry.url.as_bytes(), stream)?;
