@@ -27,5 +27,7 @@ Do not work around this by pre-creating files or loosening directory ACLs;
 nkeepass will still refuse the operation, and a manually relaxed ACL would
 defeat the privacy the refusal exists to protect.
 
-Everything else about the CLI — commands, file formats, age integration,
-shell completion — behaves the same as on Unix. See README.md and docs/.
+Read-only behavior (parsing vaults, stdout output) is expected to match
+Unix, but this file does not guarantee behavioral parity beyond that;
+consult README.md and docs/ for the current, complete list of
+platform-specific limitations.

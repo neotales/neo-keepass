@@ -107,13 +107,18 @@ jobs:
         shell: bash
         run: pwsh -NoProfile -File packaging/scripts/test-windows-package.ps1
 
-      # Package, then verify the produced artifact as a unit: extract the
-      # zip, require the named enclosing directory with exactly the four
-      # regular-file entries, re-validate the EXTRACTED exe as PE x64, check
-      # its sha256 equals the binary just built, check SHA256SUMS naming and
-      # hashes, and smoke-run the EXTRACTED exe (--version, --help) under a
-      # process timeout with kill-on-expiry. A binary that failed any check
-      # is never executed, and a mismatching artifact never reaches upload.
+      # Package, then verify the produced artifact as a unit: whitelist the
+      # zip manifest (exactly the four payloads under one named directory,
+      # strict filenames, no traversal/duplicates/symlinks), verify every
+      # entry's CRC explicitly, extract, re-validate the EXTRACTED exe as
+      # PE x64, check its sha256 equals the binary just built, check the
+      # RAW top-level exe and limitations copy the same way, check
+      # SHA256SUMS naming and hashes, and smoke-run the EXTRACTED exe
+      # (--version, --help) under one deadline covering execution, stream
+      # completion and cleanup — whole-tree kill on expiry and, on Windows,
+      # a kill-on-close job object so an orphaned descendant cannot outlive
+      # the harness. A binary that failed any check is never executed, and
+      # a mismatching artifact never reaches upload.
       - name: Package and verify artifact
         shell: bash
         run: |

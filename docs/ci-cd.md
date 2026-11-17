@@ -148,26 +148,56 @@ Verification before anything is executed or uploaded:
    runs in an isolated pwsh child process so exit codes are always fresh,
    and negative tests assert the diagnostic text, not just the exit code);
 3. the produced artifact is verified as a unit
-   (`packaging/scripts/windows-verify-artifact.ps1`): the zip is extracted
-   and must contain exactly the four payloads under one named
-   `nkeepass-<version>-<triple>/` root; the EXTRACTED exe must again be PE
-   x64 and its sha256 must equal the binary just built; `SHA256SUMS` must
-   cover exactly the three published names with matching hashes; only then
-   is the EXTRACTED exe smoke-run with `--version` and `--help` under a
-   process timeout (whole process tree killed on expiry). A binary that
-   failed any check is never executed, and a mismatching artifact never
-   reaches upload.
+   (`packaging/scripts/windows-verify-artifact.ps1`), in this order:
+   - the zip manifest is parsed and WHITELISTED before anything is opened
+     for extraction: exactly the four payloads under one named
+     `nkeepass-<version>-<triple>/` root, strict filename charset (no
+     separators beyond the root, no `..` segments, no absolute paths), no
+     duplicates, no directory entries, no symlink/reparse external
+     attributes — an out-of-root canary entry is never read, let alone
+     extracted (regression-tested);
+   - every whitelisted entry's CRC32 is computed explicitly and compared
+     to the recorded value, so an archive corrupted in transit is
+     rejected before extraction (regression-tested by patching the
+     recorded CRC);
+   - extraction is manual from the validated set into a fresh private
+     temp dir (paths built from the constant canonical names, never from
+     entry strings);
+   - the EXTRACTED exe must be PE x64 and its sha256 equal the binary
+     just built; the RAW top-level `nkeepass.exe` must match the same
+     hash and pass the same PE check; the raw `WINDOWS-LIMITATIONS.txt`
+     must be byte-identical to the zip copy and carry the mandated
+     fail-closed warning;
+   - `SHA256SUMS` must cover exactly the three published names with
+     matching hashes;
+   - only then is the EXTRACTED exe smoke-run with `--version` and
+     `--help` under ONE deadline that encompasses execution, stream
+     completion and cleanup: process wait, pipe drains and cleanup are
+     all bounded, and on expiry the whole process tree is killed. On
+     Windows the child is assigned to a kill-on-close job object, so a
+     descendant that outlives the parent while holding the redirected
+     pipes is still terminated when the job handle closes — the harness
+     cannot hang and no orphan survives (both the hung-child and the
+     orphaned-descendant cases are regression-tested with pwsh fixtures
+     that run natively on Windows).
+
+A binary that failed any check is never executed, and a mismatching
+artifact never reaches upload.
 
 Produces one artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
 days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (one named root:
 binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkeepass.exe`,
 `WINDOWS-LIMITATIONS.txt`, and a sha256sum-compatible `SHA256SUMS`
-(`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS). The
-packager writes everything to a private staging tree first and publishes
-the four files last, `SHA256SUMS` last of all, so a failed run never leaves
-a checksum describing a partial or mismatched set. Nothing is attached to a
-release; no secrets are used; permissions are `contents: read` and checkout
-persists no credentials.
+(`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS).
+Publication is NOT atomic and is not documented as one: the packager
+invalidates `SHA256SUMS` first, publishes the payload files, and writes
+the manifest last. An interrupted run can leave a mixed set of old and
+new payload files, but never a manifest describing a set it does not
+match; a consumer must treat a missing or failing `sha256sum -c` as
+fatal. The mid-publish failure state is regression-tested via an
+injected-failure hook (`NEOKEEPASS_PACKAGE_FAIL_AFTER`, test-only).
+Nothing is attached to a release; no secrets are used; permissions are
+`contents: read` and checkout persists no credentials.
 
 **Windows platform limitation (stated plainly):** secure owner-only file
 writes are UNSUPPORTED on Windows, and nkeepass FAILS CLOSED. The
@@ -191,7 +221,9 @@ and must not diverge in their user-visible contract: archive name
 convention), payload `nkeepass.exe` + `README.md` + `LICENSE.md` +
 `WINDOWS-LIMITATIONS.txt` under one named root, and a sha256sum-compatible
 `SHA256SUMS` (`<hex>  <name>`, LF, forward slashes). Change both together
-or not at all.
+or not at all — and before the release pipeline lands its Windows steps,
+the two workflows must be reconciled (or the shared packaging lifted into
+one script), or runs will race on the same artifact names and formats.
 
 **Tooling note:** the packaging scripts are PowerShell 7 (`pwsh`). The
 dev host has no system pwsh but runs the suite through a portable pwsh

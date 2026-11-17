@@ -11,11 +11,16 @@
 #                                           LF line endings, forward-slash
 #                                           names relative to <OutputDir>)
 #
-# Output discipline: everything is built and hashed in a private temp
-# staging tree first; the four files are copied into <OutputDir> only at
-# the end, in that order, SHA256SUMS last. A failed run therefore never
-# leaves a checksum file describing files that are missing or different —
-# either the full consistent set is present or the output is untouched.
+# Output discipline: publication is NOT atomic, and this script does not
+# claim a transaction. The SHA256SUMS manifest is invalidated (removed)
+# FIRST, then the payload files are copied, and the manifest is written
+# LAST of all. Therefore an interrupted run can leave a mixed set of old
+# and new payload files, but never a manifest describing a set it does
+# not match — a consumer that treats a missing or failing `sha256sum -c`
+# as fatal cannot be fooled by a partial publish. The test-only
+# NEOKEEPASS_PACKAGE_FAIL_AFTER env var (values: zip | exe | limitations)
+# injects a failure after that file is published to exercise the
+# mid-publish state.
 #
 # Re-running overwrites the outputs; it is safe to re-run. Usage:
 #
@@ -90,13 +95,17 @@ try {
     $sums = Join-Path $stage 'SHA256SUMS'
     [IO.File]::WriteAllText($sums, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
 
-    # Commit to <OutputDir> last, in this order: payload files first,
-    # SHA256SUMS last — a checksum file never precedes the files it
-    # describes, so an interrupted run cannot leave a "valid-looking" SUMS
-    # over a partial set.
+    # Commit to <OutputDir>. Invalidate the manifest first, publish the
+    # payload files, write the manifest last — see the header note: this
+    # is not atomic, but a manifest is never left describing a set it
+    # does not match.
+    Remove-Item -LiteralPath (Join-Path $outDir 'SHA256SUMS') -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath $zip -Destination (Join-Path $outDir "$name.zip") -Force
+    if ($env:NEOKEEPASS_PACKAGE_FAIL_AFTER -eq 'zip') { throw 'windows-package: injected test failure after zip publish' }
     Copy-Item -LiteralPath $rawExe -Destination (Join-Path $outDir 'nkeepass.exe') -Force
+    if ($env:NEOKEEPASS_PACKAGE_FAIL_AFTER -eq 'exe') { throw 'windows-package: injected test failure after exe publish' }
     Copy-Item -LiteralPath $rawLimitations -Destination (Join-Path $outDir 'WINDOWS-LIMITATIONS.txt') -Force
+    if ($env:NEOKEEPASS_PACKAGE_FAIL_AFTER -eq 'limitations') { throw 'windows-package: injected test failure after limitations publish' }
     Copy-Item -LiteralPath $sums -Destination (Join-Path $outDir 'SHA256SUMS') -Force
 }
 finally {
