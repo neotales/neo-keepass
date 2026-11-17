@@ -1801,7 +1801,26 @@ fn write_times(xml: &mut String, times: &KeePassTimes) {
     xml.push_str("</Times>");
 }
 fn write_text(xml: &mut String, name: &str, value: &str) {
-    write!(xml, "<{name}>{}</{name}>", escape(value)).expect("writing to String cannot fail");
+    write!(xml, "<{name}>{}</{name}>", escape_text(value)).expect("writing to String cannot fail");
+}
+
+fn escape_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        escaped.push_str(match character {
+            '\r' => "&#13;",
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&apos;",
+            _ => {
+                escaped.push(character);
+                continue;
+            }
+        });
+    }
+    escaped
 }
 fn write_escaped(xml: &mut String, value: &str) {
     for character in value.chars() {

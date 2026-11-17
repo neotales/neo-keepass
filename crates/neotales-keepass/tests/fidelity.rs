@@ -174,22 +174,44 @@ fn tag_constraints_reject_unrepresentable_current_and_history_tags_before_output
 fn tags_with_xml_special_characters_round_trip_in_current_and_history_entries() {
     let mut database = KeePassDatabase::default();
     let mut entry = Entry::new("tagged");
-    entry.tags = vec!["research & planning".into(), "<review>".into()];
+    entry.tags = vec![
+        "research & planning".into(),
+        "<review>".into(),
+        "carriage\rreturn".into(),
+        "line\r\nbreak".into(),
+    ];
     let mut snapshot = Entry::new("snapshot");
-    snapshot.tags = vec!["history & archive".into(), "<old>".into()];
+    snapshot.tags = vec![
+        "history & archive".into(),
+        "<old>".into(),
+        "history\rtag".into(),
+        "history\r\nline".into(),
+    ];
     entry.history.push(snapshot);
+    database.root.tags = vec!["group\rtag".into(), "group\r\nline".into()];
     database.root.entries.push(entry);
 
     let xml = KdbxXml::export(&database).unwrap();
     let loaded = KdbxXml::import(&xml, &KdbxReadLimits::default()).unwrap();
     assert_eq!(
         loaded.root.entries[0].tags,
-        ["research & planning", "<review>"]
+        [
+            "research & planning",
+            "<review>",
+            "carriage\rreturn",
+            "line\r\nbreak"
+        ]
     );
     assert_eq!(
         loaded.root.entries[0].history[0].tags,
-        ["history & archive", "<old>"]
+        [
+            "history & archive",
+            "<old>",
+            "history\rtag",
+            "history\r\nline"
+        ]
     );
+    assert_eq!(loaded.root.tags, ["group\rtag", "group\r\nline"]);
 }
 
 #[test]
