@@ -16,10 +16,8 @@ nkeepass automation setx --key PATH (--file PATH | --stdin) [--dry-run]
 
 Reads bounded JSON and applies its field updates in one update.
 Exactly one input source is required. `--dry-run` validates and reports
-without saving. `--key` is required. **Warning:** this route accepts
-`--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and
-`-i` / `--age-identity` for
-compatibility, but ignores them. They do not encrypt or decrypt this JSON.
+without saving. `--key` is required. Age encryption and decryption options are
+unsupported and are rejected.
 
 The document has one required top-level property, `fields`. Its value is a
 non-empty array of objects. Every object requires a string `key` and string
@@ -62,9 +60,7 @@ nkeepass automation import (--file PATH | --stdin) [--replace] [--dry-run]
 Reads a bounded interchange snapshot. Exactly one input source is required.
 `--replace` permits replacing a non-empty vault. `--dry-run` validates and
 reports without saving. The command does not accept an entry selector.
-**Warning:** it accepts
-`--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and `-i` /
-`--age-identity`, but ignores them. Import does not decrypt the input.
+Age encryption and decryption options are unsupported and are rejected.
 
 ## `export`
 
@@ -73,10 +69,9 @@ nkeepass automation export --output PATH
 ```
 
 Writes an interchange snapshot to a private, no-clobber output file.
-`--output` is required. It refuses an existing destination.
-**Warning:** it accepts `--name NAME`, `--age-encrypt`, `--age-decrypt`, `-r` /
-`--age-recipient`, and `-i` / `--age-identity`, but ignores them. Export
-remains plaintext JSON; these options do not encrypt it.
+`--output` is required. It refuses an existing destination. Export writes
+plaintext JSON; age encryption and decryption options are unsupported and are
+rejected. `--name NAME` is accepted but has no effect.
 
 ## `sync`
 
@@ -88,10 +83,8 @@ nkeepass automation sync (--file PATH | --stdin)
 Reads a bounded interchange snapshot and synchronizes it with the vault.
 Exactly one input source is required. `--strategy` chooses `newest` or
 `source`; the default is `newest`. Use
-`--dry-run` to report without saving. **Warning:** it accepts
-`--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and `-i` /
-`--age-identity`, but ignores them. Sync does not encrypt or decrypt the
-interchange data.
+`--dry-run` to report without saving. Age encryption and decryption options
+are unsupported and are rejected.
 
 The same commands are reachable as `nkeepass secrets setx/import/export/sync`
 and root `nkeepass setx/import/export/sync`. No extra aliases are defined for

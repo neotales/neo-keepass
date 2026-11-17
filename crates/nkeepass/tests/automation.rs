@@ -73,6 +73,68 @@ fn run(vault: &Path, home: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[test]
+fn automation_age_options_fail_before_vault_or_output_access() {
+    let home = tempfile::tempdir().unwrap();
+    let vault = home.path().join("missing-vault.kdbx");
+    let input = home.path().join("sensitive-input.json");
+    let output = home.path().join("must-not-be-created.json");
+    std::fs::write(
+        &input,
+        br#"{"fields":[{"key":"Token","value":"sensitive-value"}]}"#,
+    )
+    .unwrap();
+    let input = input.to_str().unwrap();
+    let output_path = output.to_str().unwrap();
+    let actions: [&[&str]; 4] = [
+        &["setx", "--key", "LOGIN", "--file", input],
+        &["import", "--file", input],
+        &["export", "--output", output_path],
+        &["sync", "--file", input],
+    ];
+
+    for action in actions {
+        for age_options in [
+            &["--age-encrypt"][..],
+            &[
+                "--age-decrypt",
+                "--age-identity",
+                "/definitely/missing-identity",
+            ][..],
+            &["--age-recipient", "age1invalid"][..],
+            &["-r", "age1invalid"][..],
+            &["--age-identity", "/definitely/missing-identity"][..],
+            &["-i", "/definitely/missing-identity"][..],
+        ] {
+            let mut args = action.to_vec();
+            args.extend_from_slice(age_options);
+            let run = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+                .args(["--vault", vault.to_str().unwrap()])
+                .args(&args)
+                .env("XDG_CONFIG_HOME", home.path())
+                .env_remove("NKEEPASS_TEST_PASSWORD")
+                .env_remove("NKEEPASS_VAULT")
+                .env_remove("NKEEPASS_VAULT_PATH")
+                .output()
+                .unwrap();
+            assert!(!run.status.success(), "{action:?} {age_options:?}");
+            assert!(run.stdout.is_empty());
+            assert_eq!(
+                run.stderr,
+                b"nkeepass: age options are not supported for automation commands\n"
+            );
+            assert!(
+                !output.exists(),
+                "export created output with unsupported age options"
+            );
+            assert!(
+                !vault.exists(),
+                "command created vault with unsupported age options"
+            );
+        }
+    }
+}
+
 fn assert_success_without(output: &Output, forbidden: &[&str]) -> serde_json::Value {
     assert!(
         output.status.success(),
