@@ -88,7 +88,8 @@ The group name is `field`. `custom-field` is an alias.
 nkeepass field ls --key PATH
 ```
 
-Lists custom-field names for one entry. `list` aliases `ls`.
+Lists all fields present on one entry, including built-in fields such as
+`Title`, `UserName`, `Password`, `URL`, and `Notes`. `list` aliases `ls`.
 
 ### `field get`
 
@@ -99,7 +100,8 @@ nkeepass field get --key PATH --field FIELD [--format FORMAT] [--name NAME]
 
 Reveals one custom field. The format defaults to `text`; supported formats
 match `secrets get`. Named formats require `--name`. `--is-output` is valid
-only for `azure-devops`. `reveal` aliases `get`.
+only for `azure-devops`. It refuses built-in fields; use `secrets get` to read
+them. `reveal` aliases `get`.
 
 `field get` does not accept `--age-encrypt`, `-r` or `--age-recipient`, or
 `--output`. Its generated help lists those inherited `get` flags, but the

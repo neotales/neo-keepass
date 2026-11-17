@@ -48,6 +48,10 @@ identity needed to decrypt the backup is stored separately. A backup failure
 does not remove the vault. Secure owner-only writes are unsupported on
 Windows, so init fails closed there.
 
+`init` accepts `--age-encrypt`, `--age-decrypt`, `-r` /
+`--age-recipient`, and `-i` / `--age-identity`, but ignores them. They do not
+encrypt or decrypt the vault.
+
 ## `context`
 
 ```text

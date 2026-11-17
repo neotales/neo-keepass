@@ -3,6 +3,9 @@
 Every command below operates on the selected vault. Use `--key PATH` to
 select an entry. A key can be a slash-separated entry path or an entry alias.
 Use `--field FIELD` where a command reads or changes one field.
+Field selection uses `--field FIELD` first. Without it, an entry alias's
+bound field is used; if the alias has no field binding, the command uses
+`Password`.
 Every route accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may precede
 the command. The shared credential flags also apply. See
 [vault credentials](credentials.md) for the complete flag set and placement.
@@ -54,6 +57,11 @@ Each binding starts with `--key PATH`, may select a field with `--field`,
 then must end with `--name NAME`. Repeat the sequence for additional values.
 The field is required unless the key is an entry alias that already binds a
 field. Use the field name `otp` to emit a TOTP code; HOTP is refused.
+**Warning:** `secrets env`, its `environment` alias, and root `env` accept
+`--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and
+`-i` / `--age-identity`, but
+ignore them. Env output remains plaintext; these options do not encrypt or
+decrypt it.
 
 The default format is `shell`. Supported formats are `shell`, `dotenv`,
 `pwsh`, `powershell`, `github-actions`, `azure-devops`, `json`, and `null`.
@@ -164,6 +172,10 @@ nkeepass secrets setx --key PATH (--file PATH | --stdin) [--dry-run]
 Reads bounded JSON for one existing entry and applies its fields as one
 update. Exactly one input source is required. `--dry-run` validates and
 reports without saving. See the [setx JSON schema and example](automation.md#setx).
+**Warning:** `secrets setx` and root `setx` accept `--age-encrypt`,
+`--age-decrypt`, `-r` / `--age-recipient`, and `-i` / `--age-identity`, but
+ignore them. They do not
+encrypt or decrypt the JSON input.
 
 ### `secrets import`
 
@@ -173,7 +185,9 @@ nkeepass secrets import (--file PATH | --stdin) [--replace] [--dry-run]
 
 Reads an interchange snapshot. Exactly one input source is required.
 `--replace` permits replacing a non-empty vault. `--dry-run` validates and
-reports without saving.
+reports without saving. **Warning:** `secrets import` and root `import` accept
+`--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and `-i` /
+`--age-identity`, but ignore them. Import does not decrypt the input.
 
 ### `secrets export`
 
@@ -182,7 +196,11 @@ nkeepass secrets export --output PATH
 ```
 
 Writes an interchange snapshot to a private, no-clobber file. `--output` is
-required, and an existing destination is not overwritten.
+required, and an existing destination is not overwritten. **Warning:**
+`secrets export` and root `export` accept `--name NAME`, `--age-encrypt`,
+`--age-decrypt`, `-r` / `--age-recipient`, and `-i` / `--age-identity`, but
+ignore them. Export
+remains plaintext JSON; these options do not encrypt it.
 
 ### `secrets sync`
 
@@ -193,7 +211,10 @@ nkeepass secrets sync (--file PATH | --stdin)
 
 Synchronizes an interchange snapshot with the vault. Exactly one input source
 is required. `--strategy` defaults to `newest`; `source` is the other
-accepted value. `--dry-run` reports without saving.
+accepted value. `--dry-run` reports without saving. **Warning:** `secrets sync`
+and root `sync` accept `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`,
+and `-i` / `--age-identity`, but ignore them. Sync does not encrypt or decrypt the
+interchange data.
 
 ## Output formats and credentials
 

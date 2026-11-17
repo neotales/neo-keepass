@@ -17,7 +17,7 @@ sample data:
       "value": "demo-user"
     },
     {
-      "key": "Environment",
+      "key": "Notes",
       "value": "example",
       "protected": false,
       "protect_in_memory": false
@@ -34,7 +34,8 @@ nkeepass secrets setx --key 'Demo/Example' --file entry.json
 
 The CLI validates the bounded JSON input and applies the selected fields as
 one update. The entry must already exist. Add `--dry-run` to validate and
-report without saving. The complete schema and size limits are in the
+report without saving. Missing standard fields are added; missing custom
+fields are ignored. The complete schema and size limits are in the
 [setx reference](../reference/automation.md#setx).
 
 ## Export a snapshot

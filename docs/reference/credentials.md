@@ -18,7 +18,8 @@ directory.
 
 The short forms are `-h` for `--help`, `-V` for `--vault`, `-r` for
 `--age-recipient`, and `-i` for `--age-identity`. No other public flags have
-short forms. `--version` is accepted at the root instead of a command.
+short forms. `--version` is accepted at the root instead of a command. Neither
+`version` nor `--version` accepts a preceding `--vault` option.
 
 ## Choose one password source
 
@@ -32,8 +33,9 @@ Use at most one of these options:
 | `--password VALUE` | The literal command-line value. Avoid this option for real passwords. |
 
 If you omit these options and `--key-file`, the CLI uses `NKEEPASS_PASSWORD`
-when it is set to a non-empty value. Otherwise it prompts without echo when
-stdin is a terminal.
+when it is set to a non-empty, valid Unicode value. If it is unset, the CLI
+prompts without echo when stdin is a terminal. An empty or non-Unicode value
+fails instead of prompting.
 Without a password source or terminal prompt, the command fails. Explicit
 password options override `NKEEPASS_PASSWORD`. An explicit source that cannot
 be read fails; the CLI does not fall back to another source. `NKEEPASS_SECRET`

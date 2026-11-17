@@ -39,8 +39,8 @@ and paths containing terminal-control characters are refused.
 
 In text output, an unset scalar appears as its key alone. In `--json` output,
 an unset scalar has a `null` value. The `aliases` value is a map in JSON
-listing output. `config get aliases` prints one JSON record per alias;
-use `alias ls`, `alias set`, or `alias rm` to manage entries.
+listing output. `config get aliases` prints valid JSON Lines, one record per
+alias. Use `alias ls`, `alias set`, or `alias rm` to manage entries.
 
 ### `config get`
 
@@ -48,9 +48,9 @@ use `alias ls`, `alias set`, or `alias rm` to manage entries.
 nkeepass config get KEY
 ```
 
-Prints one configured scalar value. `show` aliases `get`.
-The key must be `current` or `default_vault`. `aliases` is map-valued and
-cannot be read as one scalar.
+Prints a configured value. `current` and `default_vault` return scalars;
+`aliases` returns valid JSON Lines, one record per alias. `show` aliases
+`get`.
 
 ### `config set`
 
@@ -105,7 +105,7 @@ for the vault password without placing it in the command. Run it in Bash:
   printf '\n'
   export DEMO_MASTER
   unset DEMO_USERNAME
-  nkeepass exec --key 'Demo/Example' --field UserName --env DEMO_USERNAME \
+  nkeepass --vault ./tutorial.kdbx exec --key 'Demo/Example' --field UserName --env DEMO_USERNAME \
     --password-env DEMO_MASTER -- \
     sh -c 'printf "%s\n" "$DEMO_USERNAME"'
 )
