@@ -230,11 +230,12 @@ function New-DescriptorZip {
         [Parameter(Mandatory)][string] $ExeSource,
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $RepoRoot,
-        [switch] $OmitDescriptorSig
+        [switch] $OmitDescriptorSig,
+        [byte[]] $ReadmeBytes
     )
     $specs = @(
         @{ Name = "$Root/nkeepass.exe"; Bytes = [IO.File]::ReadAllBytes($ExeSource) },
-        @{ Name = "$Root/README.md"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'README.md')) },
+        @{ Name = "$Root/README.md"; Bytes = $(if ($ReadmeBytes) { $ReadmeBytes } else { [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'README.md')) }) },
         @{ Name = "$Root/LICENSE.md"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'LICENSE.md')) },
         @{ Name = "$Root/WINDOWS-LIMITATIONS.txt"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'packaging/windows/WINDOWS-LIMITATIONS.txt')) }
     )
@@ -699,16 +700,15 @@ try {
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match '(?s)descriptor flag.*disagrees')) `
         'verify: local descriptor flag set where central is clear rejected'
 
-    # Negative: the central directory claims a data descriptor while the
-    # local header does not (the reverse disagreement).
+    # Negative: the reverse disagreement — starting from the ORDINARY
+    # archive (both flags clear), set ONLY the CENTRAL directory's bit 3,
+    # leaving the local header clear.
     $c = New-DistCopy 'central-flag'
     $lz = Join-Path $c "$name.zip"
-    New-DescriptorZip -TargetZip $lz -ExeSource $peX64 -Root $name `
-        -RepoRoot (Resolve-Path (Join-Path $scripts '..' '..')).Path
     $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
     $cenBytes = [IO.File]::ReadAllBytes($lz)
     $cenFlags = $cenBytes[$rec.CentralOffset + 8] -bor ($cenBytes[$rec.CentralOffset + 9] -shl 8)
-    Patch-ZipBytes -ZipPath $lz -Offset ($rec.CentralOffset + 8) -Value ([BitConverter]::GetBytes([uint16]($cenFlags -band 0xFFF7)))
+    Patch-ZipBytes -ZipPath $lz -Offset ($rec.CentralOffset + 8) -Value ([BitConverter]::GetBytes([uint16]($cenFlags -bor 8)))
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match '(?s)descriptor flag.*disagrees')) `
@@ -742,6 +742,52 @@ try {
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $dz2, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
     Assert-True ($r.ExitCode -eq 0) 'verify: zip using signature-less data descriptors verifies end-to-end'
+
+    # Positive, real collision: a signature-less descriptor whose CRC
+    # GENUINELY equals the descriptor-signature value (0x08074b50). The
+    # four bytes at the data end are then ambiguous — signature or CRC —
+    # and only consistency with the central directory may decide. The
+    # README payload's CRC32 is exactly 0x08074b50: "readme-collision:"
+    # plus bytes 4,5,145,238, solved offline by brute force (the bytes are
+    # hard-coded, the assertion proves the fixture).
+    $readmePrefix = [Text.Encoding]::UTF8.GetBytes('readme-collision:')
+    $collisionReadme = [byte[]]::new($readmePrefix.Length + 4)
+    [Array]::Copy($readmePrefix, $collisionReadme, $readmePrefix.Length)
+    $collisionReadme[$readmePrefix.Length + 0] = 4
+    $collisionReadme[$readmePrefix.Length + 1] = 5
+    $collisionReadme[$readmePrefix.Length + 2] = 145
+    $collisionReadme[$readmePrefix.Length + 3] = 238
+    Assert-True ((Get-TestCrc32 $collisionReadme) -eq 0x08074B50) `
+        'test: collision fixture README really has CRC32 0x08074b50'
+    $c = New-DistCopy 'descriptor-collision'
+    $dz3 = Join-Path $c "$name.zip"
+    New-DescriptorZip -TargetZip $dz3 -ExeSource $peX64 -Root $name `
+        -RepoRoot (Resolve-Path (Join-Path $scripts '..' '..')).Path `
+        -OmitDescriptorSig -ReadmeBytes $collisionReadme
+    Update-SumsZipLine -SumsPath (Join-Path $c 'SHA256SUMS') -ZipName "$name.zip" `
+        -NewHash ((Get-FileHash -LiteralPath $dz3 -Algorithm SHA256).Hash.ToLowerInvariant())
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $dz3, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True ($r.ExitCode -eq 0) `
+        'verify: signature-less descriptor whose CRC equals the signature value still verifies'
+
+    # Negative: the same ambiguous prefix, but the descriptor's sizes do
+    # NOT match the central directory under either layout — the collision
+    # must not blind the check into accepting a lying descriptor.
+    $c = New-DistCopy 'descriptor-collision-bad'
+    $dz4 = Join-Path $c "$name.zip"
+    New-DescriptorZip -TargetZip $dz4 -ExeSource $peX64 -Root $name `
+        -RepoRoot (Resolve-Path (Join-Path $scripts '..' '..')).Path `
+        -OmitDescriptorSig -ReadmeBytes $collisionReadme
+    $badBytes = [IO.File]::ReadAllBytes($dz4)
+    $pattern = [Text.Encoding]::UTF8.GetBytes('readme-collision:') + $collisionReadme[$readmePrefix.Length..($readmePrefix.Length + 3)]
+    $dataEnd = (Find-Bytes -Haystack $badBytes -Needle ([byte[]]$pattern)) + $pattern.Length
+    if ($dataEnd -le $pattern.Length) { throw 'test bug: collision payload not found in crafted zip' }
+    Patch-ZipBytes -ZipPath $dz4 -Offset ($dataEnd + 4) -Value ([BitConverter]::GetBytes([uint32]0x7FFFFFFF))
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $dz4, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'data descriptor CRC/sizes disagree')) `
+        'verify: ambiguous prefix with lying descriptor sizes rejected'
 
     # Negative: DOS directory attribute bit on one entry.
     $dosDirZip = Join-Path $work 'dos-dir.zip'

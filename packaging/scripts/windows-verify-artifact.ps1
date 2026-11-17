@@ -216,24 +216,46 @@ public static class ZipRaw {
             e.LocalName = Encoding.UTF8.GetString(b, (int)(localOffset + 30), locNameLen);
             // Data descriptor (general purpose bit 3 in the LOCAL header):
             // when set, the real CRC/sizes trail the compressed data. The
-            // data end is located with the central compressed size; the
-            // signature is optional (APPNOTE 4.3.9.2), so read 16 bytes
-            // when it is present and 12 when it is not. Parsing here never
-            // throws — a malformed descriptor is recorded in DescError and
-            // the caller decides (and orders) the diagnostic.
+            // data end is located with the central compressed size. The
+            // descriptor signature is OPTIONAL (APPNOTE 4.3.9.2), so the
+            // four bytes at the data end are AMBIGUOUS: they can be the
+            // signature of a 16-byte descriptor, or the CRC of a 12-byte
+            // signature-less descriptor — including a genuine CRC that
+            // equals the signature value. Both layouts are read and the
+            // one CONSISTENT with the central directory wins; when neither
+            // matches, the declared layout's values are kept for the
+            // caller's disagreement diagnostic. Parsing never throws — a
+            // malformed descriptor is recorded in DescError.
             if ((e.LocalGpFlags & 8) != 0) {
                 e.DescPresent = true;
                 long descPos = localOffset + 30 + locNameLen + locExtraLen + e.CompSize;
-                if (descPos + 4 <= b.Length && U32(b, descPos) == 0x08074B50u) {
-                    e.DescHasSig = true;
-                    descPos += 4;
-                }
                 if (descPos + 12 > b.Length) {
                     e.DescError = "descriptor missing or truncated at its recorded position";
                 } else {
-                    e.DescCrc = U32(b, descPos);
-                    e.DescCompSize = U32(b, descPos + 4);
-                    e.DescUncompSize = U32(b, descPos + 8);
+                    bool sigHere = descPos + 16 <= b.Length && U32(b, descPos) == 0x08074B50u;
+                    uint sCrc = 0, sComp = 0, sUncomp = 0;
+                    if (sigHere) {
+                        sCrc = U32(b, descPos + 4);
+                        sComp = U32(b, descPos + 8);
+                        sUncomp = U32(b, descPos + 12);
+                    }
+                    uint nCrc = U32(b, descPos), nComp = U32(b, descPos + 4), nUncomp = U32(b, descPos + 8);
+                    bool sOk = sigHere && sCrc == e.Crc && sComp == e.CompSize && sUncomp == e.UncompSize;
+                    bool nOk = nCrc == e.Crc && nComp == e.CompSize && nUncomp == e.UncompSize;
+                    if (sOk) {
+                        e.DescHasSig = true;
+                        e.DescCrc = sCrc; e.DescCompSize = sComp; e.DescUncompSize = sUncomp;
+                    } else if (nOk) {
+                        e.DescHasSig = false;
+                        e.DescCrc = nCrc; e.DescCompSize = nComp; e.DescUncompSize = nUncomp;
+                    } else {
+                        e.DescHasSig = sigHere;
+                        if (sigHere) {
+                            e.DescCrc = sCrc; e.DescCompSize = sComp; e.DescUncompSize = sUncomp;
+                        } else {
+                            e.DescCrc = nCrc; e.DescCompSize = nComp; e.DescUncompSize = nUncomp;
+                        }
+                    }
                 }
             }
             list.Add(e);

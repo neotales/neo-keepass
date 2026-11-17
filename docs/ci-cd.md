@@ -164,13 +164,17 @@ Verification before anything is executed or uploaded:
      must agree between the two headers; and the CRC and sizes must agree
      with the central directory — in the local header when bit 3 is
      clear, in the trailing data descriptor when it is set (descriptors
-     are handled, not rejected — the descriptor signature is optional and
-     a missing, truncated or disagreeing descriptor is malformed); DOS
+     are handled, not rejected — the signature is optional, and because a
+     signature-less descriptor's CRC can genuinely equal the signature
+     value, both layouts are read and the one consistent with the central
+     directory decides; a missing, truncated or disagreeing descriptor is
+     malformed); DOS
      directory and reparse-point attribute bits and every non-regular
      Unix file type (symlink, directory, fifo, device, socket) are
      rejected; an empty mandatory payload is rejected (all synthetically
      crafted and regression-tested, including crafted descriptor zips —
-     signed and signature-less — that must verify end-to-end);
+     signed, signature-less, and with a CRC that collides with the
+     signature value — that must verify end-to-end);
    - every whitelisted entry's CRC32 is computed explicitly and compared
      to the recorded value, so an archive corrupted in transit is
      rejected before extraction (regression-tested by patching the
