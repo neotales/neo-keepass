@@ -427,7 +427,7 @@ _nkeepass_complete() {
             value_owner=''
             case "$element" in
                 --) break ;;
-                --bin|-b) pending_owner=bin ;;
+                --bin|-b) pending_owner=bin; bin_value_start=-1 ;;
                 --key|-k) pending_owner=key ;;
                 --field|-F) pending_owner=field ;;
                 --file|-f) pending_owner=file ;;
@@ -452,6 +452,55 @@ _nkeepass_complete() {
             local file_name='' file_path_before_current='' found_separator=false candidate
             local current_path="$current"
             local bin_word="$current" current_quote='' whole_assignment=false
+            local bin_space_boundary=false quote_state='' escaped_char=false word=''
+            local line_prefix="${COMP_LINE:0:COMP_POINT}" character
+            for ((scan = 0; scan < ${#line_prefix}; scan++)); do
+                character="${line_prefix:scan:1}"
+                if [[ "$escaped_char" == true ]]; then
+                    word+="$character"
+                    escaped_char=false
+                    continue
+                fi
+                if [[ "$quote_state" == single ]]; then
+                    [[ "$character" == "'" ]] && quote_state=''
+                    word+="$character"
+                    continue
+                fi
+                if [[ "$character" == '\' ]]; then
+                    escaped_char=true
+                    word+="$character"
+                    continue
+                fi
+                if [[ "$quote_state" == double ]]; then
+                    [[ "$character" == '"' ]] && quote_state=''
+                    word+="$character"
+                    continue
+                fi
+                case "$character" in
+                    "'") quote_state=single; word+="$character" ;;
+                    '"') quote_state=double; word+="$character" ;;
+                    =)
+                        if [[ "$word" == --bin || "$word" == -b ]]; then
+                            bin_space_boundary=false
+                        elif [[ "$word" != *=* ]]; then
+                            bin_space_boundary=false
+                        fi
+                        word+="$character"
+                        ;;
+                    ' '|$'\t'|$'\n')
+                        if [[ "$word" == --bin || "$word" == -b ]]; then
+                            bin_space_boundary=false
+                        elif [[ "$word" == *=* || "$word" == *'='* ]]; then
+                            bin_space_boundary=true
+                        fi
+                        word=''
+                        ;;
+                    *) word+="$character" ;;
+                esac
+                if [[ "$word" == --bin || "$word" == -b ]]; then
+                    bin_space_boundary=false
+                fi
+            done
             case "$bin_word" in
                 \'*) current_quote=single; bin_word="${bin_word:1}" ;;
                 \"*) current_quote=double; bin_word="${bin_word:1}" ;;
@@ -490,7 +539,8 @@ _nkeepass_complete() {
                     file_path_before_current+="="
                 fi
             fi
-            if [[ "$found_separator" == true ]] && [[ "$current" != --* ]] \
+            if [[ "$found_separator" == true && "$bin_space_boundary" == false ]] \
+                && [[ "$current" != --* ]] \
                 && [[ "$current_owner" == bin ]]; then
                 COMPREPLY=()
                 while IFS= read -r candidate; do
@@ -1929,6 +1979,7 @@ mod tests {
                 "space name.bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set --bin payload=danger-",
@@ -1936,6 +1987,7 @@ mod tests {
                 "danger-$(touch injected).bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass --password-env TEST set -b payload=ticks",
@@ -1949,6 +2001,7 @@ mod tests {
                 "ticks-`touch injected`.bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set --password-file ./credential --bin payload=space",
@@ -1962,6 +2015,7 @@ mod tests {
                 "space name.bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set -F Password --bin payload=apostrophe",
@@ -1975,6 +2029,7 @@ mod tests {
                 "apostrophe-'single'.bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set --bin first=old --bin payload=semi-",
@@ -1988,6 +2043,7 @@ mod tests {
                 "semi-;touch injected;.bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set --bin payload=equals=",
@@ -1995,6 +2051,7 @@ mod tests {
                 "equals=more=equals.bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set --bin 'payload=space",
@@ -2002,6 +2059,7 @@ mod tests {
                 "space name.bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set --bin \"payload=danger-",
@@ -2009,6 +2067,7 @@ mod tests {
                 "danger-$(touch injected).bin",
                 "default",
                 "",
+                true,
             ),
             (
                 "nkeepass set --bin payload=semi-",
@@ -2016,6 +2075,7 @@ mod tests {
                 "semi-;touch injected;.bin",
                 "exclude_equals",
                 "",
+                true,
             ),
             (
                 "nkeepass set --bin 'payload=apostrophe",
@@ -2023,18 +2083,46 @@ mod tests {
                 "apostrophe-'single'.bin",
                 "exclude_equals",
                 "",
+                true,
+            ),
+            (
+                "nkeepass set --bin first=old --bin 'note=space",
+                vec!["set", "--bin", "first=old", "--bin", "note=space name.bin"],
+                "space name.bin",
+                "default",
+                "",
+                true,
+            ),
+            (
+                "nkeepass set --bin first=old --bin note=space",
+                vec!["set", "--bin", "first=old", "--bin", "note=space name.bin"],
+                "space name.bin",
+                "exclude_equals",
+                "",
+                true,
+            ),
+            (
+                "nkeepass set --bin name = pre fix",
+                vec![],
+                "prefix-target",
+                "default",
+                "",
+                false,
             ),
         ];
-        for (_, _, filename, _, _) in &cases {
+        for (_, _, filename, _, _, _) in &cases {
             std::fs::write(directory.path().join(filename), b"").unwrap();
         }
         let completion_path = directory.path().join("nkeepass.bash");
         std::fs::write(&completion_path, bash).unwrap();
 
-        for (line, expected_args, expected_filename, wordbreaks, close_quote) in &cases {
+        for (line, expected_args, expected_filename, wordbreaks, close_quote, expect_match) in
+            &cases
+        {
             let script = r#"
 import os, pty, select, sys, time, signal
-directory, completion, line, expected_args, wordbreaks, close_quote = sys.argv[1:]
+directory, completion, line, expected_args, wordbreaks, close_quote, expect_match = sys.argv[1:]
+expect_match = expect_match == "true"
 import json
 expected_args = json.loads(expected_args)
 pid, fd = pty.fork()
@@ -2063,6 +2151,7 @@ transcript += result
 no_match = b"\x07" in result
 if no_match:
     os.write(fd, b"\x03")
+    transcript += drain()
 else:
     os.write(fd, close_quote.encode() + b"\n")
     transcript += drain()
@@ -2077,8 +2166,10 @@ else:
     os.kill(pid, signal.SIGKILL)
     os.waitpid(pid, 0)
     raise SystemExit("timed out waiting for interactive bash; PTY transcript: " + repr(transcript))
+if no_match == expect_match:
+    raise SystemExit("unexpected completion match state; PTY transcript: " + repr(transcript))
 if no_match:
-    raise SystemExit("Readline found no matching file")
+    raise SystemExit(0)
 with open(os.path.join(directory, "args.bin"), "rb") as stream:
     actual = stream.read().split(b"\0")[:-1]
 if actual != [arg.encode() for arg in expected_args]:
@@ -2093,6 +2184,7 @@ if actual != [arg.encode() for arg in expected_args]:
                 .arg(serde_json::to_string(&expected_args).unwrap())
                 .arg(wordbreaks)
                 .arg(close_quote)
+                .arg(expect_match.to_string())
                 .output()
                 .expect("python3 PTY driver should run");
             assert!(
