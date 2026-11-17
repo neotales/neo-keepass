@@ -479,14 +479,7 @@ _nkeepass_complete() {
                 case "$character" in
                     "'") quote_state=single; word+="$character" ;;
                     '"') quote_state=double; word+="$character" ;;
-                    =)
-                        if [[ "$word" == --bin || "$word" == -b ]]; then
-                            bin_space_boundary=false
-                        elif [[ "$word" != *=* ]]; then
-                            bin_space_boundary=false
-                        fi
-                        word+="$character"
-                        ;;
+                    =) word+="$character" ;;
                     ' '|$'\t'|$'\n')
                         if [[ "$word" == --bin || "$word" == -b ]]; then
                             bin_space_boundary=false
@@ -540,7 +533,6 @@ _nkeepass_complete() {
                 fi
             fi
             if [[ "$found_separator" == true && "$bin_space_boundary" == false ]] \
-                && [[ "$current" != --* ]] \
                 && [[ "$current_owner" == bin ]]; then
                 COMPREPLY=()
                 while IFS= read -r candidate; do
@@ -2108,6 +2100,30 @@ mod tests {
                 "default",
                 "",
                 false,
+            ),
+            (
+                "nkeepass set --bin name=pre fix=c",
+                vec![],
+                "prefix=candidate",
+                "exclude_equals",
+                "",
+                false,
+            ),
+            (
+                "nkeepass set --bin note=--evil",
+                vec!["set", "--bin", "note=--evil.bin"],
+                "--evil.bin",
+                "default",
+                "",
+                true,
+            ),
+            (
+                "nkeepass set --bin note=--danger-",
+                vec!["set", "--bin", "note=--danger-$(touch injected).bin"],
+                "--danger-$(touch injected).bin",
+                "default",
+                "",
+                true,
             ),
         ];
         for (_, _, filename, _, _, _) in &cases {
