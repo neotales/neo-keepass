@@ -116,6 +116,54 @@ and `aarch64-unknown-linux-gnu` (cross-compiled; installs
 The binary is stripped before packaging. Artifacts are uploaded as
 `nkeepass-<target>`. Nothing is attached to a GitHub release.
 
+## `windows-build.yml` — Windows x64 build + packaging
+
+Triggered by manual dispatch and pull requests. Builds the `nkeepass` CLI
+for `x86_64-pc-windows-msvc` on `windows-2025` with the pinned toolchain
+(1.98.1) and `--locked`, so the produced `nkeepass.exe` is reproducible
+against the committed `Cargo.lock`.
+
+Event-to-checkout semantics are stricter than `build.yml`:
+
+- `workflow_dispatch`: the `ref` input is **required** and must be a full
+  40-character commit SHA. The input is validated before checkout (never
+  interpolated into the shell — it crosses as an env var); branches and
+  tags are rejected, so a run can never be repointed at a movable ref after
+  it starts. Lowercased before matching.
+- `pull_request`: builds `github.sha` — the merge commit (immutable, same
+  semantics as `build.yml`).
+
+Verification before anything is executed: the PE header is parsed and its
+COFF machine field must be `0x8664` (AMD64, `packaging/scripts/
+windows-validate.ps1`), the packaging scripts' self-tests run in the real
+target environment (`packaging/scripts/test-windows-package.ps1`), and only
+then is the binary smoke-run with `--version` and `--help`. A binary that
+failed any check is never executed.
+
+Produces one artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
+days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (binary, README,
+LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkeepass.exe`,
+`WINDOWS-LIMITATIONS.txt`, and a sha256sum-compatible `SHA256SUMS`
+(`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS). Nothing
+is attached to a release; no secrets are used; permissions are
+`contents: read` and checkout persists no credentials.
+
+**Windows platform limitation (stated plainly):** owner-only secure file
+writes are UNSUPPORTED on Windows. Files nkeepass creates — vaults, config,
+CLI output — get the containing directory's default ACLs, not the Unix
+owner-only (0600) protection, so other local accounts and programs running
+as the same user can read them. The build and packaging are unaffected; the
+warning ships inside the artifact as `WINDOWS-LIMITATIONS.txt` (source:
+`packaging/windows/WINDOWS-LIMITATIONS.txt`). Do not describe Windows
+artifacts as protected by file permissions anywhere.
+
+**Tooling note:** the packaging scripts are PowerShell 7 (`pwsh`) and were
+written and reviewed without a local pwsh available on the dev host — the
+first real execution of `test-windows-package.ps1` happens on the
+`windows-2025` runner in this workflow. The workflow runs the self-tests
+before packaging precisely so those scripts are exercised (and their
+failure paths covered) in the environment that matters, on every run.
+
 ## `bench.yml` — benchmarks
 
 Manual dispatch only. Runs `cargo bench -p nkeepass` on `ubuntu-24.04` and

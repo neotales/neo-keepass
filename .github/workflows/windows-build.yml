@@ -1,0 +1,129 @@
+name: windows-build
+
+# Manual/pull-request Windows x64 release build of the nkeepass CLI.
+#
+# Produces nkeepass.exe, a zip archive, a sha256sum-compatible SHA256SUMS,
+# and the platform limitations readme, uploaded as a workflow artifact.
+# Nothing is published: no release, no tag, no secrets, no token beyond
+# read-only checkout.
+#
+# Platform limitation (also shipped inside the artifact as
+# WINDOWS-LIMITATIONS.txt): owner-only secure file writes are UNSUPPORTED on
+# Windows. Vault files, config files and CLI output files created on Windows
+# get the default filesystem ACLs of their containing directory, not the
+# Unix owner-only (0600) protection. The build and packaging here are
+# unaffected; the limitation is packaged so it reaches the binary's users
+# and is stated in docs/ci-cd.md.
+#
+# Checkout semantics are stricter than build.yml: the dispatch `ref` input
+# must be a FULL 40-character commit SHA. Branches and tags are rejected so
+# a run can never be repointed at a movable ref after it starts; the
+# checked-out commit is always immutable and nameable. Pull requests build
+# github.sha (the merge commit, also immutable).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Full 40-character commit SHA to build (movable refs rejected)"
+        required: true
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: windows x86_64 (msvc)
+    runs-on: windows-2025
+    steps:
+      # The dispatch input is untrusted data and must never reach the shell
+      # by ${{ }} interpolation; it crosses as an env var and is validated
+      # to be exactly a 40-hex commit SHA (lowercased) before checkout.
+      - name: Resolve and validate checkout commit
+        id: resolve
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_REF: ${{ inputs.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request)
+              # github.sha for pull_request is the merge commit: immutable.
+              ref=$EVENT_SHA
+              ;;
+            workflow_dispatch)
+              ref=$(printf '%s' "$DISPATCH_REF" | tr -d ' \t' | tr 'A-F' 'a-f')
+              if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
+                echo "::error::ref input must be a full 40-character commit SHA; branches and tags are rejected so the run is pinned to an immutable commit"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unexpected event for this workflow: $EVENT"
+              exit 1
+              ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # persist-credentials: false — pull-request builds compile PR-provided
+      # code (including any build scripts it adds), so the checkout token
+      # must not outlive checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ steps.resolve.outputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1" # matches rust-toolchain.toml
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build release (--locked)
+        shell: bash
+        run: cargo build --release --locked -p nkeepass --target x86_64-pc-windows-msvc
+
+      - name: Validate PE machine is x64
+        shell: bash
+        run: pwsh -NoProfile -File packaging/scripts/windows-validate.ps1 -Binary "target/x86_64-pc-windows-msvc/release/nkeepass.exe" -Machine x64
+
+      # Failure-path tests for the packaging scripts run in the real target
+      # environment (the local dev host has no pwsh; see docs/ci-cd.md).
+      - name: Run packaging script tests
+        shell: bash
+        run: pwsh -NoProfile -File packaging/scripts/test-windows-package.ps1
+
+      # A binary that failed the PE check or the tests is never executed:
+      # this step only runs if every step above passed.
+      - name: Smoke run --version and --help
+        shell: bash
+        run: |
+          bin="target/x86_64-pc-windows-msvc/release/nkeepass.exe"
+          "$bin" --version
+          "$bin" --help > /dev/null
+          echo "smoke ok: --version and --help executed on windows"
+
+      - name: Package (zip, SHA256SUMS, limitations readme)
+        shell: bash
+        run: |
+          version=$(packaging/scripts/version.sh)
+          pwsh -NoProfile -File packaging/scripts/windows-package.ps1 \
+            -Binary "target/x86_64-pc-windows-msvc/release/nkeepass.exe" \
+            -Version "$version" \
+            -Triple x86_64-pc-windows-msvc \
+            -OutputDir dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nkeepass-x86_64-pc-windows-msvc
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

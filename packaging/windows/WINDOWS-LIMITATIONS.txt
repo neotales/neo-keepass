@@ -1,0 +1,22 @@
+nkeepass for Windows — platform limitations
+============================================
+
+SECURE OWNER-ONLY FILE WRITES ARE NOT SUPPORTED ON WINDOWS.
+
+On Unix, nkeepass creates vault files, configuration files and CLI output
+files with owner-only permissions (mode 0600), so other users on the same
+machine cannot read them. Windows has no equivalent that nkeepass applies
+today: files are created with the default filesystem ACLs of their
+containing directory. On most setups that means other local accounts and
+every program running as your user can read them.
+
+What this means in practice:
+
+- Do not rely on nkeepass file permissions to protect anything on Windows.
+- Keep vaults and the nkeepass config in your user profile (for example
+  C:\Users\<you>\...), not in a shared or public directory.
+- Full-disk encryption and ordinary Windows account hygiene are the
+  remaining layers of protection.
+
+Everything else about the CLI — commands, file formats, age integration,
+shell completion — behaves the same as on Unix. See README.md and docs/.
