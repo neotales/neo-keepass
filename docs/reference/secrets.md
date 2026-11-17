@@ -81,6 +81,7 @@ byte. `null` means NUL-delimited output, not suppressed output.
 ```text
 nkeepass secrets get --key PATH [--field FIELD] [--format FORMAT]
   [--name NAME] [--is-output] [--age-encrypt] [-r KEY]... [--output PATH]
+  [--clipboard]
 ```
 
 Reveals one selected field. `--field` defaults to `Password`. The default
@@ -96,6 +97,13 @@ is valid only with `--age-encrypt`; it writes ciphertext to a private,
 no-clobber file. Without `--output`, ciphertext goes to stdout. Without age
 encryption, the selected value is printed as plaintext. Do not route it to
 logs.
+
+`--clipboard` explicitly sends plaintext to the system clipboard instead of
+stdout. It is mutually exclusive with formatted, encrypted, or file output.
+Windows conditionally clears the clipboard after 30 seconds only if the
+clipboard has not changed. Other desktop backends cannot safely compare and
+clear atomically, so they warn on stderr that the value may remain. Clipboard
+errors use a static diagnostic and never include the selected value.
 
 ### `secrets getx`
 
@@ -127,12 +135,22 @@ HOTP entries. `--format` defaults to `text`; the other formats are `json`,
 ### `secrets set`
 
 ```text
-nkeepass secrets set --key PATH [--field FIELD] (--file PATH | --stdin)
-  [--age-decrypt -i PATH]
+nkeepass secrets set --key PATH [--field FIELD] [--file PATH | --stdin]
+  [--age-decrypt -i PATH] [--username VALUE] [--url VALUE] [--notes VALUE]
+  [--bin NAME=FILE_PATH]...
 ```
 
-Reads one value from a file or stdin and updates the selected field. Exactly
-one input source is required. `--field` defaults to `Password`. With
+Reads one value from a file or stdin and updates the selected field. `--file`
+and `--stdin` are mutually exclusive; at least one input, direct field update,
+or `--bin` is required. `--field` defaults to `Password`. Repeat `--bin` or
+`-b` to add attachments using `NAME=FILE_PATH`; the first `=` separates the
+name, and further equals signs belong to the path. `--file`/`-f` always retains
+its value-input meaning. Combined attachments and fields are saved only after
+all requested mutations succeed, with an aggregate 16 MiB attachment input
+limit, a 256-file count limit, and no replacement of existing attachment names. `--username`, `--url`,
+and `--notes` accept direct values; those arguments can be visible in process
+listings and shell history, so use `--file` or `--stdin` for sensitive values.
+With
 `--age-decrypt`, the input must be age ciphertext and `-i` or
 `--age-identity PATH` is required. The CLI supports native age identities and
 unencrypted SSH private keys, not encrypted SSH keys. This command saves the

@@ -2711,7 +2711,7 @@ fn help_is_answered_at_every_command_depth() {
 /// visible without pinning the whole help text as a snapshot.
 #[test]
 fn root_help_is_aligned_scannable_and_points_to_details() {
-    const DESCRIPTION_COLUMN: usize = 26;
+    const DESCRIPTION_COLUMN: usize = 32;
 
     let tmp = tempfile::tempdir().unwrap();
     let output = cli(tmp.path(), &["--help"]);
@@ -2732,7 +2732,7 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
             "alias",
             "secrets",
             "automation",
-            "attachment|attachments",
+            "files|attachment|attachments",
             "group|groups",
             "field|custom-field",
             "config",
@@ -2829,7 +2829,10 @@ fn help_row_labels(rows: &[&str]) -> Vec<String> {
 fn every_command_tier_has_its_own_help_and_direct_children() {
     let tmp = tempfile::tempdir().unwrap();
     let groups: &[(&[&str], &[&str])] = &[
-        (&["context"], &["ls", "show", "use", "rm", "set"]),
+        (
+            &["context"],
+            &["ls|list", "show", "use", "rm|remove", "set"],
+        ),
         (&["alias"], &["ls|list", "set", "rm|remove", "resolve"]),
         (
             &["secrets"],
@@ -2852,7 +2855,15 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
         ),
         (&["automation"], &["setx", "import", "export", "sync"]),
         (
+            &["files"],
+            &["ls|list", "add|import", "get|export", "rm|remove"],
+        ),
+        (
             &["attachment"],
+            &["ls|list", "add|import", "get|export", "rm|remove"],
+        ),
+        (
+            &["attachments"],
             &["ls|list", "add|import", "get|export", "rm|remove"],
         ),
         (
@@ -2937,10 +2948,10 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
         (&["automation", "import"], "--replace"),
         (&["automation", "export"], "--output PATH"),
         (&["automation", "sync"], "--strategy newest|source"),
-        (&["attachment", "ls"], "--key PATH"),
-        (&["attachment", "add"], "--field FIELD"),
-        (&["attachment", "get"], "--output PATH"),
-        (&["attachment", "rm"], "--yes"),
+        (&["files", "ls"], "--key PATH"),
+        (&["files", "add"], "--field FIELD"),
+        (&["files", "get"], "--output PATH"),
+        (&["files", "rm"], "--yes"),
         (&["field", "ls"], "Usage: nkeepass field ls --key PATH"),
         (&["field", "get"], "--field FIELD"),
         (&["field", "set"], "--stdin"),

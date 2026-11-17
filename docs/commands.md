@@ -7,14 +7,16 @@ invocation, options, output, and failures, open the linked reference page.
 | --- | --- | --- |
 | `alias ls` | `alias list` | [Vault, context, and alias commands](reference/vault.md#alias) |
 | `alias rm` | `alias remove` | [Vault, context, and alias commands](reference/vault.md#alias) |
-| `attachment` | `attachments` | [Attachments, groups, and custom fields](reference/entries.md#attachments) |
-| `attachment ls` | `attachment list` | [Attachments](reference/entries.md#attachments) |
-| `attachment add` | `attachment import` | [Attachments](reference/entries.md#attachments) |
-| `attachment get` | `attachment export` | [Attachments](reference/entries.md#attachments) |
-| `attachment rm` | `attachment remove` | [Attachments](reference/entries.md#attachments) |
+| `files` | `attachment`, `attachments` | [Attachments, groups, and custom fields](reference/entries.md#attachments) |
+| `files ls` | `files list`, and the same under attachment aliases | [Attachments](reference/entries.md#attachments) |
+| `files add` | `files import`, and the same under attachment aliases | [Attachments](reference/entries.md#attachments) |
+| `files get` | `files export`, and the same under attachment aliases | [Attachments](reference/entries.md#attachments) |
+| `files rm` | `files remove`, and the same under attachment aliases | [Attachments](reference/entries.md#attachments) |
 | `config ls` | `config list` | [System commands](reference/system.md#config) |
 | `config get` | `config show` | [System commands](reference/system.md#config) |
 | `config rm` | `config remove` | [System commands](reference/system.md#config) |
+| `context ls` | `context list` | [Vault, context, and alias commands](reference/vault.md#context) |
+| `context rm` | `context remove` | [Vault, context, and alias commands](reference/vault.md#context) |
 | `exec` | `x` | [System commands](reference/system.md#exec) |
 | `field` | `custom-field` | [Attachments, groups, and custom fields](reference/entries.md#custom-fields) |
 | `field ls` | `field list` | [Custom fields](reference/entries.md#custom-fields) |
@@ -33,6 +35,10 @@ invocation, options, output, and failures, open the linked reference page.
 | `version` | Root `--version` | [System commands](reference/system.md#version) |
 | `-h` | `--help` | [Global flags](reference/system.md#global-flags) |
 | `-V PATH` | `--vault PATH` | [Global flags](reference/system.md#global-flags) |
+| `-k PATH` | `--key PATH` | [Secrets commands](reference/secrets.md#read-selected-values) |
+| `-F FIELD` | `--field FIELD` | [Secrets commands](reference/secrets.md#change-entries-and-fields) |
+| `-f PATH` | `--file PATH` | [Secrets commands](reference/secrets.md#change-entries-and-fields) |
+| `-b NAME=FILE_PATH` | `--bin NAME=FILE_PATH` | [Secrets set](reference/secrets.md#change-entries-and-fields) |
 | `-r KEY` | `--age-recipient KEY` | [Secrets commands](reference/secrets.md#read-selected-values) |
 | `-i PATH` | `--age-identity PATH` | [Secrets commands](reference/secrets.md#change-entries-and-fields) |
 | Shell completion name `powershell` | `pwsh` | [System commands](reference/system.md#completion) |
@@ -44,6 +50,8 @@ internal dispatch action names, not public command routes.
 `__complete` is a private protocol used by generated shell completion, not a
 public command.
 
-Entry selection has one option spelling: `--key PATH`. `PATH` may be an entry
-path or a configured entry alias. There is no `--entry`, `--selector`, or
-`-k` option.
+Entry selection accepts `--key PATH` or `-k PATH`. `PATH` may be an entry path
+or configured entry alias. `--field` also accepts `-F`; `--file` accepts `-f`.
+`--bin NAME=FILE_PATH` accepts `-b` and may be repeated. These short options
+are not rewritten after an `exec --` child separator. The global vault option
+is `-V PATH` or `--vault PATH`.

@@ -113,16 +113,20 @@ const CREDENTIAL_OPTIONS: &[HelpOption] = &[
     },
 ];
 const KEY_OPTION: HelpOption = HelpOption {
-    label: "--key PATH",
+    label: "-k, --key PATH",
     summary: "Select an entry by path or entry alias.",
 };
 const FIELD_OPTION: HelpOption = HelpOption {
-    label: "--field FIELD",
+    label: "-F, --field FIELD",
     summary: "Select a field (defaults to Password where applicable).",
 };
 const FILE_OPTION: HelpOption = HelpOption {
-    label: "--file PATH",
+    label: "-f, --file PATH",
     summary: "Read input from a file.",
+};
+const BIN_OPTION: HelpOption = HelpOption {
+    label: "-b, --bin NAME=FILE_PATH",
+    summary: "Add an attachment; repeat for multiple files.",
 };
 const STDIN_OPTION: HelpOption = HelpOption {
     label: "--stdin",
@@ -147,7 +151,7 @@ const YES_OPTION: HelpOption = HelpOption {
 
 const CONTEXT_COMMANDS: &[HelpCommand] = &[
     help_command(
-        "ls",
+        "ls|list",
         "ls",
         "List configured vault aliases and paths.",
         NO_OPTIONS,
@@ -168,7 +172,7 @@ const CONTEXT_COMMANDS: &[HelpCommand] = &[
         NO_COMMANDS,
     ),
     help_command(
-        "rm",
+        "rm|remove",
         "rm ALIAS",
         "Remove a vault alias.",
         NO_OPTIONS,
@@ -265,6 +269,10 @@ const GET_OPTIONS: &[HelpOption] = &[
     FORMAT_OPTION,
     NAME_OPTION,
     HelpOption {
+        label: "--clipboard",
+        summary: "Copy the selected value instead of writing it to stdout.",
+    },
+    HelpOption {
         label: "--is-output",
         summary: "Mark Azure DevOps output as an output variable.",
     },
@@ -285,8 +293,21 @@ const GETX_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, FORMAT_OPTION];
 const SET_OPTIONS: &[HelpOption] = &[
     KEY_OPTION,
     FIELD_OPTION,
+    HelpOption {
+        label: "--username VALUE",
+        summary: "Set the UserName field from an argument.",
+    },
+    HelpOption {
+        label: "--url VALUE",
+        summary: "Set the URL field from an argument.",
+    },
+    HelpOption {
+        label: "--notes VALUE",
+        summary: "Set the Notes field from an argument.",
+    },
     FILE_OPTION,
     STDIN_OPTION,
+    BIN_OPTION,
     HelpOption {
         label: "--age-decrypt",
         summary: "Decrypt age-encrypted input before setting the field.",
@@ -699,8 +720,8 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         AUTOMATION_COMMANDS,
     ),
     help_command(
-        "attachment|attachments",
-        "attachment <COMMAND>",
+        "files|attachment|attachments",
+        "files <COMMAND>",
         "List or manage attachments.",
         NO_OPTIONS,
         ATTACHMENT_COMMANDS,
@@ -1781,6 +1802,10 @@ impl Positional {
 struct Options<'a> {
     key: Option<&'a str>,
     field: Option<&'a str>,
+    username: Option<&'a str>,
+    url: Option<&'a str>,
+    notes: Option<&'a str>,
+    bins: Vec<&'a str>,
     name: Option<&'a str>,
     file: Option<&'a str>,
     output: Option<&'a str>,
@@ -1797,6 +1822,7 @@ struct Options<'a> {
     glob: Option<&'a str>,
     format: Option<&'a str>,
     is_output: bool,
+    clipboard: bool,
     strategy: Option<&'a str>,
     path: Option<&'a str>,
     kdf: Option<&'a str>,
@@ -1832,6 +1858,11 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             arg,
             "--key"
                 | "--field"
+                | "--username"
+                | "--url"
+                | "--notes"
+                | "--bin"
+                | "-b"
                 | "--name"
                 | "--file"
                 | "--output"
@@ -1859,6 +1890,10 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
         match arg {
             "--key" if opts.key.is_none() => opts.key = value,
             "--field" if opts.field.is_none() => opts.field = value,
+            "--username" if opts.username.is_none() => opts.username = value,
+            "--url" if opts.url.is_none() => opts.url = value,
+            "--notes" if opts.notes.is_none() => opts.notes = value,
+            "--bin" | "-b" => opts.bins.push(value.ok_or_else(|| err("invalid option"))?),
             "--name" if opts.name.is_none() => opts.name = value,
             "--file" if opts.file.is_none() => opts.file = value,
             "--output" if opts.output.is_none() => opts.output = value,
@@ -1874,6 +1909,7 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             "--size" if opts.size.is_none() => opts.size = Some(count(value, "invalid size")?),
             "--format" if opts.format.is_none() => opts.format = value,
             "--is-output" if !opts.is_output => opts.is_output = true,
+            "--clipboard" if !opts.clipboard => opts.clipboard = true,
             "--strategy" if opts.strategy.is_none() => opts.strategy = value,
             "--kdf" if opts.kdf.is_none() => opts.kdf = value,
             "--memory" if opts.memory.is_none() => {
@@ -3013,6 +3049,48 @@ fn emit_value(value: &[u8], format: &str, name: Option<&str>, is_output: bool) -
     }
 }
 
+/// Copies an explicitly selected secret without sending plaintext to stdout.
+/// Windows clipboard ownership can be tracked and cleared after the same
+/// thirty-second lease used by the interactive browser; other backends cannot
+/// safely clear without risking erasing newer user clipboard contents.
+fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
+    use crate::clipboard::{ArboardAdapter, ClipboardCopyOutcome, ClipboardLease};
+    use std::time::{Duration, Instant};
+
+    let mut lease = ClipboardLease::new(ArboardAdapter::default(), Duration::from_secs(30));
+    match lease
+        .copy(value)
+        .map_err(|_| err("clipboard is unavailable"))?
+    {
+        ClipboardCopyOutcome::RejectedNul => {
+            return Err(err("value cannot be copied to clipboard"));
+        }
+        ClipboardCopyOutcome::MayHaveCopied => {
+            eprintln!("nkeepass: clipboard write may be incomplete");
+        }
+        ClipboardCopyOutcome::Copied => {}
+    }
+    if lease.supports_timed_clear() && lease.has_lease() {
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until {
+            std::thread::sleep(
+                Duration::from_millis(100).min(until.saturating_duration_since(Instant::now())),
+            );
+        }
+        match lease.tick(Instant::now()) {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => eprintln!("nkeepass: clipboard changed; left newer contents intact"),
+            Ok(None) => {}
+            Err(_) => eprintln!("nkeepass: clipboard could not be cleared"),
+        }
+    } else {
+        eprintln!(
+            "nkeepass: clipboard may retain the secret; this platform cannot safely clear it"
+        );
+    }
+    Ok(())
+}
+
 fn reveal_native_service_field(
     service: &VaultService,
     entry: &nkeepass::ResolvedEntry,
@@ -3166,6 +3244,17 @@ fn vault_creation_options(opts: &Options<'_>) -> bool {
     reason = "the explicit per-action option matrix is easier to audit in one place"
 )]
 fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
+    if opts.clipboard && action != "get" {
+        return Err(err("--clipboard is only valid for get"));
+    }
+    if action != "set"
+        && (opts.username.is_some()
+            || opts.url.is_some()
+            || opts.notes.is_some()
+            || !opts.bins.is_empty())
+    {
+        return Err(err("set-only option used with another command"));
+    }
     let value_input = opts.file.is_some() || opts.stdin;
     let has_age_options = opts.age_encrypt
         || opts.age_decrypt
@@ -3236,7 +3325,11 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.format.is_some()
                 || opts.is_output
                 || opts.strategy.is_some()
-                || !value_input
+                || (!value_input
+                    && opts.bins.is_empty()
+                    && opts.username.is_none()
+                    && opts.url.is_none()
+                    && opts.notes.is_none())
                 || opts.age_encrypt
                 || !opts.age_recipients.is_empty()
                 || (opts.age_decrypt != opts.age_identity.is_some())
@@ -3628,6 +3721,16 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         {
             return Err(err("custom field required"));
         }
+        if opts.clipboard
+            && (action != "get"
+                || format != "text"
+                || opts.name.is_some()
+                || opts.is_output
+                || opts.output.is_some()
+                || opts.age_encrypt)
+        {
+            return Err(err("--clipboard requires plain get output"));
+        }
         let mut service = VaultService::default();
         let session = service
             .open(&path, &mut credentials, &KDBX_LIMITS)
@@ -3676,6 +3779,10 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                         .and_then(|()| io::stdout().write_all(b"\n"))
                         .map_err(|_| err("cannot write encrypted output"))
                 }
+            } else if opts.clipboard {
+                let text = std::str::from_utf8(value.as_slice())
+                    .map_err(|_| err("clipboard requires UTF-8 text"))?;
+                copy_secret_to_clipboard(Zeroizing::new(text.to_owned()))
             } else {
                 emit_value(value.as_slice(), format, opts.name, opts.is_output)
             }
@@ -3792,19 +3899,81 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         {
             return Err(err("custom field required"));
         }
-        let bytes = input_value(&opts)?;
-        let bytes = if opts.age_decrypt {
-            let identities = age_identities(
-                opts.age_identity
-                    .ok_or_else(|| err("age identity required"))?,
-            )?;
-            decrypt_age_input(&bytes, &identities)?
-        } else {
-            bytes
-        };
-        let value = Zeroizing::new(
-            String::from_utf8(bytes.to_vec()).map_err(|_| err("field requires UTF-8"))?,
-        );
+        let has_input = opts.file.is_some() || opts.stdin;
+        if opts.age_decrypt && !has_input {
+            return Err(err("age decryption requires --file or --stdin"));
+        }
+        let mut updates = Vec::new();
+        if has_input {
+            let bytes = input_value(&opts)?;
+            let bytes = if opts.age_decrypt {
+                let identities = age_identities(
+                    opts.age_identity
+                        .ok_or_else(|| err("age identity required"))?,
+                )?;
+                decrypt_age_input(&bytes, &identities)?
+            } else {
+                bytes
+            };
+            let value = Zeroizing::new(
+                String::from_utf8(bytes.to_vec()).map_err(|_| err("field requires UTF-8"))?,
+            );
+            updates.push(FieldUpdate {
+                key: name.to_owned(),
+                value,
+                protected: None,
+                protect_in_memory: None,
+            });
+        }
+        for (key, value) in [
+            ("UserName", opts.username),
+            ("URL", opts.url),
+            ("Notes", opts.notes),
+        ] {
+            if let Some(value) = value {
+                updates.push(FieldUpdate {
+                    key: key.to_owned(),
+                    value: Zeroizing::new(value.to_owned()),
+                    protected: None,
+                    protect_in_memory: None,
+                });
+            }
+        }
+        let mut update_names = BTreeSet::new();
+        if updates
+            .iter()
+            .any(|update| !update_names.insert(update.key.as_str()))
+        {
+            return Err(err("field specified more than once"));
+        }
+        let mut binaries = Vec::with_capacity(opts.bins.len());
+        let mut binary_names = BTreeSet::new();
+        let mut total_binary_bytes = 0usize;
+        if opts.bins.len() > 256 {
+            return Err(err("too many attachment inputs"));
+        }
+        for specification in &opts.bins {
+            let (binary_name, file_path) = specification
+                .split_once('=')
+                .ok_or_else(|| err("--bin requires NAME=FILE_PATH"))?;
+            if binary_name.is_empty()
+                || file_path.is_empty()
+                || binary_name.contains('/')
+                || binary_name.chars().any(char::is_control)
+            {
+                return Err(err("invalid --bin NAME=FILE_PATH"));
+            }
+            if !binary_names.insert(binary_name) {
+                return Err(err("duplicate attachment name"));
+            }
+            let remaining = 16 * 1024 * 1024usize - total_binary_bytes;
+            let bytes = bounded_file(file_path, remaining as u64)?;
+            total_binary_bytes = total_binary_bytes
+                .checked_add(bytes.len())
+                .filter(|size| *size <= 16 * 1024 * 1024)
+                .ok_or_else(|| err("attachment input exceeds size limit"))?;
+            binaries.push((binary_name, bytes));
+        }
         let mut service = VaultService::default();
         let session = service
             .open(&path, &mut credentials, &KDBX_LIMITS)
@@ -3826,30 +3995,62 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             } else {
                 selector
             };
-            let resolved = service
-                .resolve_entry(session, entry_selector)
-                .map_err(|error| match error {
-                    nkeepass::ServiceError::NotFound => {
-                        entry_not_found(&service, session, entry_selector)
-                    }
-                    error => err(error.message()),
-                })?;
-            let reference = resolved.reference();
-            let mutation = if action == "field-set" {
-                service.set_custom_field(&reference, name, value.as_str())
-            } else {
-                service.set_field(&reference, name, value.as_str())
-            };
-            mutation.map_err(|error| match error {
-                nkeepass::ServiceError::DuplicateIds => {
-                    err("vault contains duplicate object UUIDs")
+            for (binary_name, bytes) in binaries {
+                let resolved = service
+                    .resolve_entry(session, entry_selector)
+                    .map_err(|error| match error {
+                        nkeepass::ServiceError::NotFound => {
+                            entry_not_found(&service, session, entry_selector)
+                        }
+                        error => err(error.message()),
+                    })?;
+                service
+                    .add_attachment(&resolved.reference(), binary_name, bytes)
+                    .map_err(|error| match error {
+                        nkeepass::ServiceError::AttachmentExists => {
+                            err("attachment already exists")
+                        }
+                        nkeepass::ServiceError::Ambiguous => err("ambiguous attachment name"),
+                        nkeepass::ServiceError::InvalidInput => err("invalid attachment name"),
+                        error => err(error.message()),
+                    })?;
+            }
+            if !updates.is_empty() {
+                let resolved = service
+                    .resolve_entry(session, entry_selector)
+                    .map_err(|error| match error {
+                        nkeepass::ServiceError::NotFound => {
+                            entry_not_found(&service, session, entry_selector)
+                        }
+                        error => err(error.message()),
+                    })?;
+                if action == "field-set" {
+                    let update = updates
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| err("invalid field update"))?;
+                    service
+                        .set_custom_field(&resolved.reference(), &update.key, update.value.as_str())
+                        .map_err(|error| err(error.message()))?;
+                } else {
+                    service.set_fields(&resolved.reference(), updates).map_err(
+                        |error| match error {
+                            nkeepass::ServiceError::DuplicateIds => {
+                                err("vault contains duplicate object UUIDs")
+                            }
+                            nkeepass::ServiceError::DuplicateFields => {
+                                err("entry contains duplicate fields")
+                            }
+                            nkeepass::ServiceError::AmbiguousField => err("ambiguous field name"),
+                            nkeepass::ServiceError::InvalidFieldName => err("invalid field name"),
+                            nkeepass::ServiceError::FieldConflict => {
+                                err("title cannot be changed through set")
+                            }
+                            error => err(error.message()),
+                        },
+                    )?;
                 }
-                nkeepass::ServiceError::DuplicateFields => err("entry contains duplicate fields"),
-                nkeepass::ServiceError::AmbiguousField => err("ambiguous field name"),
-                nkeepass::ServiceError::InvalidFieldName => err("invalid field name"),
-                nkeepass::ServiceError::FieldConflict => err("title cannot be changed through set"),
-                error => err(error.message()),
-            })?;
+            }
             if !opts.dry_run {
                 service
                     .save(&path, &mut credentials)
@@ -5401,8 +5602,15 @@ fn help_request(args: &[String]) -> Option<Vec<String>> {
 fn takes_option_value(option: &str) -> bool {
     matches!(
         option,
-        "--key"
+        "-k" | "-f"
+            | "-b"
+            | "-F"
+            | "--key"
             | "--field"
+            | "--username"
+            | "--url"
+            | "--notes"
+            | "--bin"
             | "--name"
             | "--file"
             | "--output"
@@ -5488,6 +5696,7 @@ fn uses_credentials(route: &[String]) -> bool {
                 group.as_str(),
                 "secrets"
                     | "automation"
+                    | "files"
                     | "attachment"
                     | "attachments"
                     | "field"
@@ -5806,7 +6015,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
     match command {
         "init" => init_command(rest, vault, &mut config),
         "context" => match rest.first().map(String::as_str) {
-            Some("ls") if rest.len() == 1 => {
+            Some("ls" | "list") if rest.len() == 1 => {
                 for (name, alias) in &config.aliases {
                     if alias.kind == Kind::Vault {
                         check_alias_metadata(name, alias)?;
@@ -5835,7 +6044,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
                 use_context_alias(&mut config, &rest[1])?;
                 save_config(&config)
             }
-            Some("rm") if rest.len() == 2 => {
+            Some("rm" | "remove") if rest.len() == 2 => {
                 remove_context_alias(&mut config, &rest[1])?;
                 save_config(&config)
             }
@@ -6016,9 +6225,15 @@ fn main() {
 fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
     let mut normalized = Vec::with_capacity(args.len());
     let mut after_separator = false;
+    let mut expects_value = false;
     for arg in args {
         if after_separator {
             normalized.push(arg.clone());
+            continue;
+        }
+        if expects_value {
+            normalized.push(arg.clone());
+            expects_value = false;
             continue;
         }
         if arg == "--" {
@@ -6026,6 +6241,7 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
             normalized.push(arg.clone());
             continue;
         }
+        expects_value = takes_option_value(arg);
         let replacement = match arg.as_str() {
             "-k" => Some("--key"),
             "-f" => Some("--file"),
@@ -6043,11 +6259,28 @@ mod tests {
 
     #[test]
     fn short_key_file_and_field_options_expand_only_before_exec_separator() {
-        let args = ["get", "-k", "Root/mail", "-F", "Password", "--"].map(str::to_owned);
+        let args =
+            ["get", "-k", "Root/mail", "-F", "Password", "-f", "data.bin"].map(str::to_owned);
         assert_eq!(
             normalize_cli_aliases(&args),
-            ["get", "--key", "Root/mail", "--field", "Password", "--"].map(str::to_owned)
+            [
+                "get",
+                "--key",
+                "Root/mail",
+                "--field",
+                "Password",
+                "--file",
+                "data.bin"
+            ]
+            .map(str::to_owned)
         );
+        let value_is_alias_like = ["get", "--key", "-f"].map(str::to_owned);
+        assert_eq!(
+            normalize_cli_aliases(&value_is_alias_like),
+            value_is_alias_like
+        );
+        let command_aliases = ["list", "remove"].map(str::to_owned);
+        assert_eq!(normalize_cli_aliases(&command_aliases), command_aliases);
         let args = ["exec", "--", "child", "-k", "-f", "-F"].map(str::to_owned);
         assert_eq!(normalize_cli_aliases(&args), args);
     }
@@ -7616,7 +7849,10 @@ mod tests {
             // These narrowly-scoped names are CLI/service DTO metadata, not
             // permission to access arbitrary model-shaped fields on either value.
             let safe_record = match receiver.map(String::as_str) {
-                Some("opts") => matches!(field, "password" | "key" | "name"),
+                Some("opts") => matches!(
+                    field,
+                    "password" | "key" | "name" | "username" | "url" | "notes" | "bins"
+                ),
                 Some("common_options") => matches!(field, "key" | "name"),
                 Some("binding") => matches!(field, "key" | "name"),
                 Some("update") => {

@@ -363,6 +363,28 @@ _nkeepass_complete() {
     local index=1 element position
     local -a vault_args=()
     current="${COMP_WORDS[COMP_CWORD]}"
+    local file_spec="$current"
+    if [[ "$current" != *=* ]] && (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == *= ]]; then
+        file_spec="${COMP_WORDS[COMP_CWORD - 1]}$current"
+    fi
+    if [[ "$file_spec" == *=* ]]; then
+        local file_index=1 file_option=false file_name file_path candidate
+        while (( file_index < COMP_CWORD )); do
+            [[ "${COMP_WORDS[file_index]}" == --bin || "${COMP_WORDS[file_index]}" == -b ]] && file_option=true
+            ((file_index++))
+        done
+        if [[ "$file_option" == true ]] && [[ " ${COMP_WORDS[*]} " == *" set "* ]]; then
+            file_name="${file_spec%%=*}"
+            file_path="${file_spec#*=}"
+            local old_wordbreaks="$COMP_WORDBREAKS"
+            COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"
+            while IFS= read -r candidate; do
+                COMPREPLY+=("$file_name=$candidate")
+            done < <(compgen -f -- "$file_path")
+            COMP_WORDBREAKS="$old_wordbreaks"
+            return
+        fi
+    fi
     if (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == --password-env ]]; then
         COMPREPLY=()
         return
@@ -385,7 +407,7 @@ _nkeepass_complete() {
         if (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == "--vault" || "${COMP_WORDS[COMP_CWORD - 1]}" == "-V" ]]; then
             mapfile -t COMPREPLY < <(command nkeepass __complete vaults "$current" 2>/dev/null)
         else
-            choices='init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync attachment attachments group groups field custom-field exec x version completion --help -h --version --vault -V --password-env --password-stdin'
+            choices='init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion --help -h --version --vault -V --password-env --password-stdin'
             COMPREPLY=( $(compgen -W "$choices" -- "$current") )
         fi
         return
@@ -443,7 +465,7 @@ _nkeepass_complete() {
     case "$command" in
         init) choices='--password --password-env --password-file --password-stdin --key-file --kdf --memory --iterations --parallelism --size' ;;
         context)
-            [[ -n "$action" ]] || choices='ls show use rm set'
+            [[ -n "$action" ]] || choices='ls list show use rm remove set'
             ;;
         alias)
             if [[ -z "$action" ]]; then
@@ -471,9 +493,9 @@ _nkeepass_complete() {
                     search) choices='--password --password-env --password-file --password-stdin --key-file --' ;;
                     show) choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
                     env|environment) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                    get) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                    get) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
                     getx) choices='--key --field --format --password --password-env --password-file --password-stdin --key-file' ;;
-                    set) choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                    set) choices='--key --field --username --url --notes --file --bin -b --stdin --password --password-env --password-file --password-stdin --key-file' ;;
                     rm|remove) choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
                     ensure) choices='--key --size --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                     otp) choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
@@ -484,13 +506,13 @@ _nkeepass_complete() {
                 esac
             fi
             ;;
-        get) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+        get) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
         getx) choices='--key --field --format --password --password-env --password-file --password-stdin --key-file' ;;
         list|ls) choices='--password --password-env --password-file --password-stdin --key-file --' ;;
         search) choices='--password --password-env --password-file --password-stdin --key-file --' ;;
         show) choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
         env) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-        set) choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+        set) choices='--key --field --username --url --notes --file --bin -b --stdin --password --password-env --password-file --password-stdin --key-file' ;;
         rm|remove) choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
         ensure) choices='--key --size --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
         otp) choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
@@ -515,7 +537,7 @@ _nkeepass_complete() {
                 rm|remove) choices='--key --yes --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
             esac
             ;;
-        attachment|attachments)
+        files|attachment|attachments)
             if [[ -z "$action" ]]; then
                 choices='ls list add import get export rm remove'
             else
@@ -610,7 +632,7 @@ _nkeepass_complete_candidates() {
             case "$_nk_command:$_nk_action" in
                 :) _nk_choices='init context alias config secrets automation group groups exec --vault -V --password-env --password-stdin --help' ;;
                 init:*) _nk_choices='--password --password-env --password-file --password-stdin --key-file --kdf --memory --iterations --parallelism --size' ;;
-                context:) _nk_choices='ls show use rm set' ;;
+                context:) _nk_choices='ls list show use rm remove set' ;;
                 config:ls|config:list) _nk_choices='--json --' ;;
                 config:get|config:show|config:set|config:rm|config:remove) _nk_choices='aliases current default_vault' ;;
                 config:*) _nk_choices='ls list get show set rm remove' ;;
@@ -621,9 +643,9 @@ _nkeepass_complete_candidates() {
                 secrets:search) _nk_choices='--password --password-env --password-file --password-stdin --key-file --' ;;
                 secrets:show) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
                 secrets:env|secrets:environment) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:get) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:get) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
                 secrets:getx) _nk_choices='--key --field --format --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:set) _nk_choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:set) _nk_choices='--key --field --username --url --notes --file --bin -b --stdin --password --password-env --password-file --password-stdin --key-file' ;;
                 secrets:rm|secrets:remove) _nk_choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
                 secrets:ensure) _nk_choices='--key --size --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 secrets:otp) _nk_choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
@@ -631,13 +653,13 @@ _nkeepass_complete_candidates() {
                 secrets:import) _nk_choices='--file --stdin --replace --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 secrets:export) _nk_choices='--output --password --password-env --password-file --password-stdin --key-file' ;;
                 secrets:sync) _nk_choices='--file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                get:) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                get:) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
                 getx:) _nk_choices='--key --field --format --password --password-env --password-file --password-stdin --key-file' ;;
                 list:|ls:) _nk_choices='--password --password-env --password-file --password-stdin --key-file --' ;;
                 search:) _nk_choices='--password --password-env --password-file --password-stdin --key-file --' ;;
                 show:) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
                 env:) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                set:) _nk_choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                set:) _nk_choices='--key --field --username --url --notes --file --bin -b --stdin --password --password-env --password-file --password-stdin --key-file' ;;
                 rm:|remove:) _nk_choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
                 ensure:) _nk_choices='--key --size --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 otp:) _nk_choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
@@ -713,7 +735,7 @@ _nkeepass() {
             dynamic=("${(@f)$(command nkeepass __complete vaults "$cur" 2>/dev/null)}")
             (( ${#dynamic} && ${#dynamic[1]} )) && _describe -t values 'nkeepass metadata' dynamic
         else
-            choices=(init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync attachment attachments group groups field custom-field exec x version completion '--help' '-h' '--version' '--vault' '-V' '--password-env' '--password-stdin')
+            choices=(init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion '--help' '-h' '--version' '--vault' '-V' '--password-env' '--password-stdin')
             _describe -t commands 'nkeepass command' choices
         fi
         return
@@ -770,7 +792,7 @@ _nkeepass() {
     case "$command" in
         init) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--kdf' '--memory' '--iterations' '--parallelism' '--size') ;;
         context)
-            [[ -n "$action" ]] || choices=(ls show use rm set) ;;
+            [[ -n "$action" ]] || choices=(ls list show use rm remove set) ;;
         alias)
             if [[ -z "$action" ]]; then
                 choices=(ls list set rm remove resolve)
@@ -795,9 +817,9 @@ _nkeepass() {
                     search) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
                     show) choices=('--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     env|environment) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    get) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    get) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--clipboard') ;;
                     getx) choices=('--key' '--field' '--format' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    set) choices=('--key' '--field' '--file' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    set) choices=('--key' '--field --username --url --notes' '--file' '--bin' '-b' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     rm|remove) choices=('--key' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     ensure) choices=('--key' '--size' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     otp) choices=('--key' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
@@ -807,13 +829,13 @@ _nkeepass() {
                     sync) choices=('--file' '--stdin' '--strategy' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                 esac
             fi ;;
-        get) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        get) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--clipboard') ;;
         getx) choices=('--key' '--field' '--format' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         show) choices=('--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         list|ls) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
         search) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
         env) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        set) choices=('--key' '--field' '--file' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        set) choices=('--key' '--field --username --url --notes' '--file' '--bin' '-b' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         rm|remove) choices=('--key' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         ensure) choices=('--key' '--size' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         otp) choices=('--key' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
@@ -838,7 +860,7 @@ _nkeepass() {
                 rm|remove) choices=(--key --yes --dry-run --password --password-env --password-file --password-stdin --key-file) ;;
             esac
             ;;
-        attachment|attachments)
+        files|attachment|attachments)
             if [[ -z "$action" ]]; then
                 choices=(ls list add import get export rm remove)
             else
@@ -889,13 +911,13 @@ function __nkeepass_complete_vault_args
     end
 end
 complete -c nkeepass -f
-complete -c nkeepass -n '__fish_use_subcommand' -a 'init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync attachment attachments group groups field custom-field exec x version completion'
+complete -c nkeepass -n '__fish_use_subcommand' -a 'init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion'
 complete -c nkeepass -n '__fish_use_subcommand' -s h -l help
 complete -c nkeepass -n '__fish_use_subcommand' -s V -l vault -r -a '(nkeepass (__nkeepass_complete_vault_args) __complete vaults (commandline -ct))'
 complete -c nkeepass -n '__fish_use_subcommand' -l version
 complete -c nkeepass -n '__fish_use_subcommand' -l password-env -r
 complete -c nkeepass -n '__fish_use_subcommand' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from context' -a 'ls show use rm set'
+complete -c nkeepass -n '__fish_seen_subcommand_from context' -a 'ls list show use rm remove set'
 complete -c nkeepass -n '__fish_seen_subcommand_from init' -l kdf -a 'aes argon2d argon2id'
 complete -c nkeepass -n '__fish_seen_subcommand_from init' -l memory
 complete -c nkeepass -n '__fish_seen_subcommand_from init' -l iterations
@@ -917,10 +939,11 @@ complete -c nkeepass -n '__fish_seen_subcommand_from config get show set rm remo
 complete -c nkeepass -n '__fish_seen_subcommand_from config set' -a '(nkeepass (__nkeepass_complete_vault_args) __complete vaults (commandline -ct))'
 complete -c nkeepass -n '__fish_seen_subcommand_from secrets' -a 'get getx list ls search show env environment set rm remove ensure otp setx import export sync'
 complete -c nkeepass -n '__fish_seen_subcommand_from automation' -a 'setx import export sync'
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx set setx rm remove ensure search show env environment otp attachment attachments field custom-field exec x' -l key -r -a '(nkeepass (__nkeepass_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkeepass -n '__fish_seen_subcommand_from get getx set setx rm remove ensure search show env environment otp files attachment attachments field custom-field exec x' -l key -r -a '(nkeepass (__nkeepass_complete_vault_args) __complete keys (commandline -ct))'
 complete -c nkeepass -n '__fish_seen_subcommand_from get getx set' -l field -a 'Password Title UserName URL Notes'
 complete -c nkeepass -n '__fish_seen_subcommand_from get otp' -l format -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
 complete -c nkeepass -n '__fish_seen_subcommand_from env environment' -l format -a 'dotenv shell pwsh powershell github-actions azure-devops json null'
+complete -c nkeepass -n '__fish_seen_subcommand_from get' -l clipboard
 complete -c nkeepass -n '__fish_seen_subcommand_from get env environment otp' -l is-output
 complete -c nkeepass -n '__fish_seen_subcommand_from getx' -l format -a 'json'
 complete -c nkeepass -n '__fish_seen_subcommand_from ls' -l password-env
@@ -932,6 +955,10 @@ complete -c nkeepass -n '__fish_seen_subcommand_from get getx ls list search sho
 complete -c nkeepass -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l key-file
 complete -c nkeepass -n '__fish_seen_subcommand_from ls list search' -a '--'
 complete -c nkeepass -n '__fish_seen_subcommand_from set' -l file
+complete -c nkeepass -n '__fish_seen_subcommand_from set' -s b -l bin -r
+complete -c nkeepass -n '__fish_seen_subcommand_from set' -l username -r
+complete -c nkeepass -n '__fish_seen_subcommand_from set' -l url -r
+complete -c nkeepass -n '__fish_seen_subcommand_from set' -l notes -r
 complete -c nkeepass -n '__fish_seen_subcommand_from set' -l stdin
 complete -c nkeepass -n '__fish_seen_subcommand_from rm' -l yes
 complete -c nkeepass -n '__fish_seen_subcommand_from ensure' -l size
@@ -956,20 +983,20 @@ complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l password-e
 complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l password-file -r
 complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l password-stdin
 complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l key-file -r
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments' -a 'ls list add import get export rm remove'
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument ls list' -l key
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument ls list' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument ls list' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument add import' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument add import' -l file
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument add import' -l stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument get export' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument get export' -l output
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument rm remove' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument rm remove' -l yes
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password-file
-complete -c nkeepass -n '__fish_seen_subcommand_from attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l key-file
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments' -a 'ls list add import get export rm remove'
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l key
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-env
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-stdin
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l field
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l file
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l stdin
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l field
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l output
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l field
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l yes
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password-file
+complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l key-file
 complete -c nkeepass -n '__fish_seen_subcommand_from add' -l field
 complete -c nkeepass -n '__fish_seen_subcommand_from add' -l file
 complete -c nkeepass -n '__fish_seen_subcommand_from add' -l stdin
@@ -1113,7 +1140,7 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
             switch ($command) {
                 '' { $values = @('init', 'context', 'alias', 'config', 'secrets', 'automation', 'get', 'getx', 'list', 'ls', 'search', 'env', 'set', 'rm', 'remove', 'ensure', 'otp', 'setx', 'import', 'export', 'sync', 'attachment', 'attachments', 'group', 'groups', 'field', 'custom-field', 'exec', 'x', 'version', 'completion', '--help', '-h', '--version', '--vault', '-V', '--password-env', '--password-stdin') }
                 'init' { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--kdf', '--memory', '--iterations', '--parallelism', '--size') }
-                'context' { if (-not $action) { $values = @('ls', 'show', 'use', 'rm', 'set') } }
+                'context' { if (-not $action) { $values = @('ls', 'list', 'show', 'use', 'rm', 'remove', 'set') } }
                 'alias' {
                     if (-not $action) { $values = @('ls', 'list', 'set', 'rm', 'remove', 'resolve') }
                     elseif ($action -eq 'set') { $values = @('--kind', '--field') }
@@ -1135,9 +1162,9 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
                             'search' { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
                             'show' { $values = @('--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             { $_ -in @('env', 'environment') } { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'get' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'get' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--clipboard', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             'getx' { $values = @('--key', '--field', '--format', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'set' { $values = @('--key', '--field', '--file', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'set' { $values = @('--key', '--field --username --url --notes', '--file' '--bin' '-b', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             { $_ -in @('rm', 'remove') } { $values = @('--key', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             'ensure' { $values = @('--key', '--size', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             'otp' { $values = @('--key', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
@@ -1148,12 +1175,12 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
                         }
                     }
                 }
-                'get' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'get' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--clipboard', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'getx' { $values = @('--key', '--field', '--format', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 { $_ -in @('list', 'ls', 'search') } { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
                 'show' { $values = @('--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'env' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'set' { $values = @('--key', '--field', '--file', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'set' { $values = @('--key', '--field --username --url --notes', '--file' '--bin' '-b', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 { $_ -in @('rm', 'remove') } { $values = @('--key', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'ensure' { $values = @('--key', '--size', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'otp' { $values = @('--key', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
@@ -1242,7 +1269,7 @@ def "nu-complete nkeepass entries" [context: string] { let args = (nu-complete n
 def "nu-complete nkeepass groups" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete groups | lines }
 def "nu-complete nkeepass keys" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete keys | lines }
 export extern nkeepass [
-  command?: string@"init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync attachment attachments group groups field custom-field exec x version completion"
+  command?: string@"init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion"
   --help(-h)
   --version
   --vault(-V): string@"nu-complete nkeepass vaults"
@@ -1250,7 +1277,7 @@ export extern nkeepass [
   --password-stdin
 ]
 export extern "nkeepass init" [path?: string@"nu-complete nkeepass vault-files" --kdf: string@"aes argon2d argon2id" --memory: int --iterations: int --parallelism: int --size: int --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass context" [action: string@"ls show use rm set"]
+export extern "nkeepass context" [action: string@"ls list show use rm remove set"]
 export extern "nkeepass context ls" []
 export extern "nkeepass context show" []
 export extern "nkeepass context use" [alias: string@"nu-complete nkeepass vault-aliases"]
@@ -1277,10 +1304,10 @@ export extern "nkeepass secrets search" [query: string --password: string --pass
 export extern "nkeepass secrets show" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass secrets env" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
 export extern "nkeepass secrets environment" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkeepass secrets get" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkeepass secrets get" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
 export extern "nkeepass secrets getx" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --format: string@"json"]
 export extern "nkeepass secrets ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets set" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkeepass secrets set" [--key: string@"nu-complete nkeepass keys" --username: string --url: string --notes: string --field: string@"Password Title UserName URL Notes" --file: string --bin: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass secrets rm" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
 export extern "nkeepass secrets remove" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
 export extern "nkeepass secrets ensure" [--key: string@"nu-complete nkeepass keys" --size: int --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
@@ -1294,14 +1321,14 @@ export extern "nkeepass automation setx" [--key: string@"nu-complete nkeepass ke
 export extern "nkeepass automation import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass automation export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass automation sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass get" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkeepass get" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
 export extern "nkeepass getx" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --format: string@"json"]
 export extern "nkeepass list" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass search" [query: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass show" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass env" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkeepass set" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkeepass set" [--key: string@"nu-complete nkeepass keys" --username: string --url: string --notes: string --field: string@"Password Title UserName URL Notes" --file: string --bin: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkeepass rm" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
 export extern "nkeepass remove" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
 export extern "nkeepass ensure" [--key: string@"nu-complete nkeepass keys" --size: int --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
@@ -1598,6 +1625,8 @@ mod tests {
         assert!(bash.contains("position -eq 1"));
         assert!(bash.contains("position -eq 3"));
         assert!(bash.contains("__complete vaults \"$current\""));
+        assert!(bash.contains("COMP_WORDBREAKS=\"${COMP_WORDBREAKS//=}\""));
+        assert!(bash.contains("COMPREPLY+=(\"$file_name=$candidate\")"));
 
         let sh = generate("sh").unwrap();
         assert!(sh.contains("VAULT_OPTION VAULT_PATH"));
@@ -1645,6 +1674,16 @@ mod tests {
                 "{shell} has no vault-aware completion protocol"
             );
         }
+    }
+
+    #[test]
+    fn bash_set_binary_completion_preserves_attachment_name_prefix() {
+        let bash = generate("bash").unwrap();
+        assert!(bash.contains("COMP_WORDS[file_index]}\" == --bin"));
+        assert!(bash.contains("COMP_WORDS[file_index]}\" == -b"));
+        assert!(bash.contains("file_name=\"${file_spec%%=*}\""));
+        assert!(bash.contains("file_path=\"${file_spec#*=}\""));
+        assert!(bash.contains("COMPREPLY+=(\"$file_name=$candidate\")"));
     }
 
     #[test]

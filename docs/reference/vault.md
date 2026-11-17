@@ -56,15 +56,17 @@ encrypt or decrypt the vault.
 
 ```text
 nkeepass context ls
+nkeepass context list
 nkeepass context show
 nkeepass context use ALIAS
 nkeepass context set ALIAS ABSOLUTE_PATH
 nkeepass context rm ALIAS
+nkeepass context remove ALIAS
 ```
 
-`ls` lists configured vault aliases and paths. `show` reports the selected
+`ls` (also `list`) lists configured vault aliases and paths. `show` reports the selected
 vault and source. `use` selects a configured vault alias. `set` creates or
-updates an alias. `rm` removes an alias and clears it as current if needed.
+updates an alias. `rm` (also `remove`) removes an alias and clears it as current if needed.
 Subcommands have no command-specific options.
 
 ## `alias`

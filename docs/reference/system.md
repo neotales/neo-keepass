@@ -123,7 +123,9 @@ nkeepass completion SHELL
 Prints static completion text for the requested shell. The output is printed
 to stdout. Inspect generated text before adding it to a shell startup file.
 Accepted shell names are `bash`, `sh`, `zsh`, `fish`, `powershell`, `pwsh`,
-and `nushell`.
+and `nushell`. Filesystem path completion after `set --bin NAME=` is provided
+by the Bash completion script; other generated shell scripts currently complete
+the command and option vocabulary but leave that path to manual entry.
 
 ## `version`
 

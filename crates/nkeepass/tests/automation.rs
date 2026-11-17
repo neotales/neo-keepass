@@ -620,14 +620,14 @@ fn attachment_add_rm_round_trip_export_and_preserve_exact_names() {
     });
     let vault = TestVault::new("attachment-mutation.kdbx", &database);
     let home = tempfile::tempdir().unwrap();
-    let input = home.path().join("input.bin");
+    let input = home.path().join("input=with-equals.bin");
     std::fs::write(&input, b"new\0attachment").unwrap();
 
     let add = run(
         &vault.path,
         home.path(),
         &[
-            "attachment",
+            "files",
             "add",
             "--key",
             "LOGIN",
@@ -645,6 +645,78 @@ fn attachment_add_rm_round_trip_export_and_preserve_exact_names() {
         String::from_utf8_lossy(&add.stderr)
     );
     assert!(add.stdout.is_empty());
+
+    let legacy_path = home.path().join("legacy=input.bin");
+    std::fs::write(&legacy_path, b"legacy file input").unwrap();
+    let legacy_file = run(
+        &vault.path,
+        home.path(),
+        &[
+            "set",
+            "--key",
+            "LOGIN",
+            "--field",
+            "Token",
+            "--file",
+            legacy_path.to_str().unwrap(),
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(
+        legacy_file.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy_file.stderr)
+    );
+    assert_eq!(
+        load(&vault.path).root.entries[0]
+            .field("Token")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "legacy file input"
+    );
+
+    let named_file = format!("from-set={}", input.display());
+    let second_file = format!("second={}", input.display());
+    let set_file = run(
+        &vault.path,
+        home.path(),
+        &[
+            "set",
+            "--key",
+            "LOGIN",
+            "--bin",
+            &named_file,
+            "-b",
+            &second_file,
+            "--username",
+            "set-user",
+            "--url",
+            "https://set.example",
+            "--notes",
+            "set-notes",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(
+        set_file.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set_file.stderr)
+    );
+    let after_set_file = load(&vault.path);
+    assert!(
+        after_set_file.root.entries[0]
+            .attachments
+            .iter()
+            .any(|attachment| attachment.name == "from-set")
+    );
+    assert_eq!(after_set_file.root.entries[0].username, "set-user");
+    assert_eq!(after_set_file.root.entries[0].url, "https://set.example");
+    assert_eq!(after_set_file.root.entries[0].notes, "set-notes");
 
     let duplicate = run(
         &vault.path,
@@ -666,9 +738,11 @@ fn attachment_add_rm_round_trip_export_and_preserve_exact_names() {
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("attachment already exists"));
 
     let reopened = load(&vault.path);
-    assert_eq!(reopened.binary_pool.len(), 2);
+    assert_eq!(reopened.binary_pool.len(), 4);
     assert!(reopened.binary_pool.get(1).unwrap().protected);
     assert_eq!(reopened.root.entries[0].attachments[1].name, "case.bin");
+    assert_eq!(reopened.root.entries[0].attachments[2].name, "from-set");
+    assert_eq!(reopened.root.entries[0].attachments[3].name, "second");
     let exported = home.path().join("exported.nkp.json");
     let export = run(
         &vault.path,
@@ -692,6 +766,14 @@ fn attachment_add_rm_round_trip_export_and_preserve_exact_names() {
     assert_eq!(
         document["database"]["root"]["entries"][0]["attachments"][1]["name"],
         "case.bin"
+    );
+    assert_eq!(
+        document["database"]["root"]["entries"][0]["attachments"][2]["name"],
+        "from-set"
+    );
+    assert_eq!(
+        document["database"]["root"]["entries"][0]["attachments"][3]["name"],
+        "second"
     );
 
     let output = home.path().join("attachment.bin");
@@ -739,13 +821,75 @@ fn attachment_add_rm_round_trip_export_and_preserve_exact_names() {
         String::from_utf8_lossy(&remove.stderr)
     );
     let after_remove = load(&vault.path);
-    assert_eq!(after_remove.binary_pool.len(), 1);
-    assert_eq!(after_remove.root.entries[0].attachments.len(), 1);
+    assert_eq!(after_remove.binary_pool.len(), 3);
+    assert_eq!(after_remove.root.entries[0].attachments.len(), 3);
     assert_eq!(after_remove.root.entries[0].attachments[0].name, "Case.bin");
     assert_eq!(
         after_remove.binary_pool.get(0).unwrap().data,
         b"old attachment"
     );
+    assert_eq!(after_remove.root.entries[0].attachments[1].name, "from-set");
+    assert_eq!(after_remove.root.entries[0].attachments[2].name, "second");
+}
+
+#[test]
+fn get_clipboard_never_writes_the_selected_secret_to_stdout_or_diagnostics() {
+    let vault = TestVault::new("clipboard-get.kdbx", &database_with_entry(login_entry()));
+    let home = tempfile::tempdir().unwrap();
+    let output = run(
+        &vault.path,
+        home.path(),
+        &[
+            "get",
+            "--key",
+            "LOGIN",
+            "--clipboard",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains(ENTRY_SECRET));
+}
+
+#[test]
+fn failed_multi_attachment_set_does_not_save_partial_changes() {
+    let mut database = database_with_entry(login_entry());
+    let reference = database.binary_pool.add(b"existing".to_vec(), true);
+    database.root.entries[0].attachments.push(Attachment {
+        name: "already-there".into(),
+        reference,
+    });
+    let vault = TestVault::new("set-batch-failure.kdbx", &database);
+    let home = tempfile::tempdir().unwrap();
+    let input = home.path().join("batch.bin");
+    std::fs::write(&input, b"new attachment").unwrap();
+    let first = format!("first={}", input.display());
+    let duplicate = format!("already-there={}", input.display());
+    let output = run(
+        &vault.path,
+        home.path(),
+        &[
+            "set",
+            "--key",
+            "LOGIN",
+            "-b",
+            &first,
+            "--bin",
+            &duplicate,
+            "--username",
+            "should-not-save",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("attachment already exists"));
+    let unchanged = load(&vault.path);
+    assert_eq!(unchanged.root.entries[0].username, "automation-user");
+    assert_eq!(unchanged.root.entries[0].attachments.len(), 1);
+    assert_eq!(unchanged.binary_pool.len(), 1);
 }
 
 #[test]
