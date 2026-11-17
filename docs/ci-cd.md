@@ -120,49 +120,84 @@ The binary is stripped before packaging. Artifacts are uploaded as
 
 Triggered by manual dispatch and pull requests. Builds the `nkeepass` CLI
 for `x86_64-pc-windows-msvc` on `windows-2025` with the pinned toolchain
-(1.98.1) and `--locked`, so the produced `nkeepass.exe` is reproducible
-against the committed `Cargo.lock`.
+(1.98.1) and `--locked`, so the produced `nkeepass.exe` links exactly the
+committed `Cargo.lock` dependency set. Locked dependencies pin what is
+built; they do not make the build reproducible (compiler, runner image and
+toolchain are not pinned bit-for-bit), and no byte-identical output is
+claimed.
 
 Event-to-checkout semantics are stricter than `build.yml`:
 
 - `workflow_dispatch`: the `ref` input is **required** and must be a full
-  40-character commit SHA. The input is validated before checkout (never
-  interpolated into the shell — it crosses as an env var); branches and
-  tags are rejected, so a run can never be repointed at a movable ref after
-  it starts. Lowercased before matching.
+  40-character **lowercase hex commit SHA**, matched against the ENTIRE
+  string (`[[ "$ref" =~ ^[0-9a-f]{40}$ ]]`). No trimming, no case-folding:
+  branches, tags, uppercase, whitespace padding and any multiline value are
+  rejected (bash `=~` is unanchored by default, so the `^...$` anchors must
+  cover every character — an embedded newline or CR cannot match, and no
+  sub-line can sneak past). The input crosses as an env var, never by `${{ }}`
+  interpolation, and the step outputs exactly the validated immutable SHA.
 - `pull_request`: builds `github.sha` — the merge commit (immutable, same
   semantics as `build.yml`).
 
-Verification before anything is executed: the PE header is parsed and its
-COFF machine field must be `0x8664` (AMD64, `packaging/scripts/
-windows-validate.ps1`), the packaging scripts' self-tests run in the real
-target environment (`packaging/scripts/test-windows-package.ps1`), and only
-then is the binary smoke-run with `--version` and `--help`. A binary that
-failed any check is never executed.
+Verification before anything is executed or uploaded:
+
+1. the built binary's PE header is parsed and its COFF machine field must
+   be `0x8664` (AMD64, `packaging/scripts/windows-validate.ps1`);
+2. the packaging scripts' self-tests run in the real target environment
+   (`packaging/scripts/test-windows-package.ps1`; every script under test
+   runs in an isolated pwsh child process so exit codes are always fresh,
+   and negative tests assert the diagnostic text, not just the exit code);
+3. the produced artifact is verified as a unit
+   (`packaging/scripts/windows-verify-artifact.ps1`): the zip is extracted
+   and must contain exactly the four payloads under one named
+   `nkeepass-<version>-<triple>/` root; the EXTRACTED exe must again be PE
+   x64 and its sha256 must equal the binary just built; `SHA256SUMS` must
+   cover exactly the three published names with matching hashes; only then
+   is the EXTRACTED exe smoke-run with `--version` and `--help` under a
+   process timeout (whole process tree killed on expiry). A binary that
+   failed any check is never executed, and a mismatching artifact never
+   reaches upload.
 
 Produces one artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
-days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (binary, README,
-LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkeepass.exe`,
+days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (one named root:
+binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkeepass.exe`,
 `WINDOWS-LIMITATIONS.txt`, and a sha256sum-compatible `SHA256SUMS`
-(`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS). Nothing
-is attached to a release; no secrets are used; permissions are
-`contents: read` and checkout persists no credentials.
+(`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS). The
+packager writes everything to a private staging tree first and publishes
+the four files last, `SHA256SUMS` last of all, so a failed run never leaves
+a checksum describing a partial or mismatched set. Nothing is attached to a
+release; no secrets are used; permissions are `contents: read` and checkout
+persists no credentials.
 
-**Windows platform limitation (stated plainly):** owner-only secure file
-writes are UNSUPPORTED on Windows. Files nkeepass creates — vaults, config,
-CLI output — get the containing directory's default ACLs, not the Unix
-owner-only (0600) protection, so other local accounts and programs running
-as the same user can read them. The build and packaging are unaffected; the
-warning ships inside the artifact as `WINDOWS-LIMITATIONS.txt` (source:
-`packaging/windows/WINDOWS-LIMITATIONS.txt`). Do not describe Windows
-artifacts as protected by file permissions anywhere.
+**Windows platform limitation (stated plainly):** secure owner-only file
+writes are UNSUPPORTED on Windows, and nkeepass FAILS CLOSED. The
+implementation cannot safely replace and verify a full ACL (icacls
+`/inheritance:r /grant:r` does not remove explicit grants to other
+principals), so on Windows it refuses to write any file it cannot make
+private: vault creation/mutation, config writes, and CLI output-to-file
+exit with an explicit unsupported-operation diagnostic — these operations
+are unavailable on Windows, not "less protected". There is no
+inherited-ACL fallback and no permission parity with Unix, and none may be
+claimed. What works on Windows: reading existing vaults and stdout output.
+The warning ships inside the artifact as `WINDOWS-LIMITATIONS.txt`
+(source: `packaging/windows/WINDOWS-LIMITATIONS.txt`). Do not describe
+Windows artifacts as protected by file permissions anywhere.
 
-**Tooling note:** the packaging scripts are PowerShell 7 (`pwsh`) and were
-written and reviewed without a local pwsh available on the dev host — the
-first real execution of `test-windows-package.ps1` happens on the
-`windows-2025` runner in this workflow. The workflow runs the self-tests
-before packaging precisely so those scripts are exercised (and their
-failure paths covered) in the environment that matters, on every run.
+**Coordination with the release pipeline:** the release work builds
+Windows archives with its own `archive-windows.ps1`; this workflow uses
+`packaging/scripts/windows-package.ps1`. They are separate implementations
+and must not diverge in their user-visible contract: archive name
+`nkeepass-<version>-x86_64-pc-windows-msvc.zip` (the `archive.sh`
+convention), payload `nkeepass.exe` + `README.md` + `LICENSE.md` +
+`WINDOWS-LIMITATIONS.txt` under one named root, and a sha256sum-compatible
+`SHA256SUMS` (`<hex>  <name>`, LF, forward slashes). Change both together
+or not at all.
+
+**Tooling note:** the packaging scripts are PowerShell 7 (`pwsh`). The
+dev host has no system pwsh but runs the suite through a portable pwsh
+7.6.10 (`test-windows-package.ps1`), so the scripts — including their
+failure paths — execute locally; the `windows-build.yml` runner re-runs
+the same suite in the real target environment on every build.
 
 ## `bench.yml` — benchmarks
 

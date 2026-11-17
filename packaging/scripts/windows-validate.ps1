@@ -47,9 +47,13 @@ if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
     throw "windows-validate: missing PE signature: $Binary"
 }
 
-$machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-if ($machine -ne $expected) {
+# Named $actualMachine, NOT $machine: PowerShell variables are
+# case-insensitive, so $machine would collide with the $Machine parameter
+# and overwrite it — corrupting both the diagnostic and, in any future
+# reordering, the check itself.
+$actualMachine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+if ($actualMachine -ne $expected) {
     throw ("windows-validate: PE machine 0x{0:X4} != expected 0x{1:X4} ({2}): {3}" -f
-        $machine, $expected, $Machine, $Binary)
+        $actualMachine, $expected, $Machine, $Binary)
 }
-Write-Host ("windows-validate: ok  PE machine 0x{0:X4} ({1}): {2}" -f $machine, $Machine, $Binary)
+Write-Host ("windows-validate: ok  PE machine 0x{0:X4} ({1}): {2}" -f $actualMachine, $Machine, $Binary)
