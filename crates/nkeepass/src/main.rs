@@ -5968,17 +5968,17 @@ fn run(args: &[String], program: &str) -> Result<()> {
             operation(action, &rest[1..], vault, &config)
         }
 
-        "attachment" | "attachments" | "field" | "custom-field" | "group" | "groups"
+        "files" | "attachment" | "attachments" | "field" | "custom-field" | "group" | "groups"
             if !rest.is_empty() =>
         {
             let action = match (command, rest[0].as_str()) {
                 ("group" | "groups", "list" | "ls") => "group-ls",
                 ("group" | "groups", "add" | "create" | "ensure") => "group-add",
                 ("group" | "groups", "remove" | "rm") => "group-rm",
-                ("attachment" | "attachments", "list" | "ls") => "attachment-ls",
-                ("attachment" | "attachments", "add" | "import") => "attachment-add",
-                ("attachment" | "attachments", "get" | "export") => "attachment-get",
-                ("attachment" | "attachments", "remove" | "rm") => "attachment-rm",
+                ("files" | "attachment" | "attachments", "list" | "ls") => "attachment-ls",
+                ("files" | "attachment" | "attachments", "add" | "import") => "attachment-add",
+                ("files" | "attachment" | "attachments", "get" | "export") => "attachment-get",
+                ("files" | "attachment" | "attachments", "remove" | "rm") => "attachment-rm",
                 ("field" | "custom-field", "list" | "ls") => "field-ls",
                 ("field" | "custom-field", "get" | "reveal") => "field-get",
                 ("field" | "custom-field", "set" | "edit") => "field-set",
@@ -6004,15 +6004,53 @@ fn main() {
         eprintln!("nkeepass: arguments must be valid UTF-8");
         std::process::exit(2);
     };
+    let command_args = normalize_cli_aliases(&command_args);
     if let Err(error) = run(&command_args, &program) {
         eprintln!("nkeepass: {}", error.0);
         std::process::exit(error.1);
     }
 }
 
+/// Expands short option and command aliases before dispatch, without rewriting
+/// arguments belonging to an `exec` child after the `--` boundary.
+fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(args.len());
+    let mut after_separator = false;
+    for arg in args {
+        if after_separator {
+            normalized.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            after_separator = true;
+            normalized.push(arg.clone());
+            continue;
+        }
+        let replacement = match arg.as_str() {
+            "-k" => Some("--key"),
+            "-f" => Some("--file"),
+            "-F" => Some("--field"),
+            _ => None,
+        };
+        normalized.push(replacement.unwrap_or(arg).to_owned());
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_key_file_and_field_options_expand_only_before_exec_separator() {
+        let args = ["get", "-k", "Root/mail", "-F", "Password", "--"].map(str::to_owned);
+        assert_eq!(
+            normalize_cli_aliases(&args),
+            ["get", "--key", "Root/mail", "--field", "Password", "--"].map(str::to_owned)
+        );
+        let args = ["exec", "--", "child", "-k", "-f", "-F"].map(str::to_owned);
+        assert_eq!(normalize_cli_aliases(&args), args);
+    }
 
     #[test]
     #[cfg(unix)]
