@@ -153,9 +153,21 @@ Verification before anything is executed or uploaded:
      for extraction: exactly the four payloads under one named
      `nkeepass-<version>-<triple>/` root, strict filename charset (no
      separators beyond the root, no `..` segments, no absolute paths), no
-     duplicates, no directory entries, no symlink/reparse external
-     attributes — an out-of-root canary entry is never read, let alone
-     extracted (regression-tested);
+     duplicates, no directory entries, no symlink external attributes —
+     an out-of-root canary entry is never read, let alone extracted
+     (regression-tested);
+   - central-directory vs local-header agreement and entry types are
+     checked against the RAW zip bytes before any entry stream is opened
+     (the ZipArchive API does not expose local headers, so they are
+     parsed directly): the local header must carry the same name as the
+     central directory, and its CRC and sizes must agree with it unless
+     general purpose bit 3 (data descriptor) marks them as trailing —
+     descriptors are handled, not rejected; DOS directory and
+     reparse-point attribute bits and every non-regular Unix file type
+     (symlink, directory, fifo, device, socket) are rejected; an empty
+     mandatory payload is rejected (all synthetically crafted and
+     regression-tested, including a crafted descriptor zip that must
+     verify end-to-end);
    - every whitelisted entry's CRC32 is computed explicitly and compared
      to the recorded value, so an archive corrupted in transit is
      rejected before extraction (regression-tested by patching the
@@ -164,22 +176,34 @@ Verification before anything is executed or uploaded:
      temp dir (paths built from the constant canonical names, never from
      entry strings);
    - the EXTRACTED exe must be PE x64 and its sha256 equal the binary
-     just built; the RAW top-level `nkeepass.exe` must match the same
-     hash and pass the same PE check; the raw `WINDOWS-LIMITATIONS.txt`
-     must be byte-identical to the zip copy and carry the mandated
-     fail-closed warning;
-   - `SHA256SUMS` must cover exactly the three published names with
-     matching hashes;
+     just built; the RAW top-level `nkeepass.exe` must equal the built
+     binary AND the archived (extracted) exe and pass the same PE check;
+     the raw `WINDOWS-LIMITATIONS.txt` must be byte-identical to the zip
+     copy and both copies must carry the mandated fail-closed warning;
+   - `SHA256SUMS` must cover exactly the three published names — every
+     name is whitelisted against that exact set BEFORE any file it names
+     is opened for hashing (traversal and absolute paths never reach the
+     filesystem), a name resolving to a reparse point (symlink/junction)
+     is rejected even when its recorded hash is correct, every hash must
+     match the actual file, and the canonical
+     `nkeepass-<version>-<triple>.zip` in the dist dir must BE the file
+     that was checked (same resolved path), so the published hash
+     describes exactly the artifact that passed the checks (all
+     regression-tested);
    - only then is the EXTRACTED exe smoke-run with `--version` and
      `--help` under ONE deadline that encompasses execution, stream
      completion and cleanup: process wait, pipe drains and cleanup are
      all bounded, and on expiry the whole process tree is killed. On
-     Windows the child is assigned to a kill-on-close job object, so a
-     descendant that outlives the parent while holding the redirected
-     pipes is still terminated when the job handle closes — the harness
-     cannot hang and no orphan survives (both the hung-child and the
-     orphaned-descendant cases are regression-tested with pwsh fixtures
-     that run natively on Windows).
+     Windows the child is created SUSPENDED, assigned to a kill-on-close
+     job object BEFORE its first instruction runs, and only then resumed —
+     a suspended process cannot spawn descendants, so there is no window
+     in which anything can be outside the job; the job handle is closed
+     in a finally that also terminates the child and closes every native
+     handle, so a descendant that outlives the parent while holding the
+     redirected pipes cannot survive the harness (the escapee's death is
+     asserted natively on Windows via a PID recorded by the fixture).
+     Non-Windows smoke runs are a test seam: bounded waits, best-effort
+     tree kill.
 
 A binary that failed any check is never executed, and a mismatching
 artifact never reaches upload.
@@ -191,11 +215,17 @@ binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkeepass.exe`,
 (`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS).
 Publication is NOT atomic and is not documented as one: the packager
 invalidates `SHA256SUMS` first, publishes the payload files, and writes
-the manifest last. An interrupted run can leave a mixed set of old and
-new payload files, but never a manifest describing a set it does not
-match; a consumer must treat a missing or failing `sha256sum -c` as
-fatal. The mid-publish failure state is regression-tested via an
-injected-failure hook (`NEOKEEPASS_PACKAGE_FAIL_AFTER`, test-only).
+the manifest last. Invalidation is a hard step: if the existing manifest
+cannot be removed (locked by a scanner, ACL-denied), the run FAILS
+BEFORE touching any payload file, so the old set stays untouched and
+self-consistent. An interrupted run can otherwise leave a mixed set of
+old and new payload files with NO manifest — never a manifest describing
+a set it does not match; a consumer must treat a missing or failing
+`sha256sum -c` as fatal. Both failure modes are regression-tested via
+injected failures: `NEOKEEPASS_PACKAGE_FAIL_AFTER` (test-only) fails
+after a payload publish, and the self-tests lock the manifest (Windows)
+or make the output directory unwritable (Unix) to prove the abort
+happens before any file update.
 Nothing is attached to a release; no secrets are used; permissions are
 `contents: read` and checkout persists no credentials.
 
@@ -288,3 +318,21 @@ downloaded tools under `/tmp/opencode`, not installed system-wide and not
 repo dependencies; and the workflows themselves have not been executed on
 GitHub beyond the first `ci` run. First run of `build.yml` on a tag is the
 real test.
+
+**Windows-native caveats of the packaging gate (stated plainly):** the
+C# helpers of `windows-verify-artifact.ps1` are compiled as ONE Add-Type
+on every host with the exact source the Windows runner compiles, so C#
+syntax errors there fail on the Linux dev host too (the CS1529 class:
+a using clause after a type declaration broke only the Windows
+concatenation and was invisible locally until the first runner run).
+What a Linux host still cannot do is EXECUTE the Windows-only runner:
+`JobOps.RunBounded` (CreateProcessW with CREATE_SUSPENDED, assignment to
+the kill-on-close job before the first instruction, ResumeThread, raw
+pipe drains) is compile-checked locally and exercised only by the pwsh
+fixtures' logic on non-Windows hosts; its native behavior — STARTUPINFO
+marshaling, job semantics, and the console's propagation of redirected
+std handles to grandchildren, which the orphan fixture relies on to
+build the pipe-holding escapee — is first observed on the
+`windows-2025` runner. The same holds for the negative test that needs
+symlink creation where unavailable. The suite reports these skips by
+name instead of passing silently.

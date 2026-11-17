@@ -13,14 +13,18 @@
 #
 # Output discipline: publication is NOT atomic, and this script does not
 # claim a transaction. The SHA256SUMS manifest is invalidated (removed)
-# FIRST, then the payload files are copied, and the manifest is written
-# LAST of all. Therefore an interrupted run can leave a mixed set of old
-# and new payload files, but never a manifest describing a set it does
-# not match — a consumer that treats a missing or failing `sha256sum -c`
-# as fatal cannot be fooled by a partial publish. The test-only
-# NEOKEEPASS_PACKAGE_FAIL_AFTER env var (values: zip | exe | limitations)
-# injects a failure after that file is published to exercise the
-# mid-publish state.
+# FIRST — and if the existing manifest cannot be removed the run FAILS
+# BEFORE touching any payload file — then the payload files are copied,
+# and the manifest is written LAST of all. Therefore an interrupted or
+# failed run can leave a mixed set of old and new payload files with NO
+# manifest, or the untouched old set with the untouched old manifest, but
+# never a manifest describing a set it does not match — a consumer that
+# treats a missing or failing `sha256sum -c` as fatal cannot be fooled by
+# a partial publish. The test-only NEOKEEPASS_PACKAGE_FAIL_AFTER env var
+# (values: zip | exe | limitations) injects a failure after that file is
+# published to exercise the mid-publish state; the manifest-invalidation
+# failure path is exercised by locking the manifest (Windows) or making
+# the output directory read-only (Unix) in test-windows-package.ps1.
 #
 # Re-running overwrites the outputs; it is safe to re-run. Usage:
 #
@@ -99,7 +103,22 @@ try {
     # payload files, write the manifest last — see the header note: this
     # is not atomic, but a manifest is never left describing a set it
     # does not match.
-    Remove-Item -LiteralPath (Join-Path $outDir 'SHA256SUMS') -Force -ErrorAction SilentlyContinue
+    #
+    # Invalidation is a HARD step: if the existing manifest cannot be
+    # removed (locked by a scanner or backup, ACL-denied, a directory),
+    # the run fails BEFORE any payload file is updated — continuing would
+    # replace files underneath a manifest that still stands, publishing a
+    # stale manifest over a mixed set. Only a genuinely absent manifest
+    # (nothing to invalidate) is tolerated.
+    $existingSums = Join-Path $outDir 'SHA256SUMS'
+    try {
+        Remove-Item -LiteralPath $existingSums -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        # Nothing to invalidate.
+    } catch {
+        throw ("windows-package: could not invalidate the existing SHA256SUMS, refusing to update any payload file under a manifest that cannot be removed: {0}" -f
+            $_.Exception.Message)
+    }
     Copy-Item -LiteralPath $zip -Destination (Join-Path $outDir "$name.zip") -Force
     if ($env:NEOKEEPASS_PACKAGE_FAIL_AFTER -eq 'zip') { throw 'windows-package: injected test failure after zip publish' }
     Copy-Item -LiteralPath $rawExe -Destination (Join-Path $outDir 'nkeepass.exe') -Force

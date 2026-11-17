@@ -109,16 +109,22 @@ jobs:
 
       # Package, then verify the produced artifact as a unit: whitelist the
       # zip manifest (exactly the four payloads under one named directory,
-      # strict filenames, no traversal/duplicates/symlinks), verify every
-      # entry's CRC explicitly, extract, re-validate the EXTRACTED exe as
-      # PE x64, check its sha256 equals the binary just built, check the
-      # RAW top-level exe and limitations copy the same way, check
-      # SHA256SUMS naming and hashes, and smoke-run the EXTRACTED exe
-      # (--version, --help) under one deadline covering execution, stream
-      # completion and cleanup — whole-tree kill on expiry and, on Windows,
-      # a kill-on-close job object so an orphaned descendant cannot outlive
-      # the harness. A binary that failed any check is never executed, and
-      # a mismatching artifact never reaches upload.
+      # strict filenames, no traversal/duplicates/symlinks), check
+      # central/local header agreement and entry types from the raw zip
+      # bytes (data descriptors handled, non-regular types and empty
+      # payloads rejected), verify every entry's CRC explicitly, extract,
+      # re-validate the EXTRACTED exe as PE x64, check its sha256 equals
+      # the binary just built, check the RAW top-level exe and limitations
+      # copy the same way, check SHA256SUMS names (whitelisted before any
+      # named file is read), reparse points and hashes, require the
+      # canonical dist zip to BE the checked zip, and smoke-run the
+      # EXTRACTED exe (--version, --help) under one deadline covering
+      # execution, stream completion and cleanup — whole-tree kill on
+      # expiry and, on Windows, a kill-on-close job object the child is
+      # assigned to while still suspended, so a descendant that outlives
+      # the parent cannot outlive the harness. A binary that failed any
+      # check is never executed, and a mismatching artifact never reaches
+      # upload.
       - name: Package and verify artifact
         shell: bash
         run: |

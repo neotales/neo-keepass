@@ -4,12 +4,25 @@
 # reads bytes, so no Windows is needed; smoke fixtures are pwsh-based, so
 # the same tests run natively on Windows too).
 #
+# The compiled C# helpers of windows-verify-artifact.ps1 (CRC32, the raw
+# zip header parser and the Windows job-object runner) are added as ONE
+# type definition on EVERY host with the exact source the Windows runner
+# compiles — so a C# syntax error on the Windows-only class (the CS1529
+# class of bug: a using clause after a type declaration, which only
+# breaks when the sources are concatenated on Windows) fails on this
+# Linux host too, in every verify invocation below.
+#
 # Invocation discipline: every script under test runs in an ISOLATED pwsh
 # child process (-File), so its exit code is always fresh and defined —
 # the parent never reads a stale or unset $LASTEXITCODE, and a script that
 # throws (ErrorActionPreference Stop) surfaces as a nonzero exit whose
 # stderr carries the diagnostic. Negative tests assert both the nonzero
 # exit AND the diagnostic text.
+#
+# Windows-only assertions (the kill-on-close job removing a pipe-holding
+# escapee) are guarded by $isWinHost and run natively on the windows-2025
+# runner; on the Linux dev host they are skipped — the bounded-failure
+# assertions still run everywhere.
 #
 # Usage: test-windows-package.ps1 [-WorkDir <dir>]
 [CmdletBinding()]
@@ -136,9 +149,189 @@ function New-CraftedZip {
     }
 }
 
+# Reads the zip's central directory from the raw bytes and returns one
+# record per entry: CentralOffset, LocalOffset and Name. Test-side
+# counterpart of the verifier's own raw parser, used to aim byte patches.
+function Get-ZipLayout {
+    param([Parameter(Mandatory)][string] $ZipPath)
+    $bytes = [IO.File]::ReadAllBytes($ZipPath)
+    $eocd = -1
+    for ($i = $bytes.Length - 4; $i -ge 0; $i--) {
+        if ($bytes[$i] -eq 0x50 -and $bytes[$i + 1] -eq 0x4B -and $bytes[$i + 2] -eq 0x05 -and $bytes[$i + 3] -eq 0x06) {
+            $eocd = $i; break
+        }
+    }
+    if ($eocd -lt 0) { throw 'test bug: EOCD not found' }
+    $count = $bytes[$eocd + 10] -bor ($bytes[$eocd + 11] -shl 8)
+    $p = [int][BitConverter]::ToUInt32($bytes, $eocd + 16)
+    $records = @()
+    for ($i = 0; $i -lt $count; $i++) {
+        $nameLen = $bytes[$p + 28] -bor ($bytes[$p + 29] -shl 8)
+        $extraLen = $bytes[$p + 30] -bor ($bytes[$p + 31] -shl 8)
+        $commentLen = $bytes[$p + 32] -bor ($bytes[$p + 33] -shl 8)
+        $records += [pscustomobject]@{
+            CentralOffset = $p
+            LocalOffset   = [int][BitConverter]::ToUInt32($bytes, $p + 42)
+            Name          = [Text.Encoding]::UTF8.GetString($bytes, $p + 46, $nameLen)
+        }
+        $p += 46 + $nameLen + $extraLen + $commentLen
+    }
+    return $records
+}
+
+# Patches raw bytes at one absolute offset inside a zip file. The offsets
+# come from Get-ZipLayout; the field offsets are the APPNOTE.TXT ones
+# (local header: flags +6, CRC +14, compressed size +18, uncompressed
+# size +22, name length +26, name +30).
+function Patch-ZipBytes {
+    param(
+        [Parameter(Mandatory)][string] $ZipPath,
+        [Parameter(Mandatory)][int] $Offset,
+        [Parameter(Mandatory)][byte[]] $Value
+    )
+    $bytes = [IO.File]::ReadAllBytes($ZipPath)
+    [Array]::Copy($Value, 0, $bytes, $Offset, $Value.Length)
+    [IO.File]::WriteAllBytes($ZipPath, $bytes)
+}
+
+function Get-TestCrc32 {
+    param([Parameter(Mandatory)][byte[]] $Data)
+    # Decimal constants: PowerShell parses hex literals in the high half
+    # of a 32-bit word (0xEDB88320, 0xFFFFFFFF) as NEGATIVE int32, which
+    # cannot be cast to an unsigned type.
+    $crc = [uint64]4294967295
+    $poly = [uint64]3988292384   # 0xEDB88320
+    foreach ($b in $Data) {
+        $crc = $crc -bxor [uint64]$b
+        for ($i = 0; $i -lt 8; $i++) {
+            if (($crc -band 1) -ne 0) {
+                $crc = (($crc -shr 1) -bxor $poly)
+            } else {
+                $crc = $crc -shr 1
+            }
+        }
+    }
+    # 32-bit complement via XOR (PowerShell's -bnot promotes past 32 bits).
+    return [uint32]((4294967295 -bxor $crc) -band 4294967295)
+}
+
+# Crafts the canonical four-entry zip with general purpose bit 3 (data
+# descriptor) set: the local headers record zero CRC/sizes and the real
+# values live in trailing data descriptors (APPNOTE 4.3.9). A correct
+# verifier must handle this layout, not reject it. The payload is the
+# same as the packager's (real repo README/LICENSE/WINDOWS-LIMITATIONS),
+# so the end-to-end verification — including the byte-compare of the
+# limitations copies — can pass.
+function New-DescriptorZip {
+    param(
+        [Parameter(Mandatory)][string] $TargetZip,
+        [Parameter(Mandatory)][string] $ExeSource,
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $RepoRoot
+    )
+    $specs = @(
+        @{ Name = "$Root/nkeepass.exe"; Bytes = [IO.File]::ReadAllBytes($ExeSource) },
+        @{ Name = "$Root/README.md"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'README.md')) },
+        @{ Name = "$Root/LICENSE.md"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'LICENSE.md')) },
+        @{ Name = "$Root/WINDOWS-LIMITATIONS.txt"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'packaging/windows/WINDOWS-LIMITATIONS.txt')) }
+    )
+    $fs = [IO.File]::Create($TargetZip)
+    $bw = New-Object IO.BinaryWriter($fs)
+    $central = New-Object IO.MemoryStream
+    $cw = New-Object IO.BinaryWriter($central)
+    try {
+        foreach ($spec in $specs) {
+            $data = [byte[]]$spec['Bytes']
+            $crc = Get-TestCrc32 $data
+            $localOffset = $bw.BaseStream.Position
+            $nameBytes = [Text.Encoding]::UTF8.GetBytes($spec['Name'])
+            # local file header: sig, version, flags(bit3), method(stored),
+            # time, date, crc=0, comp=0, uncomp=0 (real values in the
+            # descriptor after the data), name len, extra len, name, data,
+            # descriptor (sig, crc, comp, uncomp).
+            $bw.Write([uint32]0x04034B50)
+            $bw.Write([uint16]20)
+            $bw.Write([uint16]0x0008)
+            $bw.Write([uint16]0)
+            $bw.Write([uint16]0)
+            $bw.Write([uint16]0)
+            $bw.Write([uint32]0)
+            $bw.Write([uint32]0)
+            $bw.Write([uint32]0)
+            $bw.Write([uint16]$nameBytes.Length)
+            $bw.Write([uint16]0)
+            $bw.Write($nameBytes)
+            $bw.Write($data)
+            $bw.Write([uint32]0x08074B50)
+            $bw.Write([uint32]$crc)
+            $bw.Write([uint32]$data.Length)
+            $bw.Write([uint32]$data.Length)
+            # central directory record with the REAL crc/sizes and bit 3.
+            $cw.Write([uint32]0x02014B50)
+            $cw.Write([uint16]20)   # version made by
+            $cw.Write([uint16]20)   # version needed
+            $cw.Write([uint16]0x0008)
+            $cw.Write([uint16]0)    # method: stored
+            $cw.Write([uint16]0)    # time
+            $cw.Write([uint16]0)    # date
+            $cw.Write([uint32]$crc)
+            $cw.Write([uint32]$data.Length)
+            $cw.Write([uint32]$data.Length)
+            $cw.Write([uint16]$nameBytes.Length)
+            $cw.Write([uint16]0)    # extra
+            $cw.Write([uint16]0)    # comment
+            $cw.Write([uint16]0)    # disk start
+            $cw.Write([uint16]0)    # internal attrs
+            $cw.Write([uint32]0)    # external attrs
+            $cw.Write([uint32]$localOffset)
+            $cw.Write($nameBytes)
+        }
+        $cdOffset = $bw.BaseStream.Position
+        $bw.Write($central.ToArray())
+        $cdSize = $central.Length
+        $bw.Write([uint32]0x06054B50)
+        $bw.Write([uint16]0)
+        $bw.Write([uint16]0)
+        $bw.Write([uint16]$specs.Count)
+        $bw.Write([uint16]$specs.Count)
+        $bw.Write([uint32]$cdSize)
+        $bw.Write([uint32]$cdOffset)
+        $bw.Write([uint16]0)
+        $bw.Flush()
+    } finally {
+        $bw.Dispose()
+        $central.Dispose()
+        $fs.Dispose()
+    }
+}
+
+# Rewrites ONLY the "<hash>  <zipname>" line of a SHA256SUMS file (used
+# when a test swaps in crafted zip bytes but needs the rest of the
+# manifest to stay self-consistent).
+function Update-SumsZipLine {
+    param(
+        [Parameter(Mandatory)][string] $SumsPath,
+        [Parameter(Mandatory)][string] $ZipName,
+        [Parameter(Mandatory)][string] $NewHash
+    )
+    $lines = [IO.File]::ReadAllText($SumsPath) -split "`n"
+    $out = foreach ($l in $lines) {
+        if ($l -match ('  ' + [regex]::Escape($ZipName) + '$')) { "$NewHash  $ZipName" } else { $l }
+    }
+    [IO.File]::WriteAllText($SumsPath, ($out -join "`n"))
+}
+
 $work = Join-Path $WorkDir ("nkeepass-pkgtest-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
+    # Fresh dist copies for each negative, so tests stay independent.
+    function New-DistCopy {
+        param([string] $Suffix)
+        $c = Join-Path $work "dist-$Suffix"
+        Copy-Item -Recurse -Force $out $c
+        return $c
+    }
+
     $validate = Join-Path $scripts 'windows-validate.ps1'
     $package = Join-Path $scripts 'windows-package.ps1'
     $verify = Join-Path $scripts 'windows-verify-artifact.ps1'
@@ -265,18 +458,54 @@ try {
         '-Binary', $peX64, '-Version', $version, '-Triple', $triple, '-OutputDir', $out)
     Assert-True ($r.ExitCode -eq 0) 'publish: rerun after failure restores the consistent set'
 
+    # Fault injection: an existing manifest that CANNOT be invalidated
+    # (locked by another handle on Windows; unwritable directory on Unix —
+    # the real-world case is an antivirus or backup holding the file) must
+    # fail the run BEFORE any payload file is updated, leaving the old,
+    # still-consistent set byte-for-byte intact.
+    $isWinHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    $c = New-DistCopy 'invalidation-fail'
+    $tracked = @("$name.zip", 'nkeepass.exe', 'WINDOWS-LIMITATIONS.txt', 'SHA256SUMS')
+    $before = @{}
+    foreach ($f in $tracked) {
+        $before[$f] = (Get-FileHash -LiteralPath (Join-Path $c $f) -Algorithm SHA256).Hash
+    }
+    $heldHandle = $null
+    if ($isWinHost) {
+        # Open with FileShare.None: no other handle may open the file, so
+        # the delete must fail with a sharing violation.
+        $heldHandle = [IO.File]::Open((Join-Path $c 'SHA256SUMS'),
+            [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    } else {
+        # Without write permission on the directory, unlinking the manifest
+        # fails with EACCES.
+        [IO.File]::SetUnixFileMode($c,
+            [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+    }
+    try {
+        $r = Invoke-Isolated -ScriptPath $package -ArgumentList @(
+            '-Binary', $peI386, '-Version', $version, '-Triple', $triple, '-OutputDir', $c)
+        Assert-True ($r.ExitCode -ne 0) 'publish: failed manifest invalidation fails the run'
+        Assert-True ($r.StdErr -match 'invalidate') 'publish: invalidation failure carries a diagnostic'
+        $unchanged = $true
+        foreach ($f in $tracked) {
+            $h = (Get-FileHash -LiteralPath (Join-Path $c $f) -Algorithm SHA256).Hash
+            if ($h -ne $before[$f]) { $unchanged = $false }
+        }
+        Assert-True $unchanged 'publish: invalidation failure aborts before ANY file update'
+    } finally {
+        if ($heldHandle) { $heldHandle.Dispose() }
+        if (-not $isWinHost) {
+            [IO.File]::SetUnixFileMode($c,
+                [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+        }
+    }
+
     # ---- windows-verify-artifact.ps1: happy path --------------------------------
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $zip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
     Assert-True ($r.ExitCode -eq 0) 'verify: structural checks pass on the packaged artifact'
-
-    # Fresh dist copies for each negative, so tests stay independent.
-    function New-DistCopy {
-        param([string] $Suffix)
-        $c = Join-Path $work "dist-$Suffix"
-        Copy-Item -Recurse -Force $out $c
-        return $c
-    }
 
     # Negative: tampered SHA256SUMS (hash no longer matches the file).
     $c = New-DistCopy 'tampered-sums'
@@ -371,6 +600,109 @@ try {
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'CRC mismatch')) `
         'verify: corrupt archive CRC rejected before extraction'
 
+    # ---- central-directory/local-header agreement (raw byte patching) ----
+
+    # Negative: the LOCAL header carries a different name than the central
+    # directory (an extraction-confusion classic).
+    $c = New-DistCopy 'local-name'
+    $lz = Join-Path $c "$name.zip"
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $locBytes = [IO.File]::ReadAllBytes($lz)
+    $locNameLen = $locBytes[$rec.LocalOffset + 26] -bor ($locBytes[$rec.LocalOffset + 27] -shl 8)
+    $locBytes[$rec.LocalOffset + 30 + $locNameLen - 1] = $locBytes[$rec.LocalOffset + 30 + $locNameLen - 1] -bxor 0x01
+    [IO.File]::WriteAllBytes($lz, $locBytes)
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'local header name disagrees')) `
+        'verify: local header name disagreeing with central directory rejected'
+
+    # Negative: local CRC differs from the central directory while no data
+    # descriptor flag is set (general purpose bit 3 clear).
+    # NB: 0xDEADBEEF as a PowerShell hex literal is a NEGATIVE int32, so
+    # the decimal form is used for the [uint32] conversion.
+    $c = New-DistCopy 'local-crc'
+    $lz = Join-Path $c "$name.zip"
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    Patch-ZipBytes -ZipPath $lz -Offset ($rec.LocalOffset + 14) -Value ([BitConverter]::GetBytes([uint32]3735928559))
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'local header CRC disagrees')) `
+        'verify: local header CRC disagreeing with central directory rejected'
+
+    # Negative: local compressed size differs from the central directory,
+    # descriptor flag clear.
+    $c = New-DistCopy 'local-size'
+    $lz = Join-Path $c "$name.zip"
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    Patch-ZipBytes -ZipPath $lz -Offset ($rec.LocalOffset + 18) -Value ([BitConverter]::GetBytes([uint32]0x7FFFFFFF))
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'local header sizes disagree')) `
+        'verify: local header sizes disagreeing with central directory rejected'
+
+    # Positive: data descriptors are HANDLED, not rejected — a zip whose
+    # local headers record zero CRC/sizes (general purpose bit 3 set) and
+    # carry the real values in trailing descriptors verifies end-to-end
+    # against a regenerated manifest line.
+    $c = New-DistCopy 'descriptor'
+    $dz = Join-Path $c "$name.zip"
+    New-DescriptorZip -TargetZip $dz -ExeSource $peX64 -Root $name -RepoRoot (Resolve-Path (Join-Path $scripts '..' '..')).Path
+    Update-SumsZipLine -SumsPath (Join-Path $c 'SHA256SUMS') -ZipName "$name.zip" `
+        -NewHash ((Get-FileHash -LiteralPath $dz -Algorithm SHA256).Hash.ToLowerInvariant())
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $dz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True ($r.ExitCode -eq 0) 'verify: zip using data descriptors verifies end-to-end'
+
+    # Negative: DOS directory attribute bit on one entry.
+    $dosDirZip = Join-Path $work 'dos-dir.zip'
+    New-CraftedZip -TargetZip $dosDirZip -ExeSource $peX64 -Entries @(
+        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0x10; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $dosDirZip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'DOS directory attribute')) `
+        'verify: DOS directory attribute rejected'
+
+    # Negative: DOS reparse-point attribute bit on one entry.
+    $dosReparseZip = Join-Path $work 'dos-reparse.zip'
+    New-CraftedZip -TargetZip $dosReparseZip -ExeSource $peX64 -Entries @(
+        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0x400; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $dosReparseZip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'reparse-point attribute')) `
+        'verify: DOS reparse-point attribute rejected'
+
+    # Negative: Unix fifo type in the mode bits (S_IFIFO) — anything that
+    # is not S_IFREG is rejected.
+    $fifoZip = Join-Path $work 'fifo.zip'
+    New-CraftedZip -TargetZip $fifoZip -ExeSource $peX64 -Entries @(
+        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/README.md"; Path = $null; Attrs = ([int](0x11ED -shl 16)); Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $fifoZip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'not a regular file')) `
+        'verify: Unix non-regular type (fifo) rejected'
+
+    # Negative: an empty mandatory payload (zero-length exe entry) is
+    # rejected.
+    $emptyZip = Join-Path $work 'empty-payload.zip'
+    New-CraftedZip -TargetZip $emptyZip -ExeSource $peX64 -Entries @(
+        @{ Name = "$name/nkeepass.exe"; Path = $null; Attrs = 0; Bytes = @() },
+        @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
+        @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $emptyZip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'mandatory payload entry is empty')) `
+        'verify: empty mandatory payload rejected'
+
     # Negative: mutated payload data with internally consistent CRC (the
     # zip API recomputes CRC on rewrite) — caught by hash parity.
     $mutZip = Join-Path $work 'mutated.zip'
@@ -412,6 +744,69 @@ try {
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'WINDOWS-LIMITATIONS')) `
         'verify: tampered top-level limitations readme rejected'
 
+    # ---- SHA256SUMS validation: whitelist before read, reparse, zip identity ----
+
+    # Negative: a traversal name in SHA256SUMS must be rejected by the
+    # whitelist BEFORE the named file is opened for hashing — the escaped
+    # file never exists here, so an implementation that reached the
+    # filesystem would fail differently. The other two lines are exactly
+    # the published names with their real hashes, so the whitelist check
+    # (not the entry-count check) is what must fire.
+    $c = New-DistCopy 'sums-traversal'
+    $exeHash = (Get-FileHash -LiteralPath (Join-Path $c 'nkeepass.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $limHash = (Get-FileHash -LiteralPath (Join-Path $c 'WINDOWS-LIMITATIONS.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText((Join-Path $c 'SHA256SUMS'), (@(
+        "$exeHash  ../outside.txt",
+        "$exeHash  nkeepass.exe",
+        "$limHash  WINDOWS-LIMITATIONS.txt") -join "`n") + "`n")
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', (Join-Path $c "$name.zip"), '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'wrong file set')) `
+        'verify: SHA256SUMS traversal name rejected by whitelist before any read'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $work 'outside.txt'))) `
+        'verify: traversal name never resolved outside the dist dir'
+
+    # Negative: a SHA256SUMS name that resolves to a reparse point (here a
+    # symlink whose hash is recorded CORRECTLY, so a naive reader would
+    # pass everything) must be rejected before hashing.
+    $c = New-DistCopy 'sums-symlink'
+    $reparseTarget = Join-Path $work 'reparse-target.txt'
+    Copy-Item -Force (Join-Path $c 'WINDOWS-LIMITATIONS.txt') $reparseTarget
+    Remove-Item -Force (Join-Path $c 'WINDOWS-LIMITATIONS.txt')
+    $made = $false
+    try {
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $c 'WINDOWS-LIMITATIONS.txt') -Target $reparseTarget
+        $made = $true
+    } catch {
+        Write-Host 'skip (symlink creation unavailable on this host)'
+    }
+    if ($made) {
+        # Record the symlink target's real hash everywhere: every naive
+        # hash check now passes, only the reparse check can reject.
+        Update-SumsZipLine -SumsPath (Join-Path $c 'SHA256SUMS') -ZipName 'WINDOWS-LIMITATIONS.txt' `
+            -NewHash ((Get-FileHash -LiteralPath $reparseTarget -Algorithm SHA256).Hash.ToLowerInvariant())
+        $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+            '-Zip', (Join-Path $c "$name.zip"), '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+        Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'reparse point')) `
+            'verify: SHA256SUMS name resolving to a reparse point rejected'
+    }
+
+    # Negative: the dist dir's canonical zip must BE the zip that was
+    # checked. Here every published hash matches (the sums line was
+    # regenerated over a swapped zip), the checked zip passes all checks —
+    # and an implementation that never ties the two together would let a
+    # stale or substituted zip ship under a valid manifest.
+    $c = New-DistCopy 'zip-identity'
+    $swapped = Join-Path $c "$name.zip"
+    [IO.File]::WriteAllBytes($swapped, [byte[]]@(
+        0x50, 0x4B, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    Update-SumsZipLine -SumsPath (Join-Path $c 'SHA256SUMS') -ZipName "$name.zip" `
+        -NewHash ((Get-FileHash -LiteralPath $swapped -Algorithm SHA256).Hash.ToLowerInvariant())
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $zip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple, '-DistDir', $c)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'canonical dist zip')) `
+        'verify: checked zip not identical to the canonical dist zip rejected'
+
     # ---- smoke harness (pwsh fixtures; runs natively on Windows too) ------------
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $zip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple,
@@ -432,20 +827,31 @@ try {
     # Orphan: the child exits immediately after spawning a descendant that
     # inherits the redirected pipes and outlives it. The harness must fail
     # BOUNDED (never hang on the drain), kill what it can reach, and — on
-    # Windows — remove the escapee via the kill-on-close job.
+    # Windows — remove the escapee via the kill-on-close job. The fixture
+    # records the descendant's PID so the Windows-native cleanup can be
+    # asserted directly: after the harness returns, the escapee must be
+    # gone.
     $orphanFixture = Join-Path $work 'orphan-child.ps1'
-    [IO.File]::WriteAllText($orphanFixture, "param(`$Pwsh)`n" +
-        "Start-Process -FilePath `$Pwsh -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 15')`n" +
+    $orphanPidFile = Join-Path $work 'orphan-grandchild.pid'
+    [IO.File]::WriteAllText($orphanFixture, "param(`$Pwsh, `$PidFile)`n" +
+        "`$g = Start-Process -FilePath `$Pwsh -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 15') -PassThru`n" +
+        "[IO.File]::WriteAllText(`$PidFile, `$g.Id)`n" +
         "exit 0`n")
     $cmd = "& '$verify' -Zip '$zip' -BuiltExe '$peX64' -Version '$version' -Triple '$triple' " +
         "-Smoke -SmokeExeOverride '$selfPwsh' " +
-        "-SmokeArguments @('-NoProfile','-File','$orphanFixture','$selfPwsh') -SmokeTimeoutSeconds 8"
+        "-SmokeArguments @('-NoProfile','-File','$orphanFixture','$selfPwsh','$orphanPidFile') -SmokeTimeoutSeconds 8"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $r = Invoke-Isolated -CommandString $cmd
     $sw.Stop()
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'did not drain')) `
         'verify: orphaned pipe-holding descendant detected and failed bounded'
     Assert-True ($sw.Elapsed.TotalSeconds -lt 30) 'verify: orphan case returned well within the deadline (no indefinite wait)'
+    if ($isWinHost) {
+        $escapeePid = [IO.File]::ReadAllText($orphanPidFile).Trim()
+        Start-Sleep -Milliseconds 500
+        $survivor = Get-Process -Id $escapeePid -ErrorAction SilentlyContinue
+        Assert-True ($null -eq $survivor) 'verify: Windows kill-on-close job removed the pipe-holding escapee (no survivor)'
+    }
 
     if ($script:failures -gt 0) {
         Write-Host "windows packaging tests failed: $script:failures problem(s)"
