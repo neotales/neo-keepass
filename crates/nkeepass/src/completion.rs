@@ -490,9 +490,6 @@ _nkeepass_complete() {
                         ;;
                     *) word+="$character" ;;
                 esac
-                if [[ "$word" == --bin || "$word" == -b ]]; then
-                    bin_space_boundary=false
-                fi
             done
             case "$bin_word" in
                 \'*) current_quote=single; bin_word="${bin_word:1}" ;;
@@ -2121,6 +2118,22 @@ mod tests {
                 "nkeepass set --bin note=--danger-",
                 vec!["set", "--bin", "note=--danger-$(touch injected).bin"],
                 "--danger-$(touch injected).bin",
+                "default",
+                "",
+                true,
+            ),
+            (
+                "nkeepass set --bin name=pre --bin",
+                vec!["set", "--bin", "name=pre", "--bin"],
+                "pre--bin-HIJACKED",
+                "default",
+                "",
+                true,
+            ),
+            (
+                "nkeepass set --bin name=pre -b",
+                vec!["set", "--bin", "name=pre", "-b"],
+                "pre-b-HIJACKED",
                 "default",
                 "",
                 true,
