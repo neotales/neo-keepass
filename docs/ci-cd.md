@@ -160,14 +160,17 @@ Verification before anything is executed or uploaded:
      checked against the RAW zip bytes before any entry stream is opened
      (the ZipArchive API does not expose local headers, so they are
      parsed directly): the local header must carry the same name as the
-     central directory, and its CRC and sizes must agree with it unless
-     general purpose bit 3 (data descriptor) marks them as trailing —
-     descriptors are handled, not rejected; DOS directory and
-     reparse-point attribute bits and every non-regular Unix file type
-     (symlink, directory, fifo, device, socket) are rejected; an empty
-     mandatory payload is rejected (all synthetically crafted and
-     regression-tested, including a crafted descriptor zip that must
-     verify end-to-end);
+     central directory; the data-descriptor flag (general purpose bit 3)
+     must agree between the two headers; and the CRC and sizes must agree
+     with the central directory — in the local header when bit 3 is
+     clear, in the trailing data descriptor when it is set (descriptors
+     are handled, not rejected — the descriptor signature is optional and
+     a missing, truncated or disagreeing descriptor is malformed); DOS
+     directory and reparse-point attribute bits and every non-regular
+     Unix file type (symlink, directory, fifo, device, socket) are
+     rejected; an empty mandatory payload is rejected (all synthetically
+     crafted and regression-tested, including crafted descriptor zips —
+     signed and signature-less — that must verify end-to-end);
    - every whitelisted entry's CRC32 is computed explicitly and compared
      to the recorded value, so an archive corrupted in transit is
      rejected before extraction (regression-tested by patching the

@@ -221,13 +221,16 @@ function Get-TestCrc32 {
 # verifier must handle this layout, not reject it. The payload is the
 # same as the packager's (real repo README/LICENSE/WINDOWS-LIMITATIONS),
 # so the end-to-end verification — including the byte-compare of the
-# limitations copies — can pass.
+# limitations copies — can pass. -OmitDescriptorSig drops the optional
+# 0x08074b50 descriptor signature (APPNOTE 4.3.9.2) — a correct verifier
+# must locate and validate the descriptor without it.
 function New-DescriptorZip {
     param(
         [Parameter(Mandatory)][string] $TargetZip,
         [Parameter(Mandatory)][string] $ExeSource,
         [Parameter(Mandatory)][string] $Root,
-        [Parameter(Mandatory)][string] $RepoRoot
+        [Parameter(Mandatory)][string] $RepoRoot,
+        [switch] $OmitDescriptorSig
     )
     $specs = @(
         @{ Name = "$Root/nkeepass.exe"; Bytes = [IO.File]::ReadAllBytes($ExeSource) },
@@ -262,7 +265,7 @@ function New-DescriptorZip {
             $bw.Write([uint16]0)
             $bw.Write($nameBytes)
             $bw.Write($data)
-            $bw.Write([uint32]0x08074B50)
+            if (-not $OmitDescriptorSig) { $bw.Write([uint32]0x08074B50) }
             $bw.Write([uint32]$crc)
             $bw.Write([uint32]$data.Length)
             $bw.Write([uint32]$data.Length)
@@ -303,6 +306,22 @@ function New-DescriptorZip {
         $central.Dispose()
         $fs.Dispose()
     }
+}
+
+# Returns the offset of the first occurrence of a byte pattern, or -1.
+function Find-Bytes {
+    param(
+        [Parameter(Mandatory)][byte[]] $Haystack,
+        [Parameter(Mandatory)][byte[]] $Needle
+    )
+    for ($i = 0; $i -le $Haystack.Length - $Needle.Length; $i++) {
+        $ok = $true
+        for ($j = 0; $j -lt $Needle.Length; $j++) {
+            if ($Haystack[$i + $j] -ne $Needle[$j]) { $ok = $false; break }
+        }
+        if ($ok) { return $i }
+    }
+    return -1
 }
 
 # Rewrites ONLY the "<hash>  <zipname>" line of a SHA256SUMS file (used
@@ -484,10 +503,19 @@ try {
             [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
     }
     try {
-        $r = Invoke-Isolated -ScriptPath $package -ArgumentList @(
-            '-Binary', $peI386, '-Version', $version, '-Triple', $triple, '-OutputDir', $c)
-        Assert-True ($r.ExitCode -ne 0) 'publish: failed manifest invalidation fails the run'
-        Assert-True ($r.StdErr -match 'invalidate') 'publish: invalidation failure carries a diagnostic'
+        try {
+            $r = Invoke-Isolated -ScriptPath $package -ArgumentList @(
+                '-Binary', $peI386, '-Version', $version, '-Triple', $triple, '-OutputDir', $c)
+            Assert-True ($r.ExitCode -ne 0) 'publish: failed manifest invalidation fails the run'
+            Assert-True ($r.StdErr -match 'invalidate') 'publish: invalidation failure carries a diagnostic'
+        } finally {
+            # Release the lock BEFORE reading the files for the unchanged
+            # comparison: Get-FileHash on the FileShare.None-locked manifest
+            # would die with a sharing violation of its own, and the test
+            # process must never be the reason its own assertions cannot
+            # run. The lock only needs to be held while the child runs.
+            if ($heldHandle) { $heldHandle.Dispose() }
+        }
         $unchanged = $true
         foreach ($f in $tracked) {
             $h = (Get-FileHash -LiteralPath (Join-Path $c $f) -Algorithm SHA256).Hash
@@ -652,6 +680,68 @@ try {
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $dz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
     Assert-True ($r.ExitCode -eq 0) 'verify: zip using data descriptors verifies end-to-end'
+
+    # Negative: the LOCAL header claims a data descriptor (general purpose
+    # bit 3 set) while the central directory does not — flipping the flag
+    # in one header alone would otherwise turn the local-vs-central
+    # CRC/size comparison off.
+    $c = New-DistCopy 'local-flag'
+    $lz = Join-Path $c "$name.zip"
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $locBytes = [IO.File]::ReadAllBytes($lz)
+    $locFlags = $locBytes[$rec.LocalOffset + 6] -bor ($locBytes[$rec.LocalOffset + 7] -shl 8)
+    Patch-ZipBytes -ZipPath $lz -Offset ($rec.LocalOffset + 6) -Value ([BitConverter]::GetBytes([uint16]($locFlags -bor 8)))
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    # (?s): pwsh renders the child's error wrapped across lines, and the
+    # entry name in the middle of the message can push the wrap point
+    # between the two words the assertion matches.
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match '(?s)descriptor flag.*disagrees')) `
+        'verify: local descriptor flag set where central is clear rejected'
+
+    # Negative: the central directory claims a data descriptor while the
+    # local header does not (the reverse disagreement).
+    $c = New-DistCopy 'central-flag'
+    $lz = Join-Path $c "$name.zip"
+    New-DescriptorZip -TargetZip $lz -ExeSource $peX64 -Root $name `
+        -RepoRoot (Resolve-Path (Join-Path $scripts '..' '..')).Path
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $cenBytes = [IO.File]::ReadAllBytes($lz)
+    $cenFlags = $cenBytes[$rec.CentralOffset + 8] -bor ($cenBytes[$rec.CentralOffset + 9] -shl 8)
+    Patch-ZipBytes -ZipPath $lz -Offset ($rec.CentralOffset + 8) -Value ([BitConverter]::GetBytes([uint16]($cenFlags -band 0xFFF7)))
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match '(?s)descriptor flag.*disagrees')) `
+        'verify: central descriptor flag set where local is clear rejected'
+
+    # Negative: a MALFORMED data descriptor — the descriptor's own CRC does
+    # not match the central directory it claims to describe.
+    $c = New-DistCopy 'desc-crc'
+    $lz = Join-Path $c "$name.zip"
+    New-DescriptorZip -TargetZip $lz -ExeSource $peX64 -Root $name `
+        -RepoRoot (Resolve-Path (Join-Path $scripts '..' '..')).Path
+    $descBytes = [IO.File]::ReadAllBytes($lz)
+    # The 0x08074b50 signature occurs only in data descriptors.
+    $descOff = Find-Bytes -Haystack $descBytes -Needle ([byte[]]@(0x50, 0x4B, 0x07, 0x08))
+    if ($descOff -lt 0) { throw 'test bug: descriptor signature not found' }
+    Patch-ZipBytes -ZipPath $lz -Offset ($descOff + 4) -Value ([BitConverter]::GetBytes([uint32]3735928559))
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'data descriptor CRC/sizes disagree')) `
+        'verify: malformed data descriptor (CRC disagrees with central) rejected'
+
+    # Positive: signature-less descriptors are handled — the signature is
+    # optional, so a zip whose descriptors carry only CRC/sizes must
+    # verify end-to-end.
+    $c = New-DistCopy 'descriptor-nosig'
+    $dz2 = Join-Path $c "$name.zip"
+    New-DescriptorZip -TargetZip $dz2 -ExeSource $peX64 -Root $name `
+        -RepoRoot (Resolve-Path (Join-Path $scripts '..' '..')).Path -OmitDescriptorSig
+    Update-SumsZipLine -SumsPath (Join-Path $c 'SHA256SUMS') -ZipName "$name.zip" `
+        -NewHash ((Get-FileHash -LiteralPath $dz2 -Algorithm SHA256).Hash.ToLowerInvariant())
+    $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+        '-Zip', $dz2, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+    Assert-True ($r.ExitCode -eq 0) 'verify: zip using signature-less data descriptors verifies end-to-end'
 
     # Negative: DOS directory attribute bit on one entry.
     $dosDirZip = Join-Path $work 'dos-dir.zip'

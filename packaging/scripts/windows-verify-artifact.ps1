@@ -14,12 +14,14 @@
 #   2. central-directory vs local-header agreement and entry types, read
 #      from the RAW zip bytes (fields the ZipArchive API does not expose):
 #      the local header must carry the same name as the central directory;
-#      its CRC and sizes must agree with the central directory unless
-#      general purpose bit 3 (data descriptor) marks them as trailing —
-#      descriptors are handled, not rejected; DOS directory and
-#      reparse-point attribute bits and any non-regular Unix file type
-#      (symlink, directory, fifo, device, socket) are rejected; an empty
-#      mandatory payload is rejected.
+#      the data-descriptor flag (general purpose bit 3) must agree between
+#      the two headers; the CRC and sizes must agree with the central
+#      directory — in the local header when bit 3 is clear, in the
+#      trailing data descriptor when it is set (descriptors are handled,
+#      not rejected; a missing, truncated or disagreeing descriptor is
+#      malformed); DOS directory and reparse-point attribute bits and any
+#      non-regular Unix file type (symlink, directory, fifo, device,
+#      socket) are rejected; an empty mandatory payload is rejected.
 #   3. every whitelisted entry's CRC32 is computed explicitly (compiled
 #      helper) and compared to the recorded value — corrupt archives are
 #      rejected before extraction.
@@ -157,6 +159,10 @@ public static class ZipRaw {
         public string LocalName;
         public ushort LocalGpFlags;
         public uint LocalCrc, LocalCompSize, LocalUncompSize;
+        public bool DescPresent;
+        public bool DescHasSig;
+        public uint DescCrc, DescCompSize, DescUncompSize;
+        public string DescError;
     }
 
     static uint U32(byte[] b, long p) {
@@ -208,6 +214,28 @@ public static class ZipRaw {
             if (locNameLen < 0 || localOffset + 30 + locNameLen + locExtraLen > b.Length)
                 throw new InvalidOperationException("zip: bad local name length for entry " + e.Name);
             e.LocalName = Encoding.UTF8.GetString(b, (int)(localOffset + 30), locNameLen);
+            // Data descriptor (general purpose bit 3 in the LOCAL header):
+            // when set, the real CRC/sizes trail the compressed data. The
+            // data end is located with the central compressed size; the
+            // signature is optional (APPNOTE 4.3.9.2), so read 16 bytes
+            // when it is present and 12 when it is not. Parsing here never
+            // throws — a malformed descriptor is recorded in DescError and
+            // the caller decides (and orders) the diagnostic.
+            if ((e.LocalGpFlags & 8) != 0) {
+                e.DescPresent = true;
+                long descPos = localOffset + 30 + locNameLen + locExtraLen + e.CompSize;
+                if (descPos + 4 <= b.Length && U32(b, descPos) == 0x08074B50u) {
+                    e.DescHasSig = true;
+                    descPos += 4;
+                }
+                if (descPos + 12 > b.Length) {
+                    e.DescError = "descriptor missing or truncated at its recorded position";
+                } else {
+                    e.DescCrc = U32(b, descPos);
+                    e.DescCompSize = U32(b, descPos + 4);
+                    e.DescUncompSize = U32(b, descPos + 8);
+                }
+            }
             list.Add(e);
             p += 46 + nameLen + extraLen + commentLen;
         }
@@ -629,11 +657,14 @@ try {
         # ---- 2. Central/local header agreement and entry types, from the RAW
         # zip bytes, BEFORE any entry stream is opened. The ZipArchive API does
         # not expose local headers, so they are parsed directly: names must
-        # agree exactly; CRC and sizes must agree with the central directory
-        # unless general purpose bit 3 (data descriptor) marks them as
-        # trailing; DOS directory/reparse attribute bits and non-regular Unix
-        # file types are rejected; and none of the mandatory payloads is
-        # empty.
+        # agree exactly; the data-descriptor flag (general purpose bit 3)
+        # must agree between the two headers, and the CRC and sizes must
+        # agree with the central directory — in the local header when bit 3
+        # is clear, and in the trailing data descriptor when it is set
+        # (descriptors are handled, not rejected; a missing, truncated or
+        # lying descriptor is malformed); DOS directory/reparse attribute
+        # bits and non-regular Unix file types are rejected; and none of
+        # the mandatory payloads is empty.
         $rawEntries = [ZipRaw]::ReadCentralDirectory((Resolve-Path $Zip).Path)
         if ($rawEntries.Length -ne $entries.Count) {
             throw ("windows-verify: raw central directory has {0} records but the archive API reported {1}" -f
@@ -659,6 +690,29 @@ try {
                 }
                 if ($re.LocalCompSize -ne $re.CompSize -or $re.LocalUncompSize -ne $re.UncompSize) {
                     throw ("windows-verify: local header sizes disagree with central directory for {0}" -f $n)
+                }
+            }
+            # The descriptor flag itself must AGREE between the two
+            # headers: flipping general purpose bit 3 in one header alone
+            # would turn the comparison above off (local flag set, central
+            # clear) or desynchronize the data layout (central flag set,
+            # local clear).
+            if ((($re.LocalGpFlags -band 8) -ne 0) -ne ((($re.GpFlags -band 8) -ne 0))) {
+                throw ("windows-verify: local header descriptor flag (general purpose bit 3) disagrees with central directory for {0}: local 0x{1:X4}, central 0x{2:X4}" -f
+                    $n, $re.LocalGpFlags, $re.GpFlags)
+            }
+            if ($re.DescPresent) {
+                # A descriptor that is absent, truncated, or whose CRC/sizes
+                # do not match the central directory is malformed — the
+                # descriptor is the only place the real values live when
+                # bit 3 is set, so a lying descriptor must not be accepted.
+                if ($null -ne $re.DescError) {
+                    throw ("windows-verify: malformed data descriptor for {0}: {1}" -f
+                        $n, $re.DescError)
+                }
+                if ($re.DescCrc -ne $re.Crc -or $re.DescCompSize -ne $re.CompSize -or $re.DescUncompSize -ne $re.UncompSize) {
+                    throw ("windows-verify: data descriptor CRC/sizes disagree with central directory for {0}: descriptor 0x{1:X8}/{2}/{3}, central 0x{4:X8}/{5}/{6}" -f
+                        $n, $re.DescCrc, $re.DescCompSize, $re.DescUncompSize, $re.Crc, $re.CompSize, $re.UncompSize)
                 }
             }
             $dos = $re.ExternalAttrs -band 0xFFFF
