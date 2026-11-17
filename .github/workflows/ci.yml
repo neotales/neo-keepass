@@ -38,8 +38,8 @@ jobs:
           zsh --version | grep -F 'zsh 5.9'
       - name: Require pinned runner PowerShell
         run: >-
-          pwsh -NoProfile -Command 'if ($PSVersionTable.PSVersion.Major -ne 7)
-          { throw "PowerShell 7 is required for completion validation" };
+          pwsh -NoProfile -Command 'if ($PSVersionTable.PSVersion.ToString() -ne "7.6.10")
+          { throw "PowerShell 7.6.10 is required for completion validation" };
           $PSVersionTable.PSVersion.ToString()'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
