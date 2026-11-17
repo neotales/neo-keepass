@@ -2140,3 +2140,32 @@ fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
     assert!(!unsupported_path.exists());
     assert_no_disclosure(&unsupported, "synthetic protected binary");
 }
+
+#[test]
+fn keepass_xml_rejects_xml10_control_without_installing_output() {
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("synthetic invalid XML");
+    entry.password = ProtectedValue::from_text("synthetic\0xml-value");
+    database.root.entries.push(entry);
+    let source = TestVault::new("invalid-xml-character.kdbx", &database);
+    let home = tempfile::tempdir().unwrap();
+    let output = home.path().join("invalid-character.xml");
+    let result = run(
+        &source.path,
+        home.path(),
+        &[
+            "secrets",
+            "export",
+            "--output",
+            output.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!result.status.success());
+    assert!(!output.exists());
+    assert_no_disclosure(&result, "synthetic\0xml-value");
+}

@@ -61,7 +61,10 @@ SSH identities are not supported yet.
 
 KeePass XML is an explicit limited interchange format, not the default JSON
 snapshot format. Export requires `--format keepass-xml --allow-plaintext` and
-refuses vaults containing protected values (including ordinary passwords).
+can reveal ordinary protected text values, including passwords. Protected
+binary attachments and unsupported data remain rejected. The library's default
+`KdbxXml::export` stays restrictive; only its explicitly named plaintext
+export path allows protected text fields.
 See [the KeePass XML interchange notes](docs/keepass-xml-interchange.md) for
 limits and security behavior.
 

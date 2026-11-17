@@ -1504,6 +1504,11 @@ fn write_database_inner(
         xml.push_str("</DeletedObjects>");
     }
     xml.push_str("</Root></KeePassFile>");
+    if matches!(storage, BinaryStorage::LegacyXml) && !xml.chars().all(xml_1_0_character) {
+        return Err(KdbxError::malformed(
+            "XML export contains a character forbidden by XML 1.0",
+        ));
+    }
     Ok(std::mem::take(&mut *xml).into_bytes())
 }
 
@@ -1979,6 +1984,7 @@ fn write_escaped(xml: &mut String, value: &str) {
             '>' => "&gt;",
             '"' => "&quot;",
             '\'' => "&apos;",
+            '\r' => "&#13;",
             _ => {
                 xml.push(character);
                 continue;
@@ -1993,4 +1999,10 @@ fn escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+        .replace('\r', "&#13;")
+}
+
+fn xml_1_0_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+        || matches!(character, '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
 }

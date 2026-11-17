@@ -166,6 +166,45 @@ fn plain_xml_round_trips_unprotected_entries() {
 }
 
 #[test]
+fn authorized_plain_xml_preserves_carriage_returns_and_rejects_xml10_controls() {
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("line endings");
+    entry.password = ProtectedValue::from_text("password\rline\r\nnext");
+    entry.fields.push(Field {
+        key: "Protected custom".into(),
+        value: ProtectedValue::from_text("custom\rline\r\nnext"),
+        protected: true,
+        protect_in_memory: false,
+    });
+    database.root.entries.push(entry);
+
+    let xml = KdbxXml::export_allow_plaintext(&database).unwrap();
+    assert!(xml.windows(b"&#13;".len()).any(|window| window == b"&#13;"));
+    let imported = KdbxXml::import(&xml, &KdbxReadLimits::default()).unwrap();
+    let entry = &imported.root.entries[0];
+    assert_eq!(
+        entry.password.reveal_text().unwrap().as_str(),
+        "password\rline\r\nnext"
+    );
+    assert_eq!(
+        entry
+            .field("Protected custom")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "custom\rline\r\nnext"
+    );
+
+    let mut invalid = KeePassDatabase::default();
+    let mut entry = Entry::new("invalid XML character");
+    entry.password = ProtectedValue::from_text("synthetic\0value");
+    invalid.root.entries.push(entry);
+    assert!(KdbxXml::export_allow_plaintext(&invalid).is_err());
+}
+
+#[test]
 fn writer_supports_outer_cipher_and_compression_matrix() {
     let limits = KdbxReadLimits::default();
     let mut database = KeePassDatabase::default();
