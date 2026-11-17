@@ -363,26 +363,64 @@ _nkeepass_complete() {
     local index=1 element position
     local -a vault_args=()
     current="${COMP_WORDS[COMP_CWORD]}"
-    local file_spec="$current"
-    if [[ "$current" != *=* ]] && (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == *= ]]; then
-        file_spec="${COMP_WORDS[COMP_CWORD - 1]}$current"
-    fi
-    if [[ "$file_spec" == *=* ]]; then
-        local file_index=1 file_option=false file_name file_path candidate
-        while (( file_index < COMP_CWORD )); do
-            [[ "${COMP_WORDS[file_index]}" == --bin || "${COMP_WORDS[file_index]}" == -b ]] && file_option=true
-            ((file_index++))
-        done
-        if [[ "$file_option" == true ]] && [[ " ${COMP_WORDS[*]} " == *" set "* ]]; then
-            file_name="${file_spec%%=*}"
-            file_path="${file_spec#*=}"
-            local old_wordbreaks="$COMP_WORDBREAKS"
-            COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"
-            while IFS= read -r candidate; do
-                COMPREPLY+=("$file_name=$candidate")
-            done < <(compgen -f -- "$file_path")
-            COMP_WORDBREAKS="$old_wordbreaks"
-            return
+    local file_name='' file_path='' file_prefix='' bin_index=-1
+    local route_command='' route_action='' scan=1 argument_context=true
+    while (( scan < COMP_CWORD )); do
+        element="${COMP_WORDS[scan]}"
+        if [[ "$element" == -- ]]; then
+            argument_context=false
+            break
+        fi
+        if [[ -z "$route_command" ]]; then
+            case "$element" in
+                --vault|-V|--password|--password-env|--password-file|--key-file)
+                    ((scan += 2))
+                    continue
+                    ;;
+                --password-stdin)
+                    ((scan++))
+                    continue
+                    ;;
+                *) route_command="$element" ;;
+            esac
+        elif [[ "$route_command" == secrets && -z "$route_action" ]]; then
+            route_action="$element"
+        fi
+        if [[ "$element" == --bin || "$element" == -b ]]; then
+            bin_index=$scan
+        fi
+        ((scan++))
+    done
+    if [[ "$route_command" == secrets && "$route_action" == set ]] \
+        || [[ "$route_command" == set && -z "$route_action" ]]; then
+        if [[ "$current" == *=* ]]; then
+            file_name="${current%%=*}"
+            file_path="${current#*=}"
+            file_prefix="$file_name="
+        elif (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == = ]]; then
+            file_name="${COMP_WORDS[COMP_CWORD - 2]-}"
+            file_path="$current"
+            file_prefix=''
+        fi
+        if (( bin_index >= 0 )) && [[ "$argument_context" == true ]] \
+            && [[ -n "$file_name" ]] && [[ "$current" != --* ]]; then
+            local file_arg=true
+            for ((scan = bin_index + 1; scan < COMP_CWORD; scan++)); do
+                case "${COMP_WORDS[scan]}" in
+                    --bin|-b|--notes|--username|--url|--file|--stdin|--key|--field|--)
+                        file_arg=false
+                        ;;
+                esac
+            done
+            if [[ "$file_arg" == true ]]; then
+                local candidate
+                COMPREPLY=()
+                while IFS= read -r candidate; do
+                    COMPREPLY+=("$file_prefix$candidate")
+                done < <(compgen -f -- "$file_path")
+                compopt -o nospace 2>/dev/null || true
+                return
+            fi
         fi
     fi
     if (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == --password-env ]]; then
@@ -630,7 +668,7 @@ _nkeepass_complete_candidates() {
         --field:get:*|--field:getx:*|--field:set:*|--field:secrets:get|--field:secrets:getx|--field:secrets:set|--field:field:get|--field:field:reveal|--field:field:set|--field:field:edit|--field:custom-field:get|--field:custom-field:reveal|--field:custom-field:set|--field:custom-field:edit) _nk_choices='Password Title UserName URL Notes' ;;
         *)
             case "$_nk_command:$_nk_action" in
-                :) _nk_choices='init context alias config secrets automation group groups exec --vault -V --password-env --password-stdin --help' ;;
+                :) _nk_choices='init context alias config secrets automation files attachment attachments group groups exec --vault -V --password-env --password-stdin --help' ;;
                 init:*) _nk_choices='--password --password-env --password-file --password-stdin --key-file --kdf --memory --iterations --parallelism --size' ;;
                 context:) _nk_choices='ls list show use rm remove set' ;;
                 config:ls|config:list) _nk_choices='--json --' ;;
@@ -676,12 +714,11 @@ _nkeepass_complete_candidates() {
                 group:add|groups:add|group:create|groups:create|group:ensure|groups:ensure) _nk_choices='--key --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 group:rm|groups:rm|group:remove|groups:remove) _nk_choices='--key --yes --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 group:*|groups:*) _nk_choices='ls list add create ensure rm remove' ;;
-                attachment:*) _nk_choices='ls list add import get export rm remove' ;;
-                attachments:*) _nk_choices='ls list add import get export rm remove' ;;
-                attachment:ls|attachments:ls|attachment:list|attachments:list) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
-                attachment:add|attachments:add|attachment:import|attachments:import) _nk_choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
-                attachment:get|attachments:get|attachment:export|attachments:export) _nk_choices='--key --field --output --password --password-env --password-file --password-stdin --key-file' ;;
-                attachment:rm|attachments:rm|attachment:remove|attachments:remove) _nk_choices='--key --field --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                files:ls|attachment:ls|attachments:ls|files:list|attachment:list|attachments:list) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
+                files:add|attachment:add|attachments:add|files:import|attachment:import|attachments:import) _nk_choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                files:get|attachment:get|attachments:get|files:export|attachment:export|attachments:export) _nk_choices='--key --field --output --password --password-env --password-file --password-stdin --key-file' ;;
+                files:rm|attachment:rm|attachments:rm|files:remove|attachment:remove|attachments:remove) _nk_choices='--key --field --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                files:*|attachment:*|attachments:*) _nk_choices='ls list add import get export rm remove' ;;
                 field:*) _nk_choices='ls list get reveal set edit rm remove' ;;
                 custom-field:*) _nk_choices='ls list get reveal set edit rm remove' ;;
                 field:ls|custom-field:ls|field:list|custom-field:list) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
@@ -819,7 +856,7 @@ _nkeepass() {
                     env|environment) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     get) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--clipboard') ;;
                     getx) choices=('--key' '--field' '--format' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    set) choices=('--key' '--field --username --url --notes' '--file' '--bin' '-b' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    set) choices=('--key' '--field' '--username' '--url' '--notes' '--file' '--bin' '-b' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     rm|remove) choices=('--key' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     ensure) choices=('--key' '--size' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                     otp) choices=('--key' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
@@ -835,7 +872,7 @@ _nkeepass() {
         list|ls) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
         search) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
         env) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        set) choices=('--key' '--field --username --url --notes' '--file' '--bin' '-b' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        set) choices=('--key' '--field' '--username' '--url' '--notes' '--file' '--bin' '-b' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         rm|remove) choices=('--key' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         ensure) choices=('--key' '--size' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         otp) choices=('--key' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
@@ -1138,7 +1175,7 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
         '--field:custom-field:edit' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
         default {
             switch ($command) {
-                '' { $values = @('init', 'context', 'alias', 'config', 'secrets', 'automation', 'get', 'getx', 'list', 'ls', 'search', 'env', 'set', 'rm', 'remove', 'ensure', 'otp', 'setx', 'import', 'export', 'sync', 'attachment', 'attachments', 'group', 'groups', 'field', 'custom-field', 'exec', 'x', 'version', 'completion', '--help', '-h', '--version', '--vault', '-V', '--password-env', '--password-stdin') }
+                '' { $values = @('init', 'context', 'alias', 'config', 'secrets', 'automation', 'get', 'getx', 'list', 'ls', 'search', 'env', 'set', 'rm', 'remove', 'ensure', 'otp', 'setx', 'import', 'export', 'sync', 'files', 'attachment', 'attachments', 'group', 'groups', 'field', 'custom-field', 'exec', 'x', 'version', 'completion', '--help', '-h', '--version', '--vault', '-V', '--password-env', '--password-stdin') }
                 'init' { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--kdf', '--memory', '--iterations', '--parallelism', '--size') }
                 'context' { if (-not $action) { $values = @('ls', 'list', 'show', 'use', 'rm', 'remove', 'set') } }
                 'alias' {
@@ -1164,7 +1201,7 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
                             { $_ -in @('env', 'environment') } { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             'get' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--clipboard', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             'getx' { $values = @('--key', '--field', '--format', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'set' { $values = @('--key', '--field --username --url --notes', '--file' '--bin' '-b', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'set' { $values = @('--key', '--field', '--username', '--url', '--notes', '--file', '--bin', '-b', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             { $_ -in @('rm', 'remove') } { $values = @('--key', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             'ensure' { $values = @('--key', '--size', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                             'otp' { $values = @('--key', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
@@ -1180,7 +1217,7 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
                 { $_ -in @('list', 'ls', 'search') } { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
                 'show' { $values = @('--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'env' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'set' { $values = @('--key', '--field --username --url --notes', '--file' '--bin' '-b', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'set' { $values = @('--key', '--field', '--username', '--url', '--notes', '--file', '--bin', '-b', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 { $_ -in @('rm', 'remove') } { $values = @('--key', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'ensure' { $values = @('--key', '--size', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'otp' { $values = @('--key', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
@@ -1199,7 +1236,7 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
                         }
                     }
                 }
-                { $_ -in @('attachment', 'attachments') } {
+                { $_ -in @('files', 'attachment', 'attachments') } {
                     if (-not $action) { $values = @('ls', 'list', 'add', 'import', 'get', 'export', 'rm', 'remove') }
                     else {
                         switch ($action) {
@@ -1625,17 +1662,18 @@ mod tests {
         assert!(bash.contains("position -eq 1"));
         assert!(bash.contains("position -eq 3"));
         assert!(bash.contains("__complete vaults \"$current\""));
-        assert!(bash.contains("COMP_WORDBREAKS=\"${COMP_WORDBREAKS//=}\""));
-        assert!(bash.contains("COMPREPLY+=(\"$file_name=$candidate\")"));
+        assert!(bash.contains("COMP_WORDS[COMP_CWORD - 2]"));
 
         let sh = generate("sh").unwrap();
         assert!(sh.contains("VAULT_OPTION VAULT_PATH"));
         assert!(sh.contains("nkeepass \"$_nk_vault_option\" \"$_nk_vault_path\" __complete"));
         assert!(sh.contains("\"${6-}\""));
+        assert!(sh.contains("files:add|attachment:add|attachments:add"));
 
         let zsh = generate("zsh").unwrap();
         assert!(zsh.contains("vault_args=(--vault"));
         assert!(zsh.contains("command nkeepass \"${vault_args[@]}\" __complete"));
+        assert!(zsh.contains("choices=('--key' '--field' '--username' '--url' '--notes'"));
         assert!(zsh.contains("command_index=2"));
         assert!(zsh.contains("position -eq 1"));
         assert!(zsh.contains("position -eq 3"));
@@ -1643,6 +1681,12 @@ mod tests {
 
         let powershell = generate("powershell").unwrap();
         assert!(powershell.contains("$vaultArguments = @('--vault'"));
+        assert!(
+            powershell
+                .contains("$values = @('--key', '--field', '--username', '--url', '--notes',")
+        );
+        assert!(!powershell.contains("'--field' '--username'"));
+        assert!(powershell.contains("@('files', 'attachment', 'attachments')"));
         assert!(powershell.contains("& nkeepass @vaultArguments __complete"));
         assert!(powershell.contains("$cursorPosition -gt $commandAst.Extent.EndOffset"));
         assert!(powershell.contains("$currentIndex -le $commandIndex"));
@@ -1677,13 +1721,134 @@ mod tests {
     }
 
     #[test]
-    fn bash_set_binary_completion_preserves_attachment_name_prefix() {
+    fn generated_bash_and_posix_scripts_parse_and_posix_files_group_completes() {
+        let directory = tempfile::tempdir().unwrap();
+        for (shell, args) in [("bash", vec!["-n"]), ("sh", vec!["-n"])] {
+            let path = directory.path().join(format!("completion.{shell}"));
+            std::fs::write(&path, generate(shell).unwrap()).unwrap();
+            let output = std::process::Command::new(shell)
+                .args(args)
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{shell} syntax failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let path = directory.path().join("completion.sh");
+        std::fs::write(&path, generate("sh").unwrap()).unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(". ./completion.sh; nkeepass_complete '' '' files; nkeepass_complete '' '' files add")
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let completions = String::from_utf8_lossy(&output.stdout);
+        assert!(completions.lines().any(|line| line == "ls"));
+        assert!(completions.lines().any(|line| line == "--file"));
+    }
+
+    #[test]
+    fn generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed() {
+        let directory = tempfile::tempdir().unwrap();
+        for (shell, script, arguments) in [("zsh", generate("zsh").unwrap(), vec!["-n"])] {
+            if std::process::Command::new(shell)
+                .arg("--version")
+                .output()
+                .is_ok()
+            {
+                let path = directory.path().join("completion.zsh");
+                std::fs::write(&path, script).unwrap();
+                let output = std::process::Command::new(shell)
+                    .args(arguments)
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{shell} syntax failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        let shell = ["pwsh", "powershell"].into_iter().find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg("exit 0")
+                .status()
+                .is_ok()
+        });
+        if let Some(shell) = shell {
+            let path = directory.path().join("completion.ps1");
+            std::fs::write(&path, generate("powershell").unwrap()).unwrap();
+            let output = std::process::Command::new(shell)
+                .args(["-NoProfile", "-Command"])
+                .arg(format!(
+                    "$source = [IO.File]::ReadAllText('{}'); [void][scriptblock]::Create($source)",
+                    path.display()
+                ))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "PowerShell syntax failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn bash_binary_completion_preserves_prefix_and_rejects_non_set_contexts() {
         let bash = generate("bash").unwrap();
-        assert!(bash.contains("COMP_WORDS[file_index]}\" == --bin"));
-        assert!(bash.contains("COMP_WORDS[file_index]}\" == -b"));
-        assert!(bash.contains("file_name=\"${file_spec%%=*}\""));
-        assert!(bash.contains("file_path=\"${file_spec#*=}\""));
-        assert!(bash.contains("COMPREPLY+=(\"$file_name=$candidate\")"));
+        let Ok(directory) = tempfile::tempdir() else {
+            panic!("temporary directory should be available");
+        };
+        std::fs::write(directory.path().join("payload-one.bin"), b"").unwrap();
+        let script = format!(
+            r#"{bash}
+COMP_WORDBREAKS=' = '
+original_wordbreaks=$COMP_WORDBREAKS
+COMP_WORDS=(nkeepass set --bin payload = ./payload)
+COMP_CWORD=5
+_nkeepass_complete
+[[ "${{COMPREPLY[*]}}" == "./payload-one.bin" ]] || exit 11
+[[ "$COMP_WORDBREAKS" == "$original_wordbreaks" ]] || exit 12
+COMP_WORDS=(nkeepass set --bin payload=./payload)
+COMP_CWORD=3
+_nkeepass_complete
+[[ "${{COMPREPLY[*]}}" == "payload=./payload-one.bin" ]] || exit 13
+COMP_WORDS=(nkeepass exec -- set --bin payload = ./payload)
+COMP_CWORD=7
+_nkeepass_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 14
+COMP_WORDS=(nkeepass set --bin first=old --notes ./payload)
+COMP_CWORD=5
+_nkeepass_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 15
+COMP_WORDS=(nkeepass set -- --bin payload = ./payload)
+COMP_CWORD=6
+_nkeepass_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 16
+"#
+        );
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .current_dir(directory.path())
+            .output()
+            .expect("bash should run");
+        assert!(
+            output.status.success(),
+            "bash completion behavior failed ({}): stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]

@@ -3050,40 +3050,38 @@ fn emit_value(value: &[u8], format: &str, name: Option<&str>, is_output: bool) -
 }
 
 /// Copies an explicitly selected secret without sending plaintext to stdout.
-/// Windows clipboard ownership can be tracked and cleared after the same
-/// thirty-second lease used by the interactive browser; other backends cannot
-/// safely clear without risking erasing newer user clipboard contents.
+/// On Linux, keeps this process alive for the bounded paste interval because
+/// the clipboard provider may need its owner to serve pasted data. Windows
+/// conditionally clears after that interval only if the clipboard owner is
+/// still this process.
 fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
-    use crate::clipboard::{ArboardAdapter, ClipboardCopyOutcome, ClipboardLease};
-    use std::time::{Duration, Instant};
+    use crate::clipboard::{ArboardAdapter, ClipboardCopyOutcome, copy_with_lifetime};
+    use std::time::Duration;
 
-    let mut lease = ClipboardLease::new(ArboardAdapter::default(), Duration::from_secs(30));
-    match lease
-        .copy(value)
-        .map_err(|_| err("clipboard is unavailable"))?
-    {
+    let ttl = Duration::from_secs(30);
+    let copied = copy_with_lifetime(
+        ArboardAdapter::default(),
+        value,
+        ttl,
+        cfg!(target_os = "linux"),
+        |duration| {
+            if cfg!(target_os = "linux") {
+                eprintln!("nkeepass: keeping clipboard available for up to 30 seconds");
+            }
+            std::thread::sleep(duration);
+        },
+    )
+    .map_err(|_| err("clipboard is unavailable"))?;
+    match copied {
         ClipboardCopyOutcome::RejectedNul => {
             return Err(err("value cannot be copied to clipboard"));
         }
         ClipboardCopyOutcome::MayHaveCopied => {
-            eprintln!("nkeepass: clipboard write may be incomplete");
+            return Err(err("clipboard write may have been incomplete"));
         }
         ClipboardCopyOutcome::Copied => {}
     }
-    if lease.supports_timed_clear() && lease.has_lease() {
-        let until = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < until {
-            std::thread::sleep(
-                Duration::from_millis(100).min(until.saturating_duration_since(Instant::now())),
-            );
-        }
-        match lease.tick(Instant::now()) {
-            Ok(Some(true)) => {}
-            Ok(Some(false)) => eprintln!("nkeepass: clipboard changed; left newer contents intact"),
-            Ok(None) => {}
-            Err(_) => eprintln!("nkeepass: clipboard could not be cleared"),
-        }
-    } else {
+    if !cfg!(windows) && !cfg!(target_os = "linux") {
         eprintln!(
             "nkeepass: clipboard may retain the secret; this platform cannot safely clear it"
         );
@@ -4033,8 +4031,9 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                         .set_custom_field(&resolved.reference(), &update.key, update.value.as_str())
                         .map_err(|error| err(error.message()))?;
                 } else {
-                    service.set_fields(&resolved.reference(), updates).map_err(
-                        |error| match error {
+                    service
+                        .set_fields_creating_custom(&resolved.reference(), updates)
+                        .map_err(|error| match error {
                             nkeepass::ServiceError::DuplicateIds => {
                                 err("vault contains duplicate object UUIDs")
                             }
@@ -4047,8 +4046,7 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                                 err("title cannot be changed through set")
                             }
                             error => err(error.message()),
-                        },
-                    )?;
+                        })?;
                 }
             }
             if !opts.dry_run {

@@ -510,6 +510,17 @@ fn set_and_field_set_save_values_visible_after_reopen() {
             "--password-env",
             "NKEEPASS_TEST_PASSWORD",
         ],
+        vec![
+            "set",
+            "--key",
+            "LOGIN",
+            "--field",
+            "NewToken",
+            "--file",
+            field_file.to_str().unwrap(),
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
     ] {
         let output = run(&vault.path, home.path(), &args);
         assert!(
@@ -529,6 +540,16 @@ fn set_and_field_set_save_values_visible_after_reopen() {
     assert_eq!(
         entry
             .field("Token")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "new-token-disposable-d47f"
+    );
+    assert_eq!(
+        entry
+            .field("NewToken")
             .unwrap()
             .value
             .reveal_text()
@@ -717,6 +738,14 @@ fn attachment_add_rm_round_trip_export_and_preserve_exact_names() {
     assert_eq!(after_set_file.root.entries[0].username, "set-user");
     assert_eq!(after_set_file.root.entries[0].url, "https://set.example");
     assert_eq!(after_set_file.root.entries[0].notes, "set-notes");
+    assert_eq!(
+        after_set_file.binary_pool.get(2).unwrap().data,
+        b"new\0attachment"
+    );
+    assert_eq!(
+        after_set_file.binary_pool.get(3).unwrap().data,
+        b"new\0attachment"
+    );
 
     let duplicate = run(
         &vault.path,
@@ -890,6 +919,110 @@ fn failed_multi_attachment_set_does_not_save_partial_changes() {
     assert_eq!(unchanged.root.entries[0].username, "automation-user");
     assert_eq!(unchanged.root.entries[0].attachments.len(), 1);
     assert_eq!(unchanged.binary_pool.len(), 1);
+}
+
+#[test]
+fn failed_set_batches_never_persist_staged_mutations() {
+    const PASSWORD: &str = "NKEEPASS_TEST_PASSWORD";
+    let database = database_with_entry(login_entry());
+    let vault = TestVault::new("set-batch-rollback.kdbx", &database);
+    let home = tempfile::tempdir().unwrap();
+    let good_file = home.path().join("good.bin");
+    std::fs::write(&good_file, b"staged attachment").unwrap();
+    let good_bin = format!("first={}", good_file.display());
+    let directory_bin = format!("second={}", home.path().display());
+    let original = std::fs::read(&vault.path).unwrap();
+
+    let mut too_many = vec!["set".to_owned(), "--key".to_owned(), "LOGIN".to_owned()];
+    for index in 0..257 {
+        too_many.push("--bin".to_owned());
+        too_many.push(format!("file{index}={}", good_file.display()));
+    }
+    too_many.extend(["--password-env".to_owned(), PASSWORD.to_owned()]);
+
+    let oversized_file = home.path().join("oversized.bin");
+    let oversized = std::fs::File::create(&oversized_file).unwrap();
+    oversized.set_len(16 * 1024 * 1024 + 1).unwrap();
+    let oversized_bin = format!("oversized={}", oversized_file.display());
+
+    let cases: Vec<Vec<String>> = vec![
+        [
+            "set", "--key", "LOGIN", "--bin", &good_bin, "--field", "Title", "--file",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([good_file.to_string_lossy().into_owned()])
+        .chain(["--password-env".to_owned(), PASSWORD.to_owned()])
+        .collect(),
+        [
+            "set",
+            "--key",
+            "LOGIN",
+            "--bin",
+            &good_bin,
+            "--bin",
+            &good_bin,
+            "--password-env",
+            PASSWORD,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        [
+            "set",
+            "--key",
+            "LOGIN",
+            "--bin",
+            &good_bin,
+            "--bin",
+            &directory_bin,
+            "--password-env",
+            PASSWORD,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        [
+            "set",
+            "--key",
+            "LOGIN",
+            "--username",
+            "first",
+            "--field",
+            "UserName",
+            "--file",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([good_file.to_string_lossy().into_owned()])
+        .chain(["--password-env".to_owned(), PASSWORD.to_owned()])
+        .collect(),
+        [
+            "set",
+            "--key",
+            "LOGIN",
+            "--bin",
+            &oversized_bin,
+            "--password-env",
+            PASSWORD,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        too_many,
+    ];
+
+    for arguments in cases {
+        let refs: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let output = run(&vault.path, home.path(), &refs);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(std::fs::read(&vault.path).unwrap(), original);
+        let unchanged = load(&vault.path);
+        assert_eq!(unchanged.root.entries[0].username, "automation-user");
+        assert_eq!(unchanged.root.entries[0].attachments.len(), 0);
+        assert_eq!(unchanged.binary_pool.len(), 0);
+    }
 }
 
 #[test]

@@ -1140,6 +1140,7 @@ impl VaultService {
     ///
     /// Returns [`ServiceError::InvalidInput`] for an empty batch,
     /// [`ServiceError::InvalidFieldName`] for invalid or repeated update keys,
+    /// [`ServiceError::FieldConflict`] when a batch attempts to change `Title`,
     /// [`ServiceError::Stale`] for an expired handle, and duplicate-model
     /// errors when any entry or history snapshot is malformed.
     pub fn set_fields(
@@ -1147,13 +1148,40 @@ impl VaultService {
         reference: &EntryRef,
         updates: Vec<FieldUpdate>,
     ) -> Result<usize, ServiceError> {
+        self.apply_field_updates(reference, updates, false)
+    }
+
+    /// Applies a field batch and creates missing custom fields, matching the
+    /// CLI `set` behavior. All update keys and the target model are validated
+    /// before mutation; an empty batch is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidInput`] for an empty batch,
+    /// [`ServiceError::InvalidFieldName`] for invalid or repeated update keys,
+    /// [`ServiceError::FieldConflict`] when a batch attempts to change `Title`,
+    /// [`ServiceError::Stale`] for an expired handle, and duplicate-model
+    /// errors when any entry or history snapshot is malformed.
+    pub fn set_fields_creating_custom(
+        &mut self,
+        reference: &EntryRef,
+        updates: Vec<FieldUpdate>,
+    ) -> Result<usize, ServiceError> {
+        self.apply_field_updates(reference, updates, true)
+    }
+
+    fn apply_field_updates(
+        &mut self,
+        reference: &EntryRef,
+        updates: Vec<FieldUpdate>,
+        create_missing_custom: bool,
+    ) -> Result<usize, ServiceError> {
         if updates.is_empty() {
             return Err(ServiceError::InvalidInput);
         }
         let mut names = BTreeSet::new();
         for update in &updates {
             if update.key.is_empty()
-                || update.key == "Title"
                 || update.key.chars().any(char::is_control)
                 || !names.insert(update.key.as_str())
             {
@@ -1167,6 +1195,9 @@ impl VaultService {
         validate_unique_object_ids(&live.database)?;
         validate_unique_field_names(&live.database)?;
         resolve_locator(&live.database, &reference.locator, reference.id)?;
+        if updates.iter().any(|update| update.key == "Title") {
+            return Err(ServiceError::FieldConflict);
+        }
         let count = updates.len();
         normalize_standard_projections(&mut live.database);
         let entry = resolve_locator_mut(&mut live.database, &reference.locator, reference.id)?;
@@ -1188,7 +1219,7 @@ impl VaultService {
                 "Notes" => update.value.as_str().clone_into(&mut entry.notes),
                 _ => {}
             }
-            if standard || present {
+            if standard || present || create_missing_custom {
                 entry.set_field(Field {
                     key,
                     value: ProtectedValue::from_text(std::mem::take(&mut *update.value)),

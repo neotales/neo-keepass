@@ -100,10 +100,14 @@ logs.
 
 `--clipboard` explicitly sends plaintext to the system clipboard instead of
 stdout. It is mutually exclusive with formatted, encrypted, or file output.
-Windows conditionally clears the clipboard after 30 seconds only if the
-clipboard has not changed. Other desktop backends cannot safely compare and
-clear atomically, so they warn on stderr that the value may remain. Clipboard
-errors use a static diagnostic and never include the selected value.
+On Linux, `get` remains running for up to 30 seconds so the desktop clipboard
+owner can serve paste requests; when the process exits the value may cease to
+be available unless the desktop clipboard manager retained it. On Windows,
+the clipboard is conditionally cleared after 30 seconds only if its ownership
+sequence still matches this write. Other desktop backends do not provide a
+safe atomic clear, so the value may remain according to that backend's
+clipboard behavior. Clipboard failures and partial writes use static
+diagnostics; no selected value is written to stdout or included in errors.
 
 ### `secrets getx`
 

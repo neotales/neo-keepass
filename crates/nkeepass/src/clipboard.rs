@@ -211,12 +211,39 @@ impl<A: ClipboardAdapter> ClipboardLease<A> {
     }
 }
 
+/// Copies a value and keeps the owner process alive when a desktop clipboard
+/// needs it to serve paste requests. Windows leases are conditionally cleared
+/// after `ttl`; `wait` is injectable so the lifetime contract can be tested
+/// without sleeping.
+pub(crate) fn copy_with_lifetime<A, W>(
+    adapter: A,
+    value: Zeroizing<String>,
+    ttl: Duration,
+    owner_must_live: bool,
+    wait: W,
+) -> Result<ClipboardCopyOutcome, ClipboardError>
+where
+    A: ClipboardAdapter,
+    W: FnOnce(Duration),
+{
+    let mut lease = ClipboardLease::new(adapter, ttl);
+    let outcome = lease.copy(value)?;
+    if lease.has_lease() && (owner_must_live || lease.supports_timed_clear()) {
+        wait(ttl);
+        if lease.supports_timed_clear() {
+            let _ = lease.tick(Instant::now() + ttl)?;
+        }
+    }
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ClipboardAdapter, ClipboardCopyOutcome, ClipboardError, ClipboardLease, ClipboardSetOutcome,
+        ClipboardAdapter, ClipboardCopyOutcome, ClipboardError, ClipboardLease,
+        ClipboardSetOutcome, copy_with_lifetime,
     };
     use zeroize::Zeroizing;
 
@@ -238,6 +265,7 @@ mod tests {
         fail_clear: bool,
         partial_set: bool,
         partial_can_clear: bool,
+        timed_clear: bool,
         clear_calls: usize,
     }
 
@@ -266,6 +294,10 @@ mod tests {
             }
             self.text = None;
             Ok(true)
+        }
+
+        fn supports_timed_clear(&self) -> bool {
+            self.timed_clear
         }
     }
 
@@ -414,5 +446,71 @@ mod tests {
         let mut lease = ClipboardLease::new(MockClipboard::default(), Duration::from_secs(10));
         lease.copy(Zeroizing::new("secret".to_owned())).unwrap();
         assert_eq!(lease.tick(Instant::now()).unwrap(), None);
+    }
+
+    #[test]
+    fn copy_lifetime_is_injected_and_bounded_for_owner_backed_clipboards() {
+        let mut waited = None;
+        let outcome = copy_with_lifetime(
+            MockClipboard::default(),
+            Zeroizing::new("secret".to_owned()),
+            Duration::from_secs(30),
+            true,
+            |duration| waited = Some(duration),
+        )
+        .unwrap();
+        assert_eq!(outcome, ClipboardCopyOutcome::Copied);
+        assert_eq!(waited, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn unavailable_nul_and_partial_copies_have_deterministic_outcomes() {
+        let mut waited = false;
+        assert_eq!(
+            copy_with_lifetime(
+                MockClipboard {
+                    fail_set: true,
+                    ..MockClipboard::default()
+                },
+                Zeroizing::new("secret".to_owned()),
+                Duration::from_secs(30),
+                true,
+                |_| waited = true,
+            ),
+            Err(ClipboardError)
+        );
+        assert!(!waited);
+
+        assert_eq!(
+            copy_with_lifetime(
+                MockClipboard::default(),
+                Zeroizing::new("bad\0value".to_owned()),
+                Duration::from_secs(30),
+                true,
+                |_| waited = true,
+            ),
+            Ok(ClipboardCopyOutcome::RejectedNul)
+        );
+        assert!(!waited);
+
+        assert_eq!(
+            copy_with_lifetime(
+                MockClipboard {
+                    partial_set: true,
+                    partial_can_clear: true,
+                    timed_clear: true,
+                    ..MockClipboard::default()
+                },
+                Zeroizing::new("secret".to_owned()),
+                Duration::from_secs(30),
+                true,
+                |duration| {
+                    assert_eq!(duration, Duration::from_secs(30));
+                    waited = true;
+                },
+            ),
+            Ok(ClipboardCopyOutcome::MayHaveCopied)
+        );
+        assert!(waited);
     }
 }
