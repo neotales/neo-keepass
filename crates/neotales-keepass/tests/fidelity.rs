@@ -64,6 +64,157 @@ fn metadata_custom_icons_and_custom_data_round_trip_through_xml() {
 }
 
 #[test]
+fn save_preserves_entry_and_history_tags_and_nested_group_custom_icons() {
+    let limits = KdbxReadLimits::default();
+    let icon_id = KdbxUuid::from_bytes([0x31; 16]);
+    let mut database = KeePassDatabase::default();
+    database.meta.custom_icons.push(CustomIcon {
+        uuid: icon_id,
+        data: vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff],
+        name: Some("nested group icon".into()),
+        last_modification: None,
+    });
+
+    let mut nested = neotales_keepass::Group::new("nested");
+    nested.custom_icon_id = icon_id;
+    let mut entry = Entry::new("current");
+    entry.tags = vec!["work".into(), "finance".into()];
+    let mut snapshot = Entry::new("previous");
+    snapshot.tags = vec!["archived".into(), "review".into()];
+    entry.history.push(snapshot);
+    nested.entries.push(entry);
+    database.root.groups.push(nested);
+
+    let mut bytes = Vec::new();
+    KdbxFile::save(
+        &database,
+        &mut bytes,
+        &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &limits,
+    )
+    .unwrap();
+    let mut loaded = KdbxFile::load_password(bytes.as_slice(), "pw", &limits).unwrap();
+    assert_eq!(loaded.root.groups[0].custom_icon_id, icon_id);
+    assert_eq!(loaded.meta.custom_icons[0].uuid, icon_id);
+    assert_eq!(
+        loaded.meta.custom_icons[0].data,
+        [0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]
+    );
+    assert_eq!(loaded.root.groups[0].entries[0].tags, ["work", "finance"]);
+    assert_eq!(
+        loaded.root.groups[0].entries[0].history[0].tags,
+        ["archived", "review"]
+    );
+
+    loaded.meta.name = "edited independently".into();
+    let mut saved = Vec::new();
+    KdbxFile::save(
+        &loaded,
+        &mut saved,
+        &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &limits,
+    )
+    .unwrap();
+    let reopened = KdbxFile::load_password(saved.as_slice(), "pw", &limits).unwrap();
+    assert_eq!(reopened.root.groups[0].custom_icon_id, icon_id);
+    assert_eq!(
+        reopened.meta.custom_icons[0].data,
+        loaded.meta.custom_icons[0].data
+    );
+    assert_eq!(reopened.root.groups[0].entries[0].tags, ["work", "finance"]);
+    assert_eq!(
+        reopened.root.groups[0].entries[0].history[0].tags,
+        ["archived", "review"]
+    );
+}
+
+#[test]
+fn tag_constraints_reject_unrepresentable_current_and_history_tags_before_output() {
+    let limits = KdbxReadLimits::default();
+    for bad_tag in ["", "a;b"] {
+        for history in [false, true] {
+            let mut database = KeePassDatabase::default();
+            let mut entry = Entry::new("tagged");
+            if history {
+                let mut snapshot = Entry::new("snapshot");
+                snapshot.tags.push(bad_tag.into());
+                entry.history.push(snapshot);
+            } else {
+                entry.tags.push(bad_tag.into());
+            }
+            database.root.entries.push(entry);
+
+            let mut output = b"existing".to_vec();
+            let error = KdbxFile::save(
+                &database,
+                &mut output,
+                &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+                KdbxWriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..KdbxWriteOptions::default()
+                },
+                &limits,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, neotales_keepass::KdbxFailureKind::Unsupported);
+            assert_eq!(output, b"existing");
+        }
+    }
+}
+
+#[test]
+fn tags_with_xml_special_characters_round_trip_in_current_and_history_entries() {
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("tagged");
+    entry.tags = vec![
+        "research & planning".into(),
+        "<review>".into(),
+        "carriage\rreturn".into(),
+        "line\r\nbreak".into(),
+    ];
+    let mut snapshot = Entry::new("snapshot");
+    snapshot.tags = vec![
+        "history & archive".into(),
+        "<old>".into(),
+        "history\rtag".into(),
+        "history\r\nline".into(),
+    ];
+    entry.history.push(snapshot);
+    database.root.tags = vec!["group\rtag".into(), "group\r\nline".into()];
+    database.root.entries.push(entry);
+
+    let xml = KdbxXml::export(&database).unwrap();
+    let loaded = KdbxXml::import(&xml, &KdbxReadLimits::default()).unwrap();
+    assert_eq!(
+        loaded.root.entries[0].tags,
+        [
+            "research & planning",
+            "<review>",
+            "carriage\rreturn",
+            "line\r\nbreak"
+        ]
+    );
+    assert_eq!(
+        loaded.root.entries[0].history[0].tags,
+        [
+            "history & archive",
+            "<old>",
+            "history\rtag",
+            "history\r\nline"
+        ]
+    );
+    assert_eq!(loaded.root.tags, ["group\rtag", "group\r\nline"]);
+}
+
+#[test]
 fn public_header_custom_data_preserves_all_variant_types() {
     let limits = KdbxReadLimits::default();
     let mut database = KeePassDatabase::default();

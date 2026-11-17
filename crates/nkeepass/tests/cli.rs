@@ -2025,7 +2025,7 @@ fn service_backed_search_preserves_ndjson_projection_and_order() {
     assert_eq!(
         output.stdout,
         concat!(
-            "{\"fields\":[\"Title\",\"UserName\",\"token\"],\"path\":\"Root/first\",\"tags\":[],\"title\":\"first\"}\n",
+            "{\"fields\":[\"Title\",\"UserName\",\"token\"],\"path\":\"Root/first\",\"tags\":[\"work\"],\"title\":\"first\"}\n",
             "{\"fields\":[\"Title\",\"UserName\"],\"path\":\"Root/second\",\"tags\":[],\"title\":\"second\"}\n",
         )
         .as_bytes(),
@@ -2322,7 +2322,7 @@ fn show_and_field_ls_resolve_through_service_without_changing_json_schemas() {
     );
     assert_eq!(value["path"], "rOoT/fOlDeR/lOgIn");
     assert_eq!(value["title"], "Login");
-    assert_eq!(value["tags"], serde_json::json!([]));
+    assert_eq!(value["tags"], serde_json::json!(["work"]));
     assert_eq!(
         value["attachments"],
         serde_json::json!([{ "name": "attached.txt" }])
@@ -2343,6 +2343,36 @@ fn show_and_field_ls_resolve_through_service_without_changing_json_schemas() {
             && field["protect_in_memory"] == false
     }));
     assert!(!String::from_utf8_lossy(&shown.stdout).contains("never-output"));
+
+    let edited = run_against(
+        &vault,
+        &config,
+        &[
+            "secrets",
+            "set",
+            "--key",
+            "Folder/Login",
+            "--notes",
+            "unrelated edit",
+        ],
+    );
+    assert!(
+        edited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&edited.stderr)
+    );
+    let reopened = run_against(
+        &vault,
+        &config,
+        &["secrets", "show", "--key", "Folder/Login"],
+    );
+    assert!(
+        reopened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reopened.stderr)
+    );
+    let reopened: serde_json::Value = serde_json::from_slice(&reopened.stdout).unwrap();
+    assert_eq!(reopened["tags"], serde_json::json!(["work"]));
 
     let fields = run_against(&vault, &config, &["field", "ls", "--key", "Folder/Login"]);
     assert!(

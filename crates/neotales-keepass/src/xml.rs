@@ -761,6 +761,9 @@ fn parse_group(
             .parse()
             .map_err(|_| KdbxError::malformed("invalid group IconID"))?;
     }
+    if let Some(value) = text(node, "CustomIconUUID") {
+        group.custom_icon_id = KdbxUuid::from_base64(value)?;
+    }
     if let Some(value) = text(node, "Tags") {
         group.tags = value
             .split(';')
@@ -1215,6 +1218,11 @@ fn write_database_inner(
             "timestamps on group or entry custom data are unsupported",
         ));
     }
+    if !tree_tags_are_xml_compatible(&database.root) {
+        return Err(KdbxError::unsupported(
+            "KDBX XML tags must be nonempty and cannot contain semicolons",
+        ));
+    }
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile><Meta>");
     let generator = if database.meta.generator.is_empty() {
         "Neotales KeePass Rust"
@@ -1430,6 +1438,21 @@ fn tree_custom_data_is_xml_compatible(group: &Group) -> bool {
             .all(|child| tree_custom_data_is_xml_compatible(child))
 }
 
+fn tree_tags_are_xml_compatible(group: &Group) -> bool {
+    fn tags_are_compatible(tags: &[String]) -> bool {
+        tags.iter().all(|tag| !tag.is_empty() && !tag.contains(';'))
+    }
+    fn entry_is_compatible(entry: &Entry) -> bool {
+        tags_are_compatible(&entry.tags) && entry.history.iter().all(entry_is_compatible)
+    }
+    tags_are_compatible(&group.tags)
+        && group.entries.iter().all(entry_is_compatible)
+        && group
+            .groups
+            .iter()
+            .all(|child| tree_tags_are_xml_compatible(child))
+}
+
 fn attachment_references_valid(group: &Group, binary_count: usize) -> bool {
     fn entry_valid(entry: &Entry, binary_count: usize) -> bool {
         entry
@@ -1580,6 +1603,9 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
         &entry.previous_parent_group_id.to_base64(),
     );
     write_times(xml, &entry.times);
+    if !entry.tags.is_empty() {
+        write_text(xml, "Tags", &entry.tags.join(";"));
+    }
     write_standard_field(xml, entry, "Title", entry.title.as_bytes(), stream)?;
     write_standard_field(xml, entry, "UserName", entry.username.as_bytes(), stream)?;
     write_standard_field(xml, entry, "URL", entry.url.as_bytes(), stream)?;
@@ -1775,7 +1801,26 @@ fn write_times(xml: &mut String, times: &KeePassTimes) {
     xml.push_str("</Times>");
 }
 fn write_text(xml: &mut String, name: &str, value: &str) {
-    write!(xml, "<{name}>{}</{name}>", escape(value)).expect("writing to String cannot fail");
+    write!(xml, "<{name}>{}</{name}>", escape_text(value)).expect("writing to String cannot fail");
+}
+
+fn escape_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        escaped.push_str(match character {
+            '\r' => "&#13;",
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&apos;",
+            _ => {
+                escaped.push(character);
+                continue;
+            }
+        });
+    }
+    escaped
 }
 fn write_escaped(xml: &mut String, value: &str) {
     for character in value.chars() {

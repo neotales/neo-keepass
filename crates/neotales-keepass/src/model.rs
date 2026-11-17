@@ -897,7 +897,8 @@ pub struct Group {
     pub groups: Vec<Group>,
     /// Ordered child entries.
     pub entries: Vec<Entry>,
-    /// Ordered tags.
+    /// Ordered tags. XML-backed KDBX stores tags as a semicolon-delimited
+    /// string, so each tag must be nonempty and must not contain `;`.
     pub tags: Vec<String>,
 }
 
@@ -982,7 +983,8 @@ pub struct Entry {
     pub quality_check: Option<bool>,
     /// Previous parent group UUID.
     pub previous_parent_group_id: KdbxUuid,
-    /// Tags.
+    /// Tags. XML-backed KDBX stores tags as a semicolon-delimited string, so
+    /// each tag must be nonempty and must not contain `;`.
     pub tags: Vec<String>,
     /// Timestamps.
     pub times: KeePassTimes,

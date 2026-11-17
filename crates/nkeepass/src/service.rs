@@ -6052,9 +6052,7 @@ mod tests {
         assert_eq!(page.hits.len(), 1);
         let hit = &page.hits[0];
         assert_eq!(hit.title(), "mail");
-        // KDBX round-tripping currently drops model-only tags; the service
-        // projects the same loaded metadata the existing CLI sees.
-        assert!(hit.tags().is_empty());
+        assert_eq!(hit.tags(), &["personal"]);
         assert_eq!(hit.field_names(), &["Title", "UserName", "URL", "recovery"]);
         let reference = hit.reference();
         assert!(service.validate_entry(&reference).is_ok());
