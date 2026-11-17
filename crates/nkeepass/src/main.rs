@@ -3151,7 +3151,13 @@ fn service_automation_operation(
                         return Err(err("unsupported import format"));
                     }
                     service
-                        .import_keepass_xml(&input, opts.replace, opts.dry_run)
+                        .import_keepass_xml(
+                            &input,
+                            nkeepass::ImportOptions {
+                                replace: opts.replace,
+                                dry_run: opts.dry_run,
+                            },
+                        )
                         .map_err(|error| err(error.message()))?;
                     (
                         serde_json::json!({

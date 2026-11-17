@@ -1885,7 +1885,7 @@ fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
     let xml = KdbxXml::export(&plain).unwrap();
     let xml_directory = tempfile::tempdir().unwrap();
     let xml_path = xml_directory.path().join("subset.xml");
-    std::fs::write(&xml_path, xml).unwrap();
+    std::fs::write(&xml_path, &xml).unwrap();
 
     let empty = TestVault::new("empty.kdbx", &KeePassDatabase::default());
     let home = tempfile::tempdir().unwrap();
@@ -1910,29 +1910,76 @@ fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
     );
     assert_eq!(load(&empty.path).root.entries[0].title, "XML fixture");
 
-    let mut protected_xml = KdbxXml::export(&plain).unwrap();
-    let marker = b"<Value>";
-    // Replacing an unprotected field marker with KeePass's protected marker
-    // checks that XML parsing rejects protected payloads before vault mutation.
-    if let Some(index) = protected_xml
-        .windows(marker.len())
-        .position(|window| window == marker)
-    {
-        protected_xml.splice(
-            index..index + marker.len(),
-            b"<Value Protected=\"True\">".iter().copied(),
+    let xml_text = String::from_utf8(xml).unwrap();
+    let title_start = xml_text.find("<String><Key>Title</Key>").unwrap();
+    let title_end =
+        xml_text[title_start..].find("</String>").unwrap() + title_start + "</String>".len();
+    let duplicate_title = xml_text[title_start..title_end].to_owned();
+    let duplicate_xml = xml_text.replacen("</Entry>", &format!("{duplicate_title}</Entry>"), 1);
+    let protected_xml = xml_text.replacen("<Value>", "<Value Protected=\"True\">", 1);
+    let unknown_xml = xml_text.replacen(
+        "</Entry>",
+        "<FutureExtension>value</FutureExtension></Entry>",
+        1,
+    );
+    let two_roots = format!("{xml_text}<KeePassFile/>");
+    let bad_inputs = [duplicate_xml, protected_xml, unknown_xml, two_roots];
+    for (index, bad_xml) in bad_inputs.iter().enumerate() {
+        let bad_path = xml_directory.path().join(format!("invalid-{index}.xml"));
+        std::fs::write(&bad_path, bad_xml).unwrap();
+        let before = std::fs::read(&empty.path).unwrap();
+        let rejected = run(
+            &empty.path,
+            home.path(),
+            &[
+                "secrets",
+                "import",
+                "--file",
+                bad_path.to_str().unwrap(),
+                "--format",
+                "keepass-xml",
+                "--replace",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
         );
+        assert!(!rejected.status.success());
+        assert!(!String::from_utf8_lossy(&rejected.stdout).contains("XML fixture"));
+        assert_eq!(std::fs::read(&empty.path).unwrap(), before);
     }
-    let protected_xml_path = xml_directory.path().join("protected.xml");
-    std::fs::write(&protected_xml_path, protected_xml).unwrap();
-    let reject_protected = run(
+
+    let before_dry_run = std::fs::read(&empty.path).unwrap();
+    let dry_run = run(
         &empty.path,
         home.path(),
         &[
             "secrets",
             "import",
             "--file",
-            protected_xml_path.to_str().unwrap(),
+            xml_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--replace",
+            "--dry-run",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(dry_run.status.success());
+    assert_eq!(std::fs::read(&empty.path).unwrap(), before_dry_run);
+
+    let mut replacement = KeePassDatabase::default();
+    replacement.root.entries.push(Entry::new("Replacement"));
+    let replacement_path = xml_directory.path().join("replacement.xml");
+    std::fs::write(&replacement_path, KdbxXml::export(&replacement).unwrap()).unwrap();
+    let replace = run(
+        &empty.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            replacement_path.to_str().unwrap(),
             "--format",
             "keepass-xml",
             "--replace",
@@ -1940,8 +1987,8 @@ fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
             "NKEEPASS_TEST_PASSWORD",
         ],
     );
-    assert!(!reject_protected.status.success());
-    assert_eq!(load(&empty.path).root.entries[0].title, "XML fixture");
+    assert!(replace.status.success());
+    assert_eq!(load(&empty.path).root.entries[0].title, "Replacement");
 
     let source = TestVault::new("plain.kdbx", &plain);
     let denied_path = home.path().join("denied.xml");

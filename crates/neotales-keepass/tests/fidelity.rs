@@ -15,6 +15,85 @@ fn timestamp(seconds: i64) -> KdbxTimestamp {
 }
 
 #[test]
+fn xml_rejects_duplicate_fields_and_multiple_document_roots() {
+    let mut database = KeePassDatabase::default();
+    database.root.entries.push(Entry::new("duplicate"));
+    let xml = String::from_utf8(KdbxXml::export(&database).unwrap()).unwrap();
+    let start = xml.find("<String><Key>Title</Key>").unwrap();
+    let end = xml[start..].find("</String>").unwrap() + start + "</String>".len();
+    let duplicate = xml[start..end].to_owned();
+    let duplicated = xml.replacen("</Entry>", &format!("{duplicate}</Entry>"), 1);
+    assert!(KdbxXml::import(duplicated.as_bytes(), &KdbxReadLimits::default()).is_err());
+
+    let two_roots = format!("{xml}<KeePassFile/>");
+    assert!(KdbxXml::import(two_roots.as_bytes(), &KdbxReadLimits::default()).is_err());
+}
+
+#[test]
+fn unprotected_field_protect_in_memory_and_username_setting_round_trip() {
+    let mut database = KeePassDatabase::default();
+    database.meta.memory_protection = true;
+    database.meta.protect_username = true;
+    let mut entry = Entry::new("protected-in-memory flag");
+    entry.set_field(Field {
+        key: "UnprotectedButPinned".into(),
+        value: ProtectedValue::from_text("field value"),
+        protected: false,
+        protect_in_memory: true,
+    });
+    database.root.entries.push(entry);
+
+    let xml = KdbxXml::export(&database).unwrap();
+    let xml_text = std::str::from_utf8(&xml).unwrap();
+    assert!(xml_text.contains("<ProtectUserName>True</ProtectUserName>"));
+    assert!(!xml_text.contains("<ProtectUsername>"));
+    assert!(xml_text.contains("<Value ProtectInMemory=\"True\">field value</Value>"));
+    let loaded = KdbxXml::import(&xml, &KdbxReadLimits::default()).unwrap();
+    let field = loaded.root.entries[0]
+        .field("UnprotectedButPinned")
+        .unwrap();
+    assert!(!field.protected);
+    assert!(field.protect_in_memory);
+
+    let legacy_spelling = xml_text.replace("ProtectUserName", "ProtectUsername");
+    let legacy_loaded =
+        KdbxXml::import(legacy_spelling.as_bytes(), &KdbxReadLimits::default()).unwrap();
+    assert!(legacy_loaded.meta.protect_username);
+    let canonical_again = KdbxXml::export(&legacy_loaded).unwrap();
+    assert!(
+        std::str::from_utf8(&canonical_again)
+            .unwrap()
+            .contains("<ProtectUserName>True</ProtectUserName>")
+    );
+
+    let limits = KdbxReadLimits::default();
+    let mut kdbx = Vec::new();
+    KdbxFile::save(
+        &loaded,
+        &mut kdbx,
+        &mut neotales_keepass::KdbxCredentials::password("xml-interop-test").unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &limits,
+    )
+    .unwrap();
+    let reopened = KdbxFile::load_password(kdbx.as_slice(), "xml-interop-test", &limits).unwrap();
+    let final_field = reopened.root.entries[0]
+        .field("UnprotectedButPinned")
+        .unwrap();
+    assert!(!final_field.protected);
+    assert!(final_field.protect_in_memory);
+    let final_xml = KdbxXml::export(&reopened).unwrap();
+    assert!(
+        std::str::from_utf8(&final_xml)
+            .unwrap()
+            .contains("<Value ProtectInMemory=\"True\">field value</Value>")
+    );
+}
+
+#[test]
 fn metadata_custom_icons_and_custom_data_round_trip_through_xml() {
     let icon_id = KdbxUuid::from_bytes([0x11; 16]);
     let mut database = KeePassDatabase::default();

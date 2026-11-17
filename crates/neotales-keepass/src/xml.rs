@@ -57,6 +57,11 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                 if let Some(parent) = stack.last_mut() {
                     parent.children.push(node);
                 } else {
+                    if root.is_some() {
+                        return Err(KdbxError::malformed(
+                            "KDBX XML must contain exactly one document element",
+                        ));
+                    }
                     root = Some(node);
                 }
             }
@@ -94,6 +99,11 @@ fn parse_tree(data: &[u8], limits: &KdbxReadLimits) -> Result<XmlNode, KdbxError
                 if let Some(parent) = stack.last_mut() {
                     parent.children.push(node);
                 } else {
+                    if root.is_some() {
+                        return Err(KdbxError::malformed(
+                            "KDBX XML must contain exactly one document element",
+                        ));
+                    }
                     root = Some(node);
                 }
             }
@@ -226,6 +236,7 @@ fn analyze_losslessness(root: &XmlNode) -> Result<bool, KdbxError> {
             "MemoryProtection" => &[
                 "ProtectTitle",
                 "ProtectUserName",
+                "ProtectUsername",
                 "ProtectPassword",
                 "ProtectURL",
                 "ProtectNotes",
@@ -522,8 +533,15 @@ fn parse_meta(
         meta.protect_password =
             text(memory, "ProtectPassword").is_some_and(|value| value == "True");
         meta.protect_title = text(memory, "ProtectTitle").is_some_and(|value| value == "True");
-        meta.protect_username =
-            text(memory, "ProtectUsername").is_some_and(|value| value == "True");
+        if child(memory, "ProtectUserName").is_some() && child(memory, "ProtectUsername").is_some()
+        {
+            return Err(KdbxError::malformed(
+                "duplicate KeePass username protection setting",
+            ));
+        }
+        meta.protect_username = text(memory, "ProtectUserName")
+            .or_else(|| text(memory, "ProtectUsername"))
+            .is_some_and(|value| value == "True");
         meta.protect_url = text(memory, "ProtectURL").is_some_and(|value| value == "True");
         meta.protect_notes = text(memory, "ProtectNotes").is_some_and(|value| value == "True");
     }
@@ -889,8 +907,12 @@ fn parse_entry(
     if let Some(times) = child(node, "Times") {
         entry.times = parse_times(times)?;
     }
+    let mut field_names = std::collections::BTreeSet::new();
     for string_node in children(node, "String") {
         let field = parse_field(string_node, stream)?;
+        if !field_names.insert(field.key.clone()) {
+            return Err(KdbxError::malformed("duplicate KeePass entry String field"));
+        }
         match field.key.as_str() {
             "Password" => entry.password = field.value.clone(),
             "Title" | "UserName" | "URL" | "Notes" => {
@@ -1376,7 +1398,7 @@ fn write_memory_protection(xml: &mut String, meta: &KeePassMeta) {
     for (name, enabled) in [
         ("ProtectPassword", meta.protect_password),
         ("ProtectTitle", meta.protect_title),
-        ("ProtectUsername", meta.protect_username),
+        ("ProtectUserName", meta.protect_username),
         ("ProtectURL", meta.protect_url),
         ("ProtectNotes", meta.protect_notes),
     ] {
@@ -1687,7 +1709,11 @@ fn write_string_field(
         .expect("writing to String cannot fail");
     } else {
         let text = field.value.reveal_text()?;
-        xml.push_str("<Value>");
+        if field.protect_in_memory {
+            xml.push_str("<Value ProtectInMemory=\"True\">");
+        } else {
+            xml.push_str("<Value>");
+        }
         write_escaped(xml, text.as_str());
         xml.push_str("</Value>");
     }

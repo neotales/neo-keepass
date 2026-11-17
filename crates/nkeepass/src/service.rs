@@ -1699,6 +1699,10 @@ impl VaultService {
     /// XML imports are deliberately limited to the subset supported by
     /// [`KdbxXml`]. Protected XML values and non-lossless model data fail
     /// closed; a nonempty target requires explicit replacement authorization.
+    /// A successful non-dry-run import mutates the live in-memory session and
+    /// invalidates its existing references. A dry run validates the complete
+    /// XML document and authorization without mutating the session. The CLI
+    /// persists a successful mutation after this method returns.
     ///
     /// # Errors
     ///
@@ -1707,8 +1711,7 @@ impl VaultService {
     pub fn import_keepass_xml(
         &mut self,
         input: &[u8],
-        replace: bool,
-        dry_run: bool,
+        options: ImportOptions,
     ) -> Result<(), AutomationError> {
         let live = self
             .session
@@ -1718,16 +1721,21 @@ impl VaultService {
             .map_err(|error| AutomationError::fixed(error.message()))?;
         let database = KdbxXml::import(input, &crate::KDBX_LIMITS)
             .map_err(|_| AutomationError::fixed("invalid or unsupported KeePass XML"))?;
+        if !database.can_save_losslessly {
+            return Err(AutomationError::fixed(
+                "KeePass XML contains unsupported data that cannot be saved losslessly",
+            ));
+        }
         validate_unique_object_ids(&database)
             .map_err(|error| AutomationError::fixed(error.message()))?;
         validate_unique_field_names(&database)
             .map_err(|error| AutomationError::fixed(error.message()))?;
-        if !replace && !automation::tree_is_empty(&live.database) {
+        if !options.replace && !automation::tree_is_empty(&live.database) {
             return Err(AutomationError::fixed(
                 "target vault is not empty; use --replace to authorize replacement",
             ));
         }
-        if !dry_run {
+        if !options.dry_run {
             self.session
                 .as_mut()
                 .ok_or_else(|| AutomationError::fixed("vault is locked"))?
@@ -5400,6 +5408,53 @@ mod tests {
             error.message(),
             "target vault is not empty; use --replace to authorize replacement"
         );
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+    }
+
+    #[test]
+    fn keepass_xml_import_rejects_lossy_input_without_mutating_even_on_dry_run() {
+        let mut target = KeePassDatabase::default();
+        target.root.add_entry(Entry::new("existing"));
+        let before = snapshot(&target);
+        let mut source = KeePassDatabase::default();
+        source.root.add_entry(Entry::new("incoming"));
+        let xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+        let lossy_xml = xml.replace(
+            "</Entry>",
+            "<FutureExtension>unsupported</FutureExtension></Entry>",
+        );
+        let mut service = service_with_database(target);
+
+        for options in [
+            ImportOptions {
+                replace: true,
+                dry_run: true,
+            },
+            ImportOptions {
+                replace: true,
+                dry_run: false,
+            },
+        ] {
+            let error = service
+                .import_keepass_xml(lossy_xml.as_bytes(), options)
+                .unwrap_err();
+            assert_eq!(
+                error.message(),
+                "KeePass XML contains unsupported data that cannot be saved losslessly"
+            );
+            assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+        }
+
+        let valid_xml = KdbxXml::export(&source).unwrap();
+        service
+            .import_keepass_xml(
+                &valid_xml,
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
         assert_eq!(service.export_snapshot().unwrap().bytes(), before);
     }
 

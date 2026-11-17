@@ -26,6 +26,12 @@ header custom data is also rejected. These failures occur before the output
 file is created. Unsupported XML/model data fails closed rather than being
 silently discarded.
 
+As with other private output files, a directory-durability diagnostic can be
+reported after the file has already been installed atomically. In that case
+the file may exist despite the command reporting failure; inspect the target
+before retrying. The pre-install no-file guarantee applies only to validation
+and encoding failures, not post-install durability uncertainty.
+
 The CLI integration test constructs an unprotected XML fixture using this
 project's `KdbxXml` writer. It is useful for routing and safety regression
 coverage but is **not independently produced** and does not establish
