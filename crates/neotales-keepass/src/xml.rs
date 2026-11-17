@@ -1218,6 +1218,11 @@ fn write_database_inner(
             "timestamps on group or entry custom data are unsupported",
         ));
     }
+    if !tree_tags_are_xml_compatible(&database.root) {
+        return Err(KdbxError::unsupported(
+            "KDBX XML tags must be nonempty and cannot contain semicolons",
+        ));
+    }
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile><Meta>");
     let generator = if database.meta.generator.is_empty() {
         "Neotales KeePass Rust"
@@ -1431,6 +1436,21 @@ fn tree_custom_data_is_xml_compatible(group: &Group) -> bool {
             .groups
             .iter()
             .all(|child| tree_custom_data_is_xml_compatible(child))
+}
+
+fn tree_tags_are_xml_compatible(group: &Group) -> bool {
+    fn tags_are_compatible(tags: &[String]) -> bool {
+        tags.iter().all(|tag| !tag.is_empty() && !tag.contains(';'))
+    }
+    fn entry_is_compatible(entry: &Entry) -> bool {
+        tags_are_compatible(&entry.tags) && entry.history.iter().all(entry_is_compatible)
+    }
+    tags_are_compatible(&group.tags)
+        && group.entries.iter().all(entry_is_compatible)
+        && group
+            .groups
+            .iter()
+            .all(|child| tree_tags_are_xml_compatible(child))
 }
 
 fn attachment_references_valid(group: &Group, binary_count: usize) -> bool {

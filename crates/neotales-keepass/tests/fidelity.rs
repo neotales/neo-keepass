@@ -137,6 +137,62 @@ fn save_preserves_entry_and_history_tags_and_nested_group_custom_icons() {
 }
 
 #[test]
+fn tag_constraints_reject_unrepresentable_current_and_history_tags_before_output() {
+    let limits = KdbxReadLimits::default();
+    for bad_tag in ["", "a;b"] {
+        for history in [false, true] {
+            let mut database = KeePassDatabase::default();
+            let mut entry = Entry::new("tagged");
+            if history {
+                let mut snapshot = Entry::new("snapshot");
+                snapshot.tags.push(bad_tag.into());
+                entry.history.push(snapshot);
+            } else {
+                entry.tags.push(bad_tag.into());
+            }
+            database.root.entries.push(entry);
+
+            let mut output = b"existing".to_vec();
+            let error = KdbxFile::save(
+                &database,
+                &mut output,
+                &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+                KdbxWriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..KdbxWriteOptions::default()
+                },
+                &limits,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, neotales_keepass::KdbxFailureKind::Unsupported);
+            assert_eq!(output, b"existing");
+        }
+    }
+}
+
+#[test]
+fn tags_with_xml_special_characters_round_trip_in_current_and_history_entries() {
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("tagged");
+    entry.tags = vec!["research & planning".into(), "<review>".into()];
+    let mut snapshot = Entry::new("snapshot");
+    snapshot.tags = vec!["history & archive".into(), "<old>".into()];
+    entry.history.push(snapshot);
+    database.root.entries.push(entry);
+
+    let xml = KdbxXml::export(&database).unwrap();
+    let loaded = KdbxXml::import(&xml, &KdbxReadLimits::default()).unwrap();
+    assert_eq!(
+        loaded.root.entries[0].tags,
+        ["research & planning", "<review>"]
+    );
+    assert_eq!(
+        loaded.root.entries[0].history[0].tags,
+        ["history & archive", "<old>"]
+    );
+}
+
+#[test]
 fn public_header_custom_data_preserves_all_variant_types() {
     let limits = KdbxReadLimits::default();
     let mut database = KeePassDatabase::default();
