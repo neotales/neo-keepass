@@ -1095,9 +1095,9 @@ pub struct KeePassMeta {
     pub protect_notes: bool,
     /// Database times.
     pub times: KeePassTimes,
-    /// Maintenance history limit.
+    /// Maximum history items, with `-1` meaning unlimited; accepted range is `-1..=i32::MAX`.
     pub history_max_items: Option<i64>,
-    /// History max size.
+    /// Maximum history size in bytes, with `-1` meaning unlimited; accepted range is `-1..=i64::MAX`.
     pub history_max_size: Option<i64>,
     /// Whether memory protection is enabled.
     pub memory_protection: bool,
@@ -1121,6 +1121,13 @@ pub struct KeePassMeta {
     pub legacy_binaries: Vec<Vec<u8>>,
     /// Custom icons.
     pub custom_icons: Vec<CustomIcon>,
+}
+
+/// Checks the KeePass metadata history-limit ranges.
+pub fn history_limits_valid(meta: &KeePassMeta) -> bool {
+    meta.history_max_items
+        .is_none_or(|limit| (-1..=i64::from(i32::MAX)).contains(&limit))
+        && meta.history_max_size.is_none_or(|limit| limit >= -1)
 }
 
 /// A custom icon in database metadata.

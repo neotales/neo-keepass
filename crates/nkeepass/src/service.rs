@@ -3852,6 +3852,9 @@ fn validate_xml_depth(root: &Group) -> Result<(), ServiceError> {
 }
 
 fn validate_save_model(database: &KeePassDatabase) -> Result<(), ServiceError> {
+    if !neotales_keepass::history_limits_valid(&database.meta) {
+        return Err(ServiceError::Save);
+    }
     validate_xml_depth(&database.root)?;
     validate_unique_object_ids(database)?;
     validate_unique_field_names(database)?;
@@ -5625,6 +5628,141 @@ mod tests {
             reimported.binary_pool.records()[attachments[1].reference].data,
             b"legacy-one"
         );
+    }
+
+    #[test]
+    fn keepass_xml_import_normalizes_mixed_declared_and_inline_binaries() {
+        let mut source = KeePassDatabase::default();
+        let declared = source.binary_pool.add(b"declared-payload".to_vec(), false);
+        let mut entry = Entry::new("mixed attachments");
+        entry.attachments.push(neotales_keepass::Attachment {
+            name: "declared.bin".into(),
+            reference: declared,
+        });
+        source.root.add_entry(entry);
+        let xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+        let mixed = xml.replacen(
+            "</Entry>",
+            "<Binary><Key>inline.bin</Key><Value>aW5saW5lLXBheWxvYWQ=</Value></Binary></Entry>",
+            1,
+        );
+
+        let (_directory, path) = vault();
+        let mut service = VaultService::default();
+        service
+            .open(&path, &mut credentials(), &crate::KDBX_LIMITS)
+            .unwrap();
+        let before = service.export_snapshot().unwrap().bytes().to_vec();
+        service
+            .import_keepass_xml(
+                mixed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(service.export_snapshot().unwrap().bytes(), before);
+        service
+            .import_keepass_xml(
+                mixed.as_bytes(),
+                ImportOptions {
+                    replace: true,
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+        service.save(&path, &mut credentials()).unwrap();
+        let reopened = KdbxFile::open(File::open(&path).unwrap(), "service-test-password").unwrap();
+        assert_eq!(reopened.root.entries[0].attachments.len(), 2);
+        for attachment in &reopened.root.entries[0].attachments {
+            let data = &reopened.binary_pool.records()[attachment.reference].data;
+            match attachment.name.as_str() {
+                "declared.bin" => assert_eq!(data, b"declared-payload"),
+                "inline.bin" => assert_eq!(data, b"inline-payload"),
+                other => panic!("unexpected attachment name: {other}"),
+            }
+        }
+        let exported = KdbxXml::export(&reopened).unwrap();
+        let round_trip = KdbxXml::import(&exported, &crate::KDBX_LIMITS).unwrap();
+        assert_eq!(round_trip.root.entries[0].attachments.len(), 2);
+        assert_eq!(round_trip.meta.legacy_binaries.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_history_limits_validate_before_mutation_and_round_trip_boundaries() {
+        let (_directory, path) = vault();
+        let mut service = VaultService::default();
+        service
+            .open(&path, &mut credentials(), &crate::KDBX_LIMITS)
+            .unwrap();
+        let original_snapshot = service.export_snapshot().unwrap().bytes().to_vec();
+        let original_disk = std::fs::read(&path).unwrap();
+        let base = String::from_utf8(original_snapshot.clone()).unwrap();
+        assert!(base.contains("\"history_max_items\":null"));
+        assert!(base.contains("\"history_max_size\":null"));
+
+        for (field, value) in [
+            ("history_max_items", "-2"),
+            ("history_max_items", "2147483648"),
+            ("history_max_size", "-2"),
+        ] {
+            let invalid = base.replacen(
+                &format!("\"{field}\":null"),
+                &format!("\"{field}\":{value}"),
+                1,
+            );
+            assert_ne!(invalid, base);
+            for dry_run in [true, false] {
+                assert!(
+                    service
+                        .import_snapshot(
+                            invalid.as_bytes(),
+                            ImportOptions {
+                                replace: true,
+                                dry_run,
+                            },
+                        )
+                        .is_err(),
+                    "invalid {field}={value} must be rejected"
+                );
+                assert_eq!(
+                    service.export_snapshot().unwrap().bytes(),
+                    original_snapshot
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), original_disk);
+            }
+        }
+
+        for (items, size) in [("-1", "9223372036854775807"), ("2147483647", "-1")] {
+            let mut valid = base.replacen(
+                "\"history_max_items\":null",
+                &format!("\"history_max_items\":{items}"),
+                1,
+            );
+            valid = valid.replacen(
+                "\"history_max_size\":null",
+                &format!("\"history_max_size\":{size}"),
+                1,
+            );
+            service
+                .import_snapshot(
+                    valid.as_bytes(),
+                    ImportOptions {
+                        replace: true,
+                        dry_run: false,
+                    },
+                )
+                .unwrap();
+            service.save(&path, &mut credentials()).unwrap();
+            let reopened =
+                KdbxFile::open(File::open(&path).unwrap(), "service-test-password").unwrap();
+            assert_eq!(
+                reopened.meta.history_max_items,
+                Some(items.parse().unwrap())
+            );
+            assert_eq!(reopened.meta.history_max_size, Some(size.parse().unwrap()));
+        }
     }
 
     #[test]

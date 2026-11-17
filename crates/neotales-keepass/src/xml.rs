@@ -456,6 +456,14 @@ pub(crate) fn parse_database(
         }
     }
     resolve_attachments(&database.root, &database.binary_pool)?;
+    if legacy_binary_references {
+        database.meta.legacy_binaries = database
+            .binary_pool
+            .records()
+            .iter()
+            .map(|record| record.data.clone())
+            .collect();
+    }
     Ok(database)
 }
 
@@ -558,10 +566,10 @@ fn parse_meta(
         meta.protect_notes = memory_protection_value(memory, "ProtectNotes", None)?;
     }
     if let Some(value) = text(node, "HistoryMaxItems") {
-        meta.history_max_items = Some(parse_history_limit(value)?);
+        meta.history_max_items = Some(parse_history_limit(value, i64::from(i32::MAX))?);
     }
     if let Some(value) = text(node, "HistoryMaxSize") {
-        meta.history_max_size = Some(parse_history_limit(value)?);
+        meta.history_max_size = Some(parse_history_limit(value, i64::MAX)?);
     }
     if let Some(value) = text(node, "RecycleBinEnabled") {
         meta.recycle_bin_enabled = value == "True";
@@ -583,7 +591,7 @@ fn parse_meta(
     Ok(())
 }
 
-fn parse_history_limit(value: &str) -> Result<i64, KdbxError> {
+fn parse_history_limit(value: &str, maximum: i64) -> Result<i64, KdbxError> {
     let digits = value.strip_prefix('-').unwrap_or(value);
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(KdbxError::malformed("invalid KeePass history limit"));
@@ -591,7 +599,7 @@ fn parse_history_limit(value: &str) -> Result<i64, KdbxError> {
     let value = value
         .parse::<i64>()
         .map_err(|_| KdbxError::malformed("invalid KeePass history limit"))?;
-    if value < -1 {
+    if value < -1 || value > maximum {
         return Err(KdbxError::malformed(
             "KeePass history limit is out of range",
         ));
@@ -1276,6 +1284,12 @@ fn write_database_inner(
     if !database.can_save_losslessly {
         return Err(KdbxError::unsupported(
             "document cannot be saved losslessly",
+        ));
+    }
+    if !crate::history_limits_valid(&database.meta) {
+        return Err(KdbxError::new(
+            crate::KdbxFailureKind::InvalidArgument,
+            "history limit is outside the KeePass range",
         ));
     }
     if !legacy_binary_state_is_consistent(database) {

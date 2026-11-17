@@ -175,11 +175,50 @@ fn history_limits_reject_malformed_ranges_and_preserve_minus_one_sentinel() {
     assert!(saved.contains("<HistoryMaxItems>-1</HistoryMaxItems>"));
     assert!(saved.contains("<HistoryMaxSize>0</HistoryMaxSize>"));
 
+    let mut maxima = KeePassDatabase::default();
+    maxima.meta.history_max_items = Some(i64::from(i32::MAX));
+    maxima.meta.history_max_size = Some(i64::MAX);
+    let maximum_xml = KdbxXml::export(&maxima).unwrap();
+    let maximum_loaded = KdbxXml::import(&maximum_xml, &KdbxReadLimits::default()).unwrap();
+    assert_eq!(
+        maximum_loaded.meta.history_max_items,
+        Some(i64::from(i32::MAX))
+    );
+    assert_eq!(maximum_loaded.meta.history_max_size, Some(i64::MAX));
+
+    for (items, size) in [
+        (Some(-2), None),
+        (Some(i64::from(i32::MAX) + 1), None),
+        (None, Some(-2)),
+    ] {
+        let mut invalid = KeePassDatabase::default();
+        invalid.meta.history_max_items = items;
+        invalid.meta.history_max_size = size;
+        assert!(KdbxXml::export(&invalid).is_err());
+        let mut bytes = Vec::new();
+        let mut credentials =
+            neotales_keepass::KdbxCredentials::password("invalid-history-test").unwrap();
+        assert!(
+            KdbxFile::save(
+                &invalid,
+                &mut bytes,
+                &mut credentials,
+                KdbxWriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..KdbxWriteOptions::default()
+                },
+                &KdbxReadLimits::default(),
+            )
+            .is_err()
+        );
+    }
+
     for (element, value) in [
         ("HistoryMaxItems", "bad"),
         ("HistoryMaxSize", "bad"),
         ("HistoryMaxItems", "-2"),
         ("HistoryMaxSize", "-2"),
+        ("HistoryMaxItems", "2147483648"),
         ("HistoryMaxItems", "9223372036854775808"),
         ("HistoryMaxSize", "9223372036854775808"),
     ] {
@@ -441,6 +480,63 @@ fn shared_legacy_xml_attachments_round_trip() {
     assert_eq!(loaded.root.entries[0].attachments[0].reference, 0);
     assert_eq!(loaded.root.entries[0].attachments[1].reference, 0);
     assert_eq!(loaded.root.entries[1].attachments[0].reference, 0);
+}
+
+#[test]
+fn mixed_legacy_and_inline_xml_binaries_normalize_and_round_trip() {
+    let mut source = KeePassDatabase::default();
+    let declared = source.binary_pool.add(b"declared-payload".to_vec(), false);
+    let mut entry = Entry::new("mixed attachments");
+    entry.attachments.push(Attachment {
+        name: "declared.bin".into(),
+        reference: declared,
+    });
+    source.root.add_entry(entry);
+
+    let xml = String::from_utf8(KdbxXml::export(&source).unwrap()).unwrap();
+    let mixed = xml.replacen(
+        "</Entry>",
+        "<Binary><Key>inline.bin</Key><Value>aW5saW5lLXBheWxvYWQ=</Value></Binary></Entry>",
+        1,
+    );
+    let loaded = KdbxXml::import(mixed.as_bytes(), &KdbxReadLimits::default()).unwrap();
+    assert_eq!(loaded.binary_pool.len(), 2);
+    assert_eq!(loaded.meta.legacy_binaries.len(), 2);
+    assert_eq!(loaded.meta.legacy_binaries[0], b"declared-payload");
+    assert_eq!(loaded.meta.legacy_binaries[1], b"inline-payload");
+
+    let mut kdbx = Vec::new();
+    KdbxFile::save(
+        &loaded,
+        &mut kdbx,
+        &mut neotales_keepass::KdbxCredentials::password("mixed-binary-test").unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+    let reopened = KdbxFile::load_password(
+        kdbx.as_slice(),
+        "mixed-binary-test",
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+    assert!(reopened.meta.legacy_binaries.is_empty());
+    assert_eq!(reopened.binary_pool.len(), 2);
+    let exported = KdbxXml::export(&reopened).unwrap();
+    let round_trip = KdbxXml::import(&exported, &KdbxReadLimits::default()).unwrap();
+    assert_eq!(round_trip.meta.legacy_binaries.len(), 2);
+    assert_eq!(round_trip.root.entries[0].attachments.len(), 2);
+    for attachment in &round_trip.root.entries[0].attachments {
+        let data = &round_trip.binary_pool.records()[attachment.reference].data;
+        match attachment.name.as_str() {
+            "declared.bin" => assert_eq!(data, b"declared-payload"),
+            "inline.bin" => assert_eq!(data, b"inline-payload"),
+            other => panic!("unexpected attachment name: {other}"),
+        }
+    }
 }
 
 #[test]
