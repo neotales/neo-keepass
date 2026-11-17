@@ -3214,7 +3214,7 @@ fn service_automation_operation(
                     ));
                 }
                 let snapshot = if xml {
-                    service.export_keepass_xml()
+                    service.export_keepass_xml_allow_plaintext()
                 } else {
                     service.export_snapshot()
                 }

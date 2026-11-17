@@ -8,6 +8,7 @@ use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::crypto::InnerCipher;
 use crate::error::KdbxError;
@@ -1193,20 +1194,21 @@ impl KdbxXml {
     /// Returns unsupported when protected fields or binaries require a KDBX
     /// inner stream.
     pub fn export(database: &KeePassDatabase) -> Result<Vec<u8>, KdbxError> {
-        if !database.public_custom_data.items().is_empty()
-            || !database.typed_public_custom_data.is_empty()
-        {
-            return Err(KdbxError::unsupported(
-                "plain XML cannot represent public outer-header custom data",
-            ));
-        }
-        if has_protected_values(database) {
-            return Err(KdbxError::unsupported(
-                "plain XML cannot represent protected values",
-            ));
-        }
-        let mut stream = InnerCipher::new(2, &[0; 64])?;
-        write_database(database, &mut stream, BinaryStorage::LegacyXml)
+        export_xml(database, false)
+    }
+
+    /// Exports KeePass XML with protected fields written as plaintext.
+    ///
+    /// This explicit path is intended only for callers that have separately
+    /// obtained authorization to create a plaintext export. Protected binary
+    /// data and other unsupported model data remain rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns unsupported when binary data or other model data cannot be
+    /// represented, or an error if revealing a field fails.
+    pub fn export_allow_plaintext(database: &KeePassDatabase) -> Result<Vec<u8>, KdbxError> {
+        export_xml(database, true)
     }
 
     /// Imports an unprotected KDBX XML document.
@@ -1231,6 +1233,38 @@ impl KdbxXml {
         };
         parse_database(data, &inner, &[], 0, true, None, limits)
     }
+}
+
+fn export_xml(database: &KeePassDatabase, allow_plaintext: bool) -> Result<Vec<u8>, KdbxError> {
+    if !database.public_custom_data.items().is_empty()
+        || !database.typed_public_custom_data.is_empty()
+    {
+        return Err(KdbxError::unsupported(
+            "plain XML cannot represent public outer-header custom data",
+        ));
+    }
+    if (has_protected_values(database) && !allow_plaintext)
+        || (allow_plaintext && has_protected_binaries(database))
+    {
+        return Err(KdbxError::unsupported(
+            "plain XML cannot represent protected values or binaries",
+        ));
+    }
+    let mut stream = InnerCipher::new(2, &[0; 64])?;
+    write_database_with_plaintext_mode(
+        database,
+        &mut stream,
+        BinaryStorage::LegacyXml,
+        allow_plaintext,
+    )
+}
+
+fn has_protected_binaries(database: &KeePassDatabase) -> bool {
+    database
+        .binary_pool
+        .records()
+        .iter()
+        .any(|record| record.protected)
 }
 
 fn has_protected_values(database: &KeePassDatabase) -> bool {
@@ -1263,7 +1297,16 @@ pub(crate) fn write_database(
     stream: &mut InnerCipher,
     storage: BinaryStorage,
 ) -> Result<Vec<u8>, KdbxError> {
-    write_database_inner(database, stream, storage, None)
+    write_database_inner(database, stream, storage, None, false)
+}
+
+fn write_database_with_plaintext_mode(
+    database: &KeePassDatabase,
+    stream: &mut InnerCipher,
+    storage: BinaryStorage,
+    allow_plaintext: bool,
+) -> Result<Vec<u8>, KdbxError> {
+    write_database_inner(database, stream, storage, None, allow_plaintext)
 }
 
 pub(crate) fn write_database_with_header_hash(
@@ -1272,7 +1315,7 @@ pub(crate) fn write_database_with_header_hash(
     storage: BinaryStorage,
     header_hash: &[u8; 32],
 ) -> Result<Vec<u8>, KdbxError> {
-    write_database_inner(database, stream, storage, Some(header_hash))
+    write_database_inner(database, stream, storage, Some(header_hash), false)
 }
 
 fn write_database_inner(
@@ -1280,6 +1323,7 @@ fn write_database_inner(
     stream: &mut InnerCipher,
     storage: BinaryStorage,
     header_hash: Option<&[u8; 32]>,
+    allow_plaintext: bool,
 ) -> Result<Vec<u8>, KdbxError> {
     if !database.can_save_losslessly {
         return Err(KdbxError::unsupported(
@@ -1313,7 +1357,9 @@ fn write_database_inner(
             "timestamps on group or entry custom data are unsupported",
         ));
     }
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile><Meta>");
+    let mut xml = Zeroizing::new(String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile><Meta>",
+    ));
     let generator = if database.meta.generator.is_empty() {
         "Neotales KeePass Rust"
     } else {
@@ -1443,7 +1489,7 @@ fn write_database_inner(
         write_legacy_binaries(&mut xml, database, stream)?;
     }
     xml.push_str("</Meta><Root>");
-    write_group(&mut xml, &database.root, &mut *stream)?;
+    write_group(&mut xml, &database.root, &mut *stream, allow_plaintext)?;
     if !database.deleted_objects.is_empty() {
         xml.push_str("<DeletedObjects>");
         for deleted in &database.deleted_objects {
@@ -1458,7 +1504,7 @@ fn write_database_inner(
         xml.push_str("</DeletedObjects>");
     }
     xml.push_str("</Root></KeePassFile>");
-    Ok(xml.into_bytes())
+    Ok(std::mem::take(&mut *xml).into_bytes())
 }
 
 fn write_memory_protection(xml: &mut String, meta: &KeePassMeta) {
@@ -1610,7 +1656,12 @@ fn write_legacy_binaries(
     Ok(())
 }
 
-fn write_group(xml: &mut String, group: &Group, stream: &mut InnerCipher) -> Result<(), KdbxError> {
+fn write_group(
+    xml: &mut String,
+    group: &Group,
+    stream: &mut InnerCipher,
+    allow_plaintext: bool,
+) -> Result<(), KdbxError> {
     xml.push_str("<Group>");
     write_text(xml, "UUID", &group.id.to_base64());
     write_text(xml, "Name", &group.name);
@@ -1651,15 +1702,20 @@ fn write_group(xml: &mut String, group: &Group, stream: &mut InnerCipher) -> Res
     }
     write_custom_data(xml, &group.custom_data, false);
     for entry in &group.entries {
-        write_entry(xml, entry, stream)?;
+        write_entry(xml, entry, stream, allow_plaintext)?;
     }
     for child in &group.groups {
-        write_group(xml, child, stream)?;
+        write_group(xml, child, stream, allow_plaintext)?;
     }
     xml.push_str("</Group>");
     Ok(())
 }
-fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Result<(), KdbxError> {
+fn write_entry(
+    xml: &mut String,
+    entry: &Entry,
+    stream: &mut InnerCipher,
+    allow_plaintext: bool,
+) -> Result<(), KdbxError> {
     xml.push_str("<Entry>");
     write_text(xml, "UUID", &entry.id.to_base64());
     write_text(xml, "OverrideURL", &entry.override_url);
@@ -1678,17 +1734,51 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
         &entry.previous_parent_group_id.to_base64(),
     );
     write_times(xml, &entry.times);
-    write_standard_field(xml, entry, "Title", entry.title.as_bytes(), stream)?;
-    write_standard_field(xml, entry, "UserName", entry.username.as_bytes(), stream)?;
-    write_standard_field(xml, entry, "URL", entry.url.as_bytes(), stream)?;
+    write_standard_field(
+        xml,
+        entry,
+        "Title",
+        entry.title.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
+    write_standard_field(
+        xml,
+        entry,
+        "UserName",
+        entry.username.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
+    write_standard_field(
+        xml,
+        entry,
+        "URL",
+        entry.url.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
     if let Some(field) = entry.field("Password") {
-        write_string_field(xml, field, stream)?;
+        write_string_field(xml, field, stream, allow_plaintext)?;
     } else if !entry.password.is_empty() {
-        entry.password.with_revealed_bytes(|password| {
-            write_field_xml(xml, "Password", password, true, false, stream)
-        })??;
+        if allow_plaintext {
+            entry.password.with_revealed_text(|password| {
+                write_field_xml(xml, "Password", password.as_bytes(), false, false, stream)
+            })??;
+        } else {
+            entry.password.with_revealed_bytes(|password| {
+                write_field_xml(xml, "Password", password, true, false, stream)
+            })??;
+        }
     }
-    write_standard_field(xml, entry, "Notes", entry.notes.as_bytes(), stream)?;
+    write_standard_field(
+        xml,
+        entry,
+        "Notes",
+        entry.notes.as_bytes(),
+        stream,
+        allow_plaintext,
+    )?;
     for field in &entry.fields {
         if matches!(
             field.key.as_str(),
@@ -1696,7 +1786,7 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
         ) {
             continue;
         }
-        write_string_field(xml, field, stream)?;
+        write_string_field(xml, field, stream, allow_plaintext)?;
     }
     for attachment in &entry.attachments {
         write!(
@@ -1741,7 +1831,7 @@ fn write_entry(xml: &mut String, entry: &Entry, stream: &mut InnerCipher) -> Res
     if !entry.history.is_empty() {
         xml.push_str("<History>");
         for snapshot in &entry.history {
-            write_entry(xml, snapshot, stream)?;
+            write_entry(xml, snapshot, stream, allow_plaintext)?;
         }
         xml.push_str("</History>");
     }
@@ -1755,9 +1845,10 @@ fn write_standard_field(
     key: &str,
     fallback: &[u8],
     stream: &mut InnerCipher,
+    allow_plaintext: bool,
 ) -> Result<(), KdbxError> {
     if let Some(field) = entry.field(key) {
-        write_string_field(xml, field, stream)
+        write_string_field(xml, field, stream, allow_plaintext)
     } else if key == "Title" || !fallback.is_empty() {
         write_field_xml(xml, key, fallback, false, false, stream)
     } else {
@@ -1769,10 +1860,11 @@ fn write_string_field(
     xml: &mut String,
     field: &Field,
     stream: &mut InnerCipher,
+    allow_plaintext: bool,
 ) -> Result<(), KdbxError> {
     xml.push_str("<String>");
     write_text(xml, "Key", &field.key);
-    if field.protected {
+    if field.protected && !allow_plaintext {
         let encoded = field.value.with_revealed_bytes(|bytes| {
             stream.transform(bytes);
             STANDARD.encode(bytes)

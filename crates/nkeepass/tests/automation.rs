@@ -1881,8 +1881,22 @@ fn sync_honours_the_directive_without_touching_the_rest_of_the_vault() {
 #[test]
 fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
     let mut plain = KeePassDatabase::default();
-    plain.root.entries.push(Entry::new("XML fixture"));
-    let xml = KdbxXml::export(&plain).unwrap();
+    let mut xml_entry = Entry::new("XML fixture");
+    xml_entry.username = "synthetic-user".into();
+    xml_entry.url = "https://example.invalid".into();
+    xml_entry.notes = "synthetic ordinary notes".into();
+    xml_entry.password = ProtectedValue::from_text("synthetic-xml-secret");
+    xml_entry.fields.push(neotales_keepass::Field {
+        key: "Synthetic protected field".into(),
+        value: ProtectedValue::from_text("synthetic-field-secret"),
+        protected: true,
+        protect_in_memory: false,
+    });
+    plain.root.entries.push(xml_entry);
+    assert!(KdbxXml::export(&plain).is_err());
+    let mut import_fixture = KeePassDatabase::default();
+    import_fixture.root.entries.push(Entry::new("XML fixture"));
+    let xml = KdbxXml::export(&import_fixture).unwrap();
     let xml_directory = tempfile::tempdir().unwrap();
     let xml_path = xml_directory.path().join("subset.xml");
     std::fs::write(&xml_path, &xml).unwrap();
@@ -2031,6 +2045,47 @@ fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
         String::from_utf8_lossy(&allowed.stderr)
     );
     assert!(std::fs::read(&output_path).unwrap().starts_with(b"<?xml"));
+    let exported = std::fs::read(&output_path).unwrap();
+    assert!(
+        exported
+            .windows(b"synthetic-xml-secret".len())
+            .any(|w| w == b"synthetic-xml-secret")
+    );
+    let roundtrip_vault = TestVault::new("xml-roundtrip.kdbx", &KeePassDatabase::default());
+    let roundtrip = run(
+        &roundtrip_vault.path,
+        home.path(),
+        &[
+            "secrets",
+            "import",
+            "--file",
+            output_path.to_str().unwrap(),
+            "--format",
+            "keepass-xml",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(roundtrip.status.success(), "XML round-trip import failed");
+    let roundtripped = load(&roundtrip_vault.path);
+    let entry = &roundtripped.root.entries[0];
+    assert_eq!(
+        entry.password.reveal_text().unwrap().as_str(),
+        "synthetic-xml-secret"
+    );
+    assert_eq!(entry.username, "synthetic-user");
+    assert_eq!(entry.url, "https://example.invalid");
+    assert_eq!(entry.notes, "synthetic ordinary notes");
+    assert_eq!(
+        entry
+            .field("Synthetic protected field")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "synthetic-field-secret"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2061,9 +2116,9 @@ fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
     assert!(!overwrite.status.success());
 
     let mut protected = KeePassDatabase::default();
-    let mut entry = Entry::new("protected");
-    entry.password = ProtectedValue::from_text(ENTRY_SECRET);
-    protected.root.entries.push(entry);
+    protected
+        .binary_pool
+        .add(b"synthetic protected binary".to_vec(), true);
     let protected_vault = TestVault::new("protected.kdbx", &protected);
     let unsupported_path = home.path().join("unsupported.xml");
     let unsupported = run(
@@ -2083,5 +2138,5 @@ fn keepass_xml_cli_is_opt_in_private_and_fail_closed() {
     );
     assert!(!unsupported.status.success());
     assert!(!unsupported_path.exists());
-    assert_no_disclosure(&unsupported, ENTRY_SECRET);
+    assert_no_disclosure(&unsupported, "synthetic protected binary");
 }

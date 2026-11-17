@@ -1694,6 +1694,29 @@ impl VaultService {
         Ok(ExportSnapshot(bytes.into()))
     }
 
+    /// Exports the open database as unprotected KeePass XML.
+    ///
+    /// Unlike [`Self::export_keepass_xml`], this explicitly reveals protected
+    /// values. Callers must obtain plaintext-export authorization before using
+    /// this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vault is locked or its contents cannot be
+    /// represented by the supported XML subset.
+    pub fn export_keepass_xml_allow_plaintext(&self) -> Result<ExportSnapshot, AutomationError> {
+        let live = self
+            .session
+            .as_ref()
+            .ok_or_else(|| AutomationError::fixed("vault is locked"))?;
+        let bytes = KdbxXml::export_allow_plaintext(&live.database).map_err(|_| {
+            AutomationError::fixed(
+                "vault contains data that the KeePass XML subset cannot represent",
+            )
+        })?;
+        Ok(ExportSnapshot(bytes.into()))
+    }
+
     /// Replaces the open database from unprotected KeePass XML.
     ///
     /// XML imports are deliberately limited to the subset supported by
