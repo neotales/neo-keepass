@@ -804,7 +804,7 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "get",
-        "get [OPTIONS]",
+        "get [PATH] [OPTIONS]",
         "Shortcut for secrets get.",
         GET_OPTIONS,
         NO_COMMANDS,
@@ -839,14 +839,14 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "set",
-        "set [OPTIONS]",
+        "set [PATH] [OPTIONS]",
         "Shortcut for secrets set.",
         SET_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "rm|remove",
-        "rm [OPTIONS]",
+        "rm [PATH] [OPTIONS]",
         "Shortcut for secrets rm.",
         RM_OPTIONS,
         NO_COMMANDS,
@@ -6648,6 +6648,19 @@ fn run(args: &[String], program: &str) -> Result<()> {
         "context" => match rest.first().map(String::as_str) {
             Some("ls" | "list") if rest.len() == 1 || (rest.len() == 2 && rest[1] == "--json") => {
                 let as_json = rest.len() == 2;
+                if as_json {
+                    // Keep the original JSON contract: machine consumers receive
+                    // configured vault aliases only. Unaliased selections are
+                    // additional human-facing context rows, not alias records.
+                    for (name, alias) in &config.aliases {
+                        if alias.kind == Kind::Vault {
+                            check_alias_metadata(name, alias)?;
+                            let path = normalized_vault_text(&vault_path(&alias.target)?);
+                            json(&serde_json::json!({"alias": name, "path": path}))?;
+                        }
+                    }
+                    return Ok(());
+                }
                 let current_path = config
                     .current
                     .as_deref()
@@ -6664,39 +6677,25 @@ fn run(args: &[String], program: &str) -> Result<()> {
                             .as_deref()
                             .is_some_and(|value| vault_path_key(value) == key);
                         listed_paths.insert(key);
-                        if as_json {
-                            json(&serde_json::json!({"alias": name, "path": path}))?;
-                        } else {
-                            writeln!(
-                                io::stdout(),
-                                "{name}\t{path}{}",
-                                if current { "\t(current)" } else { "" }
-                            )
-                            .map_err(|_| err("cannot write output"))?;
-                        }
+                        writeln!(
+                            io::stdout(),
+                            "{name}\t{path}{}",
+                            if current { "\t(current)" } else { "" }
+                        )
+                        .map_err(|_| err("cannot write output"))?;
                     }
                 }
                 if let Some(path) = &current_path
                     && listed_paths.insert(vault_path_key(path))
                 {
-                    if as_json {
-                        json(&serde_json::json!({"alias": null, "path": path}))?;
-                    } else {
-                        writeln!(io::stdout(), "(current)\t{path}")
-                            .map_err(|_| err("cannot write output"))?;
-                    }
+                    writeln!(io::stdout(), "(current)\t{path}")
+                        .map_err(|_| err("cannot write output"))?;
                 }
                 if let Some(default) = &config.default_vault {
                     let path = normalized_vault_text(&resolve_vault(default, &config)?);
                     if listed_paths.insert(vault_path_key(&path)) {
-                        if as_json {
-                            json(
-                                &serde_json::json!({"alias": null, "path": path, "source": "default"}),
-                            )?;
-                        } else {
-                            writeln!(io::stdout(), "(default)\t{path}")
-                                .map_err(|_| err("cannot write output"))?;
-                        }
+                        writeln!(io::stdout(), "(default)\t{path}")
+                            .map_err(|_| err("cannot write output"))?;
                     }
                 }
                 Ok(())

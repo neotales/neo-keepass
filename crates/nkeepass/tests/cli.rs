@@ -3158,7 +3158,29 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
             &["config", "show", "--help"][..],
             "Usage: nkp config show KEY",
         ),
-        (&["get", "--help"][..], "Usage: nkp get [OPTIONS]"),
+        (&["get", "--help"][..], "Usage: nkp get [PATH] [OPTIONS]"),
+        (&["set", "--help"][..], "Usage: nkp set [PATH] [OPTIONS]"),
+        (&["rm", "--help"][..], "Usage: nkp rm [PATH] [OPTIONS]"),
+        (
+            &["remove", "--help"][..],
+            "Usage: nkp remove [PATH] [OPTIONS]",
+        ),
+        (
+            &["secrets", "get", "--help"][..],
+            "Usage: nkp secrets get [PATH] [OPTIONS]",
+        ),
+        (
+            &["secrets", "set", "--help"][..],
+            "Usage: nkp secrets set [PATH] [OPTIONS]",
+        ),
+        (
+            &["secrets", "rm", "--help"][..],
+            "Usage: nkp secrets rm [PATH] [OPTIONS]",
+        ),
+        (
+            &["secrets", "remove", "--help"][..],
+            "Usage: nkp secrets remove [PATH] [OPTIONS]",
+        ),
     ] {
         for flag in ["--help", "-h"] {
             let mut with_flag = args.to_vec();

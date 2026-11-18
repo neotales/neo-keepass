@@ -29,8 +29,10 @@ nkp context show
 `context show` prints the selected name, path and source. `context ls` and
 `context list` print configured vault aliases and paths, plus a directly
 selected path and an otherwise unlisted configured default path. A current
-path is marked. These commands use readable text by default; add `--json` for
-machine-readable records.
+path is marked. These commands use readable text by default. With `--json`,
+`context ls`/`list` retain their alias-only output contract: one record with
+`alias` and `path` per configured vault alias. Unaliased current/default paths
+appear only in human-readable output.
 
 To use an environment selection for one shell:
 

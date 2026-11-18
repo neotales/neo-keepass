@@ -146,22 +146,22 @@ nkp context remove ALIAS
 
 `ls` (also `list`) lists configured vault aliases and paths, as well as a
 directly selected path as `(current)` and an otherwise unlisted configured
-default path as `(default)`. Paths already represented by aliases are not
-repeated as direct paths. Rows mark the configured current path. `show` reports the selected vault,
-its alias (or `(unnamed)`), and source. These commands print human-readable
-text by default; `--json` selects machine-readable records (`ls` emits one JSON
-object per line). Existing alias records retain `alias` and `path`; a direct
-current path has a null `alias`, while a newly reported direct default has a
-null `alias` and `"source":"default"`. Current status appears in text; use
-`context show --json` for machine-readable selection and source. For
-compatibility its `alias` is populated only for the configured current
-context, even when text names an alias selected through an argument,
-environment variable, or configured default. On Windows path comparisons
-normalize separators but retain case, since directories can be case-sensitive;
-case variants may therefore appear more than once on case-insensitive volumes.
-Displayed spelling is unchanged. This lexical policy does not resolve symlinks
-or hard links. `use` selects a configured vault alias. `set` creates or
-updates an alias. `rm` (also `remove`) removes an alias and clears it as current if needed.
+default path as `(default)` in human-readable output. Paths already represented
+by aliases are not repeated as direct paths. Rows mark the configured current
+path. `show` reports the selected vault, its alias (or `(unnamed)`), and
+source. These commands print human-readable text by default. With `--json`,
+`ls` emits one JSON object per configured vault alias, retaining the original
+`alias` and `path` fields; unaliased current and default paths are omitted.
+With no configured vault aliases, JSON output is empty. `show --json` reports
+the selected path and source. For compatibility its `alias` is populated only
+for the configured current context, even when text names an alias selected
+through an argument, environment variable, or configured default. On Windows
+path comparisons normalize separators but retain case, since directories may
+be case-sensitive. Case variants may therefore appear more than once on
+case-insensitive volumes. Displayed spelling is unchanged. This lexical policy
+does not resolve symlinks or hard links. `use` selects a configured vault
+alias. `set` creates or updates an alias. `rm` (also `remove`) removes an alias
+and clears it as current if needed.
 Other subcommands have no command-specific options.
 
 ## `alias`

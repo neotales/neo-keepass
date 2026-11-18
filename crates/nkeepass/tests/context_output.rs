@@ -60,7 +60,7 @@ fn candidates(root: &std::path::Path) -> Vec<serde_json::Value> {
 }
 
 #[test]
-fn direct_default_and_aliases_are_listed_once_with_current_status() {
+fn human_context_list_shows_unaliased_paths_but_json_preserves_alias_only_contract() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("default vault.kdbx");
     let path = path.to_str().unwrap();
@@ -72,10 +72,8 @@ fn direct_default_and_aliases_are_listed_once_with_current_status() {
     let text = run(root.path(), &["context", "list"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("(default)"));
     let listed = run(root.path(), &["context", "ls", "--json"]);
-    let record: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(record["path"], path);
-    assert_eq!(record["source"], "default");
-    assert!(record.get("current").is_none());
+    assert!(listed.status.success());
+    assert!(listed.stdout.is_empty());
     assert!(
         run(root.path(), &["context", "set", "work", path])
             .status
@@ -93,6 +91,7 @@ fn direct_default_and_aliases_are_listed_once_with_current_status() {
         .collect();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["alias"], "work");
+    assert_eq!(records[0]["path"], path);
     assert!(records[0].get("current").is_none());
     assert_eq!(records[0].as_object().unwrap().len(), 2);
     let text = run(root.path(), &["context", "ls"]);
@@ -109,6 +108,44 @@ fn direct_default_and_aliases_are_listed_once_with_current_status() {
         .collect();
     assert_eq!(records.len(), 1);
     assert!(records[0].get("current").is_none());
+    assert_eq!(records[0].as_object().unwrap().len(), 2);
+    let current_text = run(root.path(), &["context", "ls"]);
+    assert!(String::from_utf8_lossy(&current_text.stdout).contains("(current)"));
+
+    let direct_current = root.path().join("current-only.kdbx");
+    let separate_default = root.path().join("default-only.kdbx");
+    assert!(
+        run(
+            root.path(),
+            &["config", "set", "current", direct_current.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            root.path(),
+            &[
+                "config",
+                "set",
+                "default_vault",
+                separate_default.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    let listed = run(root.path(), &["context", "ls", "--json"]);
+    let records: Vec<serde_json::Value> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["alias"], "work");
+    let text = run(root.path(), &["context", "list"]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("(current)"));
+    assert!(text.contains("(default)"));
 }
 
 #[test]
@@ -196,13 +233,9 @@ fn windows_context_paths_preserve_case_distinct_candidates() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["alias"], "work");
     assert_eq!(rows[0]["path"], original.replace('/', "\\"));
-    assert!(
-        rows.iter()
-            .any(|row| row["alias"].is_null() && row["path"] == alternate.replace('/', "\\"))
-    );
     let text = run(root.path(), &["context", "ls"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("(current)"));
 }
@@ -672,8 +705,23 @@ fn initialized_contexts_are_visible_as_text_and_json() {
             }));
             let json = run(root.path(), &["context", action, "--json"]);
             assert!(json.status.success());
-            let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-            assert_eq!(json["path"], path);
+            if action == "show" {
+                let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+                assert_eq!(json["path"], path);
+            } else if explicit {
+                assert!(
+                    json.stdout.is_empty(),
+                    "unaliased context leaked into alias-only JSON output"
+                );
+            } else {
+                let records: Vec<serde_json::Value> = String::from_utf8_lossy(&json.stdout)
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0]["alias"], "default");
+                assert_eq!(records[0]["path"], path);
+            }
         }
         let opened = run(
             root.path(),
