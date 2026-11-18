@@ -1494,7 +1494,7 @@ fn vault_path_key(text: &str) -> String {
 /// Applies the platform's lexical comparison policy without changing output.
 fn vault_path_key_for_platform(text: &str, windows: bool) -> String {
     if windows {
-        text.replace('/', "\\").to_lowercase()
+        text.replace('/', "\\")
     } else {
         text.to_owned()
     }
@@ -2165,6 +2165,20 @@ fn backup_init_password_at(
     config_root: &Path,
     data_root: &Path,
 ) -> Result<InitPasswordBackup> {
+    backup_init_password_at_with(
+        password,
+        config_root,
+        data_root,
+        confirm_backup_identity_durability,
+    )
+}
+
+fn backup_init_password_at_with(
+    password: &str,
+    config_root: &Path,
+    data_root: &Path,
+    confirm: impl FnOnce(&File, &Path) -> Result<()>,
+) -> Result<InitPasswordBackup> {
     for path in [config_root, data_root] {
         if !path.to_str().is_some_and(safe_metadata) {
             return Err(err("password backup directory is not safe to report"));
@@ -2180,7 +2194,8 @@ fn backup_init_password_at(
     let config = config_root;
     let data = data_root;
     let identity_path = config.join("init-password.agekey");
-    let (identity, identity_created) = load_or_create_backup_identity(&identity_path)?;
+    let (identity, identity_created) =
+        load_or_create_backup_identity_with(&identity_path, confirm)?;
 
     let recipient = identity
         .recipient()
@@ -2223,7 +2238,28 @@ fn backup_init_password_at(
 /// Installs a private, no-clobber recovery candidate before vault creation.
 ///
 /// The record describes an attempt, not proof that the vault was installed.
-fn associate_init_backup(backup: &mut InitPasswordBackup, vault: &str) -> Result<()> {
+#[derive(Debug)]
+struct AssociationError {
+    message: &'static str,
+    installed: bool,
+}
+
+fn associate_init_backup(
+    backup: &mut InitPasswordBackup,
+    vault: &str,
+) -> std::result::Result<(), AssociationError> {
+    associate_init_backup_with(
+        backup,
+        vault,
+        nkeepass::private_file::write_private_noclobber,
+    )
+}
+
+fn associate_init_backup_with(
+    backup: &mut InitPasswordBackup,
+    vault: &str,
+    install: impl FnOnce(&Path, &[u8]) -> std::result::Result<(), &'static str>,
+) -> std::result::Result<(), AssociationError> {
     let mut name = backup.path.as_os_str().to_os_string();
     name.push(".json");
     let path = PathBuf::from(name);
@@ -2234,10 +2270,39 @@ fn associate_init_backup(backup: &mut InitPasswordBackup, vault: &str) -> Result
         "age_identity": backup.identity_path.to_string_lossy(),
         "status": "candidate",
     });
-    let bytes =
-        serde_json::to_vec(&record).map_err(|_| err("cannot encode recovery association"))?;
-    nkeepass::private_file::write_private_noclobber(&path, &bytes)
-        .map_err(|_| err("cannot securely install recovery association"))?;
+    let bytes = serde_json::to_vec(&record).map_err(|_| AssociationError {
+        message: "cannot encode recovery association",
+        installed: false,
+    })?;
+    if let Err(cause) = install(&path, &bytes) {
+        let installed = cause == "output installed but directory durability is unconfirmed";
+        if installed {
+            backup.association_path = Some(path);
+        }
+        return Err(AssociationError {
+            message: match cause {
+                "output installed but directory durability is unconfirmed" => {
+                    "recovery association installed but directory durability is unconfirmed"
+                }
+                "output exists" => "recovery association already exists",
+                "filesystem cannot verify persistent owner-only ACL support" => {
+                    "filesystem cannot verify persistent owner-only ACL support"
+                }
+                "cannot query filesystem ACL capability" => {
+                    "cannot query filesystem ACL capability"
+                }
+                "cannot restrict output permissions" => {
+                    "cannot restrict recovery association permissions"
+                }
+                "cannot stage output" => "cannot stage recovery association",
+                "cannot write output" => "cannot write recovery association",
+                "cannot sync output" => "cannot sync recovery association",
+                "cannot install output" => "cannot install recovery association",
+                _ => "cannot securely install recovery association",
+            },
+            installed,
+        });
+    }
     backup.association_path = Some(path);
     Ok(())
 }
@@ -2289,9 +2354,12 @@ fn ensure_backup_dir(path: &Path, diagnostic: &'static str) -> Result<()> {
     Ok(())
 }
 
-fn load_or_create_backup_identity(path: &Path) -> Result<(AgeIdentity, bool)> {
+fn load_or_create_backup_identity_with(
+    path: &Path,
+    confirm: impl FnOnce(&File, &Path) -> Result<()>,
+) -> Result<(AgeIdentity, bool)> {
     match fs::symlink_metadata(path) {
-        Ok(_) => return read_backup_identity(path).map(|identity| (identity, false)),
+        Ok(_) => return read_backup_identity(path, confirm).map(|identity| (identity, false)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(err("cannot inspect password backup identity")),
     }
@@ -2307,9 +2375,7 @@ fn load_or_create_backup_identity(path: &Path) -> Result<(AgeIdentity, bool)> {
         Err("output exists") => {
             // Another initializer may have installed the shared identity. Only
             // adopt it after the same type, permission, and key validation.
-            read_backup_identity(path)
-                .map(|identity| (identity, false))
-                .map_err(|_| err("cannot install or validate password backup identity"))
+            read_backup_identity(path, confirm).map(|identity| (identity, false))
         }
         Err("output installed but directory durability is unconfirmed") => Err(err(
             "password backup identity was installed but directory durability is unconfirmed",
@@ -2328,7 +2394,10 @@ fn load_or_create_backup_identity(path: &Path) -> Result<(AgeIdentity, bool)> {
     }
 }
 
-fn read_backup_identity(path: &Path) -> Result<AgeIdentity> {
+fn read_backup_identity(
+    path: &Path,
+    confirm: impl FnOnce(&File, &Path) -> Result<()>,
+) -> Result<AgeIdentity> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| err("cannot inspect password backup identity"))?;
     if !metadata.file_type().is_file() {
@@ -2362,8 +2431,39 @@ fn read_backup_identity(path: &Path) -> Result<AgeIdentity> {
     identity_file
         .read_to_string(&mut identity_text)
         .map_err(|_| err("cannot read password backup identity"))?;
-    AgeIdentity::from_private_key(identity_text.trim())
-        .map_err(|_| err("password backup identity is invalid"))
+    let identity = AgeIdentity::from_private_key(identity_text.trim())
+        .map_err(|_| err("password backup identity is invalid"))?;
+    confirm(&identity_file, path)?;
+    Ok(identity)
+}
+
+/// Independently confirms a reused identity after publication by another writer.
+fn confirm_backup_identity_durability(file: &File, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        file.sync_all()
+            .map_err(|_| err("cannot confirm password backup identity durability"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| err("cannot confirm password backup identity durability"))?;
+        for ancestor in parent.ancestors() {
+            File::open(ancestor)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| err("cannot confirm password backup identity durability"))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // The existing private-file layer cannot confirm parent-directory
+        // durability here. Reusing a concurrently published identity without
+        // that barrier could strand a generated-password vault.
+        let _ = (file, path);
+        return Err(err(
+            "cannot confirm reused password backup identity durability on this platform",
+        ));
+    }
+    #[cfg(unix)]
+    Ok(())
 }
 
 fn bounded_file(path: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
@@ -5044,7 +5144,15 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
                 .as_deref()
                 .ok_or_else(|| err("cannot generate master password"))?,
         )?;
-        associate_init_backup(&mut backup, &path_text)?;
+        if let Err(error) = associate_init_backup(&mut backup, &path_text) {
+            // Reporting must not replace the original failure when stdout is
+            // also unavailable. No vault installation has been attempted.
+            let _ = write_association_failure(&backup, &path_text, &error, as_json);
+            return Err(err(format!(
+                "vault creation not started; {}",
+                error.message
+            )));
+        }
         Some(backup)
     } else {
         None
@@ -5143,6 +5251,47 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         }
         Ok(())
     }
+}
+
+/// Reports an association failure without revealing the backed-up password.
+fn write_association_failure(
+    backup: &InitPasswordBackup,
+    vault: &str,
+    error: &AssociationError,
+    as_json: bool,
+) -> Result<()> {
+    let record = association_failure_record(backup, vault, error);
+    let candidate = record["association_candidate"]
+        .as_str()
+        .ok_or_else(|| err("cannot encode recovery association"))?;
+    if as_json {
+        json(&record)
+    } else {
+        writeln!(io::stdout(), "Vault creation not started.\nRecovery association candidate: {candidate}\n{}\nEncrypted password backup: {}\nAge identity: {}",
+            error.message, backup.path.display(), backup.identity_path.display())
+            .map_err(|_| err("cannot write output"))
+    }
+}
+
+/// The non-secret partial-state report emitted before vault creation starts.
+fn association_failure_record(
+    backup: &InitPasswordBackup,
+    vault: &str,
+    error: &AssociationError,
+) -> serde_json::Value {
+    let mut candidate = backup.path.as_os_str().to_os_string();
+    candidate.push(".json");
+    let candidate = PathBuf::from(candidate);
+    serde_json::json!({
+        "operation": "init-association-failed",
+        "path": vault,
+        "vault_install_started": false,
+        "association_installed": error.installed,
+        "association_candidate": candidate.to_string_lossy(),
+        "password_backup": backup.path.to_string_lossy(),
+        "age_identity": backup.identity_path.to_string_lossy(),
+        "reason": error.message,
+    })
 }
 
 /// Reports where the encrypted backup and its identity were installed.
@@ -6507,6 +6656,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     "context" => config.current.as_deref(),
                     "argument" => vault,
                     "environment" => environment.as_deref(),
+                    "default" => config.default_vault.as_deref(),
                     _ => None,
                 };
                 let alias = selected.and_then(|current| {
@@ -6517,7 +6667,10 @@ fn run(args: &[String], program: &str) -> Result<()> {
                         .map(|_| current)
                 });
                 if rest.len() == 2 {
-                    json(&serde_json::json!({"path": path, "source": source, "alias": alias}))
+                    let legacy_alias = if source == "context" { alias } else { None };
+                    json(
+                        &serde_json::json!({"path": path, "source": source, "alias": legacy_alias}),
+                    )
                 } else {
                     writeln!(
                         io::stdout(),
@@ -8635,11 +8788,93 @@ mod tests {
         assert_eq!(record["status"], "candidate");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn vault_comparison_policy_normalizes_windows_case_and_separators_only() {
+    fn reused_published_identity_requires_its_own_durability_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let data = temp.path().join("data");
+        ensure_backup_dir(&config, "synthetic failure").unwrap();
+        let identity_path = config.join("init-password.agekey");
+        let key = neotales_age::AgeKey::generate().unwrap();
+        let private = Zeroizing::new(key.private_key);
+        // Simulate the publisher after no-clobber publication, but before its
+        // parent sync has finished. The reader must perform its own barrier.
+        let mut stage = nkeepass::private_file::new_private_temp(&config).unwrap();
+        stage.write_all(private.as_bytes()).unwrap();
+        stage.as_file().sync_all().unwrap();
+        stage.persist_noclobber(&identity_path).unwrap();
+        let called = std::cell::Cell::new(false);
+        let result =
+            backup_init_password_at_with("synthetic-password", &config, &data, |file, path| {
+                called.set(true);
+                assert_eq!(path, identity_path);
+                assert!(file.metadata().unwrap().is_file());
+                Err(err("injected identity parent durability failure"))
+            });
+        assert!(called.get());
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().0,
+            "injected identity parent durability failure"
+        );
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
+        let retry =
+            backup_init_password_at_with("synthetic-password", &config, &data, |file, path| {
+                confirm_backup_identity_durability(file, path)
+            })
+            .unwrap();
+        assert!(!retry.identity_created);
+        assert!(retry.path.is_file());
+    }
+
+    #[test]
+    fn association_durability_failure_reports_installed_candidate_before_vault_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault.kdbx");
+        let mut backup = backup_init_password_at(
+            "synthetic-password",
+            &temp.path().join("config"),
+            &temp.path().join("data"),
+        )
+        .unwrap();
+        let error =
+            associate_init_backup_with(&mut backup, vault.to_str().unwrap(), |path, bytes| {
+                nkeepass::private_file::write_private_noclobber(path, bytes)?;
+                Err("output installed but directory durability is unconfirmed")
+            })
+            .unwrap_err();
+        assert!(error.installed);
+        assert!(error.message.contains("durability is unconfirmed"));
+        let candidate = backup.association_path.as_ref().unwrap();
+        assert!(candidate.is_file());
+        assert!(!vault.exists());
+        let report = association_failure_record(&backup, vault.to_str().unwrap(), &error);
+        assert_eq!(report["operation"], "init-association-failed");
+        assert_eq!(report["vault_install_started"], false);
+        assert_eq!(report["association_installed"], true);
+        assert_eq!(report["association_candidate"], candidate.to_str().unwrap());
+        assert!(!report.to_string().contains("synthetic-password"));
+        let failure = associate_init_backup_with(&mut backup, vault.to_str().unwrap(), |_, _| {
+            Err("output exists")
+        })
+        .unwrap_err();
+        assert!(!failure.installed);
+        assert_eq!(failure.message, "recovery association already exists");
+        let report = association_failure_record(&backup, vault.to_str().unwrap(), &failure);
+        assert_eq!(report["association_installed"], false);
+        assert_eq!(report["vault_install_started"], false);
+    }
+
+    #[test]
+    fn vault_comparison_policy_preserves_case_and_normalizes_windows_separators() {
         assert_eq!(
             vault_path_key_for_platform("C:/Users/Work/Vault.kdbx", true),
-            vault_path_key_for_platform("c:\\users\\work\\vault.KDBX", true)
+            vault_path_key_for_platform("C:\\Users\\Work\\Vault.kdbx", true)
+        );
+        assert_ne!(
+            vault_path_key_for_platform("C:/Users/Work/Vault.kdbx", true),
+            vault_path_key_for_platform("C:\\Users\\Work\\vault.kdbx", true)
         );
         assert_ne!(
             vault_path_key_for_platform("/work/Vault.kdbx", false),

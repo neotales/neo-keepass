@@ -94,7 +94,7 @@ fn context_alias_persistence_and_precedence() {
     );
     let show: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(show["source"], "argument");
-    assert_eq!(show["alias"], "work");
+    assert!(show["alias"].is_null());
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args(["context", "show", "--json"])
         .env("XDG_CONFIG_HOME", tmp.path())

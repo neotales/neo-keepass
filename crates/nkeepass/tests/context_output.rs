@@ -128,8 +128,10 @@ fn context_show_keeps_alias_name_for_explicit_and_environment_selection() {
         &["--vault", "work", "context", "show", "--json"],
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["alias"], "work");
+    assert!(result["alias"].is_null());
     assert_eq!(result["source"], "argument");
+    let text = run(root.path(), &["--vault", "work", "context", "show"]);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("Name: work"));
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
         .env("NKEEPASS_DATA_DIR", root.path().join("data"))
@@ -141,11 +143,35 @@ fn context_show_keeps_alias_name_for_explicit_and_environment_selection() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Name: work"));
     assert!(text.contains("Source: environment"));
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
+        .env("NKEEPASS_DATA_DIR", root.path().join("data"))
+        .env("NKEEPASS_VAULT", "work")
+        .env_remove("NKEEPASS_VAULT_PATH")
+        .args(["context", "show", "--json"])
+        .output()
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["alias"].is_null());
+    assert_eq!(result["source"], "environment");
+    assert!(
+        run(root.path(), &["config", "set", "default_vault", "work"])
+            .status
+            .success()
+    );
+    let text = run(root.path(), &["context", "show"]);
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("Name: work"));
+    assert!(text.contains("Source: default"));
+    let json = run(root.path(), &["context", "show", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(json["source"], "default");
+    assert!(json["alias"].is_null());
 }
 
 #[cfg(windows)]
 #[test]
-fn windows_context_paths_compare_without_case_or_separator_sensitivity() {
+fn windows_context_paths_preserve_case_distinct_candidates() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("MixedCase.kdbx");
     let original = path.to_str().unwrap();
@@ -170,9 +196,13 @@ fn windows_context_paths_compare_without_case_or_separator_sensitivity() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["alias"], "work");
     assert_eq!(rows[0]["path"], original.replace('/', "\\"));
+    assert!(
+        rows.iter()
+            .any(|row| row["alias"].is_null() && row["path"] == alternate.replace('/', "\\"))
+    );
     let text = run(root.path(), &["context", "ls"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("(current)"));
 }
@@ -236,75 +266,78 @@ fn generated_master_is_recoverable_without_output_disclosure() {
     drop(child.stdin.take());
     assert!(child.wait_with_output().unwrap().status.success());
 
-    let second = run(
-        root.path(),
-        &[
-            "init",
-            "second.kdbx",
-            "--generate-master-password",
-            "--iterations",
-            "64",
-        ],
-    );
-    assert!(second.status.success());
-    let text = String::from_utf8_lossy(&second.stdout);
-    assert!(text.contains("Database:"));
-    assert!(text.contains("Encrypted password backup:"));
-    assert!(text.contains("Age identity reused:"));
-    assert!(!text.contains(key.trim()));
-    let collision = run(
-        root.path(),
-        &[
-            "init",
-            "second.kdbx",
-            "--json",
-            "--generate-master-password",
-            "--iterations",
-            "64",
-        ],
-    );
-    assert!(!collision.status.success());
-    let recovery: serde_json::Value = serde_json::from_slice(&collision.stdout).unwrap();
-    assert_eq!(recovery["operation"], "init-unused-backup");
-    assert_eq!(recovery["vault_installed"], false);
-    assert!(recovery["path"].as_str().unwrap().ends_with("second.kdbx"));
-    let collision_backup =
-        std::fs::read_to_string(recovery["password_backup"].as_str().unwrap()).unwrap();
-    let identity = neotales_age::AgeIdentity::from_private_key(key.trim()).unwrap();
-    let recovered = zeroize::Zeroizing::new(
-        neotales_age::AgeFile::decrypt_armored(&collision_backup, &[identity]).unwrap(),
-    );
-    assert!(!opens_with(
-        root.path(),
-        recovery["path"].as_str().unwrap(),
-        &recovered
-    ));
-    for channel in [&collision.stdout, &collision.stderr] {
-        assert!(
-            !channel
-                .windows(recovered.len())
-                .any(|bytes| bytes == recovered.as_slice())
+    #[cfg(unix)]
+    {
+        let second = run(
+            root.path(),
+            &[
+                "init",
+                "second.kdbx",
+                "--generate-master-password",
+                "--iterations",
+                "64",
+            ],
         );
-        assert!(
-            !channel
-                .windows(key.trim().len())
-                .any(|bytes| bytes == key.trim().as_bytes())
+        assert!(second.status.success());
+        let text = String::from_utf8_lossy(&second.stdout);
+        assert!(text.contains("Database:"));
+        assert!(text.contains("Encrypted password backup:"));
+        assert!(text.contains("Age identity reused:"));
+        assert!(!text.contains(key.trim()));
+        let collision = run(
+            root.path(),
+            &[
+                "init",
+                "second.kdbx",
+                "--json",
+                "--generate-master-password",
+                "--iterations",
+                "64",
+            ],
         );
+        assert!(!collision.status.success());
+        let recovery: serde_json::Value = serde_json::from_slice(&collision.stdout).unwrap();
+        assert_eq!(recovery["operation"], "init-unused-backup");
+        assert_eq!(recovery["vault_installed"], false);
+        assert!(recovery["path"].as_str().unwrap().ends_with("second.kdbx"));
+        let collision_backup =
+            std::fs::read_to_string(recovery["password_backup"].as_str().unwrap()).unwrap();
+        let identity = neotales_age::AgeIdentity::from_private_key(key.trim()).unwrap();
+        let recovered = zeroize::Zeroizing::new(
+            neotales_age::AgeFile::decrypt_armored(&collision_backup, &[identity]).unwrap(),
+        );
+        assert!(!opens_with(
+            root.path(),
+            recovery["path"].as_str().unwrap(),
+            &recovered
+        ));
+        for channel in [&collision.stdout, &collision.stderr] {
+            assert!(
+                !channel
+                    .windows(recovered.len())
+                    .any(|bytes| bytes == recovered.as_slice())
+            );
+            assert!(
+                !channel
+                    .windows(key.trim().len())
+                    .any(|bytes| bytes == key.trim().as_bytes())
+            );
+        }
+        let text_collision = run(
+            root.path(),
+            &[
+                "init",
+                "second.kdbx",
+                "--generate-master-password",
+                "--iterations",
+                "64",
+            ],
+        );
+        assert!(!text_collision.status.success());
+        let text = String::from_utf8_lossy(&text_collision.stdout);
+        assert!(text.contains("Vault not created; unused backup"));
+        assert!(text.contains("second.kdbx"));
     }
-    let text_collision = run(
-        root.path(),
-        &[
-            "init",
-            "second.kdbx",
-            "--generate-master-password",
-            "--iterations",
-            "64",
-        ],
-    );
-    assert!(!text_collision.status.success());
-    let text = String::from_utf8_lossy(&text_collision.stdout);
-    assert!(text.contains("Vault not created; unused backup"));
-    assert!(text.contains("second.kdbx"));
 }
 
 #[cfg(unix)]
@@ -356,6 +389,7 @@ fn closed_output_recovers_from_multiple_private_candidate_records() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn concurrent_generated_init_keeps_winner_and_unused_backup_distinct() {
     let root = tempfile::tempdir().unwrap();
@@ -455,6 +489,7 @@ fn generated_init_refuses_invalid_existing_identity_without_clobber() {
     assert_eq!(std::fs::read(identity).unwrap(), b"synthetic-invalid-key");
 }
 
+#[cfg(unix)]
 #[test]
 fn init_text_reports_backup_identity_creation_and_reuse() {
     let root = tempfile::tempdir().unwrap();

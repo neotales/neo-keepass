@@ -137,6 +137,38 @@ fn generated_master_backup_and_default_context_are_private() {
 }
 
 #[test]
+fn generated_master_reuse_fails_closed_when_directory_sync_is_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = run(
+        temp.path(),
+        &[
+            "init",
+            "first.kdbx",
+            "--generate-master-password",
+            "--iterations",
+            "64",
+        ],
+    );
+    succeeded(&first);
+    let second = run(
+        temp.path(),
+        &[
+            "init",
+            "second.kdbx",
+            "--generate-master-password",
+            "--iterations",
+            "64",
+        ],
+    );
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8_lossy(&second.stderr)
+            .contains("cannot confirm reused password backup identity durability")
+    );
+    assert!(!temp.path().join("second.kdbx").exists());
+}
+
+#[test]
 fn init_backup_context_mutation_and_no_clobber_are_private() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

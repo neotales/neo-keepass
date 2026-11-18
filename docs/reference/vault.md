@@ -73,8 +73,21 @@ Only one that actually opens the vault is its recovery password. Keep candidate
 records private and retain them with their corresponding encrypted backups.
 On Unix the file and parent directory are synced before vault installation;
 Windows uses the existing private-file durability policy and owner-only DACL.
+On Unix, reuse independently syncs the identity and its directory ancestry
+before making a new backup, including when another initializer has published
+the identity but not yet synced its parent. The existing Windows policy syncs
+the staged identity file but cannot confirm parent-directory durability after
+a crash. Consequently Windows currently refuses to reuse an existing backup
+identity: generated-password init stops before vault creation, while init with
+a supplied password can report backup failure after creating the vault.
 The generated master password is not printed. An ambient `NKEEPASS_PASSWORD`
 is ignored for this opt-in mode.
+
+If installing the candidate record fails, vault creation has not started.
+The report identifies the candidate path and distinguishes an already
+installed record whose directory durability is unconfirmed from a record not
+installed by this attempt. `--json` uses `init-association-failed`; an
+encrypted backup may remain unused.
 
 Init reports the database path, backup path, and whether the age identity was
 created or reused. Treat the identity as a secret: anyone who obtains both it
@@ -124,10 +137,14 @@ text by default; `--json` selects machine-readable records (`ls` emits one JSON
 object per line). Existing alias records retain `alias` and `path`; a direct
 current path has a null `alias`, while a newly reported direct default has a
 null `alias` and `"source":"default"`. Current status appears in text; use
-`context show --json` for machine-readable selection and source. On Windows
-path comparisons normalize separators and lowercase text for deduplication;
-displayed spelling is unchanged. This lexical policy does not resolve symlinks,
-hard links, or every filesystem-specific Unicode equivalence. `use` selects a configured vault alias. `set` creates or
+`context show --json` for machine-readable selection and source. For
+compatibility its `alias` is populated only for the configured current
+context, even when text names an alias selected through an argument,
+environment variable, or configured default. On Windows path comparisons
+normalize separators but retain case, since directories can be case-sensitive;
+case variants may therefore appear more than once on case-insensitive volumes.
+Displayed spelling is unchanged. This lexical policy does not resolve symlinks
+or hard links. `use` selects a configured vault alias. `set` creates or
 updates an alias. `rm` (also `remove`) removes an alias and clears it as current if needed.
 Other subcommands have no command-specific options.
 
