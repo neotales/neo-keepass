@@ -2545,6 +2545,7 @@ else:
             "fn bounded_driver_cleanup_failure_appends_to_primary_diagnostic",
             "fn bounded_driver_owned_group_cleanup_kills_descendant_before_reap",
             "fn bounded_kill_helper_returns_within_deadline_from_unresponsive_helper",
+            "fn pty_driver_cleanup_diagnostic_preserves_primary_and_leaves_no_child",
         ];
         for item in gated_items {
             let position = lines
@@ -2637,7 +2638,9 @@ else:
         // future test after the driver may legitimately keep an
         // un-reaped-child Rust kill.
         assert!(
-            driver.starts_with("r#\"\nimport errno, os, pty, select, sys, time, signal"),
+            driver.starts_with(
+                "r#\"\nimport errno, fcntl, os, pty, select, stat, subprocess, sys, time, signal"
+            ),
             "the driver slice should open on the driver's own first line"
         );
         assert!(
@@ -2678,7 +2681,7 @@ else:
             );
         }
         for marker in [
-            "import errno, os, pty, select, sys, time, signal",
+            "import errno, fcntl, os, pty, select, stat, subprocess, sys, time, signal",
             "def stop_child():",
             "os.killpg(group_id, signal.SIGCONT)",
             "os.killpg(group_id, signal.SIGKILL)",
@@ -2688,6 +2691,9 @@ else:
             "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)",
             "os.tcgetpgrp(fd)",
             "no PTY child was started",
+            "def cleanup_diagnostics(wait_observation):",
+            "waitid-before=",
+            "master=",
             "process group absence not established",
             "; cleanup also failed: ",
             "case ended with ",
@@ -2764,6 +2770,105 @@ else:
             stderr.contains("os.waitid and WNOWAIT; no PTY child was started"),
             "the actual driver should report its safe preflight failure: {}",
             run.failure_summary()
+        );
+    }
+
+    /// Exercise the embedded driver end-to-end with a forced cleanup
+    /// failure after it has safely reaped Bash and observed group absence.
+    /// The primary argv assertion must remain first, the bounded diagnostic
+    /// must be appended, and the driver must not leave a PTY child behind.
+    #[test]
+    #[cfg(unix)]
+    fn pty_driver_cleanup_diagnostic_preserves_primary_and_leaves_no_child() {
+        let source = lf_script(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion.rs source should be readable"),
+        );
+        let driver = hostile_filename_driver_slice(&source)
+            .expect("the PTY driver's script should be sliceable")
+            .strip_prefix("r#\"\n")
+            .expect("the slice should start at the raw string");
+        let old = "if error.errno == errno.ESRCH:\n                return None";
+        assert_eq!(
+            driver.matches(old).count(),
+            1,
+            "the test must inject only at confirmed group absence"
+        );
+        let forced = driver.replace(
+            old,
+            "if error.errno == errno.ESRCH:\n                return \"FORCED_CLEANUP_FAILURE \" + cleanup_diagnostics(wait_observation)",
+        );
+        let directory = tempfile::tempdir().expect("PTY test directory");
+        std::fs::write(directory.path().join("present.bin"), b"fixture")
+            .expect("fixture file should be created");
+        let completion_path = directory.path().join("completion.bash");
+        std::fs::write(&completion_path, generate("bash").expect("bash completion"))
+            .expect("completion script should be written");
+        let expected =
+            serde_json::to_string(&["intentionally-wrong"]).expect("expected argv should encode");
+        let line = "nkp set --bin payload=present";
+        let run = run_python_bounded(
+            &forced,
+            &[
+                directory.path().as_os_str(),
+                completion_path.as_os_str(),
+                OsStr::new(line),
+                OsStr::new(&expected),
+                OsStr::new("default"),
+                OsStr::new(""),
+                OsStr::new("true"),
+            ],
+            Duration::from_secs(15),
+        );
+        assert!(
+            !run.timed_out && !run.drain_overflow && !run.success(),
+            "forced cleanup failure should be bounded, fail, and leave no pipe holder: {}",
+            run.failure_summary()
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let primary = stderr
+            .find("completion produced unexpected literal argv")
+            .expect("primary behavior failure should be retained");
+        let forced_failure = stderr
+            .find("FORCED_CLEANUP_FAILURE")
+            .expect("forced cleanup failure should be reported");
+        assert!(
+            primary < forced_failure,
+            "cleanup must append, not mask, the primary failure"
+        );
+        for diagnostic in [
+            "diagnostic[pty=",
+            "waitid-before=",
+            "process=",
+            "wchan=",
+            "master=",
+        ] {
+            assert!(
+                stderr.contains(diagnostic),
+                "cleanup failure should include `{diagnostic}`: {}",
+                run.failure_summary()
+            );
+        }
+        assert!(
+            !stderr[forced_failure..].contains("PTY transcript:"),
+            "the diagnostic snapshot must not duplicate the PTY transcript"
+        );
+        // Confirm group absence independently of the driver's own probe.
+        // Its diagnostic reports the stable PTY leader PID at `pty=pid=`.
+        let pid: i32 = stderr[forced_failure..]
+            .split("pty=pid=")
+            .nth(1)
+            .and_then(|rest| rest.split(|ch: char| !ch.is_ascii_digit()).next())
+            .and_then(|digits| digits.parse().ok())
+            .expect("diagnostic should report the PTY leader pid");
+        let probe = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .output()
+            .expect("ps should check for a leaked leader");
+        assert!(
+            !probe.status.success() || probe.stdout.trim_ascii().is_empty(),
+            "the PTY leader {pid} must already be reaped: {:?}",
+            String::from_utf8_lossy(&probe.stdout)
         );
     }
 
@@ -4540,7 +4645,7 @@ else:
             &cases
         {
             let script = r#"
-import errno, os, pty, select, sys, time, signal
+import errno, fcntl, os, pty, select, stat, subprocess, sys, time, signal
 directory, completion, line, expected_args, wordbreaks, close_quote, expect_match = sys.argv[1:]
 expect_match = expect_match == "true"
 import json
@@ -4578,13 +4683,93 @@ os.set_blocking(fd, False)
 group_id = pid
 
 def pty_job_control_state():
+    def query(label, operation):
+        try:
+            return "%s=%s" % (label, operation())
+        except OSError as error:
+            return "%s=errno-%s" % (label, error.errno)
+    return "pid=%d %s %s %s" % (
+        pid,
+        query("pgrp", lambda: os.getpgid(pid)),
+        query("session", lambda: os.getsid(pid)),
+        query("foreground", lambda: os.tcgetpgrp(fd)),
+    )
+
+def cleanup_diagnostics(wait_observation):
+    # Diagnostics are intentionally metadata-only: no command line, environ,
+    # or PTY transcript is collected here. ps is bounded and optional.
     try:
-        return (
-            "pid=%d pgrp=%d session=%d foreground=%d"
-            % (pid, os.getpgid(pid), os.getsid(pid), os.tcgetpgrp(fd))
+        result = subprocess.run(
+            ["ps", "-o", "pid=,ppid=,stat=,pgid=,tpgid=", "-p", str(pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+            check=False,
         )
+        process_state = "exit-%d" % result.returncode
+        if result.returncode == 0:
+            process_state = "".join(
+                char for char in result.stdout.strip() if char.isalnum() or char in " ._-"
+            ) or "empty"
+    except FileNotFoundError:
+        process_state = "ps-unavailable"
+    except subprocess.TimeoutExpired:
+        process_state = "ps-timeout"
+    except Exception as error:
+        process_state = "ps-error-%s" % type(error).__name__
+    try:
+        channel = subprocess.run(
+            ["ps", "-o", "wchan=", "-p", str(pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+        if channel.returncode == 0:
+            wait_channel = "".join(
+                char for char in channel.stdout.strip() if char.isalnum() or char in " ._-"
+            ) or "empty"
+        else:
+            wait_channel = "unavailable-exit-%d" % channel.returncode
+    except FileNotFoundError:
+        wait_channel = "ps-unavailable"
+    except subprocess.TimeoutExpired:
+        wait_channel = "ps-timeout"
+    except Exception as error:
+        wait_channel = "ps-error-%s" % type(error).__name__
+    try:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        master_state = "open mode=%s nonblocking=%s" % (
+            "character" if stat.S_ISCHR(os.fstat(fd).st_mode) else "other",
+            bool(flags & os.O_NONBLOCK),
+        )
+        readable = bool(select.select([fd], [], [], 0)[0])
+        master_state += " readable=%s" % readable
     except OSError as error:
-        return "pid=%d query-errno=%s:%s" % (pid, error.errno, error.strerror)
+        master_state = "fd-error-%s" % error.errno
+    try:
+        observed = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        fresh_wait = (
+            "no-status" if observed is None or not observed.si_pid else
+            "pid=%d code=%s status=%s" %
+            (observed.si_pid, observed.si_code, observed.si_status)
+        )
+    except ChildProcessError:
+        fresh_wait = "ownership-lost"
+    except OSError as error:
+        fresh_wait = "errno-%s" % error.errno
+    return (
+        "diagnostic[pty=%s; waitid-before=%s; waitid-now=%s; process=%s; "
+        "wchan=%s; master=%s]"
+        % (
+            pty_job_control_state(), wait_observation, fresh_wait,
+            process_state, wait_channel, master_state
+        )
+    )
 
 def drain(timeout=0.15):
     global transcript
@@ -4632,20 +4817,27 @@ def stop_child():
     # not prove its descendants are gone.
     identity_before = pty_job_control_state()
     signal_results = []
+    wait_observation = "not-attempted"
     try:
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        observed = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        wait_observation = (
+            "no-status" if observed is None or not observed.si_pid else
+            "pid=%d code=%s status=%s" %
+            (observed.si_pid, observed.si_code, observed.si_status)
+        )
     except ChildProcessError:
         return (
             "PTY leader is no longer an owned waitable child; refusing "
-            "to signal recorded PGID; before: %s; PTY transcript: "
-            % identity_before
+            "to signal recorded PGID; before: %s; %s; PTY transcript: "
+            % (identity_before, cleanup_diagnostics(wait_observation))
             + repr(transcript)
         )
     except OSError as error:
         return (
             "cannot confirm PTY leader ownership before cleanup; "
-            "waitid errno-%s:%s; before: %s; PTY transcript: "
-            % (error.errno, error.strerror, identity_before)
+            "waitid errno-%s:%s; before: %s; %s; PTY transcript: "
+            % (error.errno, error.strerror, identity_before,
+               cleanup_diagnostics(wait_observation))
             + repr(transcript)
         )
     # pty.fork() makes the child a session and process-group leader. The
@@ -4654,8 +4846,9 @@ def stop_child():
     if group_id != pid:
         return (
             "PTY leader PID does not anchor the recorded process group; "
-            "pid=%d recorded=%d; before: %s; PTY transcript: "
-            % (pid, group_id, identity_before)
+            "pid=%d recorded=%d; before: %s; %s; PTY transcript: "
+            % (pid, group_id, identity_before,
+               cleanup_diagnostics(wait_observation))
             + repr(transcript)
         )
     try:
@@ -4697,8 +4890,9 @@ def stop_child():
     if not reaped:
         return (
             "PTY leader was not reaped within bounded group cleanup; "
-            "cleanup: %s; before: %s; last waitpid: %s; PTY transcript: "
-            % (", ".join(signal_results), identity_before, last_wait)
+            "cleanup: %s; before: %s; last waitpid: %s; %s; PTY transcript: "
+            % (", ".join(signal_results), identity_before, last_wait,
+               cleanup_diagnostics(wait_observation))
             + repr(transcript)
         )
     # The leader is now reaped, so the PGID is no longer ours to signal.
@@ -4718,13 +4912,14 @@ def stop_child():
     return (
         "process group absence not established after bounded cleanup; "
         "cleanup: %s; before: %s; after: %s; last waitpid: %s; "
-        "group probe: %s; PTY transcript: "
+        "group probe: %s; %s; PTY transcript: "
         % (
             ", ".join(signal_results),
             identity_before,
             pty_job_control_state(),
             last_wait,
             group_probe,
+            cleanup_diagnostics(wait_observation),
         )
         + repr(transcript)
     )
