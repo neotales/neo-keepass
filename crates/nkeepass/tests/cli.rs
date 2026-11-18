@@ -3031,6 +3031,63 @@ fn help_is_answered_at_every_command_depth() {
     }
 }
 
+/// Root shortcuts show the same full summary as their `secrets` command.
+#[test]
+fn shortcut_help_shows_the_full_secrets_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (shortcut, action) in [
+        ("get", "get"),
+        ("getx", "getx"),
+        ("list", "ls"),
+        ("ls", "ls"),
+        ("search", "search"),
+        ("show", "show"),
+        ("set", "set"),
+        ("rm", "rm"),
+        ("remove", "rm"),
+        ("ensure", "ensure"),
+        ("otp", "otp"),
+        ("setx", "setx"),
+        ("import", "import"),
+        ("export", "export"),
+        ("sync", "sync"),
+        ("env", "env"),
+    ] {
+        let shortcut_output = cli(tmp.path(), &[shortcut, "--help"]);
+        let secrets_output = cli(tmp.path(), &["secrets", action, "--help"]);
+        assert!(shortcut_output.status.success(), "{shortcut} --help failed");
+        assert!(
+            secrets_output.status.success(),
+            "secrets {action} --help failed"
+        );
+        let shortcut_help = String::from_utf8(shortcut_output.stdout).unwrap();
+        let secrets_help = String::from_utf8(secrets_output.stdout).unwrap();
+        let shortcut_summary = help_summary(&shortcut_help);
+        let secrets_summary = help_summary(&secrets_help);
+        assert!(!shortcut_summary.is_empty(), "{shortcut} summary is empty");
+        assert_eq!(shortcut_summary, secrets_summary, "{shortcut} summary");
+        assert!(
+            !shortcut_summary.contains("Shortcut for"),
+            "{shortcut} retained shortcut wording: {shortcut_summary}"
+        );
+    }
+}
+
+fn help_summary(help: &str) -> &str {
+    let after_usage = help
+        .split_once("Usage:")
+        .expect("help contains usage")
+        .1
+        .split_once('\n')
+        .expect("usage has a line ending")
+        .1
+        .trim_start_matches('\n');
+    after_usage
+        .split("\n\n")
+        .next()
+        .expect("help contains summary")
+}
+
 /// Root help is an overview, not the full manual. Check the built binary's real
 /// output so spacing drift and an accidental return of the detailed prose are
 /// visible without pinning the whole help text as a snapshot.

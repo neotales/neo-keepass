@@ -7810,28 +7810,6 @@ mod tests {
     }
 
     #[test]
-    fn root_shortcut_help_uses_the_secrets_command_summary() {
-        for shortcut in ["set", "get", "list", "ls", "rm", "remove"] {
-            let shortcut_help = render_help("nkp", &[shortcut.to_owned()], HELP_WIDTH);
-            let secrets_help = render_help(
-                "nkp",
-                &["secrets".to_owned(), shortcut.to_owned()],
-                HELP_WIDTH,
-            );
-            let shortcut_summary = shortcut_help
-                .lines()
-                .find(|line| !line.starts_with("nkp ") && !line.starts_with("Usage:"))
-                .unwrap();
-            let secrets_summary = secrets_help
-                .lines()
-                .find(|line| !line.starts_with("nkp ") && !line.starts_with("Usage:"))
-                .unwrap();
-            assert_eq!(shortcut_summary, secrets_summary, "{shortcut} summary");
-            assert!(!shortcut_summary.contains("Shortcut for"));
-        }
-    }
-
-    #[test]
     fn global_credential_help_stays_scoped_and_after_command_options() {
         for route in [
             Vec::new(),
