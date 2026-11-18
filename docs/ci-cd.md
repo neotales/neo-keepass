@@ -104,7 +104,13 @@ and lifecycle path instead of patching a platform: the driver keeps the
 master fd non-blocking with deadline-bounded writes and kills bash's
 process group on every exit path, and the harness runs the driver under
 one exit deadline with separate bounded drain/recovery allowances, in its
-own process group with a whole-tree kill. Regression fixtures
+own process group with a whole-tree kill. Post-review the driver's
+cleanup is group-only — a reaped child's pid is never signaled directly,
+since it may already be recycled — and a cleanup failure composes with
+the case's primary diagnostic instead of masking it;
+`bounded_driver_post_reap_cleanup_kills_group_members_only` and
+`bounded_driver_cleanup_failure_appends_to_primary_diagnostic` pin
+those contracts. Regression fixtures
 (`bounded_driver_kills_wedged_python_within_deadline`,
 `bounded_driver_removes_pipe_holding_descendant_no_orphan_survives`)
 assert bounded return and by-PID orphan death; both are unix-gated, which

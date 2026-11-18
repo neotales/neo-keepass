@@ -1911,6 +1911,271 @@ print("descendant", descendant.pid, flush=True)
         );
     }
 
+    /// A cleanup failure must not mask the case's own diagnostic. The old
+    /// driver raised out of its finally, so a cleanup that could not
+    /// complete replaced whatever failure was already in flight. A
+    /// SIGKILLed group that ignores its reap allowance cannot be forced in
+    /// a test, so this drives the driver's compose protocol with the
+    /// cleanup failure injected: the primary diagnostic leads, the cleanup
+    /// detail is appended after it, and a numeric success does not
+    /// silently swallow one either.
+    #[test]
+    #[cfg(unix)]
+    fn bounded_driver_cleanup_failure_appends_to_primary_diagnostic() {
+        let script = r#"
+import sys
+
+transcript = "simulated transcript"
+
+def fail(message):
+    raise SystemExit(message + "; PTY transcript: " + repr(transcript))
+
+def stop_child():
+    # Simulated: the real driver only reaches this return when a SIGKILLed
+    # group ignores its reap allowance, which no test can force. What is
+    # under test is the finally that composes the two diagnostics.
+    return "interactive bash survived SIGKILL; PTY transcript: " + repr(transcript)
+
+def compose_failure(primary, cleanup):
+    # The hostile-filename driver's finally protocol, in the shape a
+    # callable needs: append to the primary diagnostic, never replace it.
+    if primary is not None:
+        detail = primary.args[0] if primary.args else None
+        if isinstance(detail, str):
+            raise SystemExit(detail + "; cleanup also failed: " + cleanup)
+        raise SystemExit(
+            "case ended with " + repr(detail) + "; cleanup failed: " + cleanup
+        )
+    raise SystemExit("cleanup failed: " + cleanup)
+
+def scenario_with_primary_failure():
+    primary = None
+    try:
+        fail("unexpected completion match state")
+    except BaseException as raised:
+        primary = raised
+    finally:
+        cleanup = stop_child()
+        if cleanup is not None:
+            compose_failure(primary, cleanup)
+        if primary is not None:
+            raise primary
+
+def scenario_with_numeric_success():
+    primary = None
+    try:
+        raise SystemExit(0)
+    except BaseException as raised:
+        primary = raised
+    finally:
+        cleanup = stop_child()
+        if cleanup is not None:
+            compose_failure(primary, cleanup)
+        if primary is not None:
+            raise primary
+
+failures = 0
+for scenario in (scenario_with_primary_failure, scenario_with_numeric_success):
+    try:
+        scenario()
+    except SystemExit as failure:
+        failures += 1
+        print(
+            "scenario failure:",
+            failure.args[0] if failure.args else failure,
+            file=sys.stderr,
+            flush=True,
+        )
+raise SystemExit(failures)
+"#;
+        let run = run_python_bounded(script, &[], Duration::from_secs(10));
+        assert!(
+            !run.success(),
+            "a cleanup failure must fail the case: {}",
+            run.failure_summary()
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let primary = stderr.find("unexpected completion match state");
+        let appended = stderr.find("cleanup also failed: ");
+        assert!(
+            primary.is_some() && appended.is_some() && primary.unwrap() < appended.unwrap(),
+            "the primary diagnostic must lead, with the cleanup appended after it: {}",
+            run.failure_summary()
+        );
+        assert!(
+            stderr.contains("interactive bash survived SIGKILL"),
+            "the cleanup detail must be part of the composed diagnostic: {}",
+            run.failure_summary()
+        );
+        assert!(
+            stderr.contains("case ended with 0"),
+            "a numeric success must not silently swallow a cleanup failure: {}",
+            run.failure_summary()
+        );
+    }
+
+    /// Post-reap is exactly the state where the retired fallback killed by
+    /// pid: the child has already been waited for, its pid may already
+    /// have been recycled, and a direct `os.kill(pid)` there would signal
+    /// whoever owns the number now. This drives the driver's cleanup shape
+    /// end to end: a session-leading bash leaves a straggler in its group,
+    /// the child is REAPED before any cleanup runs, and the group-only
+    /// cleanup then executes. It asserts the straggler dies by pid, a
+    /// bystander outside the group survives untouched, and the cleanup
+    /// reports no failure — the group id is what the cleanup owns, not the
+    /// pid number.
+    #[test]
+    #[cfg(unix)]
+    fn bounded_driver_post_reap_cleanup_kills_group_members_only() {
+        let script = r#"
+import os, signal, subprocess, time
+
+transcript = b""
+
+def stop_child(pid):
+    # The hostile-filename driver's cleanup, verbatim in shape: a group
+    # kill only, on every path — never a direct pid kill.
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        return None
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return None
+        if waited == pid:
+            return None
+        time.sleep(0.02)
+    return "interactive bash survived SIGKILL; PTY transcript: " + repr(transcript)
+
+# pty.fork() gives the real driver's child its own session and group;
+# this replicates that shape so the group semantics are the real ones.
+child = subprocess.Popen(
+    ["bash", "--noprofile", "--norc", "-c", "sleep 600 & echo $!"],
+    start_new_session=True,
+    stdout=subprocess.PIPE,
+)
+straggler = int(child.stdout.readline().decode())
+# The dangerous state comes first: reap the child BEFORE any cleanup runs,
+# so the cleanup executes against a reaped pid.
+_, status = os.waitpid(child.pid, 0)
+child.returncode = os.waitstatus_to_exitcode(status)
+# A bystander in its own group, outside everything the cleanup owns: it
+# must come through the cleanup untouched.
+victim = subprocess.Popen(
+    ["sleep", "600"],
+    start_new_session=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+failure = stop_child(child.pid)
+print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), flush=True)
+"#;
+        let run = run_python_bounded(script, &[], Duration::from_secs(15));
+        assert!(
+            run.success(),
+            "the post-reap cleanup scenario should complete: {}",
+            run.failure_summary()
+        );
+        assert!(
+            !run.drain_overflow,
+            "the straggler holds bash's stdout; it must be dead before the \
+             driver exits: {}",
+            run.failure_summary()
+        );
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let mut straggler: Option<u32> = None;
+        let mut victim: Option<u32> = None;
+        let mut cleanup = None;
+        let mut fields = stdout.split_whitespace();
+        while let Some(field) = fields.next() {
+            match field {
+                "straggler" => {
+                    straggler = fields.next().and_then(|value| value.parse().ok());
+                }
+                "victim" => {
+                    victim = fields.next().and_then(|value| value.parse().ok());
+                }
+                "cleanup" => cleanup = fields.next(),
+                _ => {}
+            }
+        }
+        let straggler =
+            straggler.unwrap_or_else(|| panic!("driver should report the straggler pid"));
+        let victim = victim.unwrap_or_else(|| panic!("driver should report the bystander pid"));
+        assert_eq!(
+            cleanup,
+            Some("None"),
+            "a reaped child's cleanup should report no failure"
+        );
+        // The straggler must be dead by pid: the group kill reached it
+        // after the reap, without any pid-based kill existing in the driver.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut straggler_alive = true;
+        while std::time::Instant::now() < deadline {
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &straggler.to_string(), "-o", "pid="])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("ps should run");
+            if !probe.success() {
+                straggler_alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !straggler_alive,
+            "straggler {straggler} SURVIVED the post-reap group kill"
+        );
+        // The bystander must still be alive: the cleanup signaled its OWN
+        // group only, never a pid it no longer owned.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut victim_alive = false;
+        while std::time::Instant::now() < deadline {
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &victim.to_string(), "-o", "pid="])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("ps should run");
+            if probe.success() {
+                victim_alive = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            victim_alive,
+            "bystander {victim} was killed by a cleanup it never belonged to"
+        );
+        // Leave nothing behind: the bystander leads its own group, so the
+        // established group-kill helper removes it — still no pid kill.
+        signal_driver_group(i32::try_from(victim).expect("bystander pid should fit i32"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut victim_dead = false;
+        while std::time::Instant::now() < deadline {
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &victim.to_string(), "-o", "pid="])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("ps should run");
+            if !probe.success() {
+                victim_dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            victim_dead,
+            "bystander {victim} could not be cleaned up after the assertion"
+        );
+    }
+
     /// Every PTY-harness item stays `#[cfg(unix)]`-gated, item by item. The
     /// harness needs a pty and process-group kills, and an ungated
     /// `impl BoundedDriverRun` of a gated struct fails to compile the
@@ -1942,6 +2207,8 @@ print("descendant", descendant.pid, flush=True)
             "fn bash_binary_completion_uses_readline_quoting_for_hostile_filenames",
             "fn bounded_driver_kills_wedged_python_within_deadline",
             "fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives",
+            "fn bounded_driver_cleanup_failure_appends_to_primary_diagnostic",
+            "fn bounded_driver_post_reap_cleanup_kills_group_members_only",
         ];
         for item in gated_items {
             let position = lines
@@ -1959,6 +2226,55 @@ print("descendant", descendant.pid, flush=True)
                 "#[cfg(unix)]",
                 "unix-gated item `{item}` lost its #[cfg(unix)] attribute — \
                  the Windows unit-test job would fail to compile"
+            );
+        }
+    }
+
+    /// The PTY driver's cleanup must own the process GROUP, never the pid
+    /// number: once the child is reaped its pid can be recycled into an
+    /// unrelated process, and a direct kill on that path would target
+    /// whoever owns the number now. This pins, in the driver's own
+    /// source, the contract the behavior regressions above exercise: no
+    /// direct pid kill exists anywhere in this file, the driver kills
+    /// through the group on every exit path, a cleanup failure is
+    /// composed with the primary diagnostic instead of masking it, and an
+    /// argv mismatch reports the PTY transcript. Like the gating check it
+    /// reads the source as text and runs wherever the unit tests run — a
+    /// Linux-side edit that loses one of these fails here before it
+    /// ships.
+    #[test]
+    fn pty_driver_cleanup_owns_the_group_and_composes_failures() {
+        let source =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion.rs source should be readable");
+        // Everything asserted below must live in the hostile-filename
+        // driver itself, past its pty.fork of bash — not only in a copy of
+        // its protocol kept elsewhere in this file.
+        let driver_start = source
+            .find("os.execvp(\"bash\", [\"bash\", \"--noprofile\", \"--norc\", \"-i\"])")
+            .expect("the PTY driver should fork interactive bash");
+        let driver = &source[driver_start..];
+        // Assembled from pieces so this test's own source — which must
+        // name the pattern to forbid it — can never satisfy the search.
+        let direct_kill_call = ["os.kill(", "pid,"].concat();
+        assert!(
+            !source.contains(&direct_kill_call),
+            "the PTY driver must never kill by pid: a reaped pid can be \
+             recycled into an unrelated process"
+        );
+        for marker in [
+            "def stop_child():",
+            "os.killpg(pid, signal.SIGKILL)",
+            "; cleanup: ",
+            "; cleanup also failed: ",
+            "case ended with ",
+            "raise primary",
+            "fail(\"completion produced unexpected literal argv",
+        ] {
+            assert!(
+                driver.contains(marker),
+                "the PTY driver must keep `{marker}` — its cleanup owns the \
+                 group, composes failures, and reports the transcript"
             );
         }
     }
@@ -2593,26 +2909,38 @@ def write_bounded(data, timeout=5.0):
 
 def stop_child():
     # pty.fork()'s child called setsid(): bash leads its own session and
-    # process group, so killpg reaches every job it spawned. Kill even on the
-    # success paths, so a straggler subshell never outlives the driver.
+    # process group, so killpg reaches every job it spawned. Kill even on
+    # the success paths, so a straggler subshell never outlives the
+    # driver. Group kill ONLY, on every path: an un-reaped child — even
+    # as a zombie — still counts as a group member, so killpg cannot miss
+    # a child that is still ours, and a group with live members never has
+    # its id recycled. killpg raising OSError therefore means the whole
+    # group is gone, which is only possible once the child was reaped —
+    # and the pid of a reaped child may already belong to an unrelated
+    # process. NEVER fall back to a direct kill by pid on that path: after
+    # a reap the number is not ours to signal; the group id was.
     try:
         os.killpg(pid, signal.SIGKILL)
     except OSError:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            return
+        return None
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         try:
             waited, _ = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
-            return
+            # Already reaped (by the exit wait above, or an earlier
+            # cleanup): nothing left to signal or reap, and killpg has
+            # already covered the descendants.
+            return None
         if waited == pid:
-            return
+            return None
         time.sleep(0.02)
-    fail("interactive bash survived SIGKILL")
+    # NOT raised: raising here — especially out of a finally — would mask
+    # whatever failure is already propagating. Return the diagnostic; the
+    # caller composes it with the primary one.
+    return "interactive bash survived SIGKILL; PTY transcript: " + repr(transcript)
 
+primary = None
 try:
     drain()
     if wordbreaks == "exclude_equals":
@@ -2637,8 +2965,11 @@ try:
             break
         time.sleep(0.02)
     else:
-        stop_child()
-        fail("timed out waiting for interactive bash to exit")
+        # The timeout is the primary failure; a cleanup that could not
+        # finish is appended to it, never raised over it.
+        cleanup = stop_child()
+        fail("timed out waiting for interactive bash to exit"
+             + (("; cleanup: " + cleanup) if cleanup else ""))
     if no_match == expect_match:
         fail("unexpected completion match state")
     if no_match:
@@ -2646,9 +2977,26 @@ try:
     with open(os.path.join(directory, "args.bin"), "rb") as stream:
         actual = stream.read().split(b"\0")[:-1]
     if actual != [arg.encode() for arg in expected_args]:
-        raise SystemExit("completion produced unexpected literal argv: " + repr(actual))
+        fail("completion produced unexpected literal argv: " + repr(actual))
+except BaseException as raised:
+    # Hold the primary diagnostic — fail() raises SystemExit, and an
+    # unexpected exception is held the same way. The finally decides what
+    # the process exits with: a cleanup failure appends to this, never
+    # masks it.
+    primary = raised
 finally:
-    stop_child()
+    cleanup = stop_child()
+    if cleanup is not None:
+        if primary is not None:
+            detail = primary.args[0] if primary.args else None
+            if isinstance(detail, str):
+                raise SystemExit(detail + "; cleanup also failed: " + cleanup)
+            raise SystemExit(
+                "case ended with " + repr(detail) + "; cleanup failed: " + cleanup
+            )
+        raise SystemExit("cleanup failed: " + cleanup)
+    if primary is not None:
+        raise primary
 "#;
             let expected_json = serde_json::to_string(&expected_args).unwrap();
             let expect_match_flag = expect_match.to_string();
