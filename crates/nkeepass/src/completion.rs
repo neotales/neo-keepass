@@ -2773,6 +2773,99 @@ else:
         );
     }
 
+    /// Exercise the actual driver with a simulated exit that cannot become
+    /// waitable until the PTY master is closed. This is fault injection, not
+    /// a claim that the Darwin kernel has that particular dependency.
+    #[test]
+    #[cfg(unix)]
+    fn pty_driver_closes_master_before_waiting_for_exit() {
+        let source = lf_script(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion.rs source should be readable"),
+        );
+        let driver = hostile_filename_driver_slice(&source)
+            .expect("driver should be sliceable")
+            .strip_prefix("r#\"\n")
+            .expect("raw string prefix");
+        let target = "waited, status = os.waitpid(pid, os.WNOHANG)";
+        assert_eq!(driver.matches(target).count(), 1);
+        let injected = driver.replace(
+            target,
+            "try:\n                os.fstat(fd)\n            except OSError as error:\n                if error.errno != errno.EBADF:\n                    raise\n                waited, status = os.waitpid(pid, os.WNOHANG)\n            else:\n                waited, status = (0, 0)",
+        ).replace(
+            "os.set_blocking(fd, False)",
+            "os.set_blocking(fd, False)\nprint('PTY-TEST-PID', pid, flush=True)",
+        );
+        let directory = tempfile::tempdir().expect("PTY test directory");
+        std::fs::write(directory.path().join("present.bin"), b"").unwrap();
+        let completion = directory.path().join("completion.bash");
+        std::fs::write(&completion, generate("bash").unwrap()).unwrap();
+        let expected = serde_json::to_string(&["set", "--bin", "payload=present.bin"]).unwrap();
+        let run = run_python_bounded(
+            &injected,
+            &[
+                directory.path().as_os_str(),
+                completion.as_os_str(),
+                OsStr::new("nkp set --bin payload=present"),
+                OsStr::new(&expected),
+                OsStr::new("default"),
+                OsStr::new(""),
+                OsStr::new("true"),
+            ],
+            Duration::from_secs(15),
+        );
+        assert!(
+            run.success() && !run.drain_overflow,
+            "actual driver must close the master, reap the leader and observe group absence: {}",
+            run.failure_summary()
+        );
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let pid = stdout
+            .split_whitespace()
+            .nth(1)
+            .expect("driver must report its PTY leader");
+        let probe = std::process::Command::new("ps")
+            .args(["-p", pid, "-o", "pid="])
+            .output()
+            .expect("ps must check for a leaked leader");
+        assert!(
+            !probe.status.success() || probe.stdout.trim_ascii().is_empty(),
+            "PTY leader {pid} remains after driver returned"
+        );
+        std::fs::remove_file(directory.path().join("args.bin")).unwrap();
+        let failed_close = injected.replace(
+            "        os.close(fd)\n        close_error = None",
+            "        os.close(fd)\n        raise OSError(errno.EIO, 'injected close failure')\n        close_error = None",
+        );
+        assert_ne!(failed_close, injected, "close fault must be injected");
+        let run = run_python_bounded(
+            &failed_close,
+            &[
+                directory.path().as_os_str(),
+                completion.as_os_str(),
+                OsStr::new("nkp set --bin payload=present"),
+                OsStr::new(&expected),
+                OsStr::new("default"),
+                OsStr::new(""),
+                OsStr::new("true"),
+            ],
+            Duration::from_secs(15),
+        );
+        assert!(!run.success() && !run.timed_out && !run.drain_overflow);
+        assert!(
+            String::from_utf8_lossy(&run.stderr).contains("PTY master close failed"),
+            "close failure must not become a pass: {}",
+            run.failure_summary()
+        );
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let pid = stdout.split_whitespace().nth(1).expect("leader pid");
+        let probe = std::process::Command::new("ps")
+            .args(["-p", pid, "-o", "pid="])
+            .output()
+            .expect("ps must check for a leaked leader");
+        assert!(!probe.status.success() || probe.stdout.trim_ascii().is_empty());
+    }
+
     /// Exercise the embedded driver end-to-end with a forced cleanup
     /// failure after it has safely reaped Bash and observed group absence.
     /// The primary argv assertion must remain first, the bounded diagnostic
@@ -2788,7 +2881,7 @@ else:
             .expect("the PTY driver's script should be sliceable")
             .strip_prefix("r#\"\n")
             .expect("the slice should start at the raw string");
-        let old = "if error.errno == errno.ESRCH:\n                return None";
+        let old = "if error.errno == errno.ESRCH:\n                return close_error";
         assert_eq!(
             driver.matches(old).count(),
             1,
@@ -4861,6 +4954,19 @@ def stop_child():
         signal_results.append("SIGKILL=sent")
     except OSError as error:
         signal_results.append("SIGKILL=errno-%s:%s" % (error.errno, error.strerror))
+    # The behavior and literal argv have already been checked. Release our
+    # PTY master after signaling the still-owned group but before waiting for
+    # its leader: Darwin can wait in terminal teardown during exit. Apple's
+    # tty_dev.c ptcclose flushes the open slave and drops carrier. The CI
+    # observation of an exiting process with a readable master is consistent
+    # with, but does not prove, such a dependency. The outer driver deadline
+    # also bounds this close if a kernel call itself gets stuck.
+    try:
+        os.close(fd)
+        close_error = None
+    except OSError as error:
+        close_error = "PTY master close failed: errno-%s:%s" % (error.errno, error.strerror)
+        signal_results.append(close_error)
     deadline = time.monotonic() + 3
     last_wait = "not-attempted"
     reaped = False
@@ -4905,7 +5011,7 @@ def stop_child():
             group_probe = "exists"
         except OSError as error:
             if error.errno == errno.ESRCH:
-                return None
+                return close_error
             group_probe = "errno-%s:%s" % (error.errno, error.strerror)
             break
         time.sleep(0.02)
