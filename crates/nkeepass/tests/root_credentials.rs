@@ -2,7 +2,7 @@
 
 #[path = "support/application_environment.rs"]
 mod application_environment;
-use application_environment::IsolatedApplicationEnvironment;
+use application_environment::{IsolatedApplicationEnvironment, IsolatedCommand};
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -32,9 +32,9 @@ fn vault(home: &Path) -> PathBuf {
     path
 }
 
-fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
+fn command(home: &Path, vault: &Path, args: &[&str]) -> IsolatedCommand {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
-    command.isolate_application_environment();
+    let mut command = command.isolate_application_environment();
     command
         .args(["--vault", vault.to_str().unwrap()])
         .args(args)

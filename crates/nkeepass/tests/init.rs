@@ -9,7 +9,7 @@
 
 #[path = "support/application_environment.rs"]
 mod application_environment;
-use application_environment::IsolatedApplicationEnvironment;
+use application_environment::{IsolatedApplicationEnvironment, IsolatedCommand};
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -72,9 +72,9 @@ impl Fixture {
     }
 }
 
-fn command(fixture: &Fixture, password: &str) -> Command {
+fn command(fixture: &Fixture, password: &str) -> IsolatedCommand {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
-    child.isolate_application_environment();
+    let mut child = child.isolate_application_environment();
     child
         .current_dir(fixture.root.path())
         .env("HOME", fixture.root.path())

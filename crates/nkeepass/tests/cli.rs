@@ -153,19 +153,16 @@ fn vault_environment_aliases_are_ordered_and_empty_values_fail_closed() {
 }
 
 #[test]
-fn subprocess_fixture_isolates_xdg_directory_overrides() {
+fn subprocess_fixture_clears_xdg_config_dir() {
     let temp = tempfile::tempdir().unwrap();
-    let expected_home = temp.path().join("expected");
-    let canary_home = temp.path().join("must-not-be-used");
+    let canary = temp.path().join("config-dir-canary");
     let vault = temp.path().join("synthetic.kdbx");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
-    command
-        .env("XDG_CONFIG_DIR", &canary_home)
-        .env("XDG_DATA_DIR", &canary_home);
+    let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    raw.env("XDG_CONFIG_DIR", &canary);
+    let mut command = raw.isolate_application_environment();
+    let expected_config = command.home().join("config/nkeepass/config.json");
     let output = command
-        .isolate_application_environment()
         .args(["context", "set", "canary", vault.to_str().unwrap()])
-        .env("XDG_CONFIG_HOME", &expected_home)
         .output()
         .unwrap();
 
@@ -174,30 +171,38 @@ fn subprocess_fixture_isolates_xdg_directory_overrides() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(expected_home.join("nkeepass/config.json").is_file());
-    assert!(
-        !canary_home.exists(),
-        "inherited XDG override escaped fixture"
-    );
+    assert!(expected_config.is_file());
+    assert!(!canary.exists(), "XDG_CONFIG_DIR escaped the fixture");
 }
 
 #[test]
-fn subprocess_fixture_isolates_default_data_path_from_xdg_and_home_overrides() {
+fn subprocess_fixture_clears_xdg_config_home() {
     let temp = tempfile::tempdir().unwrap();
-    let canary_home = temp.path().join("must-not-be-used");
-    let canary_data = canary_home.join("data");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
-    command
-        .env("XDG_DATA_DIR", &canary_data)
-        .env("XDG_DATA_HOME", &canary_home)
-        .env("XDG_CONFIG_DIR", &canary_home)
-        .env("XDG_CONFIG_HOME", &canary_home)
-        .env("HOME", &canary_home);
+    let canary = temp.path().join("config-home-canary");
+    let vault = temp.path().join("synthetic.kdbx");
+    let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    raw.env("XDG_CONFIG_HOME", &canary);
+    let mut command = raw.isolate_application_environment();
+    let expected_config = command.home().join("config/nkeepass/config.json");
     let output = command
-        .isolate_application_environment()
-        .args(["context", "show"])
+        .args(["context", "set", "canary", vault.to_str().unwrap()])
         .output()
         .unwrap();
+
+    assert!(output.status.success());
+    assert!(expected_config.is_file());
+    assert!(!canary.exists(), "XDG_CONFIG_HOME escaped the fixture");
+}
+
+#[test]
+fn subprocess_fixture_clears_xdg_data_dir() {
+    let temp = tempfile::tempdir().unwrap();
+    let canary = temp.path().join("data-dir-canary");
+    let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    raw.env("XDG_DATA_DIR", &canary);
+    let mut command = raw.isolate_application_environment();
+    let expected_data = command.home().join("data/nkeepass/default.kdbx");
+    let output = command.args(["context", "show"]).output().unwrap();
 
     assert!(
         output.status.success(),
@@ -205,17 +210,45 @@ fn subprocess_fixture_isolates_default_data_path_from_xdg_and_home_overrides() {
         String::from_utf8_lossy(&output.stderr)
     );
     let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let resolved = context["path"].as_str().expect("context includes a path");
-    assert_ne!(
-        resolved,
-        canary_data.join("nkeepass/default.kdbx").to_string_lossy()
-    );
-    assert!(resolved.contains("neo-keepass-test"));
+    assert_eq!(context["path"], expected_data.to_string_lossy().as_ref());
     assert_eq!(context["source"], "data-directory");
-    assert!(
-        !canary_home.exists(),
-        "inherited directory override escaped fixture"
-    );
+    assert!(!canary.exists(), "XDG_DATA_DIR escaped the fixture");
+}
+
+#[test]
+fn subprocess_fixture_clears_xdg_data_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let canary = temp.path().join("data-home-canary");
+    let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    raw.env("XDG_DATA_HOME", &canary);
+    let mut command = raw.isolate_application_environment();
+    let expected_data = command.home().join("data/nkeepass/default.kdbx");
+    let output = command.args(["context", "show"]).output().unwrap();
+
+    assert!(output.status.success());
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(context["path"], expected_data.to_string_lossy().as_ref());
+    assert!(!canary.exists(), "XDG_DATA_HOME escaped the fixture");
+}
+
+#[test]
+fn subprocess_fixture_clears_home_for_default_data_resolution() {
+    let temp = tempfile::tempdir().unwrap();
+    let canary = temp.path().join("home-canary");
+    let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    raw.env("HOME", &canary);
+    let mut command = raw.isolate_application_environment();
+    // Remove the XDG data candidates so resolution must use the sanitized HOME.
+    command
+        .env_remove("XDG_DATA_DIR")
+        .env_remove("XDG_DATA_HOME");
+    let expected_data = command.home().join(".local/share/nkeepass/default.kdbx");
+    let output = command.args(["context", "show"]).output().unwrap();
+
+    assert!(output.status.success());
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(context["path"], expected_data.to_string_lossy().as_ref());
+    assert!(!canary.exists(), "HOME escaped the fixture");
 }
 
 #[test]
@@ -1505,8 +1538,9 @@ fn shortcuts_fields_attachments_and_exec() {
         );
         assert!(out.stdout.is_empty());
     }
-    let mut isolated_stdin = Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .isolate_application_environment()
+    let mut isolated_command =
+        Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    isolated_command
         .args([
             "--vault",
             vault,
@@ -1523,7 +1557,8 @@ fn shortcuts_fields_attachments_and_exec() {
         ])
         .env("XDG_CONFIG_HOME", tmp.path())
         .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NKEEPASS_VAULT_PATH");
+    let mut isolated_stdin = isolated_command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2901,12 +2936,13 @@ fn ls_propagates_a_closed_stdout_pipe() {
     )
     .unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .isolate_application_environment()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    command
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
-        .args(["secrets", "ls", "--password-env", "HOSTILE_TEST_PASSWORD"])
+        .args(["secrets", "ls", "--password-env", "HOSTILE_TEST_PASSWORD"]);
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -3446,8 +3482,7 @@ fn help_uses_the_argv0_basename_including_executable_extension() {
         (OsString::from("/opt/tools/工具"), "工具"),
         (OsString::from_vec(b"/opt/tools/nkp-\xff".to_vec()), "nkp-�"),
     ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
-        command.isolate_application_environment();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
         command
             .arg0(argv0)
             .arg("secrets")
@@ -3580,8 +3615,7 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
     // work; stdin is the one a caller reaches for when the password must not sit
     // in the process environment, and it is a path worth having a test on.
     let run = |args: &[&str]| -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
-        child.isolate_application_environment();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
         child
             .args(args)
             .env("HOME", tmp.path())

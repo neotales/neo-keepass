@@ -1,18 +1,21 @@
 //! Test-only isolation for the application's environment configuration.
 
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
 
-static TEST_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Removes all supported application configuration names from a child
-/// process before a test adds the variables it intends to exercise.
-pub trait IsolatedApplicationEnvironment {
-    fn isolate_application_environment(&mut self) -> &mut Command;
+/// Owns a child command and its disposable home directory until the command
+/// has completed and the fixture is dropped.
+pub struct IsolatedCommand {
+    command: Command,
+    _home: tempfile::TempDir,
 }
 
-impl IsolatedApplicationEnvironment for Command {
-    fn isolate_application_environment(&mut self) -> &mut Command {
+impl IsolatedCommand {
+    /// Removes inherited application inputs and directs home/XDG paths into an
+    /// owned temporary directory whose lifetime covers the command fixture.
+    #[must_use]
+    pub fn new(mut command: Command) -> Self {
         for name in [
             "NEO_KEEPASS_PASSWORD",
             "NKP_PASSWORD",
@@ -34,18 +37,54 @@ impl IsolatedApplicationEnvironment for Command {
             "NKEEPASS_COMPLETE_PASSWORD_ENV",
             "XDG_CONFIG_DIR",
             "XDG_DATA_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "HOME",
         ] {
-            self.env_remove(name);
+            command.env_remove(name);
         }
-        let home = TEST_HOME.get_or_init(|| {
-            tempfile::Builder::new()
-                .prefix("neo-keepass-test-")
-                .tempdir()
-                .unwrap()
-        });
-        self.env("HOME", home.path())
+        let home = tempfile::Builder::new()
+            .prefix("neo-keepass-test-")
+            .tempdir()
+            .expect("create isolated command home");
+        command
+            .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.path().join("config"))
             .env("XDG_DATA_HOME", home.path().join("data"));
-        self
+        Self {
+            command,
+            _home: home,
+        }
+    }
+
+    /// Returns the temporary home that backs this command's sanitized defaults.
+    #[must_use]
+    pub fn home(&self) -> &Path {
+        self._home.path()
+    }
+}
+
+impl Deref for IsolatedCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for IsolatedCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
+/// Wraps a command with an owned, sanitized home/XDG environment.
+pub trait IsolatedApplicationEnvironment {
+    fn isolate_application_environment(self) -> IsolatedCommand;
+}
+
+impl IsolatedApplicationEnvironment for Command {
+    fn isolate_application_environment(self) -> IsolatedCommand {
+        IsolatedCommand::new(self)
     }
 }
