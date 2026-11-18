@@ -33,7 +33,7 @@ fn vault(home: &Path) -> PathBuf {
 }
 
 fn command(home: &Path, vault: &Path, args: &[&str]) -> IsolatedCommand {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let command = Command::new(env!("CARGO_BIN_EXE_nkp"));
     let mut command = command.isolate_application_environment();
     command
         .args(["--vault", vault.to_str().unwrap()])

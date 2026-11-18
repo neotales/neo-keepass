@@ -73,7 +73,7 @@ impl Fixture {
 }
 
 fn command(fixture: &Fixture, password: &str) -> IsolatedCommand {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let child = Command::new(env!("CARGO_BIN_EXE_nkp"));
     let mut child = child.isolate_application_environment();
     child
         .current_dir(fixture.root.path())

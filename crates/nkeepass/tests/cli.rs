@@ -159,9 +159,8 @@ fn subprocess_fixture_clears_xdg_config_dir() {
     let vault = temp.path().join("synthetic.kdbx");
     let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
     raw.env("XDG_CONFIG_DIR", &canary);
-    let mut command = raw.isolate_application_environment();
-    let expected_config = command.home().join("config/nkeepass/config.json");
-    let output = command
+    let output = raw
+        .isolate_application_environment()
         .args(["context", "set", "canary", vault.to_str().unwrap()])
         .output()
         .unwrap();
@@ -171,7 +170,6 @@ fn subprocess_fixture_clears_xdg_config_dir() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(expected_config.is_file());
     assert!(!canary.exists(), "XDG_CONFIG_DIR escaped the fixture");
 }
 
@@ -182,15 +180,13 @@ fn subprocess_fixture_clears_xdg_config_home() {
     let vault = temp.path().join("synthetic.kdbx");
     let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
     raw.env("XDG_CONFIG_HOME", &canary);
-    let mut command = raw.isolate_application_environment();
-    let expected_config = command.home().join("config/nkeepass/config.json");
-    let output = command
+    let output = raw
+        .isolate_application_environment()
         .args(["context", "set", "canary", vault.to_str().unwrap()])
         .output()
         .unwrap();
 
     assert!(output.status.success());
-    assert!(expected_config.is_file());
     assert!(!canary.exists(), "XDG_CONFIG_HOME escaped the fixture");
 }
 
@@ -256,19 +252,56 @@ fn isolated_command_home_lives_through_spawn_and_wait_then_is_removed() {
     let mut raw = Command::new("sh");
     raw.args(["-c", "test -d \"$HOME\" && sleep 0.05 && test -d \"$HOME\""]);
     let mut command = raw.isolate_application_environment();
-    let home = command.home().to_path_buf();
-
     let mut child = command.spawn().unwrap();
+    let home = child.home().to_path_buf();
     assert!(
         home.is_dir(),
         "owned home disappeared immediately after spawn"
     );
+
     let status = child.wait().unwrap();
     assert!(status.success());
-    assert!(home.is_dir(), "owned home disappeared before fixture drop");
+    assert!(home.is_dir(), "owned home disappeared before guard drop");
+    drop(child);
+    assert!(!home.exists(), "owned home leaked after child guard drop");
+}
 
-    drop(command);
-    assert!(!home.exists(), "owned home leaked after fixture drop");
+#[test]
+fn isolated_child_kills_and_reaps_on_unwind_before_removing_home() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let mut home = None;
+    let mut pid = None;
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let mut raw = Command::new("sh");
+        raw.args(["-c", "exec sleep 60"]);
+        let mut command = raw.isolate_application_environment();
+        let child = command.spawn().unwrap();
+        home = Some(child.home().to_path_buf());
+        pid = Some(child.id());
+        assert!(home.as_ref().unwrap().is_dir());
+        assert!(process_is_alive(pid.unwrap()));
+        panic!("exercise isolated child cleanup during unwind");
+    }));
+
+    assert!(result.is_err());
+    assert!(
+        !home.as_ref().unwrap().exists(),
+        "child home survived guard unwinding"
+    );
+    assert!(
+        !process_is_alive(pid.unwrap()),
+        "child survived or was not reaped during guard unwinding"
+    );
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[test]
@@ -3492,7 +3525,6 @@ fn root_help_formats_aliases_shortcut_descriptions_and_safety_sections() {
 fn help_uses_the_argv0_basename_including_executable_extension() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
-    use std::os::unix::process::CommandExt;
 
     let tmp = tempfile::tempdir().unwrap();
     for (argv0, expected) in [
