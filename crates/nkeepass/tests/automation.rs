@@ -4,6 +4,10 @@
     reason = "end-to-end automation tests intentionally keep setup and assertions together"
 )]
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -63,9 +67,11 @@ fn load(path: &Path) -> KeePassDatabase {
 
 fn run(vault: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(["--vault", vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", home)
+        .env("XDG_DATA_HOME", home.join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
         .env_remove("NKEEPASS_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")
@@ -109,9 +115,11 @@ fn automation_age_options_fail_before_vault_or_output_access() {
             let mut args = action.to_vec();
             args.extend_from_slice(age_options);
             let run = Command::new(env!("CARGO_BIN_EXE_nkp"))
+                .isolate_application_environment()
                 .args(["--vault", vault.to_str().unwrap()])
                 .args(&args)
                 .env("XDG_CONFIG_HOME", home.path())
+                .env("XDG_DATA_HOME", home.path().join("data"))
                 .env_remove("NKEEPASS_TEST_PASSWORD")
                 .env_remove("NKEEPASS_VAULT")
                 .env_remove("NKEEPASS_VAULT_PATH")

@@ -16,7 +16,7 @@ Regenerate shell completion for the new name with `nkp completion SHELL`
 [command reference](docs/reference/system.md)) and replace the old
 `nkeepass` completion script. If you parse `github-actions` output, its
 heredoc delimiter changed from `NKEEPASS_EOF` to `NKP_EOF`. Everything else
-keeps its existing names: `NKEEPASS_*` environment variables, the
+remains compatible: legacy `NKEEPASS_*` environment variables, the
 `~/.config/nkeepass/` and `~/.local/share/nkeepass/` directories, and the
 config.json and KDBX formats, so existing setups and vaults keep working.
 
@@ -43,9 +43,29 @@ It never prints that password. See the [recovery instructions](docs/reference/va
 before using this option. With a supplied password and no key file, init
 attempts an age-encrypted password backup after successful vault creation, in a uniquely named file under
 `~/.local/share/nkeepass/`; the reusable native age identity is in
-`~/.config/nkeepass/init-password.agekey`. The `NKEEPASS_CONFIG_DIR` and
-`NKEEPASS_DATA_DIR` app overrides and XDG directory settings select these
-locations.
+`~/.config/nkeepass/init-password.agekey`. The `NEO_KEEPASS_CONFIG_DIR` and
+`NEO_KEEPASS_DATA_DIR` app overrides (and their aliases below), and XDG
+directory settings select these locations.
+Application environment inputs accept `NEO_KEEPASS_*` and `NKP_*` forms of
+existing `NKEEPASS_*` names. For each setting, the first *present* name wins:
+`NEO_KEEPASS_*`, then `NKP_*`, then legacy `NKEEPASS_*`. An empty higher-priority
+value does not fall through. Explicit CLI choices such as `--vault` or
+`--password-env` take precedence over defaults.
+
+For the default password names, an empty or non-Unicode selected value is an
+error; lower-priority names are not tried. For `VAULT` and `VAULT_PATH`, an
+empty or non-Unicode selected path is an error. `VAULT` is checked before
+`VAULT_PATH`, so a present `VAULT` value—including an empty one—prevents
+`VAULT_PATH` from being considered. Config/data directory overrides use the
+selected OS path and fail validation rather than falling back if it is empty
+or invalid. The completion password-environment selector treats an empty
+selected name as disabled (without trying lower-priority names); a
+non-Unicode selected name is an error. The name supplied to
+`--password-env` remains literal and is not rewritten.
+
+Environment-name matching follows host semantics: Windows names are
+case-insensitive; Unix names are case-sensitive.
+
 Both files are installed privately without overwriting existing files. Keep the
 identity safe: it decrypts the backup. Since this checkout has no OS credential
 vault integration, this file-based backup is the fallback. When a key file is
@@ -53,7 +73,10 @@ also part of the master credentials, no password-only backup is made, because
 the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
 If that supplied-password backup fails, init reports the sanitized cause and
-leaves the already-created vault in place. Init reports paths in readable text; use
+leaves the already-created vault in place. Before password-only creation, init
+resolves both backup directories and refuses non-Unicode or control-containing
+paths because recovery locations must be safely reportable. Key-file-only init
+does not impose that backup-path restriction. Init reports paths in readable text; use
 `--json` for machine-readable output. On Windows, private files are created with a
 protected current-user-only DACL and verified before writing. Volumes must
 advertise persistent ACL enforcement; unsupported or unqueryable volumes are

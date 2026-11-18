@@ -8,6 +8,10 @@
 //! produce. A code is safe to hand to a child process; the seed is not, and it is
 //! the thing this suite asserts is absent from every output.
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -78,6 +82,17 @@ fn auth() -> [&'static str; 2] {
     ["--password-env", "NKEEPASS_TOTP_TEST_PASSWORD"]
 }
 
+fn fixture_command(fixture: &Fixture, command: Command) -> Command {
+    let mut command = command.isolate_application_environment();
+    command
+        .current_dir(fixture.directory.path())
+        .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
+        .env("NKEEPASS_VAULT", &fixture.vault)
+        .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD);
+    command
+}
+
 /// Run a command with the fixture's credential.
 ///
 /// The credential flags are spliced in **before** the `--` terminator when there
@@ -96,14 +111,47 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
         command.extend_from_slice(args);
         command.extend_from_slice(&auth());
     }
-    Command::new(nkp())
-        .current_dir(fixture.directory.path())
-        .env("NKEEPASS_VAULT", &fixture.vault)
-        .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD)
+    fixture_command(fixture, Command::new(nkp()))
         .args(&command)
         .stdin(Stdio::null())
         .output()
         .unwrap()
+}
+
+#[test]
+fn fixture_ignores_hostile_config_and_data_homes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new(TOTP_URI);
+    let hostile = tempfile::tempdir().unwrap();
+    let config = hostile.path().join("nkeepass");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = config.join("config.json");
+    std::fs::write(&file, b"{invalid-json").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut raw = Command::new(nkp());
+    raw.env("XDG_CONFIG_HOME", hostile.path())
+        .env("XDG_DATA_HOME", hostile.path());
+    let mut command = fixture_command(&fixture, raw);
+    let data_home = fixture.directory.path().join("data");
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| { key == "XDG_DATA_HOME" && value == Some(data_home.as_os_str()) })
+    );
+    let output = command
+        .args([
+            "secrets", "env", "--key", "LOGIN", "--field", "otp", "--name", "CODE",
+        ])
+        .args(auth())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", error_text(&output));
+    assert_no_seed(&output);
+    assert!(is_code(&bound_value(&text(&output), "CODE")));
+    assert!(!hostile.path().join("nkeepass/default.kdbx").exists());
 }
 
 fn text(output: &Output) -> String {
@@ -299,10 +347,7 @@ fn exec_rejects_a_repeated_field_for_one_key() {
 #[test]
 fn exec_refuses_an_existing_binding_name_before_starting_the_child() {
     let fixture = Fixture::new(TOTP_URI);
-    let output = Command::new(nkp())
-        .current_dir(fixture.directory.path())
-        .env("NKEEPASS_VAULT", &fixture.vault)
-        .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD)
+    let output = fixture_command(&fixture, Command::new(nkp()))
         .env("COLLISION", "caller-value")
         .args([
             "exec",

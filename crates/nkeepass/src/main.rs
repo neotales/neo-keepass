@@ -81,6 +81,15 @@ const GLOBAL_CREDENTIAL_OPTIONS: &[HelpOption] = &[
     },
 ];
 const DEFAULT_PASSWORD_ENV: &str = "NKEEPASS_PASSWORD";
+
+/// Reads a supported application environment variable using canonical-name
+/// precedence: `NEO_KEEPASS_*`, then `NKP_*`, then legacy `NKEEPASS_*`.
+fn app_env_var_os(name: &str) -> Option<std::ffi::OsString> {
+    let suffix = name.strip_prefix("NKEEPASS_")?;
+    env::var_os(format!("NEO_KEEPASS_{suffix}"))
+        .or_else(|| env::var_os(format!("NKP_{suffix}")))
+        .or_else(|| env::var_os(name))
+}
 const ROOT_ONLY_OPTIONS: &[HelpOption] = &[HelpOption {
     label: "--version",
     summary: "Print version information.",
@@ -1204,7 +1213,7 @@ fn resolve_app_dir(
 }
 
 fn config_dir() -> Result<PathBuf> {
-    let app_override = env::var_os("NKEEPASS_CONFIG_DIR");
+    let app_override = app_env_var_os("NKEEPASS_CONFIG_DIR");
     let xdg_override = env::var_os("XDG_CONFIG_DIR");
     let standard_xdg_home = env::var_os("XDG_CONFIG_HOME");
     resolve_app_dir(
@@ -1219,7 +1228,7 @@ fn config_dir() -> Result<PathBuf> {
 }
 
 fn data_dir() -> Result<PathBuf> {
-    let app_override = env::var_os("NKEEPASS_DATA_DIR");
+    let app_override = app_env_var_os("NKEEPASS_DATA_DIR");
     let xdg_override = env::var_os("XDG_DATA_DIR");
     let standard_xdg_home = env::var_os("XDG_DATA_HOME");
     resolve_app_dir(
@@ -1624,12 +1633,16 @@ fn remove_context_alias(config: &mut Config, name: &str) -> Result<()> {
 }
 
 fn environment_vault(name: &str) -> Result<Option<String>> {
-    let Some(path) = env::var_os(name).filter(|value| !value.is_empty()) else {
+    let Some(path) = app_env_var_os(name) else {
         return Ok(None);
     };
-    path.into_string()
-        .map(Some)
-        .map_err(|_| err("vault environment variable is not valid UTF-8"))
+    let path = path
+        .into_string()
+        .map_err(|_| err("vault environment variable is not valid UTF-8"))?;
+    if path.is_empty() {
+        return Err(err("vault environment variable must not be empty"));
+    }
+    Ok(Some(path))
 }
 
 fn active_vault<'a>(
@@ -2077,12 +2090,12 @@ fn password(opts: &Options<'_>) -> Result<Option<Zeroizing<String>>> {
     if opts.key_file.is_some() {
         return Ok(None);
     }
-    match env::var(DEFAULT_PASSWORD_ENV) {
-        Ok(value) if !value.is_empty() => return Ok(Some(Zeroizing::new(value))),
-        Err(env::VarError::NotPresent) => {}
-        Ok(_) | Err(env::VarError::NotUnicode(_)) => {
-            return Err(err("password environment variable unavailable"));
-        }
+    match app_env_var_os(DEFAULT_PASSWORD_ENV) {
+        Some(value) => match value.into_string() {
+            Ok(value) if !value.is_empty() => return Ok(Some(Zeroizing::new(value))),
+            Ok(_) | Err(_) => return Err(err("password environment variable unavailable")),
+        },
+        None => {}
     }
     if !io::stdin().is_terminal() {
         return Err(err("password source required for non-interactive input"));
@@ -2172,10 +2185,6 @@ struct InitPasswordBackup {
     identity_path: PathBuf,
     identity_created: bool,
     association_path: Option<PathBuf>,
-}
-
-fn backup_init_password(password: &str) -> Result<InitPasswordBackup> {
-    backup_init_password_at(password, &config_dir()?, &data_dir()?)
 }
 
 #[cfg(test)]
@@ -5162,6 +5171,25 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     }
     let path_text = normalized_vault_text(&path);
 
+    // Both backup roots must be reportable before creating a password-only
+    // vault. Keep these exact paths for the subsequent backup transaction.
+    let backup_roots = if opts.key_file.is_none() {
+        let roots = (|| {
+            let config = config_dir()?;
+            let data = data_dir()?;
+            for root in [&config, &data] {
+                if !root.to_str().is_some_and(safe_metadata) {
+                    return Err(err("password backup directory is not safe to report"));
+                }
+            }
+            Ok((config, data))
+        })()
+        .map_err(|error: CliError| err(format!("vault creation did not start; {}", error.0)))?;
+        Some(roots)
+    } else {
+        None
+    };
+
     let master_password = if generate_master {
         Some(
             nkeepass::service::generate_master_password()
@@ -5175,10 +5203,15 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     // A generated master password must be recoverable even if creation installs
     // the vault but later reports a durability or configuration failure.
     let generated_backup = if generate_master {
-        let mut backup = backup_init_password(
+        let (config_root, data_root) = backup_roots.as_ref().ok_or_else(|| {
+            err("vault creation did not start; password backup roots unavailable")
+        })?;
+        let mut backup = backup_init_password_at(
             master_password
                 .as_deref()
                 .ok_or_else(|| err("cannot generate master password"))?,
+            config_root,
+            data_root,
         )?;
         if let Err(error) = associate_init_backup(&mut backup, &path_text) {
             // Reporting must not replace the original failure when stdout is
@@ -5209,13 +5242,13 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     let password_backup = if generated_backup.is_some() {
         Ok(generated_backup)
     } else if create_result.is_ok() {
-        if opts.key_file.is_some() {
-            Ok(None)
-        } else {
+        if let Some((config_root, data_root)) = &backup_roots {
             master_password
                 .as_deref()
-                .map(|password| backup_init_password(password))
+                .map(|password| backup_init_password_at(password, config_root, data_root))
                 .transpose()
+        } else {
+            Ok(None)
         }
     } else {
         Ok(None)
@@ -5919,7 +5952,7 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     }
     let mut seen = BTreeSet::new();
     for name in &env_names {
-        if name == DEFAULT_PASSWORD_ENV || password_env == Some(name.as_str()) {
+        if is_default_password_env_name(name) || password_env == Some(name.as_str()) {
             return Err(err(
                 "exec environment name is reserved for the master password",
             ));
@@ -6124,6 +6157,20 @@ fn valid_env_name(name: &str) -> bool {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_default_password_env_name(name: &str) -> bool {
+    const RESERVED: [&str; 3] = ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"];
+    RESERVED.iter().any(|reserved| {
+        #[cfg(windows)]
+        {
+            name.eq_ignore_ascii_case(reserved)
+        }
+        #[cfg(not(windows))]
+        {
+            name == *reserved
+        }
+    })
 }
 
 fn public_secrets_action(action: &str) -> Option<&str> {
@@ -6380,7 +6427,7 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
         output.push_str("CREDENTIALS:\n");
         write_paragraph(
             &mut output,
-            "Without an explicit credential source, use NKEEPASS_PASSWORD when set. Explicit sources override it; NKEEPASS_SECRET is not an alias.",
+            "Without an explicit source, use NEO_KEEPASS_PASSWORD, then NKP_PASSWORD, then NKEEPASS_PASSWORD. Explicit sources override them; NKEEPASS_SECRET is not an alias.",
             width,
             "  ",
         );
@@ -6955,6 +7002,17 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_reserves_all_default_password_variable_names() {
+        for name in ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"] {
+            assert!(is_default_password_env_name(name));
+        }
+        #[cfg(windows)]
+        assert!(is_default_password_env_name("neo_keepass_password"));
+        #[cfg(not(windows))]
+        assert!(!is_default_password_env_name("neo_keepass_password"));
+    }
 
     #[test]
     fn short_key_file_and_field_options_expand_only_before_exec_separator() {

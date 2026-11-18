@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,9 +52,11 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
     // test has to know which spelling the helper prefers.
 
     Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
         .env("PW", PASSWORD)
         .env_remove("NKEEPASS_VAULT")
@@ -61,13 +67,16 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
 }
 
 fn run_with_input(fixture: &Fixture, args: &[&str], input: &[u8]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    command
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env_remove("NKEEPASS_TEST_PASSWORD")
         .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NKEEPASS_VAULT_PATH");
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -205,6 +214,7 @@ fn public_routes_reject_internal_actions_before_vault_access() {
         vec!["automation", "attachment-ls", "--key", "LOGIN"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(["--vault", missing.to_str().unwrap()])
             .args(&args)
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
@@ -283,6 +293,7 @@ fn generic_dry_run_is_rejected_by_non_dry_run_commands() {
     ];
     for args in cases {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(["--vault", missing.to_str().unwrap()])
             .args(&args)
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
@@ -301,6 +312,7 @@ fn duplicate_global_vault_is_rejected() {
     let first = tmp.path().join("first.kdbx");
     let second = tmp.path().join("second.kdbx");
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             first.to_str().unwrap(),
@@ -497,6 +509,7 @@ fn secrets_env_rejects_unrelated_options_before_credentials_or_vault() {
         args.extend(extra);
         args.extend(auth);
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(&args)
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
             .env_remove("MISSING_PASSWORD")
@@ -755,6 +768,7 @@ fn config_directory_permissions_are_checked_on_read() {
 
     let command = || {
         Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(["alias", "list"])
             .env("XDG_CONFIG_HOME", &config_home)
             .env_remove("NKEEPASS_VAULT")
@@ -812,6 +826,7 @@ fn exec_does_not_pass_the_parent_environment_to_the_child() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             &vault,
@@ -1073,6 +1088,7 @@ fn config_write_uses_the_authenticated_account_when_username_is_forged() {
     let config_home = fixture.directory.path().join("spoofed-config-home");
     let system_root = std::env::var_os("SystemRoot").expect("SystemRoot");
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(["config", "set", "current", fixture.vault.to_str().unwrap()])
         .env_clear()
         .env("SystemRoot", &system_root)

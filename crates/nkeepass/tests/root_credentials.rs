@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -29,19 +33,95 @@ fn vault(home: &Path) -> PathBuf {
 }
 
 fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let mut command = command.isolate_application_environment();
     command
         .args(["--vault", vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", home)
+        .env("XDG_DATA_HOME", home.join("data"))
         .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NEO_KEEPASS_CONFIG_DIR")
+        .env_remove("NKP_CONFIG_DIR")
+        .env_remove("NKEEPASS_DATA_DIR")
+        .env_remove("NEO_KEEPASS_DATA_DIR")
+        .env_remove("NKP_DATA_DIR")
         .env_remove("XDG_CONFIG_DIR")
         .env_remove("NKEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NKP_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
+        .env_remove("NKP_VAULT_PATH")
         .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_PASSWORD")
+        .env_remove("NKP_PASSWORD")
+        .env_remove("NKEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NKP_COMPLETE_PASSWORD_ENV")
         .env_remove("NKEEPASS_SECRET")
         .stdin(Stdio::null());
     command
+}
+
+#[test]
+fn default_password_environment_names_follow_documented_precedence() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = vault(temp.path());
+    for (variables, expected_success) in [
+        (vec![("NKEEPASS_PASSWORD", "vault-password")], true),
+        (vec![("NKP_PASSWORD", "vault-password")], true),
+        (vec![("NEO_KEEPASS_PASSWORD", "vault-password")], true),
+        (
+            vec![
+                ("NKEEPASS_PASSWORD", "wrong"),
+                ("NKP_PASSWORD", "vault-password"),
+            ],
+            true,
+        ),
+        (
+            vec![
+                ("NKEEPASS_PASSWORD", "vault-password"),
+                ("NKP_PASSWORD", "wrong"),
+            ],
+            false,
+        ),
+        (
+            vec![
+                ("NKP_PASSWORD", "wrong"),
+                ("NEO_KEEPASS_PASSWORD", "vault-password"),
+            ],
+            true,
+        ),
+        (
+            vec![
+                ("NKEEPASS_PASSWORD", "vault-password"),
+                ("NEO_KEEPASS_PASSWORD", "wrong"),
+            ],
+            false,
+        ),
+        (
+            vec![
+                ("NKP_PASSWORD", "vault-password"),
+                ("NEO_KEEPASS_PASSWORD", ""),
+            ],
+            false,
+        ),
+    ] {
+        let mut command = command(temp.path(), &vault, &["get", "--key", "login"]);
+        for &(name, value) in &variables {
+            command.env(name, value);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            expected_success,
+            "unexpected result with environment names: {:?}; stdout: {}; stderr: {}",
+            variables.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
 
 fn success(output: &Output) {
@@ -109,8 +189,9 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
         vec!["--password-stdin", "secrets", "get", "--key", "login"],
         vec!["secrets", "get", "--password-stdin", "--key", "login"],
     ] {
-        let mut child = command(temp.path(), &vault, &args)
-            .env("NKEEPASS_PASSWORD", "wrong-password")
+        let mut command = command(temp.path(), &vault, &args);
+        command.env("NKEEPASS_PASSWORD", "wrong-password");
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -135,6 +216,7 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
 #[test]
 fn global_credential_help_and_static_completions_show_both_sources() {
     let help = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .arg("--help")
         .output()
         .unwrap();
@@ -146,6 +228,7 @@ fn global_credential_help_and_static_completions_show_both_sources() {
     assert!(help.contains("NKEEPASS_PASSWORD"));
     for shell in ["bash", "sh", "zsh", "fish", "powershell", "nushell"] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(["completion", shell])
             .output()
             .unwrap();
@@ -317,7 +400,12 @@ fn non_utf8_password_variables_fail_without_disclosure() {
     use std::os::unix::ffi::OsStringExt;
     let temp = tempfile::tempdir().unwrap();
     let vault = vault(temp.path());
-    for name in ["EXPLICIT_PASSWORD", "NKEEPASS_PASSWORD"] {
+    for name in [
+        "EXPLICIT_PASSWORD",
+        "NKEEPASS_PASSWORD",
+        "NKP_PASSWORD",
+        "NEO_KEEPASS_PASSWORD",
+    ] {
         let mut args = Vec::new();
         if name == "EXPLICIT_PASSWORD" {
             args.extend(["--password-env", name]);
@@ -425,4 +513,23 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
             .lines()
             .any(|line| line == "APP_PASSWORD=app-secret")
     );
+}
+
+#[test]
+fn exec_rejects_every_default_password_alias_as_a_child_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = vault(temp.path());
+    for name in ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"] {
+        let output = command(
+            temp.path(),
+            &vault,
+            &["exec", "--key", "login", "--env", name, "--", "/bin/true"],
+        )
+        .output()
+        .unwrap();
+        assert!(!output.status.success(), "exec accepted reserved {name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("reserved for the master password")
+        );
+    }
 }

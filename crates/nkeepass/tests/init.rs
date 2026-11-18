@@ -7,6 +7,10 @@
 //! worse than a missing feature, because the user has no way to tell it
 //! happened.
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -69,19 +73,34 @@ impl Fixture {
 }
 
 fn command(fixture: &Fixture, password: &str) -> Command {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let child = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let mut child = child.isolate_application_environment();
     child
         .current_dir(fixture.root.path())
         .env("HOME", fixture.root.path())
         .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NEO_KEEPASS_CONFIG_DIR")
+        .env_remove("NKP_CONFIG_DIR")
         .env_remove("NKEEPASS_DATA_DIR")
+        .env_remove("NEO_KEEPASS_DATA_DIR")
+        .env_remove("NKP_DATA_DIR")
         .env_remove("XDG_CONFIG_DIR")
         .env_remove("XDG_DATA_DIR")
         .env("XDG_CONFIG_HOME", fixture.config_home())
         .env("XDG_DATA_HOME", fixture.data_home())
         .env(PASSWORD_ENV, password)
         .env_remove("NKEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NKP_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
+        .env_remove("NKP_VAULT_PATH")
+        .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_PASSWORD")
+        .env_remove("NKP_PASSWORD")
+        .env_remove("NKEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NKP_COMPLETE_PASSWORD_ENV")
         .stdin(Stdio::null());
     child
 }
@@ -119,6 +138,196 @@ fn password_backup_uses_app_specific_directory_overrides() {
         Some(xdg_data.join("nkeepass").as_path())
     );
     assert!(xdg_config.join("nkeepass/init-password.agekey").is_file());
+
+    for (index, (config_name, data_name, fallback_name)) in [
+        ("NEO_KEEPASS_CONFIG_DIR", "NEO_KEEPASS_DATA_DIR", "NKP"),
+        ("NKP_CONFIG_DIR", "NKP_DATA_DIR", "NKEEPASS"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let selected_config = fixture.root.path().join(format!("alias-config-{index}"));
+        let selected_data = fixture.root.path().join(format!("alias-data-{index}"));
+        let ignored_config = fixture.root.path().join(format!("ignored-config-{index}"));
+        let ignored_data = fixture.root.path().join(format!("ignored-data-{index}"));
+        let alias_vault = fixture.vault(&format!("alias-{index}.kdbx"));
+        let output = command(&fixture, PASSWORD)
+            .env(config_name, &selected_config)
+            .env(data_name, &selected_data)
+            .env(format!("{fallback_name}_CONFIG_DIR"), &ignored_config)
+            .env(format!("{fallback_name}_DATA_DIR"), &ignored_data)
+            .args(with_password(&["init", alias_vault.to_str().unwrap()]))
+            .output()
+            .unwrap();
+        let result = created(&output);
+        let backup = PathBuf::from(result["password_backup"].as_str().unwrap());
+        assert_eq!(backup.parent(), Some(selected_data.as_path()));
+        assert!(selected_config.join("init-password.agekey").is_file());
+        assert!(!ignored_config.exists());
+        assert!(!ignored_data.exists());
+    }
+}
+
+#[test]
+fn empty_config_alias_does_not_fall_through_to_lower_priority_directory() {
+    let fixture = Fixture::new();
+    let selected_config = fixture.root.path().join("empty-fallback-config");
+    let empty_output = command(&fixture, PASSWORD)
+        .env("NEO_KEEPASS_CONFIG_DIR", "")
+        .env("NKP_CONFIG_DIR", &selected_config)
+        .args(with_password(&[
+            "init",
+            fixture.vault("empty-config-dir.kdbx").to_str().unwrap(),
+        ]))
+        .output()
+        .unwrap();
+    assert!(!empty_output.status.success());
+    assert!(!selected_config.exists());
+}
+
+#[test]
+fn empty_data_alias_does_not_fall_through_to_lower_priority_directory() {
+    let fixture = Fixture::new();
+    let selected_data = fixture.root.path().join("empty-fallback-data");
+    let empty_output = command(&fixture, PASSWORD)
+        .env("NEO_KEEPASS_DATA_DIR", "")
+        .env("NKP_DATA_DIR", &selected_data)
+        .args(with_password(&[
+            "init",
+            fixture.vault("empty-data-dir.kdbx").to_str().unwrap(),
+        ]))
+        .output()
+        .unwrap();
+    assert!(!empty_output.status.success());
+    assert!(!selected_data.exists());
+}
+
+#[test]
+fn app_directory_aliases_accept_os_native_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let config = PathBuf::from(std::ffi::OsString::from_vec(
+        fixture
+            .root
+            .path()
+            .join("config-")
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .copied()
+            .chain([0xff])
+            .collect(),
+    ));
+    let output = command(&fixture, PASSWORD)
+        .env("NEO_KEEPASS_CONFIG_DIR", &config)
+        .args([
+            "context",
+            "set",
+            "native",
+            fixture.vault("native.kdbx").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "OS-native directory paths should work: {}",
+        stderr(&output)
+    );
+    assert!(config.join("config.json").is_file());
+}
+
+#[test]
+fn unsafe_backup_roots_stop_password_only_creation_before_any_vault() {
+    use std::os::unix::ffi::OsStringExt;
+
+    for suffix in ["CONFIG_DIR", "DATA_DIR"] {
+        for prefix in ["NEO_KEEPASS", "NKP", "NKEEPASS"] {
+            for bad_byte in [0xff, b'\n'] {
+                for generated in [false, true] {
+                    for json in [false, true] {
+                        let fixture = Fixture::new();
+                        let vault = fixture.vault("not-created.kdbx");
+                        let bad_root = PathBuf::from(std::ffi::OsString::from_vec(
+                            fixture
+                                .root
+                                .path()
+                                .join("unsafe-")
+                                .as_os_str()
+                                .as_encoded_bytes()
+                                .iter()
+                                .copied()
+                                .chain([bad_byte])
+                                .collect(),
+                        ));
+                        let mut child = command(&fixture, PASSWORD);
+                        child
+                            .env(format!("{prefix}_{suffix}"), bad_root)
+                            .args(["init", vault.to_str().unwrap()]);
+                        if generated {
+                            child.arg("--generate-master-password");
+                        } else {
+                            child.args(["--password-env", PASSWORD_ENV]);
+                        }
+                        if json {
+                            child.arg("--json");
+                        }
+                        let output = child.output().unwrap();
+                        assert!(!output.status.success(), "{prefix}_{suffix}");
+                        assert!(!vault.exists(), "{prefix}_{suffix}");
+                        assert!(
+                            stderr(&output).contains("vault creation did not start"),
+                            "{}",
+                            stderr(&output)
+                        );
+                        assert!(
+                            stderr(&output)
+                                .contains("password backup directory is not safe to report")
+                        );
+                        assert_no_password(&output);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn key_file_only_init_does_not_require_reportable_backup_roots() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let vault = fixture.vault("key-only.kdbx");
+    let key = fixture.root.path().join("keyfile");
+    std::fs::write(&key, [42_u8; 32]).unwrap();
+    let unsafe_data = PathBuf::from(std::ffi::OsString::from_vec(
+        fixture
+            .root
+            .path()
+            .join("data-")
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .copied()
+            .chain([0xff])
+            .collect(),
+    ));
+    let output = command(&fixture, PASSWORD)
+        .env("NEO_KEEPASS_DATA_DIR", unsafe_data)
+        .args([
+            "init",
+            vault.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--json",
+            "--iterations",
+            "64",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(vault.is_file());
+    assert_no_password(&output);
 }
 
 #[cfg(unix)]
@@ -992,7 +1201,8 @@ fn relative_init_path_is_resolved_from_the_invocation_directory() {
 fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
     let fixture = Fixture::new();
     let vault = fixture.vault("stdin.kdbx");
-    let mut child = command(&fixture, PASSWORD)
+    let mut command = command(&fixture, PASSWORD);
+    command
         .args([
             "init",
             vault.to_str().unwrap(),
@@ -1000,7 +1210,8 @@ fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
             "--iterations",
             "64",
         ])
-        .env_remove(PASSWORD_ENV)
+        .env_remove(PASSWORD_ENV);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1009,7 +1220,7 @@ fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
     use std::io::Write as _;
     child
         .stdin
-        .as_mut()
+        .take()
         .unwrap()
         .write_all(format!("{PASSWORD}\n").as_bytes())
         .unwrap();

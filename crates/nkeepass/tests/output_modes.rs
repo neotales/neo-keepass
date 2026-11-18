@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -117,9 +121,11 @@ impl Fixture {
 
 fn run(fixture: &Fixture, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
         .env_remove("NKEEPASS_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")
@@ -1121,6 +1127,7 @@ fn password_file_is_safe_for_automation_output_commands() {
     let password_file = fixture.directory.path().join("master.password");
     std::fs::write(&password_file, format!("{PASSWORD}\n")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             fixture.vault.to_str().unwrap(),
@@ -1144,6 +1151,7 @@ fn password_file_is_safe_for_automation_output_commands() {
 
     let snapshot = fixture.directory.path().join("snapshot.json");
     let exported = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             fixture.vault.to_str().unwrap(),
