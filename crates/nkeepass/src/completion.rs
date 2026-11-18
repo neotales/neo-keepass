@@ -2312,13 +2312,13 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
     /// number: once the child is reaped its pid can be recycled into an
     /// unrelated process, and a direct kill on that path would target
     /// whoever owns the number now. This pins, in the driver's own
-    /// source, the contract the behavior regressions above exercise: no
-    /// direct pid kill exists anywhere in this file, and within the
-    /// driver's own raw-string script — the search is bounded by the
-    /// script's `r#"` opening and its `"#;` terminator, so tests after
-    /// the driver keep their legitimate Rust kills — no direct-kill
-    /// spelling survives at all: `os.kill(` and `.kill(` are both
-    /// forbidden there while `killpg` alone is sanctioned. The driver
+    /// raw-string script, the contract the behavior regressions above
+    /// exercise: no direct pid kill exists within the driver's script —
+    /// the search is bounded by the script's `r#"` opening and its
+    /// `"#;` terminator, so tests after the driver keep their
+    /// legitimate Rust kills — no direct-kill spelling survives there
+    /// at all: `os.kill(` and `.kill(` are both forbidden while
+    /// `killpg` alone is sanctioned. The driver
     /// kills through the group on every exit path, a cleanup failure is
     /// composed with the primary diagnostic instead of masking it, and
     /// an argv mismatch reports the PTY transcript. Like the gating check
