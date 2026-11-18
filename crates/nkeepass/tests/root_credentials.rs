@@ -37,6 +37,9 @@ fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
         .env_remove("NKEEPASS_CONFIG_DIR")
         .env_remove("NEO_KEEPASS_CONFIG_DIR")
         .env_remove("NKP_CONFIG_DIR")
+        .env_remove("NKEEPASS_DATA_DIR")
+        .env_remove("NEO_KEEPASS_DATA_DIR")
+        .env_remove("NKP_DATA_DIR")
         .env_remove("XDG_CONFIG_DIR")
         .env_remove("NKEEPASS_VAULT")
         .env_remove("NEO_KEEPASS_VAULT")
@@ -47,6 +50,9 @@ fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
         .env_remove("NKEEPASS_PASSWORD")
         .env_remove("NEO_KEEPASS_PASSWORD")
         .env_remove("NKP_PASSWORD")
+        .env_remove("NKEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NKP_COMPLETE_PASSWORD_ENV")
         .env_remove("NKEEPASS_SECRET")
         .stdin(Stdio::null());
     command
@@ -498,4 +504,23 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
             .lines()
             .any(|line| line == "APP_PASSWORD=app-secret")
     );
+}
+
+#[test]
+fn exec_rejects_every_default_password_alias_as_a_child_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = vault(temp.path());
+    for name in ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"] {
+        let output = command(
+            temp.path(),
+            &vault,
+            &["exec", "--key", "login", "--env", name, "--", "/bin/true"],
+        )
+        .output()
+        .unwrap();
+        assert!(!output.status.success(), "exec accepted reserved {name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("reserved for the master password")
+        );
+    }
 }

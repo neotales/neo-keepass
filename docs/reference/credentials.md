@@ -35,8 +35,9 @@ Use at most one of these options:
 If you omit these options and `--key-file`, the CLI uses `NEO_KEEPASS_PASSWORD`,
 then `NKP_PASSWORD`, then legacy `NKEEPASS_PASSWORD` (the first set name)
 when it is set to a non-empty, valid Unicode value. If all are unset, the CLI
-prompts without echo when stdin is a terminal. An empty or non-Unicode value
-fails instead of prompting.
+prompts without echo when stdin is a terminal. The first present name wins:
+an empty or non-Unicode higher-priority value fails instead of falling back or
+prompting.
 Without a password source or terminal prompt, the command fails. Explicit
 password options override all three names. Across the three default names,
 `NEO_KEEPASS_*` takes precedence over `NKP_*`, which takes precedence over

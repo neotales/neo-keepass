@@ -36,11 +36,13 @@ export NEO_KEEPASS_VAULT="$HOME/vaults/work.kdbx"
 nkp secrets ls
 ```
 
-An explicit `--vault` overrides both vault environment variables. For each
-name, the `NEO_KEEPASS_*` form takes precedence over `NKP_*`, which takes
-precedence over the corresponding legacy `NKEEPASS_*` form. The `VAULT`
-variable takes precedence over the `VAULT_PATH` variable after resolving each
-name's aliases.
+An explicit `--vault` overrides both vault environment variables, even if an
+environment value is empty or invalid. For each name, `NEO_KEEPASS_*` takes
+precedence over `NKP_*`, which takes precedence over legacy `NKEEPASS_*`.
+The first present `VAULT` name takes precedence over every `VAULT_PATH` name.
+A selected empty or non-Unicode vault value is an error; it does not fall
+through to another alias, `VAULT_PATH`, context, or configured default. Unset
+the higher-priority name to use a lower-priority one.
 
 Vault paths must be absolute and normalized when stored as paths. Entry aliases
 are separate from vault aliases. See [vault and context commands](../reference/vault.md).

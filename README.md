@@ -42,17 +42,25 @@ password as age-encrypted data in a uniquely named file under
 `~/.config/nkeepass/init-password.agekey`. The `NKEEPASS_CONFIG_DIR` and
 `NKEEPASS_DATA_DIR` app overrides and XDG directory settings select these
 locations.
-Application environment inputs also accept the `NEO_KEEPASS_*` and `NKP_*`
-forms of the existing `NKEEPASS_*` names. If more than one form is set,
-`NEO_KEEPASS_*` wins over `NKP_*`, which wins over legacy `NKEEPASS_*`.
-Explicit command-line flags remain higher priority than all environment
-forms. For example, `NEO_KEEPASS_VAULT` wins over `NKP_VAULT` and
-`NKEEPASS_VAULT`; unset `NEO_KEEPASS_VAULT` to fall back to the shorter or
-legacy name. This applies to vault selection, password default, app config/data
-directory overrides, and completion-related application settings. Arbitrary
-environment names supplied to `--password-env` remain literal names.
-Environment-name matching follows the host operating system; Windows
-environment names are case-insensitive, while Unix names are case-sensitive.
+Application environment inputs accept `NEO_KEEPASS_*` and `NKP_*` forms of
+existing `NKEEPASS_*` names. For each setting, the first *present* name wins:
+`NEO_KEEPASS_*`, then `NKP_*`, then legacy `NKEEPASS_*`. An empty higher-priority
+value does not fall through. Explicit CLI choices such as `--vault` or
+`--password-env` take precedence over defaults.
+
+For the default password names, an empty or non-Unicode selected value is an
+error; lower-priority names are not tried. For `VAULT` and `VAULT_PATH`, an
+empty or non-Unicode selected path is an error. `VAULT` is checked before
+`VAULT_PATH`, so a present `VAULT` value—including an empty one—prevents
+`VAULT_PATH` from being considered. Config/data directory overrides use the
+selected OS path and fail validation rather than falling back if it is empty
+or invalid. The completion password-environment selector treats an empty
+selected name as disabled (without trying lower-priority names); a
+non-Unicode selected name is an error. The name supplied to
+`--password-env` remains literal and is not rewritten.
+
+Environment-name matching follows host semantics: Windows names are
+case-insensitive; Unix names are case-sensitive.
 Both files are installed privately without overwriting existing files. Keep the
 identity safe: it decrypts the backup. Since this checkout has no OS credential
 vault integration, this file-based backup is the fallback. When a key file is

@@ -28,10 +28,123 @@ fn cli(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args(args)
         .env("XDG_CONFIG_HOME", home)
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NKP_VAULT")
         .env_remove("NKEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
+        .env_remove("NKP_VAULT_PATH")
         .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_PASSWORD")
+        .env_remove("NKP_PASSWORD")
+        .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_CONFIG_DIR")
+        .env_remove("NKP_CONFIG_DIR")
+        .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NEO_KEEPASS_DATA_DIR")
+        .env_remove("NKP_DATA_DIR")
+        .env_remove("NKEEPASS_DATA_DIR")
         .output()
         .unwrap()
+}
+
+#[test]
+fn vault_environment_aliases_are_ordered_and_empty_values_fail_closed() {
+    use nkp_cli::{CliFixture, command};
+
+    let fixture = CliFixture::new(false);
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
+    let vault = fixture.vault().to_str().unwrap();
+    let ignored = fixture.directory().join("ignored.kdbx");
+    let ignored = ignored.to_str().unwrap();
+    let config = fixture.directory().join("env-alias-config");
+
+    for (name, args) in [
+        (
+            "NEO_KEEPASS_VAULT",
+            vec![
+                ("NEO_KEEPASS_VAULT", vault),
+                ("NKP_VAULT", ignored),
+                ("NKEEPASS_VAULT", ignored),
+            ],
+        ),
+        (
+            "NKP_VAULT",
+            vec![("NKP_VAULT", vault), ("NKEEPASS_VAULT", ignored)],
+        ),
+        (
+            "NEO_KEEPASS_VAULT_PATH",
+            vec![
+                ("NEO_KEEPASS_VAULT_PATH", vault),
+                ("NKP_VAULT_PATH", ignored),
+                ("NKEEPASS_VAULT_PATH", ignored),
+            ],
+        ),
+        (
+            "NKP_VAULT_PATH",
+            vec![("NKP_VAULT_PATH", vault), ("NKEEPASS_VAULT_PATH", ignored)],
+        ),
+        (
+            "NEO_KEEPASS_VAULT",
+            vec![
+                ("NEO_KEEPASS_VAULT", vault),
+                ("NEO_KEEPASS_VAULT_PATH", ignored),
+            ],
+        ),
+    ] {
+        let mut command = command(binary, &fixture);
+        command.env("XDG_CONFIG_HOME", &config);
+        for (variable, value) in args {
+            command.env(variable, value);
+        }
+        let output = command.args(["context", "show"]).output().unwrap();
+        assert!(output.status.success(), "{name} was not accepted");
+        let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(context["path"], vault, "{name} did not win as documented");
+        assert_eq!(context["source"], "environment");
+    }
+
+    for (empty_name, fallback_name) in [
+        ("NEO_KEEPASS_VAULT", "NKP_VAULT"),
+        ("NKP_VAULT", "NKEEPASS_VAULT"),
+        ("NEO_KEEPASS_VAULT_PATH", "NKP_VAULT_PATH"),
+        ("NKP_VAULT_PATH", "NKEEPASS_VAULT_PATH"),
+    ] {
+        let output = command(binary, &fixture)
+            .env("XDG_CONFIG_HOME", &config)
+            .env(empty_name, "")
+            .env(fallback_name, vault)
+            .args(["context", "show"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "empty {empty_name} fell through");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must not be empty"));
+    }
+
+    let explicit = command(binary, &fixture)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("NEO_KEEPASS_VAULT", "")
+        .env("NKP_VAULT", ignored)
+        .args(["--vault", vault, "context", "show"])
+        .output()
+        .unwrap();
+    assert!(explicit.status.success(), "explicit --vault should win");
+    let context: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert_eq!(context["path"], vault);
+    assert_eq!(context["source"], "argument");
+
+    use std::os::unix::ffi::OsStringExt;
+    let non_unicode = command(binary, &fixture)
+        .env("XDG_CONFIG_HOME", &config)
+        .env(
+            "NEO_KEEPASS_VAULT",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        )
+        .env("NKP_VAULT", vault)
+        .args(["context", "show"])
+        .output()
+        .unwrap();
+    assert!(!non_unicode.status.success());
+    assert!(String::from_utf8_lossy(&non_unicode.stderr).contains("not valid UTF-8"));
 }
 
 #[test]
@@ -692,9 +805,11 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
             .env("XDG_CONFIG_HOME", &config_home)
             .env("NKEEPASS_VAULT", vault)
             .env(
-                "NKEEPASS_COMPLETE_PASSWORD_ENV",
+                "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
                 "NKEEPASS_COMPLETE_TEST_PASSWORD",
             )
+            .env("NKP_COMPLETE_PASSWORD_ENV", "MISSING_LOWER_PRIORITY_NAME")
+            .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "MISSING_LEGACY_NAME")
             .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
             .args(["__complete", kind, prefix])
             .stdin(Stdio::null())
@@ -713,6 +828,50 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
     assert!(keys.status.success());
     assert_eq!(keys.stdout, b"mail\n");
     assert_no_secrets(&keys);
+
+    let empty_completion_name = command(binary, &fixture)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("NKEEPASS_VAULT", vault)
+        .env("NEO_KEEPASS_COMPLETE_PASSWORD_ENV", "")
+        .env(
+            "NKP_COMPLETE_PASSWORD_ENV",
+            "NKEEPASS_COMPLETE_TEST_PASSWORD",
+        )
+        .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
+        .args(["__complete", "entries", "Root/fixture"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(empty_completion_name.status.success());
+    assert!(
+        empty_completion_name.stdout.is_empty(),
+        "empty high-priority completion selector fell through"
+    );
+    assert_no_secrets(&empty_completion_name);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let non_unicode_name = command(binary, &fixture)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("NKEEPASS_VAULT", vault)
+            .env(
+                "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
+                std::ffi::OsString::from_vec(vec![0xff]),
+            )
+            .env(
+                "NKP_COMPLETE_PASSWORD_ENV",
+                "NKEEPASS_COMPLETE_TEST_PASSWORD",
+            )
+            .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
+            .args(["__complete", "entries", "Root/fixture"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!non_unicode_name.status.success());
+        assert!(non_unicode_name.stdout.is_empty());
+        assert_no_secrets(&non_unicode_name);
+    }
 
     // The shell protocol must honor the same explicit global vault as the
     // command being completed; an environment fallback must not win.

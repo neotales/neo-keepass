@@ -1599,12 +1599,16 @@ fn remove_context_alias(config: &mut Config, name: &str) -> Result<()> {
 }
 
 fn environment_vault(name: &str) -> Result<Option<String>> {
-    let Some(path) = app_env_var_os(name).filter(|value| !value.is_empty()) else {
+    let Some(path) = app_env_var_os(name) else {
         return Ok(None);
     };
-    path.into_string()
-        .map(Some)
-        .map_err(|_| err("vault environment variable is not valid UTF-8"))
+    let path = path
+        .into_string()
+        .map_err(|_| err("vault environment variable is not valid UTF-8"))?;
+    if path.is_empty() {
+        return Err(err("vault environment variable must not be empty"));
+    }
+    Ok(Some(path))
 }
 
 fn active_vault<'a>(
@@ -5430,7 +5434,7 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     }
     let mut seen = BTreeSet::new();
     for name in &env_names {
-        if name == DEFAULT_PASSWORD_ENV || password_env == Some(name.as_str()) {
+        if is_default_password_env_name(name) || password_env == Some(name.as_str()) {
             return Err(err(
                 "exec environment name is reserved for the master password",
             ));
@@ -5635,6 +5639,20 @@ fn valid_env_name(name: &str) -> bool {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_default_password_env_name(name: &str) -> bool {
+    const RESERVED: [&str; 3] = ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"];
+    RESERVED.iter().any(|reserved| {
+        #[cfg(windows)]
+        {
+            name.eq_ignore_ascii_case(reserved)
+        }
+        #[cfg(not(windows))]
+        {
+            name == *reserved
+        }
+    })
 }
 
 fn public_secrets_action(action: &str) -> Option<&str> {
@@ -6398,6 +6416,17 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_reserves_all_default_password_variable_names() {
+        for name in ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"] {
+            assert!(is_default_password_env_name(name));
+        }
+        #[cfg(windows)]
+        assert!(is_default_password_env_name("neo_keepass_password"));
+        #[cfg(not(windows))]
+        assert!(!is_default_password_env_name("neo_keepass_password"));
+    }
 
     #[test]
     fn short_key_file_and_field_options_expand_only_before_exec_separator() {

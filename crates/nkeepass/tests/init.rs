@@ -74,14 +74,28 @@ fn command(fixture: &Fixture, password: &str) -> Command {
         .current_dir(fixture.root.path())
         .env("HOME", fixture.root.path())
         .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NEO_KEEPASS_CONFIG_DIR")
+        .env_remove("NKP_CONFIG_DIR")
         .env_remove("NKEEPASS_DATA_DIR")
+        .env_remove("NEO_KEEPASS_DATA_DIR")
+        .env_remove("NKP_DATA_DIR")
         .env_remove("XDG_CONFIG_DIR")
         .env_remove("XDG_DATA_DIR")
         .env("XDG_CONFIG_HOME", fixture.config_home())
         .env("XDG_DATA_HOME", fixture.data_home())
         .env(PASSWORD_ENV, password)
         .env_remove("NKEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NKP_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
+        .env_remove("NKP_VAULT_PATH")
+        .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_PASSWORD")
+        .env_remove("NKP_PASSWORD")
+        .env_remove("NKEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NKP_COMPLETE_PASSWORD_ENV")
         .stdin(Stdio::null());
     child
 }
@@ -119,6 +133,97 @@ fn password_backup_uses_app_specific_directory_overrides() {
         Some(xdg_data.join("nkeepass").as_path())
     );
     assert!(xdg_config.join("nkeepass/init-password.agekey").is_file());
+
+    for (index, (config_name, data_name, fallback_name)) in [
+        ("NEO_KEEPASS_CONFIG_DIR", "NEO_KEEPASS_DATA_DIR", "NKP"),
+        ("NKP_CONFIG_DIR", "NKP_DATA_DIR", "NKEEPASS"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let selected_config = fixture.root.path().join(format!("alias-config-{index}"));
+        let selected_data = fixture.root.path().join(format!("alias-data-{index}"));
+        let ignored_config = fixture.root.path().join(format!("ignored-config-{index}"));
+        let ignored_data = fixture.root.path().join(format!("ignored-data-{index}"));
+        let alias_vault = fixture.vault(&format!("alias-{index}.kdbx"));
+        let output = command(&fixture, PASSWORD)
+            .env(config_name, &selected_config)
+            .env(data_name, &selected_data)
+            .env(format!("{fallback_name}_CONFIG_DIR"), &ignored_config)
+            .env(format!("{fallback_name}_DATA_DIR"), &ignored_data)
+            .args(with_password(&["init", alias_vault.to_str().unwrap()]))
+            .output()
+            .unwrap();
+        let result = created(&output);
+        let backup = PathBuf::from(result["password_backup"].as_str().unwrap());
+        assert_eq!(backup.parent(), Some(selected_data.as_path()));
+        assert!(selected_config.join("init-password.agekey").is_file());
+        assert!(!ignored_config.exists());
+        assert!(!ignored_data.exists());
+    }
+}
+
+#[test]
+fn app_directory_aliases_do_not_fall_through_on_empty_and_accept_os_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let selected_config = fixture.root.path().join("empty-fallback-config");
+    let selected_data = fixture.root.path().join("empty-fallback-data");
+    let empty_output = command(&fixture, PASSWORD)
+        .env("NEO_KEEPASS_CONFIG_DIR", "")
+        .env("NKP_CONFIG_DIR", &selected_config)
+        .env("NEO_KEEPASS_DATA_DIR", "")
+        .env("NKP_DATA_DIR", &selected_data)
+        .args(with_password(&[
+            "init",
+            fixture.vault("empty-dir.kdbx").to_str().unwrap(),
+        ]))
+        .output()
+        .unwrap();
+    assert!(!empty_output.status.success());
+    assert!(!selected_config.exists());
+    assert!(!selected_data.exists());
+
+    let config = PathBuf::from(std::ffi::OsString::from_vec(
+        fixture
+            .root
+            .path()
+            .join("config-")
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .copied()
+            .chain([0xff])
+            .collect(),
+    ));
+    let data = PathBuf::from(std::ffi::OsString::from_vec(
+        fixture
+            .root
+            .path()
+            .join("data-")
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .copied()
+            .chain([0xfe])
+            .collect(),
+    ));
+    let output = command(&fixture, PASSWORD)
+        .env("NEO_KEEPASS_CONFIG_DIR", &config)
+        .env("NEO_KEEPASS_DATA_DIR", &data)
+        .args(with_password(&[
+            "init",
+            fixture.vault("nonunicode-dir.kdbx").to_str().unwrap(),
+        ]))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "OS-native directory paths should work"
+    );
+    assert!(config.join("init-password.agekey").is_file());
+    assert!(data.is_dir());
 }
 
 #[cfg(unix)]
