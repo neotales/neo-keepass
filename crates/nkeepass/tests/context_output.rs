@@ -64,20 +64,26 @@ fn human_context_list_shows_unaliased_paths_but_json_preserves_alias_only_contra
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("default vault.kdbx");
     let path = path.to_str().unwrap();
-    assert!(run(root.path(), &["config", "set", "default_vault", path])
-        .status
-        .success());
+    assert!(
+        run(root.path(), &["config", "set", "default_vault", path])
+            .status
+            .success()
+    );
     let text = run(root.path(), &["context", "list"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("(default)"));
     let listed = run(root.path(), &["context", "ls", "--json"]);
     assert!(listed.status.success());
     assert!(listed.stdout.is_empty());
-    assert!(run(root.path(), &["context", "set", "work", path])
-        .status
-        .success());
-    assert!(run(root.path(), &["context", "use", "work"])
-        .status
-        .success());
+    assert!(
+        run(root.path(), &["context", "set", "work", path])
+            .status
+            .success()
+    );
+    assert!(
+        run(root.path(), &["context", "use", "work"])
+            .status
+            .success()
+    );
     let listed = run(root.path(), &["context", "list", "--json"]);
     let records: Vec<serde_json::Value> = String::from_utf8_lossy(&listed.stdout)
         .lines()
@@ -90,9 +96,11 @@ fn human_context_list_shows_unaliased_paths_but_json_preserves_alias_only_contra
     assert_eq!(records[0].as_object().unwrap().len(), 2);
     let text = run(root.path(), &["context", "ls"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("(current)"));
-    assert!(run(root.path(), &["config", "set", "current", path])
-        .status
-        .success());
+    assert!(
+        run(root.path(), &["config", "set", "current", path])
+            .status
+            .success()
+    );
     let listed = run(root.path(), &["context", "ls", "--json"]);
     let records: Vec<serde_json::Value> = String::from_utf8_lossy(&listed.stdout)
         .lines()
@@ -106,23 +114,27 @@ fn human_context_list_shows_unaliased_paths_but_json_preserves_alias_only_contra
 
     let direct_current = root.path().join("current-only.kdbx");
     let separate_default = root.path().join("default-only.kdbx");
-    assert!(run(
-        root.path(),
-        &["config", "set", "current", direct_current.to_str().unwrap()]
-    )
-    .status
-    .success());
-    assert!(run(
-        root.path(),
-        &[
-            "config",
-            "set",
-            "default_vault",
-            separate_default.to_str().unwrap()
-        ]
-    )
-    .status
-    .success());
+    assert!(
+        run(
+            root.path(),
+            &["config", "set", "current", direct_current.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            root.path(),
+            &[
+                "config",
+                "set",
+                "default_vault",
+                separate_default.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
     let listed = run(root.path(), &["context", "ls", "--json"]);
     let records: Vec<serde_json::Value> = String::from_utf8_lossy(&listed.stdout)
         .lines()
@@ -140,12 +152,14 @@ fn human_context_list_shows_unaliased_paths_but_json_preserves_alias_only_contra
 fn context_show_keeps_alias_name_for_explicit_and_environment_selection() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault.kdbx");
-    assert!(run(
-        root.path(),
-        &["context", "set", "work", path.to_str().unwrap()]
-    )
-    .status
-    .success());
+    assert!(
+        run(
+            root.path(),
+            &["context", "set", "work", path.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
     let output = run(
         root.path(),
         &["--vault", "work", "context", "show", "--json"],
@@ -199,12 +213,16 @@ fn windows_context_paths_preserve_case_distinct_candidates() {
     let path = root.path().join("MixedCase.kdbx");
     let original = path.to_str().unwrap();
     let alternate = original.to_ascii_uppercase().replace('\\', "/");
-    assert!(run(root.path(), &["context", "set", "work", original])
-        .status
-        .success());
-    assert!(run(root.path(), &["config", "set", "current", &alternate])
-        .status
-        .success());
+    assert!(
+        run(root.path(), &["context", "set", "work", original])
+            .status
+            .success()
+    );
+    assert!(
+        run(root.path(), &["config", "set", "current", &alternate])
+            .status
+            .success()
+    );
     assert!(
         run(root.path(), &["config", "set", "default_vault", &alternate])
             .status
@@ -268,12 +286,16 @@ fn generated_master_is_recoverable_without_output_disclosure() {
     assert_eq!(password.len(), 32);
     assert!(password.iter().all(u8::is_ascii_alphanumeric));
     for channel in [&result.stdout, &result.stderr] {
-        assert!(!channel
-            .windows(password.len())
-            .any(|part| part == password.as_slice()));
-        assert!(!channel
-            .windows(key.trim().len())
-            .any(|part| part == key.trim().as_bytes()));
+        assert!(
+            !channel
+                .windows(password.len())
+                .any(|part| part == password.as_slice())
+        );
+        assert!(
+            !channel
+                .windows(key.trim().len())
+                .any(|part| part == key.trim().as_bytes())
+        );
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root.path())
@@ -337,12 +359,16 @@ fn generated_master_is_recoverable_without_output_disclosure() {
             &recovered
         ));
         for channel in [&collision.stdout, &collision.stderr] {
-            assert!(!channel
-                .windows(recovered.len())
-                .any(|bytes| bytes == recovered.as_slice()));
-            assert!(!channel
-                .windows(key.trim().len())
-                .any(|bytes| bytes == key.trim().as_bytes()));
+            assert!(
+                !channel
+                    .windows(recovered.len())
+                    .any(|bytes| bytes == recovered.as_slice())
+            );
+            assert!(
+                !channel
+                    .windows(key.trim().len())
+                    .any(|bytes| bytes == key.trim().as_bytes())
+            );
         }
         let text_collision = run(
             root.path(),
