@@ -46,10 +46,12 @@ and their conflicts.
 | `--parallelism N` | Set Argon2 lanes from 1 to 16. Default is 1. Only valid with Argon2. |
 
 The CLI rejects KDF values outside its own read policy. The Argon2 memory,
-time, and combined-work limits apply together. On password-only init,
-it writes an age-encrypted password backup after creating the vault. The
-identity needed to decrypt the backup is stored separately. A backup failure
-does not remove the vault. On Windows private staging requires a filesystem
+time, and combined-work limits apply together. With a supplied password and no
+key file, init attempts the age-encrypted backup after successful vault
+creation. A failure of that backup leaves the created vault in place. With a
+generated master password, backup and recovery association are attempted
+before vault creation; a failure in either stops vault creation. The identity
+needed to decrypt the backup is stored separately. On Windows private staging requires a filesystem
 that supports protected, verified current-user-only DACLs.
 
 With `--generate-master-password`, init installs the encrypted backup **before**

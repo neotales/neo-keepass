@@ -619,7 +619,7 @@ const INIT_OPTIONS: &[HelpOption] = &[
     },
     HelpOption {
         label: "Partial failure",
-        summary: "Backup errors happen after vault creation; the vault remains installed and the cause is reported.",
+        summary: "Supplied password-only: backup follows successful vault creation; backup failure leaves the vault installed. Generated master: backup and association precede vault creation; their failure stops creation.",
     },
     HelpOption {
         label: "Windows private files",

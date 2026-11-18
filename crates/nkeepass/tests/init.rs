@@ -520,12 +520,18 @@ fn init_help_succeeds_and_documents_its_flags() {
             "Password persistence",
             "age-encrypted",
             "Partial failure",
-            "remains installed",
             "Windows private files",
             "owner-only ACLs",
         ] {
             assert!(text.contains(expected), "init {flag} omits {expected}");
         }
+        let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains(
+            "Supplied password-only: backup follows successful vault creation; backup failure leaves the vault installed."
+        ));
+        assert!(normalized.contains(
+            "Generated master: backup and association precede vault creation; their failure stops creation."
+        ));
     }
 
     let help = run(&fixture, &["--help"]);
@@ -533,6 +539,30 @@ fn init_help_succeeds_and_documents_its_flags() {
     let root_help = String::from_utf8_lossy(&help.stdout);
     assert!(root_help.contains("COMMANDS:"));
     assert!(root_help.lines().any(|line| line.starts_with("  init ")));
+}
+
+#[test]
+fn initialization_docs_distinguish_backup_failure_ordering() {
+    let readme = include_str!("../../../README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(readme.contains(
+        "master password and installs its encrypted backup and recovery association before attempting vault creation; a failure in either stops vault creation."
+    ));
+    assert!(readme.contains(
+        "If that supplied-password backup fails, init reports the sanitized cause and leaves the already-created vault in place."
+    ));
+    let reference = include_str!("../../../docs/reference/vault.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(reference.contains(
+        "With a supplied password and no key file, init attempts the age-encrypted backup after successful vault creation. A failure of that backup leaves the created vault in place."
+    ));
+    assert!(reference.contains(
+        "With a generated master password, backup and recovery association are attempted before vault creation; a failure in either stops vault creation."
+    ));
 }
 
 #[test]
