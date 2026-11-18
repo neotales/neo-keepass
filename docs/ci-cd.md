@@ -166,7 +166,15 @@ whole leg, a canary step pins the generated-script parse, boundary, and
 dynamic-path tests to the native `/bin/bash` through
 `NKEEPASS_COMPLETION_BASH`, with its own version assert so a future
 Apple bash upgrade forces a canary revisit rather than silently
-testing bash 5 twice. The exit-wedge remains the one macOS behavior NOT
+testing bash 5 twice. Both filtered `cargo test` steps that name
+specific tests — this canary and the completion-interpreters lane's
+zsh/PowerShell syntax test — carry a named-run guard: `cargo test
+FILTER` exits 0 even when a renamed or mistyped filter matches no test
+at all, so each step asserts by full printed name that every intended
+test ran and passed, plus the exact expected run count, with pipefail
+carrying cargo's own exit code through the captured output. Without
+the guard a renamed test would silently void a step's coverage while
+the step stays green. The exit-wedge remains the one macOS behavior NOT
 reproduced or explained: it did not occur against bash 3.2.57 on Linux,
 so it is macOS-PTY-specific or timing-dependent and stays unverified
 without a native run; the bounded failure and transcript are the

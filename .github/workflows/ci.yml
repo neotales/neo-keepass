@@ -51,7 +51,28 @@ jobs:
         # Executes a test binary that spawns zsh/pwsh interpreters; a missing
         # prompt can block forever, so the step is bounded tighter than the job.
         timeout-minutes: 15
-        run: cargo test -p nkeepass --bin nkp generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed
+        run: |
+          # Named-run guard, same as the macOS canary step: `cargo test
+          # FILTER` exits 0 even when a renamed or mistyped filter matches
+          # NO test. Assert the one intended test by its full printed
+          # name and the exact expected run count. pipefail (the default
+          # bash shell on this runner) carries cargo's own exit code
+          # through tee; every value here is a literal in this file.
+          log="$(mktemp)"
+          status=0
+          cargo test -p nkeepass --bin nkp generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::completion-interpreter cargo test exited $status; see the output above"
+            exit "$status"
+          fi
+          if ! grep -q "^test completion::tests::generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed \.\.\. ok$" "$log"; then
+            echo "::error::intended interpreter test did not run and pass: generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed (renamed, or filtered out?)"
+            exit 1
+          fi
+          if ! grep -q "^test result: ok\. 1 passed; 0 failed; 0 ignored" "$log"; then
+            echo "::error::expected exactly 1 passing test; see the output above"
+            exit 1
+          fi
 
   rsa-slow-lane:
     name: RSA 16,384-bit slow lane
@@ -185,7 +206,36 @@ jobs:
             exit 1
           fi
           /bin/bash --version | head -1
-          cargo test -p nkeepass --bin nkp -- generated_bash_and_posix bash_filename_completion bash_dynamic_completion
+          # Named-run guard: `cargo test FILTER` exits 0 even when a
+          # renamed or mistyped filter matches NO test, so a green step
+          # alone cannot prove the intended coverage ran. Assert each
+          # intended test by its full printed name, plus the exact
+          # expected run count. pipefail (this step's shell: bash
+          # default) carries cargo's own exit code through tee, and
+          # every value here is a literal in this file — nothing from
+          # the event, inputs, or the environment reaches this block.
+          expected=(
+            generated_bash_and_posix_scripts_parse_and_posix_files_group_completes
+            bash_filename_completion_does_not_cross_command_or_option_value_boundaries
+            bash_dynamic_completion_accumulates_candidates_without_mapfile
+          )
+          log="$(mktemp)"
+          status=0
+          cargo test -p nkeepass --bin nkp -- generated_bash_and_posix bash_filename_completion bash_dynamic_completion 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::canary cargo test exited $status; see the output above"
+            exit "$status"
+          fi
+          for name in "${expected[@]}"; do
+            if ! grep -q "^test completion::tests::${name} \.\.\. ok$" "$log"; then
+              echo "::error::intended canary test did not run and pass: $name (renamed, or filtered out?)"
+              exit 1
+            fi
+          done
+          if ! grep -q "^test result: ok\. 3 passed; 0 failed; 0 ignored" "$log"; then
+            echo "::error::canary expected exactly 3 passing tests; see the output above"
+            exit 1
+          fi
       - name: Test
         shell: bash
         # Integration tests include PTY-style password prompts (#![cfg(unix)]);
