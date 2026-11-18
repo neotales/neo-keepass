@@ -1580,25 +1580,35 @@ define_nushell_completion!(
 mod tests {
     use super::{POWERSHELL, generate};
     use crate::CONFIG_KEYS;
+    #[cfg(unix)]
     use std::ffi::OsStr;
+    #[cfg(unix)]
     use std::time::Duration;
 
-    /// One deadline covering a whole python driver run — process exit AND
-    /// stream drain — for a healthy interactive-bash case. A driver that
-    /// exceeds it is killed as a tree and the case fails with diagnostics;
-    /// the test binary must never outwait a wedged driver.
+    /// Deadline for the driver PROCESS to exit, per case. Streams are
+    /// drained under separate allowances. Healthy cases finish in a few
+    /// seconds; a driver that exceeds this is killed as a tree and the case
+    /// fails with diagnostics. The whole bounded run is therefore this
+    /// deadline plus at most four drain/recovery allowances
+    /// ([`PYTHON_DRIVER_DRAIN_ALLOWANCE`] × 4: two streams × drain and
+    /// post-kill recovery) plus kill-helper spawn time.
+    #[cfg(unix)]
     const PYTHON_DRIVER_DEADLINE: Duration = Duration::from_secs(20);
 
-    /// Bounded cleanup allowance after the deadline: how long each pipe drain
-    /// may take to finish once the driver tree is killed. A drain that still
-    /// has not finished is reported as `drain_overflow`, never waited on; its
-    /// reader thread leaks until process exit rather than risk blocking the
-    /// harness forever — the same trade-off the packaging smoke harness
-    /// documents for a failed Windows drain.
+    /// Bounded allowance per drain or recovery attempt on a captured stream:
+    /// the first drain after the driver exits, then — only after a group
+    /// kill in the overflow path — one recovery attempt per stream. An
+    /// expired attempt sets `drain_overflow` and is never retried within
+    /// the same stage; the reader thread of an unrecovered stream leaks
+    /// until process exit rather than risk blocking the harness forever —
+    /// the same trade-off the packaging smoke harness documents for a
+    /// failed Windows drain.
+    #[cfg(unix)]
     const PYTHON_DRIVER_DRAIN_ALLOWANCE: Duration = Duration::from_secs(2);
 
     /// Outcome of [`run_python_bounded`] — everything a failure diagnostic
     /// needs, including what was captured before a kill.
+    #[cfg(unix)]
     #[derive(Debug)]
     struct BoundedDriverRun {
         /// Exit status of the direct child, including the post-kill reap
@@ -1636,18 +1646,21 @@ mod tests {
         }
     }
 
-    /// Run `python3 -c <script> <arguments>` under one whole-process deadline.
+    /// Run `python3 -c <script> <arguments>` bounded: one deadline for the
+    /// driver PROCESS to exit, then separate bounded allowances to drain
+    /// each captured stream — and, after a group kill in the overflow path,
+    /// to recover what was captured before the kill. The test-side analogue
+    /// of the packaging smoke-harness contract in `docs/ci-cd.md` and the
+    /// direct answer to the macOS hang documented there: a wedged driver
+    /// fails within a bounded budget instead of hanging the test binary,
+    /// and no descendant holding inherited pipes survives the harness.
     ///
-    /// The test-side analogue of the packaging smoke-harness contract in
-    /// `docs/ci-cd.md`: a single deadline covers execution and stream
-    /// completion, cleanup is a separate bounded allowance, and on Unix the
-    /// driver is born into its own process group so the kill reaches every
-    /// descendant holding inherited pipes — not just the direct child. A
-    /// wedged driver therefore cannot hang the test binary, and no orphan
-    /// survives the harness. Windows has no std process-group kill; the
-    /// direct child is killed there and `drain_overflow` reports an escapee
-    /// instead of blocking (native tree containment on Windows is the
-    /// packaging harness's job object, not this helper's).
+    /// Unix-only: every caller drives a pty or asserts process-group
+    /// cleanup, and the kill needs process-group semantics. Native Windows
+    /// tree containment is the packaging harness's job object, not this
+    /// helper's. On Unix the driver is born into its own process group so
+    /// the kill reaches every descendant, not just the direct child.
+    #[cfg(unix)]
     fn run_python_bounded(
         script: &str,
         arguments: &[&OsStr],
@@ -1662,13 +1675,10 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // Own process group: killpg then reaches descendants that
-            // inherited the redirected pipes, not just the direct child.
-            command.process_group(0);
-        }
+        // Own process group: killpg then reaches descendants that inherited
+        // the redirected pipes, not just the direct child.
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
         let mut child = command.spawn().expect("python3 driver should start");
         let mut stdout_pipe = child.stdout.take().expect("driver stdout is piped");
         let mut stderr_pipe = child.stderr.take().expect("driver stderr is piped");
@@ -1708,10 +1718,11 @@ mod tests {
         let stderr = drain_capture(&stderr_receiver, &mut drain_overflow);
         if drain_overflow {
             // A descendant outlived the driver while holding the redirected
-            // pipes: kill the tree so no orphan survives, then recover the
-            // captured bytes with one bounded second-chance drain (the kill
-            // closes the surviving write ends, so EOF is now reachable).
-            kill_driver_tree(&mut child);
+            // pipes. The direct child is already reaped here, so cleanup is
+            // group-only — `Child::kill` on a reaped child could signal a
+            // reused pid. The group kill closes the surviving write ends, so
+            // one bounded recovery drain per stream can now reach EOF.
+            kill_driver_group(child.id());
             let recovered_stdout = stdout_receiver
                 .recv_timeout(PYTHON_DRIVER_DRAIN_ALLOWANCE)
                 .unwrap_or_default();
@@ -1745,9 +1756,12 @@ mod tests {
         }
     }
 
-    /// Drain one captured stream bounded. On overflow the flag is set and a
-    /// bounded second attempt is made — after the tree kill, EOF arrives —
-    /// but the harness never blocks past the allowance twice.
+    /// Drain one captured stream, bounded by a single allowance. An expired
+    /// attempt sets the overflow flag; recovery happens only after the
+    /// group kill in the caller, when EOF is actually reachable — the
+    /// harness never stacks attempts on a pipe a live descendant still
+    /// holds.
+    #[cfg(unix)]
     fn drain_capture(
         receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
         overflow: &mut bool,
@@ -1756,39 +1770,57 @@ mod tests {
             return captured;
         }
         *overflow = true;
-        receiver
-            .recv_timeout(PYTHON_DRIVER_DRAIN_ALLOWANCE)
-            .unwrap_or_default()
+        Vec::new()
     }
 
-    /// Kill the driver process tree: the process group on Unix (the driver
-    /// was born into its own group), then the direct child regardless. The
-    /// group kill runs through python3 — this crate forbids `unsafe`, so
-    /// libc/nix wrappers are unavailable, and python3 is already the hard
-    /// dependency of every driver test here. Never passes pgid 0 (that would
-    /// target our own group): a pid that no longer converts falls back to
-    /// the direct-child kill only.
+    /// Send SIGKILL to a driver process group via the python3 helper — this
+    /// crate forbids `unsafe`, so libc/nix wrappers are unavailable, and
+    /// python3 is already the hard dependency of every driver test here.
+    /// Never passes 0: that would target our own group.
+    #[cfg(unix)]
+    fn signal_driver_group(group: i32) {
+        let group_kill = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
+                &group.to_string(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = group_kill;
+    }
+
+    /// Kill the driver tree while the direct child is still live: the
+    /// process group first (the driver was born into its own group, so
+    /// this reaches descendants that inherited the redirected pipes), then
+    /// the direct child.
+    #[cfg(unix)]
     fn kill_driver_tree(child: &mut std::process::Child) {
-        #[cfg(unix)]
         if let Ok(group) = i32::try_from(child.id()) {
-            let group_kill = std::process::Command::new("python3")
-                .args([
-                    "-c",
-                    "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
-                    &group.to_string(),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            let _ = group_kill;
+            signal_driver_group(group);
         }
         let _ = child.kill();
+    }
+
+    /// Group-only cleanup after the direct child was reaped. Never
+    /// `Child::kill()` a reaped child — its pid may already have been
+    /// reused for an unrelated process. `killpg` stays correct here: this
+    /// path only runs while a descendant still holds a redirected pipe,
+    /// and a process group with live members never recycles its id.
+    #[cfg(unix)]
+    fn kill_driver_group(driver_pid: u32) {
+        if let Ok(group) = i32::try_from(driver_pid) {
+            signal_driver_group(group);
+        }
     }
 
     /// A wedged driver is killed within the deadline instead of hanging the
     /// test binary, with its captured output preserved in the diagnostic.
     /// This is the direct regression for the 75-minute macOS CI hang that
-    /// orphaned python3 on cancellation.
+    /// orphaned python3 on cancellation (incident facts in
+    /// `docs/ci-cd.md`); the wedging syscall itself was never captured, so
+    /// the mitigation is OS-agnostic bounded cleanup, not a platform patch.
     #[test]
     #[cfg(unix)]
     fn bounded_driver_kills_wedged_python_within_deadline() {
@@ -1820,9 +1852,12 @@ mod tests {
     }
 
     /// A driver whose descendant holds the inherited stdout pipe cannot pin
-    /// the harness: the drain overflows bounded, the tree is killed, and the
-    /// escapee is asserted dead BY PID — the same pattern as the packaging
-    /// smoke harness's orphan fixture.
+    /// the harness: the drain overflows bounded, the group is killed, and
+    /// the escapee is asserted dead BY PID — the same pattern as the
+    /// packaging smoke harness's orphan fixture. This also covers the
+    /// post-reap cleanup path: the driver exits and is reaped BEFORE the
+    /// drain overflows, so the kill must come from `kill_driver_group`
+    /// alone, without touching the reaped child.
     #[test]
     #[cfg(unix)]
     fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives() {
@@ -2457,10 +2492,12 @@ pid, fd = pty.fork()
 if pid == 0:
     os.chdir(directory)
     os.execvp("bash", ["bash", "--noprofile", "--norc", "-i"])
-# The master must stay non-blocking: Darwin can report a pty master readable
-# while no data is pending, and a blocking os.read then wedges the driver
-# forever (the observed macOS CI hang). A non-blocking fd also keeps
-# os.write from blocking if bash ever stops consuming input.
+# A macOS CI run hung >75 minutes with this driver orphaned on cancel; the
+# exact blocking syscall was never captured (incident facts: docs/ci-cd.md).
+# The mitigation is OS-agnostic rather than a platform patch: with a
+# blocking master fd, os.read can wedge after a select-reported readiness
+# that no longer holds, and os.write can wedge when bash stops consuming
+# input. Keep the master non-blocking and bound every write instead.
 os.set_blocking(fd, False)
 
 def drain(timeout=0.15):
