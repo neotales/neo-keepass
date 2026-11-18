@@ -433,8 +433,21 @@ try {
         $reader = New-Object IO.StreamReader($limitEntry.Open())
         $limitText = $reader.ReadToEnd()
         $reader.Close()
-        Assert-True (($limitText -match 'SECURE OWNER-ONLY FILE WRITES ARE NOT SUPPORTED') -and
-            ($limitText -match 'FAILS CLOSED')) 'zip: limitations readme carries the fail-closed warning'
+        $requiredLimitations = @(
+            'PRIVATE FILE WRITES ARE SUPPORTED WHEN WINDOWS SECURITY CHECKS SUCCEED',
+            'fails closed',
+            'persistent ACL enforcement',
+            'path-based staging',
+            'does not defend against administrators or the same user',
+            'every filesystem',
+            'elevated execution',
+            'account/configuration'
+        )
+        $limitationsComplete = $true
+        foreach ($marker in $requiredLimitations) {
+            if ($limitText -notmatch [regex]::Escape($marker)) { $limitationsComplete = $false }
+        }
+        Assert-True $limitationsComplete 'zip: limitations readme states supported protected writes, fail-closed conditions, and scope'
     } finally {
         $archive.Dispose()
     }

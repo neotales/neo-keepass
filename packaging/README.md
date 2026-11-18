@@ -38,6 +38,19 @@ build from that version; the rpm spec pins it in a `%global crate_version`.
 Nothing here uploads anywhere. Release publication is out of scope; artifacts
 only ever become CI workflow artifacts.
 
+### Windows artifact notice
+
+The Windows archive includes `WINDOWS-LIMITATIONS.txt` both inside the zip
+and alongside it for convenient reading; the verifier checks the copies are
+byte-identical and assert the same security contract. Private file writes use
+a protected current-user DACL and are allowed only when persistent ACL
+enforcement is advertised and security verification succeeds; otherwise nkp
+fails closed. The implementation assumes a trusted containing directory and
+does not defend against administrators or the same user. Support has not
+been established for every filesystem, elevated execution, or every Windows
+account/configuration. See the notice itself and `docs/ci-cd.md`; do not
+overstate this as universal Windows or Unix-permission parity.
+
 ## Layout
 
 - `scripts/version.sh` — prints the crate version.

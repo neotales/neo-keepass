@@ -1,33 +1,24 @@
 nkp (neo-keepass) for Windows — platform limitations
-============================================
+====================================================
 
-SECURE OWNER-ONLY FILE WRITES ARE NOT SUPPORTED ON WINDOWS, AND NKP
-FAILS CLOSED.
+PRIVATE FILE WRITES ARE SUPPORTED WHEN WINDOWS SECURITY CHECKS SUCCEED.
+nkp fails closed when it cannot establish and verify the required protection.
 
-On Unix, nkp creates vault files, configuration files and CLI output
-files with owner-only permissions (mode 0600), so other users on the same
-machine cannot read them. On Windows, nkp cannot safely replace and
-verify a full ACL (icacls /inheritance:r /grant:r does not remove explicit
-grants to other principals), so it refuses to write a file it cannot make
-private. There is no inherited-ACL fallback and no permission parity with
-Unix, and none is claimed.
+On Windows, nkp creates private files with a protected DACL granting access
+to the current user, and verifies the resulting security descriptor before
+writing. The volume must advertise persistent ACL enforcement. Unsupported
+or unqueryable volumes, or any failed security verification, are rejected
+before file contents are written. This applies to vault creation/mutation,
+configuration files, and CLI output files.
 
-What this means in practice — on Windows, nkp does NOT support:
+The implementation uses path-based staging and assumes the containing
+directory is trusted and not controlled by an adversary. It does not defend
+against administrators or the same user. These guarantees have not been
+established for every filesystem, elevated execution, or every Windows
+account/configuration; do not infer broader coverage from this notice.
 
-- creating or mutating a vault (init, set, and other vault writes)
-- writing the nkp config
-- exporting or writing CLI output to files
-
-These operations exit with an explicit unsupported-operation diagnostic
-instead of producing a file. They are not merely "less protected"; they do
-not happen. What does work on Windows: reading existing vaults and
-printing to stdout (for example `get` to the terminal or a pipe).
-
-Do not work around this by pre-creating files or loosening directory ACLs;
-nkp will still refuse the operation, and a manually relaxed ACL would
-defeat the privacy the refusal exists to protect.
-
-Read-only behavior (parsing vaults, stdout output) is expected to match
-Unix, but this file does not guarantee behavioral parity beyond that;
-consult README.md and docs/ for the current, complete list of
-platform-specific limitations.
+This is not a claim of Unix permission parity. On Unix, nkp uses mode 0600;
+Windows uses ACLs and the platform's security APIs. Reading existing vaults
+and printing to stdout are supported independently of private-file writes.
+Do not loosen directory ACLs or bypass a failed security check: failure is
+intentional protection, not an indication that an unprotected write is safe.

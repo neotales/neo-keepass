@@ -8,13 +8,11 @@ name: windows-build
 # Nothing is published: no release, no tag, no secrets, no token beyond
 # read-only checkout.
 #
-# Platform limitation (also shipped inside the artifact as
-# WINDOWS-LIMITATIONS.txt): secure owner-only file writes are UNSUPPORTED on
-# Windows and nkp FAILS CLOSED — vault creation/mutation, config writes
-# and CLI output-to-file return an explicit unsupported-operation diagnostic
-# rather than writing a file it cannot make private. The build and packaging
-# here are unaffected; the limitation is packaged so it reaches the binary's
-# users and is stated in docs/ci-cd.md.
+# Windows private-file behavior and scope are documented in the packaged
+# WINDOWS-LIMITATIONS.txt and docs/ci-cd.md: protected current-user DACL writes
+# are supported when persistent ACL enforcement and security verification
+# succeed; failures reject the write. The documented path-based trust
+# assumption and unverified platform configurations remain limitations.
 #
 # Checkout semantics are stricter than build.yml: the dispatch `ref` input
 # must be a FULL 40-character lowercase hex commit SHA, matched against the

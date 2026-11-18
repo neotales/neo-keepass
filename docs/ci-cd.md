@@ -490,7 +490,9 @@ Verification before anything is executed or uploaded:
      just built; the RAW top-level `nkp.exe` must equal the built
      binary AND the archived (extracted) exe and pass the same PE check;
      the raw `WINDOWS-LIMITATIONS.txt` must be byte-identical to the zip
-     copy and both copies must carry the mandated fail-closed warning;
+     copy and both copies must carry the required Windows private-write
+     contract, fail-closed conditions, trusted-parent assumption, and
+     explicit unverified-scope caveat;
    - `SHA256SUMS` must cover exactly the three published names — every
      name is whitelisted against that exact set BEFORE any file it names
      is opened for hashing (traversal and absolute paths never reach the
@@ -574,19 +576,20 @@ It additionally produces the 14-day executable-only triage artifact
 `SHA256SUMS`. Nothing is attached to a release; no secrets are used; permissions are
 `contents: read` and checkout persists no credentials.
 
-**Windows platform limitation (stated plainly):** secure owner-only file
-writes are UNSUPPORTED on Windows, and nkp FAILS CLOSED. The
-implementation cannot safely replace and verify a full ACL (icacls
-`/inheritance:r /grant:r` does not remove explicit grants to other
-principals), so on Windows it refuses to write any file it cannot make
-private: vault creation/mutation, config writes, and CLI output-to-file
-exit with an explicit unsupported-operation diagnostic — these operations
-are unavailable on Windows, not "less protected". There is no
-inherited-ACL fallback and no permission parity with Unix, and none may be
-claimed. What works on Windows: reading existing vaults and stdout output.
-The warning ships inside the artifact as `WINDOWS-LIMITATIONS.txt`
-(source: `packaging/windows/WINDOWS-LIMITATIONS.txt`). Do not describe
-Windows artifacts as protected by file permissions anywhere.
+**Windows private-file behavior and limitations:** at `f140c51`, Windows
+private writes are supported by creating a protected current-user-only DACL
+and verifying the resulting security descriptor before writing. The volume
+must advertise persistent ACL enforcement; unsupported or unqueryable
+volumes and failed security verification fail closed. This covers vault
+creation/mutation, configuration writes, and CLI output-to-file when those
+checks succeed. The implementation uses path-based staging and assumes the
+containing directory is trusted; it does not defend against administrators
+or the same user. Do not claim behavior proven for every filesystem,
+elevated execution, or every Windows account/configuration. This is not Unix
+permission parity: Unix uses mode 0600, while Windows uses ACLs and Windows
+security APIs. The packaged `WINDOWS-LIMITATIONS.txt` (source:
+`packaging/windows/WINDOWS-LIMITATIONS.txt`) carries the same contract and
+scope caveats.
 
 **Coordination with the release pipeline:** the release work builds
 Windows archives with its own `archive-windows.ps1`; this workflow uses

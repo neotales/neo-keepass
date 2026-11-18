@@ -34,7 +34,7 @@
 #      equal the built binary's hash AND the archived (extracted) exe's
 #      hash and pass the PE check; WINDOWS-LIMITATIONS.txt must be
 #      byte-identical to the zip copy and both copies must carry the
-#      mandated warning text.
+#      mandated Windows private-write support and fail-closed limitation text.
 #   7. SHA256SUMS in the dist directory: every NAME is whitelisted against
 #      the exact three published names BEFORE any file it names is read
 #      (traversal, absolute paths and any other name are rejected before
@@ -1003,11 +1003,20 @@ try {
             $checkedZip, $distZip)
     }
 
-    # Mandated warning content — checked on BOTH copies (the byte-compare
-    # above already implies it; assert it directly on each).
+    # Mandated private-write contract — checked on BOTH copies (the
+    # byte-compare above already implies it; assert it directly on each).
     foreach ($limPath in @($rawLimitations, $zipLimPath)) {
         $limText = [IO.File]::ReadAllText($limPath)
-        foreach ($marker in @('SECURE OWNER-ONLY FILE WRITES ARE NOT SUPPORTED', 'FAILS CLOSED')) {
+        foreach ($marker in @(
+            'PRIVATE FILE WRITES ARE SUPPORTED WHEN WINDOWS SECURITY CHECKS SUCCEED',
+            'fails closed',
+            'persistent ACL enforcement',
+            'path-based staging',
+            'does not defend against administrators or the same user',
+            'every filesystem',
+            'elevated execution',
+            'account/configuration'
+        )) {
             if ($limText -notmatch $marker) {
                 throw "windows-verify: WINDOWS-LIMITATIONS.txt is missing the mandated text: $marker ($limPath)"
             }
