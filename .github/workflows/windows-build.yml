@@ -42,6 +42,12 @@ jobs:
   windows:
     name: windows x86_64 (msvc)
     runs-on: windows-2025
+    # Cold MSVC build is the slow leg. Job-level only: no compile/package
+    # step timeouts, and the packaging script tests plus the artifact smoke
+    # run already enforce their own internal deadlines (see "Package and
+    # verify artifact" below). 60 is a conservative cap, not a measured
+    # multiple.
+    timeout-minutes: 60
     steps:
       # The dispatch input is untrusted data and must never reach the shell
       # by ${{ }} interpolation; it crosses as an env var and is validated as
