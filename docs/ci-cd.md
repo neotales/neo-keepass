@@ -162,8 +162,9 @@ Homebrew's bash (resolved through `brew --prefix`, with no hardcoded
 install path) and asserts both the prefix resolution and the major
 floor, so CI runs the matrix against a real bash >= 4; and because that
 PATH change displaces the legacy bash from PATH resolution for the
-whole leg, a canary step pins the generated-script parse, boundary, and
-dynamic-path tests to the native `/bin/bash` through
+whole leg, a canary step pins the generated-script parse, boundary,
+dynamic-path, and static command/option-vocabulary tests to the
+native `/bin/bash` through
 `NKEEPASS_COMPLETION_BASH`, with its own version assert so a future
 Apple bash upgrade forces a canary revisit rather than silently
 testing bash 5 twice. Both filtered `cargo test` steps that name

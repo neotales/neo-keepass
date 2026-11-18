@@ -51,12 +51,18 @@ jobs:
         # Executes a test binary that spawns zsh/pwsh interpreters; a missing
         # prompt can block forever, so the step is bounded tighter than the job.
         timeout-minutes: 15
+        # Explicit shell: bash — the runner default is plain `bash -e`,
+        # which has NO pipefail: a failing cargo piped through a
+        # successful tee would yield the pipeline 0 and the step would
+        # continue with cargo's exit code lost (verified locally:
+        # without -o pipefail the pipeline reports 0; with it, 101).
+        shell: bash
         run: |
           # Named-run guard, same as the macOS canary step: `cargo test
           # FILTER` exits 0 even when a renamed or mistyped filter matches
           # NO test. Assert the one intended test by its full printed
-          # name and the exact expected run count. pipefail (the default
-          # bash shell on this runner) carries cargo's own exit code
+          # name and the exact expected run count. pipefail (from the
+          # explicit shell: bash above) carries cargo's own exit code
           # through tee; every value here is a literal in this file.
           log="$(mktemp)"
           status=0
@@ -181,15 +187,17 @@ jobs:
       # leg's PATH: the generated-script tests otherwise exercise
       # Homebrew's 5.x here, and nothing in CI would keep testing the
       # script against the bash a stock macOS still ships. Pin the
-      # parse, word-boundary, and dynamic-path tests to the native
-      # /bin/bash through NKEEPASS_COMPLETION_BASH; the version assert
-      # keeps the canary honest — if Apple ever replaces /bin/bash with
-      # a bash >= 4 the step fails and the canary is revisited instead
-      # of silently testing bash 5 twice. These are regression guards
-      # for what works on the legacy bash today — parse, boundaries,
-      # and the while-read dynamic accumulators — NOT completion
-      # parity: the interactive matrix on this leg runs against the
-      # brew bash by design.
+      # parse, word-boundary, dynamic-path, and static command/option
+      # vocabulary tests to the native /bin/bash through
+      # NKEEPASS_COMPLETION_BASH; the version assert keeps the canary
+      # honest — if Apple ever replaces /bin/bash with a bash >= 4 the
+      # step fails and the canary is revisited instead of silently
+      # testing bash 5 twice. These are regression guards for what
+      # works on the legacy bash today — parse, boundaries, the
+      # while-read dynamic accumulators, and the static vocabulary the
+      # completion reference documents as working there — NOT
+      # completion parity: the interactive matrix on this leg runs
+      # against the brew bash by design.
       - name: Canary - generated completion against the native /bin/bash (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -210,10 +218,13 @@ jobs:
           # renamed or mistyped filter matches NO test, so a green step
           # alone cannot prove the intended coverage ran. Assert each
           # intended test by its full printed name, plus the exact
-          # expected run count. pipefail (this step's shell: bash
-          # default) carries cargo's own exit code through tee, and
-          # every value here is a literal in this file — nothing from
-          # the event, inputs, or the environment reaches this block.
+          # expected run count. The explicit `shell: bash` above runs
+          # `bash --noprofile --norc -eo pipefail`, so cargo's own
+          # exit code survives the tee pipe (the runner default
+          # `bash -e` has no pipefail and would swallow a failing
+          # cargo behind a successful tee), and every value here is a
+          # literal in this file — nothing from the event, inputs, or
+          # the environment reaches this block.
           expected=(
             generated_bash_and_posix_scripts_parse_and_posix_files_group_completes
             bash_filename_completion_does_not_cross_command_or_option_value_boundaries

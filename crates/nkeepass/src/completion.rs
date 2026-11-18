@@ -3508,21 +3508,24 @@ _nkp_complete
         );
     }
 
-    /// Drives both dynamic completion sites in the generated bash
-    /// script — the `--vault` branch and the metadata `kind` branch —
-    /// through whatever bash `NKEEPASS_COMPLETION_BASH` selects. These
-    /// are the two sites whose `mapfile` accumulators became
-    /// while-read loops: mapfile/readarray are new in bash 4.0 (per
-    /// bash-4.0's NEWS) and bash 3.2 — still stock macOS's /bin/bash —
-    /// has no mapfile, so the old code failed every dynamic completion
-    /// with an unredirected "mapfile: command not found" and left
-    /// COMPREPLY empty. `command nkp` bypasses shell functions, so a
-    /// stub EXECUTABLE on the child PATH is the only way to answer the
-    /// `__complete` queries; without it both branches would leave
-    /// COMPREPLY empty and the count assertions would fail, so the
-    /// stub keeps the test non-vacuous. The macOS canary step runs
-    /// this against the native /bin/bash alongside the parse and
-    /// boundary tests.
+    /// Drives the generated bash completion's 3.2-relevant paths
+    /// through whatever bash `NKEEPASS_COMPLETION_BASH` selects: both
+    /// dynamic completion sites — the `--vault` branch and the metadata
+    /// `kind` branch, the two sites whose `mapfile` accumulators became
+    /// while-read loops — plus positive cases for the static command
+    /// and option vocabulary, the paths the completion reference
+    /// (docs/reference/system.md) states work on bash 3.2.
+    /// mapfile/readarray are new in bash 4.0 (per bash-4.0's NEWS) and
+    /// bash 3.2 — still stock macOS's /bin/bash — has no mapfile, so
+    /// the old code failed every dynamic completion with an
+    /// unredirected "mapfile: command not found" and left COMPREPLY
+    /// empty. `command nkp` bypasses shell functions, so a stub
+    /// EXECUTABLE on the child PATH is the only way to answer the
+    /// `__complete` queries; without it both dynamic branches would
+    /// leave COMPREPLY empty and the count assertions would fail, so
+    /// the stub keeps those assertions non-vacuous. The macOS canary
+    /// step runs this against the native /bin/bash alongside the
+    /// parse and boundary tests.
     #[test]
     #[cfg(unix)]
     fn bash_dynamic_completion_accumulates_candidates_without_mapfile() {
@@ -3547,6 +3550,18 @@ COMP_CWORD=2
 _nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 2 ]] || exit 3
 [[ "${{COMPREPLY[1]}}" == "vault-two" ]] || exit 4
+COMP_WORDS=(nkp se)
+COMP_CWORD=1
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 4 ]] || exit 5
+[[ "${{COMPREPLY[0]}}" == "secrets" ]] || exit 6
+[[ "${{COMPREPLY[3]}}" == "setx" ]] || exit 7
+COMP_WORDS=(nkp --password)
+COMP_CWORD=1
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 2 ]] || exit 8
+[[ "${{COMPREPLY[0]}}" == "--password-env" ]] || exit 9
+[[ "${{COMPREPLY[1]}}" == "--password-stdin" ]] || exit 10
 "#
         );
         let program = completion_bash_program();
@@ -3570,6 +3585,17 @@ _nkp_complete
                 Some(3) =>
                     "the --key branch did not accumulate the stub's two candidates".to_owned(),
                 Some(4) => "the --key branch lost vault-two".to_owned(),
+                Some(5) => {
+                    "static command completion did not offer 4 candidates for `se`".to_owned()
+                }
+                Some(6) => "static command completion lost `secrets`".to_owned(),
+                Some(7) => "static command completion lost `setx`".to_owned(),
+                Some(8) => {
+                    "static option completion did not offer 2 candidates for `--password`"
+                        .to_owned()
+                }
+                Some(9) => "static option completion lost `--password-env`".to_owned(),
+                Some(10) => "static option completion lost `--password-stdin`".to_owned(),
                 other => format!("unexpected exit status {other:?}"),
             },
             shell_interpreter_identity(&program),
