@@ -182,6 +182,43 @@ fn subprocess_fixture_isolates_xdg_directory_overrides() {
 }
 
 #[test]
+fn subprocess_fixture_isolates_default_data_path_from_xdg_and_home_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let canary_home = temp.path().join("must-not-be-used");
+    let canary_data = canary_home.join("data");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    command
+        .env("XDG_DATA_DIR", &canary_data)
+        .env("XDG_DATA_HOME", &canary_home)
+        .env("XDG_CONFIG_DIR", &canary_home)
+        .env("XDG_CONFIG_HOME", &canary_home)
+        .env("HOME", &canary_home);
+    let output = command
+        .isolate_application_environment()
+        .args(["context", "show"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let resolved = context["path"].as_str().expect("context includes a path");
+    assert_ne!(
+        resolved,
+        canary_data.join("nkeepass/default.kdbx").to_string_lossy()
+    );
+    assert!(resolved.contains("neo-keepass-test"));
+    assert_eq!(context["source"], "data-directory");
+    assert!(
+        !canary_home.exists(),
+        "inherited directory override escaped fixture"
+    );
+}
+
+#[test]
 fn context_alias_persistence_and_precedence() {
     let tmp = tempfile::tempdir().unwrap();
     // Use the platform's temporary directory so the target is absolute on every OS.

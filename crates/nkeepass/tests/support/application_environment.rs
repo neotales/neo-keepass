@@ -1,6 +1,9 @@
 //! Test-only isolation for the application's environment configuration.
 
 use std::process::Command;
+use std::sync::OnceLock;
+
+static TEST_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
 
 /// Removes all supported application configuration names from a child
 /// process before a test adds the variables it intends to exercise.
@@ -34,6 +37,15 @@ impl IsolatedApplicationEnvironment for Command {
         ] {
             self.env_remove(name);
         }
+        let home = TEST_HOME.get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("neo-keepass-test-")
+                .tempdir()
+                .unwrap()
+        });
+        self.env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_DATA_HOME", home.path().join("data"));
         self
     }
 }
