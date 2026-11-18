@@ -70,8 +70,8 @@ impl Fixture {
     }
 }
 
-fn nkeepass() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_nkeepass"))
+fn nkp() -> &'static Path {
+    Path::new(env!("CARGO_BIN_EXE_nkp"))
 }
 
 fn auth() -> [&'static str; 2] {
@@ -96,7 +96,7 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
         command.extend_from_slice(args);
         command.extend_from_slice(&auth());
     }
-    Command::new(nkeepass())
+    Command::new(nkp())
         .current_dir(fixture.directory.path())
         .env("NKEEPASS_VAULT", &fixture.vault)
         .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD)
@@ -299,7 +299,7 @@ fn exec_rejects_a_repeated_field_for_one_key() {
 #[test]
 fn exec_refuses_an_existing_binding_name_before_starting_the_child() {
     let fixture = Fixture::new(TOTP_URI);
-    let output = Command::new(nkeepass())
+    let output = Command::new(nkp())
         .current_dir(fixture.directory.path())
         .env("NKEEPASS_VAULT", &fixture.vault)
         .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD)
@@ -360,7 +360,7 @@ fn the_expiry_warning_names_the_binding_and_never_the_code() {
     }
     let stderr = warned.expect("no expiry warning appeared within 40 seconds");
     assert!(
-        stderr.starts_with("nkeepass: warning:"),
+        stderr.starts_with("nkp: warning:"),
         "the warning belongs on stderr and is labelled: {stderr:?}"
     );
 }

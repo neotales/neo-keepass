@@ -8,7 +8,7 @@ use neotales_keepass::{
 
 #[test]
 fn password_value_compatibility_is_documented_and_stdin_conflicts_fail_closed() {
-    let help = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let help = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .arg("--help")
         .output()
         .unwrap();
@@ -22,7 +22,7 @@ fn password_value_compatibility_is_documented_and_stdin_conflicts_fail_closed() 
     let vault = tmp.path().join("password-mode.kdbx");
     // The command must reject the ambiguous input before it tries to open a
     // vault, so this disposable path need not contain a valid database.
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args([
             "--vault",
             vault.to_str().unwrap(),
@@ -53,7 +53,7 @@ fn password_value_compatibility_is_documented_and_stdin_conflicts_fail_closed() 
         &KdbxReadLimits::default(),
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args([
             "--vault",
             vault.to_str().unwrap(),

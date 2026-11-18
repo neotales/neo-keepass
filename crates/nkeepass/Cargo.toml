@@ -8,6 +8,13 @@ repository.workspace = true
 publish = false
 description = "Headless KeePass automation CLI and TUI"
 
+# The shipped executable is `nkp`. The package keeps the `nkeepass` crate
+# name, which the library target, integration tests, and workspace
+# references continue to use.
+[[bin]]
+name = "nkp"
+path = "src/main.rs"
+
 [dependencies]
 neotales-keepass.workspace = true
 neotales-age.workspace = true

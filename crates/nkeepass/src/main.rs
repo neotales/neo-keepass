@@ -1330,8 +1330,7 @@ const UNKNOWN_CONFIG_KEY: &str =
 /// text, and both outcomes put an unreviewed string into a file that is
 /// supposed to hold paths. `alias set` and `alias rm` validate a target against
 /// its alias kind, which is the check that makes a value safe to store.
-const CONFIG_ALIASES_NOT_SCALAR: &str =
-    "aliases is a map; use nkeepass alias set and nkeepass alias rm";
+const CONFIG_ALIASES_NOT_SCALAR: &str = "aliases is a map; use nkp alias set and nkp alias rm";
 
 /// The refusal for a scalar key that holds nothing.
 ///
@@ -1656,7 +1655,7 @@ fn write_search_hit(hit: &SearchHit) -> Result<()> {
 /// Writes one text line, reporting a failed write rather than panicking.
 ///
 /// `println!` aborts on a write error, so a listing consumed by a pipeline that
-/// closes early -- `nkeepass config ls | head -1` -- would die with a panic
+/// closes early -- `nkp config ls | head -1` -- would die with a panic
 /// message on stderr instead of stopping. `json` already returns the refusal
 /// for a closed pipe, and this is the same contract for the text form.
 fn print_line(line: &str) -> Result<()> {
@@ -1710,7 +1709,7 @@ fn safe_metadata(value: &str) -> bool {
 fn report_withheld(withheld: usize) {
     if withheld > 0 {
         eprintln!(
-            "nkeepass: {withheld} record(s) withheld: vault metadata contains \
+            "nkp: {withheld} record(s) withheld: vault metadata contains \
              terminal-control bytes"
         );
     }
@@ -2878,7 +2877,7 @@ fn validate_formatted_controls(value: &str) -> Result<()> {
 ///
 /// Chosen by us, not derived from anything in the vault: the value is refused
 /// rather than escaped if it contains this line (see [`validate_named_value`]).
-const GITHUB_EOF: &str = "NKEEPASS_EOF";
+const GITHUB_EOF: &str = "NKP_EOF";
 
 /// Whether `--format` names a variable the caller has to supply with `--name`.
 ///
@@ -2980,7 +2979,7 @@ fn emit_powershell_value(name: &str, value: &str) -> Result<()> {
     )
 }
 
-/// `NAME<<NKEEPASS_EOF` / value / `NKEEPASS_EOF`, the `$GITHUB_OUTPUT` form.
+/// `NAME<<NKP_EOF` / value / `NKP_EOF`, the `$GITHUB_OUTPUT` form.
 ///
 /// Nothing is quoted, so there is no value that can break out of the block and no
 /// escape to get wrong. That is the reason to prefer it over the deprecated
@@ -3082,7 +3081,7 @@ fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
         cfg!(target_os = "linux"),
         |duration| {
             if cfg!(target_os = "linux") {
-                eprintln!("nkeepass: keeping clipboard available for up to 30 seconds");
+                eprintln!("nkp: keeping clipboard available for up to 30 seconds");
             }
             std::thread::sleep(duration);
         },
@@ -3103,9 +3102,7 @@ fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
         ClipboardCopyOutcome::Copied => {}
     }
     if !cfg!(windows) && !cfg!(target_os = "linux") {
-        eprintln!(
-            "nkeepass: clipboard may retain the secret; this platform cannot safely clear it"
-        );
+        eprintln!("nkp: clipboard may retain the secret; this platform cannot safely clear it");
     }
     Ok(())
 }
@@ -4720,7 +4717,7 @@ fn bounded_kdf_count(value: u64) -> Result<u32> {
 /// The writer policy a new vault is created with.
 ///
 /// The defaults are the library's, which is the pinned policy every other
-/// `nkeepass` save already uses, and every override is bounded by the same
+/// `nkp` save already uses, and every override is bounded by the same
 /// [`KDBX_LIMITS`] the reader enforces. That is deliberate in both directions:
 /// `init` does not write a file the rest of the CLI reads under different
 /// assumptions, and it cannot write a file this CLI would then refuse to open.
@@ -4840,7 +4837,7 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     // that true with no extra step. Replacing a context the user chose is a
     // different matter: silently retargeting someone's selection at a vault
     // they did not ask for is the kind of surprise this CLI refuses elsewhere,
-    // so an existing context is left alone and `nkeepass context use` remains
+    // so an existing context is left alone and `nkp context use` remains
     // the way to change it. The flag is reported because "usable immediately"
     // and "did not touch your configuration" must not look identical.
     let create_result = service.create(&path, &mut credentials, write, opts.size);
@@ -4997,7 +4994,7 @@ fn warn_otp_expiring(name: &str, timestamp: u64, period: u64) {
         && remaining <= OTP_EXPIRY_WARNING_SECONDS
     {
         eprintln!(
-            "nkeepass: warning: the code bound to {name} expires in {remaining}s; \
+            "nkp: warning: the code bound to {name} expires in {remaining}s; \
              a server that started its window early may already reject it"
         );
     }
@@ -5206,7 +5203,7 @@ fn config_get(config: &Config, key: ConfigKey) -> Result<()> {
     }
     let value = config.value(key).ok_or_else(|| err(CONFIG_KEY_NOT_SET))?;
     check_config_value(value)?;
-    // The bare value, not a JSON document, so `$(nkeepass config get current)`
+    // The bare value, not a JSON document, so `$(nkp config get current)`
     // is the path. A caller that wants a record has `config ls --json`.
     print_line(value)
 }
@@ -5610,7 +5607,7 @@ fn public_automation_action(action: &str) -> Option<&str> {
 /// Whether these arguments are asking for help rather than doing anything.
 ///
 /// Stops at a bare `--`, because past that separator the arguments belong to a
-/// child process. `nkeepass exec --key K --env V -- myapp --help` has to run
+/// child process. `nkp exec --key K --env V -- myapp --help` has to run
 /// `myapp --help`; printing this CLI's reference instead would be a command that
 /// cannot launch a program whose name starts with a hyphen.
 fn aliases(names: &str) -> impl Iterator<Item = &str> {
@@ -5720,7 +5717,7 @@ fn program_basename(argv0: &OsStr) -> String {
     Path::new(argv0)
         .file_name()
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| OsStr::new("nkeepass"))
+        .unwrap_or_else(|| OsStr::new("nkp"))
         .to_string_lossy()
         .into_owned()
 }
@@ -6009,7 +6006,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
         return Ok(());
     }
     if args == ["--version"] || args == ["version"] {
-        println!("nkeepass {}", env!("CARGO_PKG_VERSION"));
+        println!("nkp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let mut vault = None;
@@ -6046,7 +6043,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
     // `__complete` protocol.
     if command == "tui" {
         let [path] = rest else {
-            return Err(err("usage: nkeepass tui PATH"));
+            return Err(err("usage: nkp tui PATH"));
         };
         let aliases = load_config()?
             .aliases
@@ -6274,17 +6271,17 @@ fn main() {
     let mut arguments = env::args_os();
     let program = arguments
         .next()
-        .map_or_else(|| "nkeepass".to_owned(), |arg| program_basename(&arg));
+        .map_or_else(|| "nkp".to_owned(), |arg| program_basename(&arg));
     let command_args = arguments
         .map(std::ffi::OsString::into_string)
         .collect::<std::result::Result<Vec<_>, _>>();
     let Ok(command_args) = command_args else {
-        eprintln!("nkeepass: arguments must be valid UTF-8");
+        eprintln!("nkp: arguments must be valid UTF-8");
         std::process::exit(2);
     };
     let command_args = normalize_cli_aliases(&command_args);
     if let Err(error) = run(&command_args, &program) {
-        eprintln!("nkeepass: {}", error.0);
+        eprintln!("nkp: {}", error.0);
         std::process::exit(error.1);
     }
 }
@@ -6941,14 +6938,14 @@ mod tests {
 
     #[test]
     fn global_help_options_follow_command_options_in_their_own_section() {
-        let help = render_help("nkeepass", &["get".to_owned()], HELP_WIDTH);
+        let help = render_help("nkp", &["get".to_owned()], HELP_WIDTH);
         let command_option = help.find("--key PATH").unwrap();
         let global_heading = help.find("GLOBAL OPTIONS:").unwrap();
         let global_option = help.find("-V, --vault PATH").unwrap();
         assert!(command_option < global_heading);
         assert!(global_heading < global_option);
 
-        let context = render_help("nkeepass", &["context".to_owned()], HELP_WIDTH);
+        let context = render_help("nkp", &["context".to_owned()], HELP_WIDTH);
         for action in ["ls", "show", "use", "rm", "set"] {
             assert!(context.contains(action));
         }
@@ -6961,7 +6958,7 @@ mod tests {
             vec!["exec".to_owned()],
             vec!["secrets".to_owned(), "get".to_owned()],
         ] {
-            let help = render_help("nkeepass", &route, HELP_WIDTH);
+            let help = render_help("nkp", &route, HELP_WIDTH);
             let options = help.find("OPTIONS:\n").unwrap();
             let globals = help.find("GLOBAL OPTIONS:\n").unwrap();
             assert!(options < globals);
@@ -6978,7 +6975,7 @@ mod tests {
         }
 
         let context = render_help(
-            "nkeepass",
+            "nkp",
             &["context".to_owned(), "show".to_owned()],
             HELP_WIDTH,
         );
@@ -7198,7 +7195,7 @@ mod tests {
                     Some(std::ffi::OsStr::new(r"C:\Valid\Nkeepass")),
                     None,
                     || panic!("invalid app override must not fall through"),
-                    "nkeepass",
+                    "nkp",
                     "directory unavailable",
                     validate_base_dir,
                 )
@@ -7250,7 +7247,7 @@ mod tests {
                 Some(std::ffi::OsStr::new(r"C:\Valid\Nkeepass")),
                 None,
                 || panic!("invalid app override must not fall through"),
-                "nkeepass",
+                "nkp",
                 "directory unavailable",
                 validate_base_dir,
             )
@@ -8466,16 +8463,16 @@ mod tests {
         assert!(validate_named_value("pwsh", "one\ntwo").is_ok());
         assert!(validate_named_value("pwsh", GITHUB_EOF).is_ok());
         assert!(validate_named_value("github-actions", "one\ntwo").is_ok());
-        assert!(validate_named_value("github-actions", "NKEEPASS_EO").is_ok());
-        assert!(validate_named_value("github-actions", "NKEEPASS_EOF extra").is_ok());
+        assert!(validate_named_value("github-actions", "NKP_EO").is_ok());
+        assert!(validate_named_value("github-actions", "NKP_EOF extra").is_ok());
         assert_eq!(
-            validate_named_value("github-actions", "NKEEPASS_EOF")
+            validate_named_value("github-actions", "NKP_EOF")
                 .unwrap_err()
                 .0,
             "github-actions output cannot contain the heredoc delimiter"
         );
         assert_eq!(
-            validate_named_value("github-actions", "before\nNKEEPASS_EOF\nafter")
+            validate_named_value("github-actions", "before\nNKP_EOF\nafter")
                 .unwrap_err()
                 .0,
             "github-actions output cannot contain the heredoc delimiter"

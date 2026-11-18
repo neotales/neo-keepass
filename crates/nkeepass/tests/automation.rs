@@ -62,7 +62,7 @@ fn load(path: &Path) -> KeePassDatabase {
 }
 
 fn run(vault: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args(["--vault", vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", home)
@@ -108,7 +108,7 @@ fn automation_age_options_fail_before_vault_or_output_access() {
         ] {
             let mut args = action.to_vec();
             args.extend_from_slice(age_options);
-            let run = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+            let run = Command::new(env!("CARGO_BIN_EXE_nkp"))
                 .args(["--vault", vault.to_str().unwrap()])
                 .args(&args)
                 .env("XDG_CONFIG_HOME", home.path())
@@ -121,7 +121,7 @@ fn automation_age_options_fail_before_vault_or_output_access() {
             assert!(run.stdout.is_empty());
             assert_eq!(
                 run.stderr,
-                b"nkeepass: age options are not supported for automation commands\n"
+                b"nkp: age options are not supported for automation commands\n"
             );
             assert!(
                 !output.exists(),
@@ -535,7 +535,7 @@ fn ensure_mutation_uses_service_paths_aliases_and_dry_run() {
         );
         assert!(!output.status.success(), "accepted {bad_path}");
         assert!(output.stdout.is_empty());
-        assert_eq!(output.stderr, b"nkeepass: invalid entry path\n");
+        assert_eq!(output.stderr, b"nkp: invalid entry path\n");
         assert_eq!(std::fs::read(&vault.path).unwrap(), after_hierarchy);
     }
 }
@@ -951,10 +951,10 @@ fn get_clipboard_never_writes_the_selected_secret_to_stdout_or_diagnostics() {
     } else {
         assert!(
             [
-                "nkeepass: clipboard is unavailable\n",
-                "nkeepass: value cannot be copied to clipboard\n",
-                "nkeepass: clipboard write may have been incomplete\n",
-                "nkeepass: clipboard could not be cleared; the copied secret may remain\n",
+                "nkp: clipboard is unavailable\n",
+                "nkp: value cannot be copied to clipboard\n",
+                "nkp: clipboard write may have been incomplete\n",
+                "nkp: clipboard could not be cleared; the copied secret may remain\n",
             ]
             .iter()
             .any(|diagnostic| stderr == *diagnostic),
@@ -1106,10 +1106,7 @@ fn failed_set_batches_never_persist_staged_mutations() {
         let output = run(&vault.path, home.path(), &refs);
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
-        assert_eq!(
-            output.stderr,
-            format!("nkeepass: {expected_error}\n").as_bytes()
-        );
+        assert_eq!(output.stderr, format!("nkp: {expected_error}\n").as_bytes());
         assert_eq!(std::fs::read(&vault.path).unwrap(), original);
         let unchanged = load(&vault.path);
         assert_eq!(unchanged.root.entries[0].username, "automation-user");
@@ -1287,7 +1284,7 @@ fn export_import_round_trip_preserves_protected_history_and_loss_relevant_data()
     assert!(duplicate_import.stdout.is_empty());
     assert_eq!(
         duplicate_import.stderr,
-        b"nkeepass: interchange contains duplicate typed custom-data keys\n".as_slice()
+        b"nkp: interchange contains duplicate typed custom-data keys\n".as_slice()
     );
     assert_eq!(std::fs::read(&target.path).unwrap(), before);
     for marker in [ENTRY_SECRET, FIELD_SECRET, NOTES_SECRET, IMPORT_SECRET] {
@@ -1392,7 +1389,7 @@ fn export_import_round_trip_preserves_protected_history_and_loss_relevant_data()
     assert!(unauthorized.stdout.is_empty());
     assert_eq!(
         unauthorized.stderr,
-        b"nkeepass: target vault is not empty; use --replace to authorize replacement\n".as_slice()
+        b"nkp: target vault is not empty; use --replace to authorize replacement\n".as_slice()
     );
     assert_eq!(std::fs::read(&source.path).unwrap(), before);
     assert_no_disclosure(&unauthorized, ENTRY_SECRET);
@@ -1413,7 +1410,7 @@ fn export_import_round_trip_preserves_protected_history_and_loss_relevant_data()
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"nkeepass: output already exists or cannot be created\n".as_slice()
+        b"nkp: output already exists or cannot be created\n".as_slice()
     );
     assert_eq!(std::fs::read(&interchange).unwrap(), envelope);
 }
@@ -1742,7 +1739,7 @@ fn the_ensure_directive_is_bounded_and_a_misspelling_is_refused() {
         );
         assert!(!output.status.success(), "size {size} was accepted");
         assert!(output.stdout.is_empty());
-        assert_eq!(output.stderr, format!("nkeepass: {message}\n").as_bytes());
+        assert_eq!(output.stderr, format!("nkp: {message}\n").as_bytes());
         assert!(!String::from_utf8_lossy(&output.stderr).contains(ENTRY_SECRET));
     }
 
@@ -1774,7 +1771,7 @@ fn the_ensure_directive_is_bounded_and_a_misspelling_is_refused() {
         assert!(!output.status.success(), "{directive} was accepted");
         assert_eq!(
             output.stderr,
-            b"nkeepass: invalid interchange document\n".as_slice()
+            b"nkp: invalid interchange document\n".as_slice()
         );
     }
 

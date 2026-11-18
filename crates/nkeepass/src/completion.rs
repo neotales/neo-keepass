@@ -357,8 +357,8 @@ pub fn candidates(args: &[String], vault: Option<&str>) -> Result<()> {
     }
 }
 
-const BASH: &str = r#"# Static nkeepass completion. Dynamic queries return metadata only and never secrets.
-_nkeepass_complete() {
+const BASH: &str = r#"# Static nkp completion. Dynamic queries return metadata only and never secrets.
+_nkp_complete() {
     local current previous command action choices kind
     local index=1 element position
     local -a vault_args=()
@@ -580,7 +580,7 @@ _nkeepass_complete() {
     done
     if (( index >= COMP_CWORD )); then
         if (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == "--vault" || "${COMP_WORDS[COMP_CWORD - 1]}" == "-V" ]]; then
-            mapfile -t COMPREPLY < <(command nkeepass __complete vaults "$current" 2>/dev/null)
+            mapfile -t COMPREPLY < <(command nkp __complete vaults "$current" 2>/dev/null)
         else
             choices='init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion --help -h --version --vault -V --password-env --password-stdin'
             COMPREPLY=( $(compgen -W "$choices" -- "$current") )
@@ -615,7 +615,7 @@ _nkeepass_complete() {
         kind='vaults'
     fi
     if [[ -n "$kind" ]]; then
-        mapfile -t COMPREPLY < <(command nkeepass "${vault_args[@]}" __complete "$kind" "$current" 2>/dev/null)
+        mapfile -t COMPREPLY < <(command nkp "${vault_args[@]}" __complete "$kind" "$current" 2>/dev/null)
         return
     fi
     if [[ "$previous" == "--" ]]; then
@@ -741,14 +741,14 @@ _nkeepass_complete() {
     esac
     COMPREPLY=( $(compgen -W "$choices" -- "$current") )
 }
-complete -o filenames -F _nkeepass_complete nkeepass
+complete -o filenames -F _nkp_complete nkp
 "#;
 
-const POSIX_SH: &str = r#"# Static nkeepass completion for POSIX sh. Dynamic queries return metadata only and never secrets.
+const POSIX_SH: &str = r#"# Static nkp completion for POSIX sh. Dynamic queries return metadata only and never secrets.
 # POSIX sh has no standard programmable tab-completion registration. This stable
 # helper prints matching candidates for CURRENT PREVIOUS COMMAND [ACTION [VAULT_OPTION VAULT_PATH]].
-# A POSIX-shell integration can call `nkeepass_complete "$cur" "$prev" "$command" "$action"`.
-_nkeepass_complete_candidates() {
+# A POSIX-shell integration can call `nkp_complete "$cur" "$prev" "$command" "$action"`.
+_nkp_complete_candidates() {
     _nk_current=$1
     _nk_previous=$2
     _nk_command=$3
@@ -783,10 +783,10 @@ _nkeepass_complete_candidates() {
         case "$_nk_vault_option" in
             --vault|-V)
                 if [ -n "$_nk_vault_path" ]; then
-                    nkeepass "$_nk_vault_option" "$_nk_vault_path" __complete "$_nk_kind" "$_nk_current" 2>/dev/null
+                    nkp "$_nk_vault_option" "$_nk_vault_path" __complete "$_nk_kind" "$_nk_current" 2>/dev/null
                 fi
                 ;;
-            *) nkeepass __complete "$_nk_kind" "$_nk_current" 2>/dev/null ;;
+            *) nkp __complete "$_nk_kind" "$_nk_current" 2>/dev/null ;;
         esac
         unset _nk_current _nk_previous _nk_command _nk_action _nk_kind _nk_vault_option _nk_vault_path
         return
@@ -875,14 +875,14 @@ _nkeepass_complete_candidates() {
     done
     unset _nk_current _nk_previous _nk_command _nk_action _nk_kind _nk_choices _nk_candidate
 }
-nkeepass_complete() {
-    _nkeepass_complete_candidates "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}"
+nkp_complete() {
+    _nkp_complete_candidates "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}"
 }
 "#;
 
-const ZSH: &str = r#"#compdef nkeepass
-# Static nkeepass completion. Dynamic queries return metadata only and never secrets.
-_nkeepass() {
+const ZSH: &str = r#"#compdef nkp
+# Static nkp completion. Dynamic queries return metadata only and never secrets.
+_nkp() {
     local -a choices dynamic vault_args
     local -i command_index=2 position
     local command action previous element kind
@@ -906,11 +906,11 @@ _nkeepass() {
     done
     if (( CURRENT <= command_index )); then
         if [[ "${words[CURRENT - 1]}" == "--vault" || "${words[CURRENT - 1]}" == "-V" ]]; then
-            dynamic=("${(@f)$(command nkeepass __complete vaults "$cur" 2>/dev/null)}")
-            (( ${#dynamic} && ${#dynamic[1]} )) && _describe -t values 'nkeepass metadata' dynamic
+            dynamic=("${(@f)$(command nkp __complete vaults "$cur" 2>/dev/null)}")
+            (( ${#dynamic} && ${#dynamic[1]} )) && _describe -t values 'nkp metadata' dynamic
         else
             choices=(init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion '--help' '-h' '--version' '--vault' '-V' '--password-env' '--password-stdin')
-            _describe -t commands 'nkeepass command' choices
+            _describe -t commands 'nkp command' choices
         fi
         return
     fi
@@ -940,8 +940,8 @@ _nkeepass() {
         kind='vaults'
     fi
     if [[ -n "$kind" ]]; then
-        dynamic=("${(@f)$(command nkeepass "${vault_args[@]}" __complete "$kind" "$cur" 2>/dev/null)}")
-        (( ${#dynamic} && ${#dynamic[1]} )) && _describe -t values 'nkeepass metadata' dynamic
+        dynamic=("${(@f)$(command nkp "${vault_args[@]}" __complete "$kind" "$cur" 2>/dev/null)}")
+        (( ${#dynamic} && ${#dynamic[1]} )) && _describe -t values 'nkp metadata' dynamic
         return
     fi
     if [[ "$previous" == "--" ]]; then
@@ -960,7 +960,7 @@ _nkeepass() {
         --field:get:*|--field:getx:*|--field:set:*|--field:secrets:get|--field:secrets:getx|--field:secrets:set|--field:field:get|--field:field:reveal|--field:field:set|--field:field:edit|--field:custom-field:get|--field:custom-field:reveal|--field:custom-field:set|--field:custom-field:edit) choices=(Password Title UserName URL Notes) ;;
     esac
     if (( ${#choices} )); then
-        _describe -t values 'nkeepass value' choices
+        _describe -t values 'nkp value' choices
         return
     fi
     case "$command" in
@@ -1059,17 +1059,17 @@ _nkeepass() {
         exec|x) choices=('--key' '--env' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
         completion) [[ -z "$action" ]] && choices=(bash sh zsh fish powershell pwsh nushell) ;;
     esac
-    (( ${#choices} )) && _describe -t values 'nkeepass value' choices
+    (( ${#choices} )) && _describe -t values 'nkp value' choices
 }
-if [[ "$funcstack[1]" == "_nkeepass" ]]; then
-    _nkeepass "$@"
+if [[ "$funcstack[1]" == "_nkp" ]]; then
+    _nkp "$@"
 else
-    compdef _nkeepass nkeepass
+    compdef _nkp nkp
 fi
 "#;
 
-const FISH: &str = r"# Static nkeepass completion. Dynamic queries return metadata only and never secrets.
-function __nkeepass_complete_vault_args
+const FISH: &str = r"# Static nkp completion. Dynamic queries return metadata only and never secrets.
+function __nkp_complete_vault_args
     set -l words (commandline -opc)
     set -l i 1
     while test $i -lt (count $words)
@@ -1084,128 +1084,128 @@ function __nkeepass_complete_vault_args
         set i (math $i + 1)
     end
 end
-complete -c nkeepass -f
-complete -c nkeepass -n '__fish_use_subcommand' -a 'init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion'
-complete -c nkeepass -n '__fish_use_subcommand' -s h -l help
-complete -c nkeepass -n '__fish_use_subcommand' -s V -l vault -r -a '(nkeepass (__nkeepass_complete_vault_args) __complete vaults (commandline -ct))'
-complete -c nkeepass -n '__fish_use_subcommand' -l version
-complete -c nkeepass -n '__fish_use_subcommand' -l password-env -r
-complete -c nkeepass -n '__fish_use_subcommand' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from context' -a 'ls list show use rm remove set'
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l kdf -a 'aes argon2d argon2id'
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l memory
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l iterations
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l parallelism
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l size
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l password-file
-complete -c nkeepass -n '__fish_seen_subcommand_from init' -l key-file
-complete -c nkeepass -n '__fish_seen_subcommand_from alias' -a 'ls list set rm remove resolve'
-complete -c nkeepass -n '__fish_seen_subcommand_from alias set rm remove resolve' -a '(nkeepass (__nkeepass_complete_vault_args) __complete aliases (commandline -ct))'
-complete -c nkeepass -n '__fish_seen_subcommand_from context use rm' -a '(nkeepass (__nkeepass_complete_vault_args) __complete vault-aliases (commandline -ct))'
-complete -c nkeepass -n '__fish_seen_subcommand_from context set' -a '(nkeepass (__nkeepass_complete_vault_args) __complete vaults (commandline -ct))'
-complete -c nkeepass -n '__fish_seen_subcommand_from alias; and __fish_seen_argument set' -l kind -a 'vault entry'
-complete -c nkeepass -n '__fish_seen_subcommand_from alias; and __fish_seen_argument set' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from config' -a 'ls list get show set rm remove'
-complete -c nkeepass -n '__fish_seen_subcommand_from config ls list' -l json
-complete -c nkeepass -n '__fish_seen_subcommand_from config get show set rm remove' -a 'aliases current default_vault'
-complete -c nkeepass -n '__fish_seen_subcommand_from config set' -a '(nkeepass (__nkeepass_complete_vault_args) __complete vaults (commandline -ct))'
-complete -c nkeepass -n '__fish_seen_subcommand_from secrets' -a 'get getx list ls search show env environment set rm remove ensure otp setx import export sync'
-complete -c nkeepass -n '__fish_seen_subcommand_from automation' -a 'setx import export sync'
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx set setx rm remove ensure search show env environment otp files attachment attachments field custom-field exec x' -l key -r -a '(nkeepass (__nkeepass_complete_vault_args) __complete keys (commandline -ct))'
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx set' -l field -a 'Password Title UserName URL Notes'
-complete -c nkeepass -n '__fish_seen_subcommand_from get otp' -l format -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
-complete -c nkeepass -n '__fish_seen_subcommand_from env environment' -l format -a 'dotenv shell pwsh powershell github-actions azure-devops json null'
-complete -c nkeepass -n '__fish_seen_subcommand_from get' -l clipboard
-complete -c nkeepass -n '__fish_seen_subcommand_from get env environment otp' -l is-output
-complete -c nkeepass -n '__fish_seen_subcommand_from getx' -l format -a 'json'
-complete -c nkeepass -n '__fish_seen_subcommand_from ls' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from get env environment otp field custom-field' -l name
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password-file
-complete -c nkeepass -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l key-file
-complete -c nkeepass -n '__fish_seen_subcommand_from ls list search' -a '--'
-complete -c nkeepass -n '__fish_seen_subcommand_from set' -l file
-complete -c nkeepass -n '__fish_seen_subcommand_from set' -s b -l bin -r
-complete -c nkeepass -n '__fish_seen_subcommand_from set' -l username -r
-complete -c nkeepass -n '__fish_seen_subcommand_from set' -l url -r
-complete -c nkeepass -n '__fish_seen_subcommand_from set' -l notes -r
-complete -c nkeepass -n '__fish_seen_subcommand_from set' -l stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from rm' -l yes
-complete -c nkeepass -n '__fish_seen_subcommand_from ensure' -l size
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import sync' -l file
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import sync' -l stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from import' -l replace
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import sync' -l dry-run
-complete -c nkeepass -n '__fish_seen_subcommand_from sync' -l strategy -a 'newest source target'
-complete -c nkeepass -n '__fish_seen_subcommand_from export' -l output
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import export sync' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import export sync' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import export sync' -l password
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import export sync' -l password-file
-complete -c nkeepass -n '__fish_seen_subcommand_from setx import export sync' -l key-file
-complete -c nkeepass -n '__fish_seen_subcommand_from ensure' -l dry-run
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -a 'ls list add create ensure rm remove'
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument add create ensure rm remove' -l key -r -a '(nkeepass (__nkeepass_complete_vault_args) __complete groups (commandline -ct))'
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument add create ensure rm remove' -l dry-run
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument rm remove' -l yes
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l password -r
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l password-env -r
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l password-file -r
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from group groups' -l key-file -r
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments' -a 'ls list add import get export rm remove'
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l key
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l file
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l output
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l yes
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password-file
-complete -c nkeepass -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l key-file
-complete -c nkeepass -n '__fish_seen_subcommand_from add' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from add' -l file
-complete -c nkeepass -n '__fish_seen_subcommand_from add' -l stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from get' -l output
-complete -c nkeepass -n '__fish_seen_subcommand_from get' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from rm' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from add get rm' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from add get rm' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from rm' -l yes
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field' -a 'ls list get reveal set edit rm remove'
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l key
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit rm remove' -l field
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l format -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l is-output
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit' -l file
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit' -l stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument rm remove' -l yes
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l password
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l password-file
-complete -c nkeepass -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l key-file
-complete -c nkeepass -n '__fish_seen_subcommand_from exec x' -l env
-complete -c nkeepass -n '__fish_seen_subcommand_from exec x' -l password-env
-complete -c nkeepass -n '__fish_seen_subcommand_from exec x' -l password-stdin
-complete -c nkeepass -n '__fish_seen_subcommand_from exec x' -l password
-complete -c nkeepass -n '__fish_seen_subcommand_from exec x' -l password-file
-complete -c nkeepass -n '__fish_seen_subcommand_from exec x' -l key-file
-complete -c nkeepass -n '__fish_seen_subcommand_from exec x' -a '--'
-complete -c nkeepass -n '__fish_seen_subcommand_from completion' -a 'bash sh zsh fish powershell pwsh nushell'
+complete -c nkp -f
+complete -c nkp -n '__fish_use_subcommand' -a 'init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion'
+complete -c nkp -n '__fish_use_subcommand' -s h -l help
+complete -c nkp -n '__fish_use_subcommand' -s V -l vault -r -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
+complete -c nkp -n '__fish_use_subcommand' -l version
+complete -c nkp -n '__fish_use_subcommand' -l password-env -r
+complete -c nkp -n '__fish_use_subcommand' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from context' -a 'ls list show use rm remove set'
+complete -c nkp -n '__fish_seen_subcommand_from init' -l kdf -a 'aes argon2d argon2id'
+complete -c nkp -n '__fish_seen_subcommand_from init' -l memory
+complete -c nkp -n '__fish_seen_subcommand_from init' -l iterations
+complete -c nkp -n '__fish_seen_subcommand_from init' -l parallelism
+complete -c nkp -n '__fish_seen_subcommand_from init' -l size
+complete -c nkp -n '__fish_seen_subcommand_from init' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from init' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from init' -l password-file
+complete -c nkp -n '__fish_seen_subcommand_from init' -l key-file
+complete -c nkp -n '__fish_seen_subcommand_from alias' -a 'ls list set rm remove resolve'
+complete -c nkp -n '__fish_seen_subcommand_from alias set rm remove resolve' -a '(nkp (__nkp_complete_vault_args) __complete aliases (commandline -ct))'
+complete -c nkp -n '__fish_seen_subcommand_from context use rm' -a '(nkp (__nkp_complete_vault_args) __complete vault-aliases (commandline -ct))'
+complete -c nkp -n '__fish_seen_subcommand_from context set' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
+complete -c nkp -n '__fish_seen_subcommand_from alias; and __fish_seen_argument set' -l kind -a 'vault entry'
+complete -c nkp -n '__fish_seen_subcommand_from alias; and __fish_seen_argument set' -l field
+complete -c nkp -n '__fish_seen_subcommand_from config' -a 'ls list get show set rm remove'
+complete -c nkp -n '__fish_seen_subcommand_from config ls list' -l json
+complete -c nkp -n '__fish_seen_subcommand_from config get show set rm remove' -a 'aliases current default_vault'
+complete -c nkp -n '__fish_seen_subcommand_from config set' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
+complete -c nkp -n '__fish_seen_subcommand_from secrets' -a 'get getx list ls search show env environment set rm remove ensure otp setx import export sync'
+complete -c nkp -n '__fish_seen_subcommand_from automation' -a 'setx import export sync'
+complete -c nkp -n '__fish_seen_subcommand_from get getx set setx rm remove ensure search show env environment otp files attachment attachments field custom-field exec x' -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__fish_seen_subcommand_from get getx set' -l field -a 'Password Title UserName URL Notes'
+complete -c nkp -n '__fish_seen_subcommand_from get otp' -l format -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
+complete -c nkp -n '__fish_seen_subcommand_from env environment' -l format -a 'dotenv shell pwsh powershell github-actions azure-devops json null'
+complete -c nkp -n '__fish_seen_subcommand_from get' -l clipboard
+complete -c nkp -n '__fish_seen_subcommand_from get env environment otp' -l is-output
+complete -c nkp -n '__fish_seen_subcommand_from getx' -l format -a 'json'
+complete -c nkp -n '__fish_seen_subcommand_from ls' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from get env environment otp field custom-field' -l name
+complete -c nkp -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password
+complete -c nkp -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l password-file
+complete -c nkp -n '__fish_seen_subcommand_from get getx ls list search show set rm remove ensure env environment otp' -l key-file
+complete -c nkp -n '__fish_seen_subcommand_from ls list search' -a '--'
+complete -c nkp -n '__fish_seen_subcommand_from set' -l file
+complete -c nkp -n '__fish_seen_subcommand_from set' -s b -l bin -r
+complete -c nkp -n '__fish_seen_subcommand_from set' -l username -r
+complete -c nkp -n '__fish_seen_subcommand_from set' -l url -r
+complete -c nkp -n '__fish_seen_subcommand_from set' -l notes -r
+complete -c nkp -n '__fish_seen_subcommand_from set' -l stdin
+complete -c nkp -n '__fish_seen_subcommand_from rm' -l yes
+complete -c nkp -n '__fish_seen_subcommand_from ensure' -l size
+complete -c nkp -n '__fish_seen_subcommand_from setx import sync' -l file
+complete -c nkp -n '__fish_seen_subcommand_from setx import sync' -l stdin
+complete -c nkp -n '__fish_seen_subcommand_from import' -l replace
+complete -c nkp -n '__fish_seen_subcommand_from setx import sync' -l dry-run
+complete -c nkp -n '__fish_seen_subcommand_from sync' -l strategy -a 'newest source target'
+complete -c nkp -n '__fish_seen_subcommand_from export' -l output
+complete -c nkp -n '__fish_seen_subcommand_from setx import export sync' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from setx import export sync' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from setx import export sync' -l password
+complete -c nkp -n '__fish_seen_subcommand_from setx import export sync' -l password-file
+complete -c nkp -n '__fish_seen_subcommand_from setx import export sync' -l key-file
+complete -c nkp -n '__fish_seen_subcommand_from ensure' -l dry-run
+complete -c nkp -n '__fish_seen_subcommand_from group groups' -a 'ls list add create ensure rm remove'
+complete -c nkp -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument add create ensure rm remove' -l key -r -a '(nkp (__nkp_complete_vault_args) __complete groups (commandline -ct))'
+complete -c nkp -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument add create ensure rm remove' -l dry-run
+complete -c nkp -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument rm remove' -l yes
+complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password -r
+complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password-env -r
+complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password-file -r
+complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from group groups' -l key-file -r
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments' -a 'ls list add import get export rm remove'
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l key
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l field
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l file
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l stdin
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l field
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l output
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l field
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l yes
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password-file
+complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l key-file
+complete -c nkp -n '__fish_seen_subcommand_from add' -l field
+complete -c nkp -n '__fish_seen_subcommand_from add' -l file
+complete -c nkp -n '__fish_seen_subcommand_from add' -l stdin
+complete -c nkp -n '__fish_seen_subcommand_from get' -l output
+complete -c nkp -n '__fish_seen_subcommand_from get' -l field
+complete -c nkp -n '__fish_seen_subcommand_from rm' -l field
+complete -c nkp -n '__fish_seen_subcommand_from add get rm' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from add get rm' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from rm' -l yes
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field' -a 'ls list get reveal set edit rm remove'
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l key
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l field
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit rm remove' -l field
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l format -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l is-output
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit' -l file
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit' -l stdin
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument rm remove' -l yes
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l password
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l password-file
+complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l key-file
+complete -c nkp -n '__fish_seen_subcommand_from exec x' -l env
+complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password-env
+complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password-stdin
+complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password
+complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password-file
+complete -c nkp -n '__fish_seen_subcommand_from exec x' -l key-file
+complete -c nkp -n '__fish_seen_subcommand_from exec x' -a '--'
+complete -c nkp -n '__fish_seen_subcommand_from completion' -a 'bash sh zsh fish powershell pwsh nushell'
 ";
 
-const POWERSHELL: &str = r#"# Static nkeepass completion. Dynamic queries return metadata only and never secrets.
-Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
+const POWERSHELL: &str = r#"# Static nkp completion. Dynamic queries return metadata only and never secrets.
+Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
     $elements = @($commandAst.CommandElements | ForEach-Object {
         $text = $_.Extent.Text
@@ -1275,7 +1275,7 @@ Register-ArgumentCompleter -Native -CommandName nkeepass -ScriptBlock {
         $protocolKind = 'vaults'
     }
     if ($protocolKind) {
-        $values = @(& nkeepass @vaultArguments __complete $protocolKind $wordToComplete 2>$null | ForEach-Object { $_.ToString() } | Where-Object { $_ })
+        $values = @(& nkp @vaultArguments __complete $protocolKind $wordToComplete 2>$null | ForEach-Object { $_.ToString() } | Where-Object { $_ })
     } else {
         if ($previous -ne '--') {
             switch ("$previous`:$command`:$action") {
@@ -1424,9 +1424,9 @@ macro_rules! define_nushell_completion {
 #[cfg(test)]
 const NUSHELL_VAULT_CONTEXT_REGEX: &str = $vault_regex;
 const NUSHELL: &str = concat!(
-    r#"# Static nkeepass completion. Dynamic queries return metadata only and never secrets.
+    r#"# Static nkp completion. Dynamic queries return metadata only and never secrets.
 # Nushell custom completers receive the whole command context as their first argument.
-def "nu-complete nkeepass vault-args" [context: string] {
+def "nu-complete nkp vault-args" [context: string] {
   let matches = ($context | parse --regex r#'"#,
     $vault_regex,
     r#"'#)
@@ -1436,144 +1436,144 @@ def "nu-complete nkeepass vault-args" [context: string] {
     ["--vault", $vault]
   }
 }
-def "nu-complete nkeepass aliases" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete aliases | lines }
-def "nu-complete nkeepass vault-files" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete vault-files | lines }
-def "nu-complete nkeepass vaults" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete vaults | lines }
-def "nu-complete nkeepass entries" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete entries | lines }
-def "nu-complete nkeepass groups" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete groups | lines }
-def "nu-complete nkeepass keys" [context: string] { let args = (nu-complete nkeepass vault-args $context); ^nkeepass ...$args __complete keys | lines }
-export extern nkeepass [
+def "nu-complete nkp aliases" [context: string] { let args = (nu-complete nkp vault-args $context); ^nkp ...$args __complete aliases | lines }
+def "nu-complete nkp vault-files" [context: string] { let args = (nu-complete nkp vault-args $context); ^nkp ...$args __complete vault-files | lines }
+def "nu-complete nkp vaults" [context: string] { let args = (nu-complete nkp vault-args $context); ^nkp ...$args __complete vaults | lines }
+def "nu-complete nkp entries" [context: string] { let args = (nu-complete nkp vault-args $context); ^nkp ...$args __complete entries | lines }
+def "nu-complete nkp groups" [context: string] { let args = (nu-complete nkp vault-args $context); ^nkp ...$args __complete groups | lines }
+def "nu-complete nkp keys" [context: string] { let args = (nu-complete nkp vault-args $context); ^nkp ...$args __complete keys | lines }
+export extern nkp [
   command?: string@"init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion"
   --help(-h)
   --version
-  --vault(-V): string@"nu-complete nkeepass vaults"
+  --vault(-V): string@"nu-complete nkp vaults"
   --password-env: string
   --password-stdin
 ]
-export extern "nkeepass init" [path?: string@"nu-complete nkeepass vault-files" --kdf: string@"aes argon2d argon2id" --memory: int --iterations: int --parallelism: int --size: int --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass context" [action: string@"ls list show use rm remove set"]
-export extern "nkeepass context ls" []
-export extern "nkeepass context show" []
-export extern "nkeepass context use" [alias: string@"nu-complete nkeepass vault-aliases"]
-export extern "nkeepass context rm" [alias: string@"nu-complete nkeepass vault-aliases"]
-export extern "nkeepass context set" [alias: string path: string@"nu-complete nkeepass vaults"]
-export extern "nkeepass alias" [action: string@"ls list set rm remove resolve"]
-export extern "nkeepass alias ls" []
-export extern "nkeepass alias list" []
-export extern "nkeepass alias set" [name: string@"nu-complete nkeepass aliases" target: string@"nu-complete nkeepass vaults" --kind: string@"vault entry" --field: string]
-export extern "nkeepass alias rm" [name: string@"nu-complete nkeepass aliases"]
-export extern "nkeepass alias remove" [name: string@"nu-complete nkeepass aliases"]
-export extern "nkeepass alias resolve" [name: string@"nu-complete nkeepass aliases"]
-export extern "nkeepass config" [action: string@"ls list get show set rm remove"]
-export extern "nkeepass config ls" [glob?: string --json]
-export extern "nkeepass config list" [glob?: string --json]
-export extern "nkeepass config get" [key: string@"aliases current default_vault"]
-export extern "nkeepass config show" [key: string@"aliases current default_vault"]
-export extern "nkeepass config set" [key: string@"aliases current default_vault" value: string@"nu-complete nkeepass vaults"]
-export extern "nkeepass config rm" [key: string@"aliases current default_vault"]
-export extern "nkeepass config remove" [key: string@"aliases current default_vault"]
-export extern "nkeepass secrets" [action: string@"get getx list ls search show env environment set rm remove ensure otp setx import export sync"]
-export extern "nkeepass secrets list" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets search" [query: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets show" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets env" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkeepass secrets environment" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkeepass secrets get" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
-export extern "nkeepass secrets getx" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --format: string@"json"]
-export extern "nkeepass secrets ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets set" [--key: string@"nu-complete nkeepass keys" --username: string --url: string --notes: string --field: string@"Password Title UserName URL Notes" --file: string --bin: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets rm" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass secrets remove" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass secrets ensure" [--key: string@"nu-complete nkeepass keys" --size: int --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets otp" [--key: string@"nu-complete nkeepass keys" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
-export extern "nkeepass secrets setx" [--key: string@"nu-complete nkeepass keys" --file: string --stdin --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass secrets sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass automation" [action: string@"setx import export sync"]
-export extern "nkeepass automation setx" [--key: string@"nu-complete nkeepass keys" --file: string --stdin --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass automation import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass automation export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass automation sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass get" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
-export extern "nkeepass getx" [--key: string@"nu-complete nkeepass keys" --field: string@"Password Title UserName URL Notes" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --format: string@"json"]
-export extern "nkeepass list" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass search" [query: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass show" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass env" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkeepass set" [--key: string@"nu-complete nkeepass keys" --username: string --url: string --notes: string --field: string@"Password Title UserName URL Notes" --file: string --bin: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass rm" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass remove" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass ensure" [--key: string@"nu-complete nkeepass keys" --size: int --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass otp" [--key: string@"nu-complete nkeepass keys" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
-export extern "nkeepass setx" [--key: string@"nu-complete nkeepass keys" --file: string --stdin --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass group" [action: string@"ls list add create ensure rm remove"]
-export extern "nkeepass groups" [action: string@"ls list add create ensure rm remove"]
-export extern "nkeepass group ls" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass group list" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass groups ls" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass groups list" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass group add" [--key: string@"nu-complete nkeepass groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass group create" [--key: string@"nu-complete nkeepass groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass group ensure" [--key: string@"nu-complete nkeepass groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass groups add" [--key: string@"nu-complete nkeepass groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass groups create" [--key: string@"nu-complete nkeepass groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass groups ensure" [--key: string@"nu-complete nkeepass groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass group rm" [--key: string@"nu-complete nkeepass groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass group remove" [--key: string@"nu-complete nkeepass groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass groups rm" [--key: string@"nu-complete nkeepass groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass groups remove" [--key: string@"nu-complete nkeepass groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachment" [action: string@"ls list add import get export rm remove"]
-export extern "nkeepass attachments" [action: string@"ls list add import get export rm remove"]
-export extern "nkeepass attachment ls" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachment list" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachments ls" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachments list" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachment add" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachment import" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachments add" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachments import" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachment get" [--key: string@"nu-complete nkeepass keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachment export" [--key: string@"nu-complete nkeepass keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachments get" [--key: string@"nu-complete nkeepass keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachments export" [--key: string@"nu-complete nkeepass keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass attachment rm" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass attachment remove" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass attachments rm" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass attachments remove" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass field" [action: string@"ls list get reveal set edit rm remove"]
-export extern "nkeepass custom-field" [action: string@"ls list get reveal set edit rm remove"]
-export extern "nkeepass field ls" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass field list" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass custom-field ls" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass custom-field list" [--key: string@"nu-complete nkeepass keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass field get" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass field reveal" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass custom-field get" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass custom-field reveal" [--key: string@"nu-complete nkeepass keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass field set" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass field edit" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass custom-field set" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass custom-field edit" [--key: string@"nu-complete nkeepass keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkeepass field rm" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass field remove" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass custom-field rm" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass custom-field remove" [--key: string@"nu-complete nkeepass keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkeepass exec" [--key: string@"nu-complete nkeepass keys" --env: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
-export extern "nkeepass x" [--key: string@"nu-complete nkeepass keys" --env: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
-export extern "nkeepass version" []
-export extern "nkeepass completion" [shell: string@"bash sh zsh fish powershell pwsh nushell"]
+export extern "nkp init" [path?: string@"nu-complete nkp vault-files" --kdf: string@"aes argon2d argon2id" --memory: int --iterations: int --parallelism: int --size: int --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp context" [action: string@"ls list show use rm remove set"]
+export extern "nkp context ls" []
+export extern "nkp context show" []
+export extern "nkp context use" [alias: string@"nu-complete nkp vault-aliases"]
+export extern "nkp context rm" [alias: string@"nu-complete nkp vault-aliases"]
+export extern "nkp context set" [alias: string path: string@"nu-complete nkp vaults"]
+export extern "nkp alias" [action: string@"ls list set rm remove resolve"]
+export extern "nkp alias ls" []
+export extern "nkp alias list" []
+export extern "nkp alias set" [name: string@"nu-complete nkp aliases" target: string@"nu-complete nkp vaults" --kind: string@"vault entry" --field: string]
+export extern "nkp alias rm" [name: string@"nu-complete nkp aliases"]
+export extern "nkp alias remove" [name: string@"nu-complete nkp aliases"]
+export extern "nkp alias resolve" [name: string@"nu-complete nkp aliases"]
+export extern "nkp config" [action: string@"ls list get show set rm remove"]
+export extern "nkp config ls" [glob?: string --json]
+export extern "nkp config list" [glob?: string --json]
+export extern "nkp config get" [key: string@"aliases current default_vault"]
+export extern "nkp config show" [key: string@"aliases current default_vault"]
+export extern "nkp config set" [key: string@"aliases current default_vault" value: string@"nu-complete nkp vaults"]
+export extern "nkp config rm" [key: string@"aliases current default_vault"]
+export extern "nkp config remove" [key: string@"aliases current default_vault"]
+export extern "nkp secrets" [action: string@"get getx list ls search show env environment set rm remove ensure otp setx import export sync"]
+export extern "nkp secrets list" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets search" [query: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets show" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets env" [--key: string@"nu-complete nkp keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
+export extern "nkp secrets environment" [--key: string@"nu-complete nkp keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
+export extern "nkp secrets get" [--key: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp secrets getx" [--key: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --format: string@"json"]
+export extern "nkp secrets ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets set" [--key: string@"nu-complete nkp keys" --username: string --url: string --notes: string --field: string@"Password Title UserName URL Notes" --file: string --bin: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets rm" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp secrets remove" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp secrets ensure" [--key: string@"nu-complete nkp keys" --size: int --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets otp" [--key: string@"nu-complete nkp keys" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp secrets setx" [--key: string@"nu-complete nkp keys" --file: string --stdin --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp automation" [action: string@"setx import export sync"]
+export extern "nkp automation setx" [--key: string@"nu-complete nkp keys" --file: string --stdin --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp automation import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp automation export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp automation sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp get" [--key: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp getx" [--key: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --format: string@"json"]
+export extern "nkp list" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp search" [query: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp show" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp env" [--key: string@"nu-complete nkp keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
+export extern "nkp set" [--key: string@"nu-complete nkp keys" --username: string --url: string --notes: string --field: string@"Password Title UserName URL Notes" --file: string --bin: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp rm" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp remove" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp ensure" [--key: string@"nu-complete nkp keys" --size: int --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp otp" [--key: string@"nu-complete nkp keys" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp setx" [--key: string@"nu-complete nkp keys" --file: string --stdin --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group" [action: string@"ls list add create ensure rm remove"]
+export extern "nkp groups" [action: string@"ls list add create ensure rm remove"]
+export extern "nkp group ls" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group list" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups ls" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups list" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group add" [--key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group create" [--key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group ensure" [--key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups add" [--key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups create" [--key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups ensure" [--key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group rm" [--key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group remove" [--key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups rm" [--key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups remove" [--key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment" [action: string@"ls list add import get export rm remove"]
+export extern "nkp attachments" [action: string@"ls list add import get export rm remove"]
+export extern "nkp attachment ls" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment list" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments ls" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments list" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment add" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment import" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments add" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments import" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment get" [--key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment export" [--key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments get" [--key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments export" [--key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment rm" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp attachment remove" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp attachments rm" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp attachments remove" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp field" [action: string@"ls list get reveal set edit rm remove"]
+export extern "nkp custom-field" [action: string@"ls list get reveal set edit rm remove"]
+export extern "nkp field ls" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field list" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field ls" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field list" [--key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field get" [--key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field reveal" [--key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field get" [--key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field reveal" [--key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field set" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field edit" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field set" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field edit" [--key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field rm" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp field remove" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp custom-field rm" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp custom-field remove" [--key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp exec" [--key: string@"nu-complete nkp keys" --env: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
+export extern "nkp x" [--key: string@"nu-complete nkp keys" --env: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
+export extern "nkp version" []
+export extern "nkp completion" [shell: string@"bash sh zsh fish powershell pwsh nushell"]
 "#,
 );
     };
 }
 
 define_nushell_completion!(
-    r#"(?m)^\s*nkeepass\s+(?:--vault|-V)\s+(?:"(?<double>[^"]*)"|'(?<single>[^']*)'|(?<bare>\S+))"#
+    r#"(?m)^\s*nkp\s+(?:--vault|-V)\s+(?:"(?<double>[^"]*)"|'(?<single>[^']*)'|(?<bare>\S+))"#
 );
 
 #[cfg(test)]
@@ -1583,7 +1583,7 @@ mod tests {
 
     fn fixture_vault_argument(pattern: &str, context: &str) -> Option<String> {
         assert_eq!(pattern, super::NUSHELL_VAULT_CONTEXT_REGEX);
-        let remainder = context.strip_prefix("nkeepass ")?;
+        let remainder = context.strip_prefix("nkp ")?;
         let remainder = remainder
             .strip_prefix("--vault ")
             .or_else(|| remainder.strip_prefix("-V "))?;
@@ -1795,7 +1795,7 @@ mod tests {
     fn programmable_completions_forward_the_explicit_global_vault() {
         let bash = generate("bash").unwrap();
         assert!(bash.contains("vault_args=(--vault"));
-        assert!(bash.contains("command nkeepass \"${vault_args[@]}\" __complete"));
+        assert!(bash.contains("command nkp \"${vault_args[@]}\" __complete"));
         assert!(bash.contains("position -eq 1"));
         assert!(bash.contains("position -eq 3"));
         assert!(bash.contains("__complete vaults \"$current\""));
@@ -1804,13 +1804,13 @@ mod tests {
 
         let sh = generate("sh").unwrap();
         assert!(sh.contains("VAULT_OPTION VAULT_PATH"));
-        assert!(sh.contains("nkeepass \"$_nk_vault_option\" \"$_nk_vault_path\" __complete"));
+        assert!(sh.contains("nkp \"$_nk_vault_option\" \"$_nk_vault_path\" __complete"));
         assert!(sh.contains("\"${6-}\""));
         assert!(sh.contains("files:add|attachment:add|attachments:add"));
 
         let zsh = generate("zsh").unwrap();
         assert!(zsh.contains("vault_args=(--vault"));
-        assert!(zsh.contains("command nkeepass \"${vault_args[@]}\" __complete"));
+        assert!(zsh.contains("command nkp \"${vault_args[@]}\" __complete"));
         assert!(zsh.contains("choices=('--key' '--field' '--username' '--url' '--notes'"));
         assert!(zsh.contains("command_index=2"));
         assert!(zsh.contains("position -eq 1"));
@@ -1825,7 +1825,7 @@ mod tests {
         );
         assert!(!powershell.contains("'--field' '--username'"));
         assert!(powershell.contains("@('files', 'attachment', 'attachments')"));
-        assert!(powershell.contains("& nkeepass @vaultArguments __complete"));
+        assert!(powershell.contains("& nkp @vaultArguments __complete"));
         assert!(powershell.contains("$cursorPosition -gt $commandAst.Extent.EndOffset"));
         assert!(powershell.contains("$currentIndex -le $commandIndex"));
         assert!(powershell.contains("$currentIndex -gt ($commandIndex + 1)"));
@@ -1833,14 +1833,14 @@ mod tests {
         assert!(powershell.contains("$commandIndex + 3"));
 
         let fish = generate("fish").unwrap();
-        assert!(fish.contains("__nkeepass_complete_vault_args"));
-        assert!(fish.contains("nkeepass (__nkeepass_complete_vault_args) __complete keys"));
-        assert!(fish.contains("nkeepass (__nkeepass_complete_vault_args) __complete vaults"));
+        assert!(fish.contains("__nkp_complete_vault_args"));
+        assert!(fish.contains("nkp (__nkp_complete_vault_args) __complete keys"));
+        assert!(fish.contains("nkp (__nkp_complete_vault_args) __complete vaults"));
 
         let nushell = generate("nushell").unwrap();
-        assert!(nushell.contains("nu-complete nkeepass vault-args"));
-        assert!(nushell.contains("^nkeepass ...$args __complete keys"));
-        assert!(nushell.contains("^nkeepass ...$args __complete vaults"));
+        assert!(nushell.contains("nu-complete nkp vault-args"));
+        assert!(nushell.contains("^nkp ...$args __complete keys"));
+        assert!(nushell.contains("^nkp ...$args __complete vaults"));
         assert!(nushell.contains(&format!(
             "parse --regex r#'{}'#",
             super::NUSHELL_VAULT_CONTEXT_REGEX
@@ -1852,7 +1852,7 @@ mod tests {
             assert!(
                 script.contains("--vault")
                     && (script.contains("__complete")
-                        || script.contains("__nkeepass_complete_vault_args")),
+                        || script.contains("__nkp_complete_vault_args")),
                 "{shell} has no vault-aware completion protocol"
             );
         }
@@ -1880,7 +1880,7 @@ mod tests {
         std::fs::write(&path, generate("sh").unwrap()).unwrap();
         let output = std::process::Command::new("sh")
             .arg("-c")
-            .arg(". ./completion.sh; nkeepass_complete '' '' files; nkeepass_complete '' '' files add")
+            .arg(". ./completion.sh; nkp_complete '' '' files; nkp_complete '' '' files add")
             .current_dir(directory.path())
             .output()
             .unwrap();
@@ -1963,7 +1963,7 @@ mod tests {
         let marker = directory.path().join("injected");
         let cases = [
             (
-                "nkeepass set --bin payload=space",
+                "nkp set --bin payload=space",
                 vec!["set", "--bin", "payload=space name.bin"],
                 "space name.bin",
                 "default",
@@ -1971,7 +1971,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin payload=danger-",
+                "nkp set --bin payload=danger-",
                 vec!["set", "--bin", "payload=danger-$(touch injected).bin"],
                 "danger-$(touch injected).bin",
                 "default",
@@ -1979,7 +1979,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass --password-env TEST set -b payload=ticks",
+                "nkp --password-env TEST set -b payload=ticks",
                 vec![
                     "--password-env",
                     "TEST",
@@ -1993,7 +1993,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --password-file ./credential --bin payload=space",
+                "nkp set --password-file ./credential --bin payload=space",
                 vec![
                     "set",
                     "--password-file",
@@ -2007,7 +2007,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set -F Password --bin payload=apostrophe",
+                "nkp set -F Password --bin payload=apostrophe",
                 vec![
                     "set",
                     "-F",
@@ -2021,7 +2021,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin first=old --bin payload=semi-",
+                "nkp set --bin first=old --bin payload=semi-",
                 vec![
                     "set",
                     "--bin",
@@ -2035,7 +2035,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin payload=equals=",
+                "nkp set --bin payload=equals=",
                 vec!["set", "--bin", "payload=equals=more=equals.bin"],
                 "equals=more=equals.bin",
                 "default",
@@ -2043,7 +2043,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin 'payload=space",
+                "nkp set --bin 'payload=space",
                 vec!["set", "--bin", "payload=space name.bin"],
                 "space name.bin",
                 "default",
@@ -2051,7 +2051,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin \"payload=danger-",
+                "nkp set --bin \"payload=danger-",
                 vec!["set", "--bin", "payload=danger-$(touch injected).bin"],
                 "danger-$(touch injected).bin",
                 "default",
@@ -2059,7 +2059,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin payload=semi-",
+                "nkp set --bin payload=semi-",
                 vec!["set", "--bin", "payload=semi-;touch injected;.bin"],
                 "semi-;touch injected;.bin",
                 "exclude_equals",
@@ -2067,7 +2067,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin 'payload=apostrophe",
+                "nkp set --bin 'payload=apostrophe",
                 vec!["set", "--bin", "payload=apostrophe-'single'.bin"],
                 "apostrophe-'single'.bin",
                 "exclude_equals",
@@ -2075,7 +2075,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin first=old --bin 'note=space",
+                "nkp set --bin first=old --bin 'note=space",
                 vec!["set", "--bin", "first=old", "--bin", "note=space name.bin"],
                 "space name.bin",
                 "default",
@@ -2083,7 +2083,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin first=old --bin note=space",
+                "nkp set --bin first=old --bin note=space",
                 vec!["set", "--bin", "first=old", "--bin", "note=space name.bin"],
                 "space name.bin",
                 "exclude_equals",
@@ -2091,7 +2091,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin name = pre fix",
+                "nkp set --bin name = pre fix",
                 vec![],
                 "prefix-target",
                 "default",
@@ -2099,7 +2099,7 @@ mod tests {
                 false,
             ),
             (
-                "nkeepass set --bin name=pre fix=c",
+                "nkp set --bin name=pre fix=c",
                 vec![],
                 "prefix=candidate",
                 "exclude_equals",
@@ -2107,7 +2107,7 @@ mod tests {
                 false,
             ),
             (
-                "nkeepass set --bin note=--evil",
+                "nkp set --bin note=--evil",
                 vec!["set", "--bin", "note=--evil.bin"],
                 "--evil.bin",
                 "default",
@@ -2115,7 +2115,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin note=--danger-",
+                "nkp set --bin note=--danger-",
                 vec!["set", "--bin", "note=--danger-$(touch injected).bin"],
                 "--danger-$(touch injected).bin",
                 "default",
@@ -2123,7 +2123,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin name=pre --bin",
+                "nkp set --bin name=pre --bin",
                 vec!["set", "--bin", "name=pre", "--bin"],
                 "pre--bin-HIJACKED",
                 "default",
@@ -2131,7 +2131,7 @@ mod tests {
                 true,
             ),
             (
-                "nkeepass set --bin name=pre -b",
+                "nkp set --bin name=pre -b",
                 vec!["set", "--bin", "name=pre", "-b"],
                 "pre-b-HIJACKED",
                 "default",
@@ -2142,7 +2142,7 @@ mod tests {
         for (_, _, filename, _, _, _) in &cases {
             std::fs::write(directory.path().join(filename), b"").unwrap();
         }
-        let completion_path = directory.path().join("nkeepass.bash");
+        let completion_path = directory.path().join("nkp.bash");
         std::fs::write(&completion_path, bash).unwrap();
 
         for (line, expected_args, expected_filename, wordbreaks, close_quote, expect_match) in
@@ -2171,7 +2171,7 @@ transcript = drain()
 if wordbreaks == "exclude_equals":
     os.write(fd, b'COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"\n')
     transcript += drain()
-os.write(fd, b"nkeepass() { printf '%s\\0' \"$@\" > args.bin; }; source " +
+os.write(fd, b"nkp() { printf '%s\\0' \"$@\" > args.bin; }; source " +
          completion.encode() + b"\n")
 transcript += drain()
 os.write(fd, line.encode() + b"\t")
@@ -2231,17 +2231,17 @@ if actual != [arg.encode() for arg in expected_args]:
         let bash = generate("bash").unwrap();
         let script = format!(
             r#"{bash}
-COMP_WORDS=(nkeepass exec -- set --bin payload = candidate)
+COMP_WORDS=(nkp exec -- set --bin payload = candidate)
 COMP_CWORD=7
-_nkeepass_complete
+_nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 1
-COMP_WORDS=(nkeepass set -- --bin payload = candidate)
+COMP_WORDS=(nkp set -- --bin payload = candidate)
 COMP_CWORD=6
-_nkeepass_complete
+_nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 2
-COMP_WORDS=(nkeepass set --notes --bin payload = candidate)
+COMP_WORDS=(nkp set --notes --bin payload = candidate)
 COMP_CWORD=6
-_nkeepass_complete
+_nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 3
 "#
         );
@@ -2363,17 +2363,14 @@ _nkeepass_complete
     fn nushell_vault_context_fixture_preserves_quoted_paths() {
         let cases = [
             (
-                r#"nkeepass --vault "/vaults/work vault.kdbx" get --key """#,
+                r#"nkp --vault "/vaults/work vault.kdbx" get --key """#,
                 "/vaults/work vault.kdbx",
             ),
             (
-                "nkeepass -V '/vaults/my vault.kdbx' keys",
+                "nkp -V '/vaults/my vault.kdbx' keys",
                 "/vaults/my vault.kdbx",
             ),
-            (
-                "nkeepass --vault /vaults/plain.kdbx keys",
-                "/vaults/plain.kdbx",
-            ),
+            ("nkp --vault /vaults/plain.kdbx keys", "/vaults/plain.kdbx"),
         ];
         let script = generate("nushell").unwrap();
         let regex_invocation = format!("parse --regex r#'{}'#", super::NUSHELL_VAULT_CONTEXT_REGEX);
@@ -2387,7 +2384,7 @@ _nkeepass_complete
         assert_eq!(
             fixture_vault_argument(
                 super::NUSHELL_VAULT_CONTEXT_REGEX,
-                "nkeepass --vault=/vaults/no.kdbx keys"
+                "nkp --vault=/vaults/no.kdbx keys"
             ),
             None
         );

@@ -6,14 +6,14 @@
     reason = "shared fixture exposes optional scenarios to other CLI adapters"
 )]
 #[path = "support/cli_support.rs"]
-mod nkeepass_cli;
+mod nkp_cli;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn help_program() -> String {
-    Path::new(env!("CARGO_BIN_EXE_nkeepass"))
+    Path::new(env!("CARGO_BIN_EXE_nkp"))
         .file_name()
         .expect("Cargo binary path has a basename")
         .to_string_lossy()
@@ -21,11 +21,11 @@ fn help_program() -> String {
 }
 
 fn expected_help(text: &str) -> String {
-    text.replace("nkeepass", &help_program())
+    text.replace("nkp", &help_program())
 }
 
 fn cli(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args(args)
         .env("XDG_CONFIG_HOME", home)
         .env_remove("NKEEPASS_VAULT")
@@ -92,7 +92,7 @@ fn context_alias_persistence_and_precedence() {
     let show: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(show["source"], "argument");
     assert!(show["alias"].is_null());
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args(["context", "show"])
         .env("XDG_CONFIG_HOME", tmp.path())
         .env("NKEEPASS_VAULT", vault)
@@ -182,7 +182,7 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     let tmp = tempfile::tempdir().unwrap();
-    let relative = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let relative = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(tmp.path())
         .args(["alias", "list"])
         .env("XDG_CONFIG_HOME", "relative-config")
@@ -215,7 +215,7 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
 
     let env_home = tmp.path().join("env-home");
     let invalid_env = OsString::from_vec(vec![0xff]);
-    let environment = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let environment = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args(["context", "show"])
         .env("XDG_CONFIG_HOME", &env_home)
         .env("NKEEPASS_VAULT", invalid_env)
@@ -226,7 +226,7 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
     assert!(!String::from_utf8_lossy(&environment.stderr).contains("panicked"));
 
     let invalid_arg = OsString::from_vec(vec![0xfe]);
-    let argument = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let argument = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .arg(invalid_arg)
         .env("XDG_CONFIG_HOME", env_home)
         .output()
@@ -237,7 +237,7 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
 
 #[test]
 fn metadata_listing_never_prints_password_or_values() {
-    use nkeepass_cli::{CliFixture, MASTER_PASSWORD, assert_no_secrets};
+    use nkp_cli::{CliFixture, MASTER_PASSWORD, assert_no_secrets};
 
     // A vault built in process, with a real entry carrying a real password, a
     // username, notes, a protected custom field, an OTP seed and an attachment.
@@ -258,7 +258,7 @@ fn metadata_listing_never_prints_password_or_values() {
     // non-empty. Without it the rest is decoration.
     let fixture = CliFixture::new(false);
     let vault = fixture.vault();
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args([
             "--vault",
             vault.to_str().unwrap(),
@@ -357,12 +357,12 @@ fn child_reporting_script_value() -> (&'static str, Vec<String>) {
 
 #[test]
 fn explicit_password_is_a_documented_scripting_compatibility_mode() {
-    use nkeepass_cli::{
+    use nkp_cli::{
         CliFixture, ENTRY_TITLE, MASTER_PASSWORD, assert_no_secrets, command, run_with_stdin,
     };
 
     let fixture = CliFixture::new(false);
-    let binary = Path::new(env!("CARGO_BIN_EXE_nkeepass"));
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
     let vault = fixture.vault().to_str().unwrap();
     let run = |args: &[&str]| {
         let mut child = command(binary, &fixture);
@@ -440,22 +440,17 @@ fn explicit_password_is_a_documented_scripting_compatibility_mode() {
     ] {
         let failure = run(&args);
         assert!(!failure.status.success());
-        assert_eq!(
-            failure.stderr,
-            format!("nkeepass: {diagnostic}\n").as_bytes()
-        );
+        assert_eq!(failure.stderr, format!("nkp: {diagnostic}\n").as_bytes());
         assert_no_secrets(&failure);
     }
 }
 
 #[test]
 fn attachment_metadata_and_explicit_export_use_service_alias_selection() {
-    use nkeepass_cli::{
-        ATTACHMENT, CliFixture, ENTRY_TITLE, MASTER_PASSWORD, command, run_with_stdin,
-    };
+    use nkp_cli::{ATTACHMENT, CliFixture, ENTRY_TITLE, MASTER_PASSWORD, command, run_with_stdin};
 
     let fixture = CliFixture::new(false);
-    let binary = Path::new(env!("CARGO_BIN_EXE_nkeepass"));
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
     let vault = fixture.vault().to_str().unwrap();
     let run = |args: &[&str]| {
         let mut child = command(binary, &fixture);
@@ -524,7 +519,7 @@ fn completion_scripts_are_static_for_every_advertised_shell() {
     let marker = "completion-environment-SENTINEL-39ac71";
     let mut scripts = std::collections::BTreeMap::new();
     for shell in ["bash", "sh", "zsh", "fish", "powershell", "pwsh", "nushell"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+        let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
             .current_dir(tmp.path())
             .env_clear()
             .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "COMPLETION_PASSWORD")
@@ -594,7 +589,7 @@ fn completion_scripts_are_static_for_every_advertised_shell() {
 #[test]
 fn completion_rejects_unsupported_shells_without_echoing_input() {
     let marker = "unsupported-shell-SENTINEL-827d1a";
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .env_clear()
         .args(["completion", "csh", marker])
         .output()
@@ -603,7 +598,7 @@ fn completion_rejects_unsupported_shells_without_echoing_input() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"nkeepass: unsupported completion shell\n".as_slice()
+        b"nkp: unsupported completion shell\n".as_slice()
     );
 }
 
@@ -613,10 +608,10 @@ fn completion_rejects_unsupported_shells_without_echoing_input() {
     reason = "one end-to-end matrix covers every completion disclosure boundary"
 )]
 fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
-    use nkeepass_cli::{CliFixture, assert_no_secrets, command};
+    use nkp_cli::{CliFixture, assert_no_secrets, command};
 
     let fixture = CliFixture::new(false);
-    let binary = Path::new(env!("CARGO_BIN_EXE_nkeepass"));
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
     let vault = fixture.vault().to_str().unwrap();
 
     let locked = command(binary, &fixture)
@@ -700,10 +695,7 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
                 "NKEEPASS_COMPLETE_PASSWORD_ENV",
                 "NKEEPASS_COMPLETE_TEST_PASSWORD",
             )
-            .env(
-                "NKEEPASS_COMPLETE_TEST_PASSWORD",
-                nkeepass_cli::MASTER_PASSWORD,
-            )
+            .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
             .args(["__complete", kind, prefix])
             .stdin(Stdio::null())
             .output()
@@ -731,10 +723,7 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
             "NKEEPASS_COMPLETE_PASSWORD_ENV",
             "NKEEPASS_COMPLETE_TEST_PASSWORD",
         )
-        .env(
-            "NKEEPASS_COMPLETE_TEST_PASSWORD",
-            nkeepass_cli::MASTER_PASSWORD,
-        )
+        .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
         .args(["--vault", vault, "__complete", "keys", "m"])
         .stdin(Stdio::null())
         .output()
@@ -750,10 +739,7 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
             "NKEEPASS_COMPLETE_PASSWORD_ENV",
             "NKEEPASS_COMPLETE_TEST_PASSWORD",
         )
-        .env(
-            "NKEEPASS_COMPLETE_TEST_PASSWORD",
-            nkeepass_cli::WRONG_PASSWORD,
-        )
+        .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::WRONG_PASSWORD)
         .args(["__complete", "entries", "fixture"])
         .stdin(Stdio::null())
         .output()
@@ -764,20 +750,13 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
 
     let rejected_secret = command(binary, &fixture)
         .env_clear()
-        .args([
-            "__complete",
-            "entries",
-            "fixture",
-            nkeepass_cli::MASTER_PASSWORD,
-        ])
+        .args(["__complete", "entries", "fixture", nkp_cli::MASTER_PASSWORD])
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert!(!rejected_secret.status.success());
     assert!(rejected_secret.stdout.is_empty());
-    assert!(
-        !String::from_utf8_lossy(&rejected_secret.stderr).contains(nkeepass_cli::MASTER_PASSWORD)
-    );
+    assert!(!String::from_utf8_lossy(&rejected_secret.stderr).contains(nkp_cli::MASTER_PASSWORD));
 }
 
 #[test]
@@ -821,7 +800,7 @@ fn completion_protocol_omits_ambiguous_entry_and_group_paths() {
         ("entries", "Root/Foo/"),
         ("groups", "Root/Foo"),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+        let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
             .env("NKEEPASS_VAULT", &vault)
             .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "COMPLETION_TEST_PASSWORD")
@@ -841,10 +820,10 @@ fn completion_protocol_omits_ambiguous_entry_and_group_paths() {
 
 #[test]
 fn public_and_diagnostic_surfaces_do_not_leak_fixture_markers() {
-    use nkeepass_cli::{CliFixture, Scenario, assert_public_surfaces, command, run_with_stdin};
+    use nkp_cli::{CliFixture, Scenario, assert_public_surfaces, command, run_with_stdin};
 
     let fixture = CliFixture::new(false);
-    let binary = Path::new(env!("CARGO_BIN_EXE_nkeepass"));
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
     assert_public_surfaces(&fixture, |scenario, fixture| {
         let vault = fixture.vault().to_str().unwrap();
         let corrupt = fixture.corrupt_vault();
@@ -861,7 +840,7 @@ fn public_and_diagnostic_surfaces_do_not_leak_fixture_markers() {
                     "alias",
                     "set",
                     "mail",
-                    nkeepass_cli::ENTRY_TITLE,
+                    nkp_cli::ENTRY_TITLE,
                     "--field",
                     "UserName",
                 ],
@@ -884,7 +863,7 @@ fn public_and_diagnostic_surfaces_do_not_leak_fixture_markers() {
                     vault,
                     "get",
                     "--key",
-                    nkeepass_cli::ENTRY_TITLE,
+                    nkp_cli::ENTRY_TITLE,
                     "--password-stdin",
                 ],
                 b"cli-wrong-SENTINEL-c29a81\n",
@@ -958,7 +937,7 @@ fn shortcuts_fields_attachments_and_exec() {
     );
     let vault = vault.to_str().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+        Command::new(env!("CARGO_BIN_EXE_nkp"))
             .args(["--vault", vault])
             .args(args)
             .env("XDG_CONFIG_HOME", tmp.path())
@@ -1287,7 +1266,7 @@ fn shortcuts_fields_attachments_and_exec() {
         );
         assert!(out.stdout.is_empty());
     }
-    let mut isolated_stdin = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let mut isolated_stdin = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args([
             "--vault",
             vault,
@@ -1440,7 +1419,7 @@ fn hostile_metadata_vault(dir: &Path) -> PathBuf {
 /// per-command option, and in front of the subcommand it is an "unknown
 /// command" error rather than a global flag.
 fn run_against(vault: &Path, config: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    Command::new(env!("CARGO_BIN_EXE_nkp"))
         .env("XDG_CONFIG_HOME", config)
         .env("NKEEPASS_VAULT", vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -1740,7 +1719,7 @@ fn root_prefixed_selectors_survive_unaddressable_siblings() {
     );
     assert_eq!(selected.stdout, b"actual-child-entry");
 
-    let candidates = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let candidates = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .env("XDG_CONFIG_HOME", &config)
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -1751,7 +1730,7 @@ fn root_prefixed_selectors_survive_unaddressable_siblings() {
         .unwrap();
     assert!(candidates.status.success());
     assert_eq!(candidates.stdout, b"Root/Valid/bad/entry\n");
-    let hidden = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let hidden = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .env("XDG_CONFIG_HOME", &config)
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -2117,7 +2096,7 @@ fn search_keeps_matching_rules_duplicates_order_and_thousand_result_cap() {
             &["secrets", "search", query],
         );
         assert_eq!(invalid.status.code(), Some(2));
-        assert_eq!(invalid.stderr, b"nkeepass: invalid search query\n");
+        assert_eq!(invalid.stderr, b"nkp: invalid search query\n");
         assert!(invalid.stdout.is_empty());
     }
     let max_query = "q".repeat(4_096);
@@ -2412,7 +2391,7 @@ fn show_and_field_ls_resolve_through_service_without_changing_json_schemas() {
     assert!(!String::from_utf8_lossy(&fields.stdout).contains("never-output"));
 
     let run_alias = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+        Command::new(env!("CARGO_BIN_EXE_nkp"))
             .env("XDG_CONFIG_HOME", &config)
             .args(args)
             .stdin(Stdio::null())
@@ -2539,7 +2518,7 @@ fn ls_glob_withholds_only_matching_hostile_rows() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -2565,7 +2544,7 @@ fn ls_glob_withholds_only_matching_hostile_rows() {
     );
     assert_eq!(
         output.stderr,
-        b"nkeepass: 1 record(s) withheld: vault metadata contains terminal-control bytes\n"
+        b"nkp: 1 record(s) withheld: vault metadata contains terminal-control bytes\n"
     );
 
     let no_match = run_against(
@@ -2646,7 +2625,7 @@ fn ls_rejects_globs_over_the_byte_limit_before_unlocking_the_vault() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         output.stderr,
-        b"nkeepass: glob pattern is 1025 bytes; the limit is 1024\n"
+        b"nkp: glob pattern is 1025 bytes; the limit is 1024\n"
     );
     assert!(output.stdout.is_empty());
 }
@@ -2677,7 +2656,7 @@ fn ls_propagates_a_closed_stdout_pipe() {
     )
     .unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -2689,7 +2668,7 @@ fn ls_propagates_a_closed_stdout_pipe() {
     drop(child.stdout.take());
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(output.stderr, b"nkeepass: cannot write output\n");
+    assert_eq!(output.stderr, b"nkp: cannot write output\n");
 }
 
 /// Every root command and shortcut answers `--help` with its own route.
@@ -2951,28 +2930,22 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
     }
 
     let leaves: &[(&[&str], &str)] = &[
-        (&["context", "show"], "Usage: nkeepass context show"),
-        (
-            &["context", "set"],
-            "Usage: nkeepass context set ALIAS PATH",
-        ),
-        (&["context", "use"], "Usage: nkeepass context use ALIAS"),
-        (&["context", "rm"], "Usage: nkeepass context rm ALIAS"),
-        (&["context", "ls"], "Usage: nkeepass context ls"),
-        (&["alias", "ls"], "Usage: nkeepass alias ls"),
+        (&["context", "show"], "Usage: nkp context show"),
+        (&["context", "set"], "Usage: nkp context set ALIAS PATH"),
+        (&["context", "use"], "Usage: nkp context use ALIAS"),
+        (&["context", "rm"], "Usage: nkp context rm ALIAS"),
+        (&["context", "ls"], "Usage: nkp context ls"),
+        (&["alias", "ls"], "Usage: nkp alias ls"),
         (&["alias", "set"], "--kind vault|entry"),
-        (&["alias", "rm"], "Usage: nkeepass alias rm NAME"),
-        (&["alias", "resolve"], "Usage: nkeepass alias resolve NAME"),
+        (&["alias", "rm"], "Usage: nkp alias rm NAME"),
+        (&["alias", "resolve"], "Usage: nkp alias resolve NAME"),
         (&["secrets", "ls"], "--password-env NAME"),
         (
             &["secrets", "search"],
-            "Usage: nkeepass secrets search [--] QUERY",
+            "Usage: nkp secrets search [--] QUERY",
         ),
         (&["secrets", "env"], "--name NAME"),
-        (
-            &["secrets", "show"],
-            "Usage: nkeepass secrets show --key PATH",
-        ),
+        (&["secrets", "show"], "Usage: nkp secrets show --key PATH"),
         (&["secrets", "get"], "--format FORMAT"),
         (&["secrets", "getx"], "--key PATH"),
         (&["secrets", "set"], "--stdin"),
@@ -2991,14 +2964,14 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
         (&["files", "add"], "--field FIELD"),
         (&["files", "get"], "--output PATH"),
         (&["files", "rm"], "--yes"),
-        (&["field", "ls"], "Usage: nkeepass field ls --key PATH"),
+        (&["field", "ls"], "Usage: nkp field ls --key PATH"),
         (&["field", "get"], "--field FIELD"),
         (&["field", "set"], "--stdin"),
         (&["field", "rm"], "--yes"),
         (&["config", "ls"], "--json"),
-        (&["config", "get"], "Usage: nkeepass config get KEY"),
-        (&["config", "set"], "Usage: nkeepass config set KEY VALUE"),
-        (&["config", "rm"], "Usage: nkeepass config rm KEY"),
+        (&["config", "get"], "Usage: nkp config get KEY"),
+        (&["config", "set"], "Usage: nkp config set KEY VALUE"),
+        (&["config", "rm"], "Usage: nkp config rm KEY"),
     ];
     for (path, expected) in leaves {
         for flag in ["--help", "-h"] {
@@ -3118,11 +3091,9 @@ fn help_shows_only_options_allowed_by_the_selected_command() {
     let exec_help = String::from_utf8(exec.stdout).unwrap();
     let exec_options = help_section(&exec_help, "OPTIONS").join("\n");
     let normalized_exec_help = exec_help.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized_exec_help.contains(
-        &expected_help(
-            "Usage: nkeepass exec [--key PATH [--field FIELD] --env NAME]... [OPTIONS] -- COMMAND [ARG ...]"
-        )
-    ));
+    assert!(normalized_exec_help.contains(&expected_help(
+        "Usage: nkp exec [--key PATH [--field FIELD] --env NAME]... [OPTIONS] -- COMMAND [ARG ...]"
+    )));
     for option in ["--key PATH", "--field FIELD", "--env NAME"] {
         assert!(
             exec_options.contains(option),
@@ -3162,28 +3133,28 @@ fn rendered_command_help_aligns_wrapped_option_descriptions() {
 fn accepted_root_and_nested_aliases_route_to_their_own_help() {
     let tmp = tempfile::tempdir().unwrap();
     for (args, usage) in [
-        (&["x", "--help"][..], "Usage: nkeepass x [--key PATH"),
+        (&["x", "--help"][..], "Usage: nkp x [--key PATH"),
         (
             &["attachments", "ls", "--help"][..],
-            "Usage: nkeepass attachments ls --key PATH",
+            "Usage: nkp attachments ls --key PATH",
         ),
         (
             &["custom-field", "get", "--help"][..],
-            "Usage: nkeepass custom-field get --key PATH --field FIELD [OPTIONS]",
+            "Usage: nkp custom-field get --key PATH --field FIELD [OPTIONS]",
         ),
         (
             &["secrets", "list", "--help"][..],
-            "Usage: nkeepass secrets list [--] [GLOB]",
+            "Usage: nkp secrets list [--] [GLOB]",
         ),
         (
             &["secrets", "environment", "--help"][..],
-            "Usage: nkeepass secrets environment [--key PATH",
+            "Usage: nkp secrets environment [--key PATH",
         ),
         (
             &["config", "show", "--help"][..],
-            "Usage: nkeepass config show KEY",
+            "Usage: nkp config show KEY",
         ),
-        (&["get", "--help"][..], "Usage: nkeepass get [OPTIONS]"),
+        (&["get", "--help"][..], "Usage: nkp get [OPTIONS]"),
     ] {
         for flag in ["--help", "-h"] {
             let mut with_flag = args.to_vec();
@@ -3208,13 +3179,13 @@ fn help_uses_the_argv0_basename_including_executable_extension() {
 
     let tmp = tempfile::tempdir().unwrap();
     for (argv0, expected) in [
-        (OsString::from("/opt/nkeepass"), "nkeepass"),
+        (OsString::from("/opt/nkp"), "nkp"),
         (OsString::from("nkp"), "nkp"),
         (OsString::from("/opt/tools/nkp.exe"), "nkp.exe"),
         (OsString::from("/opt/tools/工具"), "工具"),
         (OsString::from_vec(b"/opt/tools/nkp-\xff".to_vec()), "nkp-�"),
     ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_nkeepass"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
         command
             .arg0(argv0)
             .arg("secrets")
@@ -3276,7 +3247,7 @@ fn short_help_flag_and_group_help_work() {
 /// A child's own `--help` belongs to the child.
 ///
 /// `exec` runs a program, and that program's arguments live after a bare `--`.
-/// Scanning for `--help` past that separator would make `nkeepass exec -- myapp
+/// Scanning for `--help` past that separator would make `nkp exec -- myapp
 /// --help` print this CLI's reference instead of running `myapp --help`, which
 /// would be a command unable to launch anything that takes a flag.
 #[test]
@@ -3297,7 +3268,7 @@ fn exec_passes_help_through_to_the_child_rather_than_answering_it() {
         std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args([
             "exec",
             "--key",
@@ -3316,7 +3287,7 @@ fn exec_passes_help_through_to_the_child_rather_than_answering_it() {
     // Whatever this CLI decides about the missing key, the child's own output
     // must not be replaced by this CLI's help text.
     assert!(
-        !stdout.contains("nkeepass - headless KeePass CLI"),
+        !stdout.contains("nkp - headless KeePass CLI"),
         "exec answered --help itself instead of passing it on:\n{stdout}"
     );
 }
@@ -3346,7 +3317,7 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
     // work; stdin is the one a caller reaches for when the password must not sit
     // in the process environment, and it is a path worth having a test on.
     let run = |args: &[&str]| -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nkeepass"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
         child
             .args(args)
             .env("HOME", tmp.path())
@@ -3359,14 +3330,14 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = child.spawn().expect("nkeepass should start");
+        let mut child = child.spawn().expect("nkp should start");
         child
             .stdin
             .take()
             .expect("stdin was piped")
             .write_all(b"pw-for-this-test\n")
             .expect("the password should reach the child");
-        child.wait_with_output().expect("nkeepass should finish")
+        child.wait_with_output().expect("nkp should finish")
     };
 
     // A vault with no groups. Built through the CLI rather than from a checked-in
@@ -3418,7 +3389,7 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
     // A well-formed path that simply is not there keeps its own message, because
     // that is a different answer to a different question.
     let absent = ask("nothing-here");
-    assert_eq!(absent, "nkeepass: entry not found");
+    assert_eq!(absent, "nkp: entry not found");
 }
 
 /// A command with a home directory, so it gets as far as the vault.
@@ -3432,8 +3403,8 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
 /// cases in this file that *expect* a refusal were passing for the wrong reason,
 /// before this helper existed. A test that cannot distinguish "the key file was
 /// rejected" from "the process could not start" is not testing the key file.
-fn key_file_command(fixture: &nkeepass_cli::CliFixture) -> std::process::Command {
-    let mut child = nkeepass_cli::command(Path::new(env!("CARGO_BIN_EXE_nkeepass")), fixture);
+fn key_file_command(fixture: &nkp_cli::CliFixture) -> std::process::Command {
+    let mut child = nkp_cli::command(Path::new(env!("CARGO_BIN_EXE_nkp")), fixture);
     child
         .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
         .env("XDG_DATA_HOME", fixture.directory().join("data"))
@@ -3489,7 +3460,7 @@ fn child_counting_nkeepass_variables() -> (&'static str, Vec<String>) {
 /// file, so the composite credential is exercised rather than mocked.
 #[test]
 fn a_key_file_alone_opens_the_vault_and_skips_the_password_prompt() {
-    use nkeepass_cli::{CliFixture, ENTRY_TITLE, MASTER_PASSWORD, run_with_stdin};
+    use nkp_cli::{CliFixture, ENTRY_TITLE, MASTER_PASSWORD, run_with_stdin};
 
     let fixture = CliFixture::key_file_only();
     let mut child = key_file_command(&fixture);
@@ -3522,7 +3493,7 @@ fn a_key_file_alone_opens_the_vault_and_skips_the_password_prompt() {
 
 #[test]
 fn a_key_file_and_a_password_together_open_the_same_vault() {
-    use nkeepass_cli::{CliFixture, ENTRY_TITLE, MASTER_PASSWORD};
+    use nkp_cli::{CliFixture, ENTRY_TITLE, MASTER_PASSWORD};
 
     let fixture = CliFixture::new(true);
     let output = key_file_command(&fixture)
@@ -3555,7 +3526,7 @@ fn a_key_file_and_a_password_together_open_the_same_vault() {
 /// authentication into a disclosure in whatever log captured it.
 #[test]
 fn a_wrong_key_file_fails_with_a_static_diagnostic_and_no_path() {
-    use nkeepass_cli::{CliFixture, assert_no_secrets};
+    use nkp_cli::{CliFixture, assert_no_secrets};
 
     let fixture = CliFixture::new(true);
     let wrong = fixture.directory().join("not-the-key");
@@ -3590,7 +3561,7 @@ fn a_wrong_key_file_fails_with_a_static_diagnostic_and_no_path() {
 
 #[test]
 fn a_missing_key_file_fails_with_a_static_diagnostic() {
-    use nkeepass_cli::CliFixture;
+    use nkp_cli::CliFixture;
 
     let fixture = CliFixture::new(true);
     let absent = fixture.directory().join("absent.key");
@@ -3620,7 +3591,7 @@ fn a_missing_key_file_fails_with_a_static_diagnostic() {
 
 #[test]
 fn a_key_file_that_is_a_directory_is_refused() {
-    use nkeepass_cli::CliFixture;
+    use nkp_cli::CliFixture;
 
     let fixture = CliFixture::new(true);
     let output = key_file_command(&fixture)
@@ -3651,7 +3622,7 @@ fn a_key_file_that_is_a_directory_is_refused() {
 /// travels in argv rather than in the environment.
 #[test]
 fn exec_with_a_key_file_passes_no_nkeepass_variable_to_the_child() {
-    use nkeepass_cli::{CliFixture, ENTRY_TITLE, MASTER_PASSWORD, assert_no_secrets};
+    use nkp_cli::{CliFixture, ENTRY_TITLE, MASTER_PASSWORD, assert_no_secrets};
 
     let fixture = CliFixture::new(true);
     let (child, child_args) = child_counting_nkeepass_variables();

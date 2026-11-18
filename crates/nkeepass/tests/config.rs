@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-//! Integration coverage for the `nkeepass config` command group.
+//! Integration coverage for the `nkp config` command group.
 //!
 //! Two claims are under test, and the second is the one that matters.
 //!
@@ -181,7 +181,7 @@ impl ConfigHome {
 /// `HOME` is removed rather than pointed somewhere plausible: if any command in
 /// this group consulted it, the test would touch a real file instead of failing.
 fn run(home: &ConfigHome, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkeepass"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
     command
         .args(args)
         .env("XDG_CONFIG_HOME", home.home())
@@ -199,7 +199,7 @@ fn assert_refused(output: &Output, diagnostic: &str) {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        format!("nkeepass: {diagnostic}\n").as_bytes(),
+        format!("nkp: {diagnostic}\n").as_bytes(),
         "unexpected diagnostic"
     );
 }
@@ -339,7 +339,7 @@ fn get_prints_the_bare_value_so_it_can_be_substituted() {
             .success()
     );
     // One line holding the path and nothing else: a JSON document here would
-    // make `$(nkeepass config get current)` unusable without a parser.
+    // make `$(nkp config get current)` unusable without a parser.
     assert_eq!(
         stdout(&run(&home, &["config", "get", "current"])),
         format!("{}\n", vault())
@@ -468,7 +468,7 @@ fn the_alias_map_is_left_to_the_alias_commands() {
     ] {
         assert_refused(
             &run(&home, &args),
-            "aliases is a map; use nkeepass alias set and nkeepass alias rm",
+            "aliases is a map; use nkp alias set and nkp alias rm",
         );
     }
     assert_eq!(home.bytes(), before, "the alias map must be untouched");
@@ -603,7 +603,7 @@ fn the_group_is_advertised_and_its_subcommand_help_is_reachable() {
     assert!(!group.contains("aliases, current, default_vault"));
 
     let listing = stdout(&run(&home, &["config", "ls", "--help"]));
-    let binary = Path::new(env!("CARGO_BIN_EXE_nkeepass"));
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
     let program = binary.file_name().unwrap().to_string_lossy();
     assert!(listing.contains(&format!("{program} config ls [GLOB] [--json]")));
     assert!(listing.contains("--json"));

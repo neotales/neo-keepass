@@ -1,4 +1,5 @@
-//! Bounded, explicit-disclosure interchange and batch-edit formats for nkeepass.
+//! Bounded, explicit-disclosure interchange and batch-edit formats for the nkp
+//! CLI.
 
 #![allow(
     clippy::assigning_clones,

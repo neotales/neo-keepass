@@ -26,7 +26,7 @@ const HOSTILE_SECRET: &str = "hostile-title-secret-disposable-31c4";
 const QUOTED_SECRET: &str = "single' double\" dollar $ backtick` backslash \\ percent % vso]";
 
 /// The delimiter the github-actions format writes, and the one it refuses.
-const GITHUB_EOF: &str = "NKEEPASS_EOF";
+const GITHUB_EOF: &str = "NKP_EOF";
 
 /// Every format that needs a `--name`, whether or not it also needs an escape.
 const NAMED_FORMATS: [&str; 6] = [
@@ -116,7 +116,7 @@ impl Fixture {
 }
 
 fn run(fixture: &Fixture, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
@@ -285,7 +285,7 @@ fn formatted_output_rejects_terminal_controls_before_writing() {
         assert!(output.stdout.is_empty());
         assert_eq!(
             output.stderr,
-            b"nkeepass: formatted output cannot contain terminal-control bytes\n".as_slice(),
+            b"nkp: formatted output cannot contain terminal-control bytes\n".as_slice(),
             "{format} wrote a terminal-control byte"
         );
         assert_markers_absent(&output);
@@ -328,7 +328,7 @@ fn formatted_output_rejects_terminal_controls_before_writing() {
         assert!(env.stdout.is_empty());
         assert_eq!(
             env.stderr,
-            b"nkeepass: formatted output cannot contain terminal-control bytes\n".as_slice(),
+            b"nkp: formatted output cannot contain terminal-control bytes\n".as_slice(),
             "{format} wrote a terminal-control byte from a binding"
         );
         assert_markers_absent(&env);
@@ -363,9 +363,7 @@ fn ci_shell_formats_render_known_values_exactly() {
             "dotenv" => "LOGIN_TOKEN=\"token-output-disposable-d490\"\n",
             "shell" => "export LOGIN_TOKEN='token-output-disposable-d490';\n",
             "pwsh" | "powershell" => "$env:LOGIN_TOKEN = 'token-output-disposable-d490'\n",
-            "github-actions" => {
-                "LOGIN_TOKEN<<NKEEPASS_EOF\ntoken-output-disposable-d490\nNKEEPASS_EOF\n"
-            }
+            "github-actions" => "LOGIN_TOKEN<<NKP_EOF\ntoken-output-disposable-d490\nNKP_EOF\n",
             "azure-devops" => {
                 "##vso[task.setvariable variable=LOGIN_TOKEN]token-output-disposable-d490\n"
             }
@@ -420,7 +418,7 @@ fn ci_shell_formats_round_trip_quotes_dollar_backtick_and_backslash() {
         // single quote is doubled rather than backslash-escaped.
         "$env:LOGIN_QUOTED = 'single'' double\" dollar $ backtick` backslash \\ percent % vso]'\n",
         // Nothing is quoted, so the value is the block body verbatim.
-        "LOGIN_QUOTED<<NKEEPASS_EOF\nsingle' double\" dollar $ backtick` backslash \\ percent % vso]\nNKEEPASS_EOF\n",
+        "LOGIN_QUOTED<<NKP_EOF\nsingle' double\" dollar $ backtick` backslash \\ percent % vso]\nNKP_EOF\n",
         // The value follows the property list untouched.
         "##vso[task.setvariable variable=LOGIN_QUOTED]single' double\" dollar $ backtick` backslash \\ percent % vso]\n",
     ];
@@ -502,7 +500,7 @@ fn line_feeds_are_data_except_where_the_consumer_cannot_carry_one() {
     assert!(azure.stdout.is_empty());
     assert_eq!(
         azure.stderr,
-        b"nkeepass: azure-devops output cannot contain a line feed\n".as_slice()
+        b"nkp: azure-devops output cannot contain a line feed\n".as_slice()
     );
     assert_markers_absent(&azure);
 }
@@ -531,7 +529,7 @@ fn a_heredoc_delimiter_in_the_value_is_refused() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"nkeepass: github-actions output cannot contain the heredoc delimiter\n".as_slice()
+        b"nkp: github-actions output cannot contain the heredoc delimiter\n".as_slice()
     );
     assert_markers_absent(&output);
 
@@ -554,7 +552,7 @@ fn a_heredoc_delimiter_in_the_value_is_refused() {
         ],
     );
     let pwsh = String::from_utf8(success(&pwsh).to_vec()).unwrap();
-    assert_eq!(pwsh, "$env:LOGIN_HEREDOC = 'before\nNKEEPASS_EOF\nafter'\n");
+    assert_eq!(pwsh, "$env:LOGIN_HEREDOC = 'before\nNKP_EOF\nafter'\n");
 
     let azure = run(
         &fixture,
@@ -575,7 +573,7 @@ fn a_heredoc_delimiter_in_the_value_is_refused() {
     assert!(!azure.status.success());
     assert_eq!(
         azure.stderr,
-        b"nkeepass: azure-devops output cannot contain a line feed\n".as_slice()
+        b"nkp: azure-devops output cannot contain a line feed\n".as_slice()
     );
     assert_markers_absent(&azure);
 }
@@ -597,7 +595,7 @@ fn named_formats_require_a_caller_supplied_identifier() {
         assert!(unnamed.stdout.is_empty());
         assert_eq!(
             unnamed.stderr,
-            b"nkeepass: --name required for formatted output\n".as_slice(),
+            b"nkp: --name required for formatted output\n".as_slice(),
             "{format} gave the wrong diagnostic"
         );
         assert_markers_absent(&unnamed);
@@ -724,7 +722,7 @@ fn is_output_is_the_azure_devops_form_and_nothing_else() {
         assert!(refused.stdout.is_empty());
         assert_eq!(
             refused.stderr,
-            b"nkeepass: --is-output requires the azure-devops format\n".as_slice()
+            b"nkp: --is-output requires the azure-devops format\n".as_slice()
         );
         assert_markers_absent(&refused);
     }
@@ -795,7 +793,7 @@ fn secrets_env_renders_every_binding_in_order() {
     assert!(truncated.stdout.is_empty());
     assert_eq!(
         truncated.stderr,
-        b"nkeepass: azure-devops output cannot contain a line feed\n".as_slice()
+        b"nkp: azure-devops output cannot contain a line feed\n".as_slice()
     );
     assert_markers_absent(&truncated);
 }
@@ -824,7 +822,7 @@ fn secrets_env_renders_the_ci_logging_formats() {
     );
     assert_eq!(
         String::from_utf8(success(&github).to_vec()).unwrap(),
-        "LOGIN_TOKEN<<NKEEPASS_EOF\ntoken-output-disposable-d490\nNKEEPASS_EOF\n"
+        "LOGIN_TOKEN<<NKP_EOF\ntoken-output-disposable-d490\nNKP_EOF\n"
     );
 
     let azure = run(
@@ -1093,7 +1091,7 @@ fn missing_noninteractive_password_and_unrelated_options_fail_with_static_redact
     assert!(!no_password.status.success());
     assert_eq!(
         no_password.stderr,
-        b"nkeepass: password source required for non-interactive input\n".as_slice()
+        b"nkp: password source required for non-interactive input\n".as_slice()
     );
     assert_markers_absent(&no_password);
 
@@ -1112,7 +1110,7 @@ fn missing_noninteractive_password_and_unrelated_options_fail_with_static_redact
     assert!(!irrelevant.status.success());
     assert_eq!(
         irrelevant.stderr,
-        b"nkeepass: invalid operation option\n".as_slice()
+        b"nkp: invalid operation option\n".as_slice()
     );
     assert_markers_absent(&irrelevant);
 }
@@ -1122,7 +1120,7 @@ fn password_file_is_safe_for_automation_output_commands() {
     let fixture = Fixture::new();
     let password_file = fixture.directory.path().join("master.password");
     std::fs::write(&password_file, format!("{PASSWORD}\n")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args([
             "--vault",
             fixture.vault.to_str().unwrap(),
@@ -1145,7 +1143,7 @@ fn password_file_is_safe_for_automation_output_commands() {
     assert_markers_absent(&output);
 
     let snapshot = fixture.directory.path().join("snapshot.json");
-    let exported = Command::new(env!("CARGO_BIN_EXE_nkeepass"))
+    let exported = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .args([
             "--vault",
             fixture.vault.to_str().unwrap(),

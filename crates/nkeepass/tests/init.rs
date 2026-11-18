@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-//! Integration coverage for `nkeepass init`.
+//! Integration coverage for `nkp init`.
 //!
 //! The properties asserted here are security properties, not conveniences: a
 //! create path that silently overwrites, briefly exposes, or prints a secret is
@@ -69,7 +69,7 @@ impl Fixture {
 }
 
 fn command(fixture: &Fixture, password: &str) -> Command {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkeepass"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
     child
         .current_dir(fixture.root.path())
         .env("HOME", fixture.root.path())
@@ -349,7 +349,7 @@ fn staging_failure_keeps_the_target_absent_and_reports_the_init_diagnostic() {
     assert!(!output.status.success());
     assert_eq!(
         stderr(&output).trim(),
-        "nkeepass: cannot create vault temporary file"
+        "nkp: cannot create vault temporary file"
     );
     assert!(!vault.exists());
 }
