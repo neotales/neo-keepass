@@ -2139,8 +2139,12 @@ fn cli_search_continues_past_more_than_ten_thousand_hostile_matches() {
     let tmp = tempfile::tempdir().unwrap();
     let vault = tmp.path().join("search-hostile-continuation.kdbx");
     let mut database = KeePassDatabase::default();
+    // U+009B is 8-bit CSI: as terminal-acting as ESC, but a valid XML 1.0
+    // character, so a conforming writer can still produce this vault. The
+    // writer fails closed on ESC in unprotected text because XML 1.0 forbids
+    // that character outright, even as a character reference.
     for _ in 0..10_005 {
-        database.root.add_entry(Entry::new("needle\u{1b}"));
+        database.root.add_entry(Entry::new("needle\u{9b}"));
     }
     database.root.add_entry(Entry::new("needle-benign"));
     KdbxFile::save(
@@ -2450,7 +2454,9 @@ fn field_ls_ignores_unrelated_unsafe_metadata_but_rejects_unsafe_field_names() {
     let vault = tmp.path().join("field-list-hostile.kdbx");
     let mut database = KeePassDatabase::default();
     let mut entry = Entry::new("target");
-    entry.tags.push("bad\u{1b}tag".into());
+    // Same reasoning as the search continuation fixture: U+009B is the
+    // terminal-hostile, XML-1.0-representable stand-in for ESC.
+    entry.tags.push("bad\u{9b}tag".into());
     entry.fields.push(Field {
         key: "safe-field".into(),
         value: neotales_keepass::ProtectedValue::from_text("not-output"),
@@ -2459,13 +2465,13 @@ fn field_ls_ignores_unrelated_unsafe_metadata_but_rejects_unsafe_field_names() {
     });
     let attachment = database.binary_pool.add(b"bytes".to_vec(), true);
     entry.attachments.push(Attachment {
-        name: "bad\u{1b}attachment".into(),
+        name: "bad\u{9b}attachment".into(),
         reference: attachment,
     });
     database.root.add_entry(entry);
     let mut unsafe_field = Entry::new("unsafe-field");
     unsafe_field.fields.push(Field {
-        key: "bad\u{1b}field".into(),
+        key: "bad\u{9b}field".into(),
         value: neotales_keepass::ProtectedValue::from_text("secret"),
         protected: false,
         protect_in_memory: false,
@@ -2515,9 +2521,12 @@ fn ls_glob_withholds_only_matching_hostile_rows() {
     let tmp = tempfile::tempdir().unwrap();
     let vault = tmp.path().join("list-glob-hostile.kdbx");
     let mut database = KeePassDatabase::default();
-    database.root.add_entry(Entry::new("needle\u{1b}"));
+    // U+009B is 8-bit CSI: as terminal-acting as ESC, but a valid XML 1.0
+    // character, so a conforming writer can still produce this vault. ESC in
+    // unprotected text is XML-1.0-forbidden and the writer now fails closed.
+    database.root.add_entry(Entry::new("needle\u{9b}"));
     database.root.add_entry(Entry::new("needle-visible"));
-    database.root.add_entry(Entry::new("other\u{1b}"));
+    database.root.add_entry(Entry::new("other\u{9b}"));
     KdbxFile::save(
         &database,
         std::fs::File::create(&vault).unwrap(),

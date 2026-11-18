@@ -1197,7 +1197,8 @@ impl KdbxXml {
         export_xml(database, false)
     }
 
-    /// Exports KeePass XML with protected fields written as plaintext.
+    /// Exports plain XML like [`KdbxXml::export`], writing protected field
+    /// values as plaintext instead of rejecting the document.
     ///
     /// This explicit path is intended only for callers that have separately
     /// obtained authorization to create a plaintext export. Protected binary
@@ -1509,7 +1510,13 @@ fn write_database_inner(
         xml.push_str("</DeletedObjects>");
     }
     xml.push_str("</Root></KeePassFile>");
-    if matches!(storage, BinaryStorage::LegacyXml) && !xml.chars().all(xml_1_0_character) {
+    // Both storages embed this buffer as an XML 1.0 document — KDBX 3 as the
+    // decrypted payload, KDBX 4 as the inner payload behind the inner header —
+    // so a character XML 1.0 forbids must fail the save for either one before
+    // any bytes reach the caller. The assembled document is what is validated:
+    // protected values and binaries are already base64 here and pass by
+    // construction, so only unprotected text can trigger this error.
+    if !xml.chars().all(xml_1_0_character) {
         return Err(KdbxError::malformed(
             "XML export contains a character forbidden by XML 1.0",
         ));
@@ -1997,27 +2004,12 @@ fn write_times(xml: &mut String, times: &KeePassTimes) {
     xml.push_str("</Times>");
 }
 fn write_text(xml: &mut String, name: &str, value: &str) {
-    write!(xml, "<{name}>{}</{name}>", escape_text(value)).expect("writing to String cannot fail");
+    write!(xml, "<{name}>{}</{name}>", escape(value)).expect("writing to String cannot fail");
 }
 
-fn escape_text(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        escaped.push_str(match character {
-            '\r' => "&#13;",
-            '&' => "&amp;",
-            '<' => "&lt;",
-            '>' => "&gt;",
-            '"' => "&quot;",
-            '\'' => "&apos;",
-            _ => {
-                escaped.push(character);
-                continue;
-            }
-        });
-    }
-    escaped
-}
+/// Writes `value` with the five predefined XML entities and carriage returns
+/// (`&#13;`, which XML 1.0 input normalization would otherwise fold to a line
+/// feed) escaped.
 fn write_escaped(xml: &mut String, value: &str) {
     for character in value.chars() {
         xml.push_str(match character {
@@ -2034,14 +2026,13 @@ fn write_escaped(xml: &mut String, value: &str) {
         });
     }
 }
+
+/// Returns `value` with exactly the escaping [`write_escaped`] applies, so the
+/// in-place and owned-string writers cannot drift apart.
 fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-        .replace('\r', "&#13;")
+    let mut escaped = String::with_capacity(value.len());
+    write_escaped(&mut escaped, value);
+    escaped
 }
 
 fn xml_1_0_character(character: char) -> bool {

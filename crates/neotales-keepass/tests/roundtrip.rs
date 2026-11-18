@@ -204,6 +204,175 @@ fn authorized_plain_xml_preserves_carriage_returns_and_rejects_xml10_controls() 
     assert!(KdbxXml::export_allow_plaintext(&invalid).is_err());
 }
 
+// Carriage return is the one character XML 1.0 line-end normalization would
+// fold away on reparse, so both writers must escape it as `&#13;` and both
+// readers must hand it back unchanged. The values here are synthetic fixture
+// text and are asserted on, never printed.
+#[test]
+fn kdbx3_and_kdbx4_saves_preserve_carriage_returns_in_unprotected_fields() {
+    let limits = KdbxReadLimits::default();
+    for version in [WriterVersion::Kdbx3, WriterVersion::Kdbx4] {
+        let mut database = KeePassDatabase::default();
+        let mut entry = Entry::new("carriage\rreturn title");
+        entry.notes = "notes\rline\r\nnext".into();
+        entry.fields.push(Field {
+            key: "Unprotected custom".into(),
+            value: ProtectedValue::from_text("custom\rline\r\nnext"),
+            protected: false,
+            protect_in_memory: false,
+        });
+        database.root.entries.push(entry);
+
+        let mut bytes = Vec::new();
+        match version {
+            WriterVersion::Kdbx3 => KdbxFile::save_kdbx3(
+                &database,
+                &mut bytes,
+                &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+                Kdbx3WriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..Kdbx3WriteOptions::default()
+                },
+                &limits,
+            )
+            .unwrap(),
+            WriterVersion::Kdbx4 => KdbxFile::save(
+                &database,
+                &mut bytes,
+                &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+                KdbxWriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..KdbxWriteOptions::default()
+                },
+                &limits,
+            )
+            .unwrap(),
+        }
+        let loaded = KdbxFile::load_password(bytes.as_slice(), "pw", &limits).unwrap();
+        let loaded_entry = &loaded.root.entries[0];
+        assert_eq!(loaded_entry.title, "carriage\rreturn title");
+        assert_eq!(loaded_entry.notes, "notes\rline\r\nnext");
+        assert_eq!(
+            loaded_entry
+                .field("Unprotected custom")
+                .unwrap()
+                .value
+                .reveal_text()
+                .unwrap()
+                .as_str(),
+            "custom\rline\r\nnext"
+        );
+    }
+}
+
+// XML 1.0 forbids a NUL outright, so a save carrying one in unprotected text
+// must fail closed before any byte reaches the destination — the destination
+// file stays at zero length rather than ending up partially written. The same
+// character inside a protected value is base64 on the wire and must still save.
+#[test]
+fn forbidden_xml10_text_fails_saves_before_output_while_protected_values_still_round_trip() {
+    let limits = KdbxReadLimits::default();
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("forbidden text");
+    entry.fields.push(Field {
+        key: "Unprotected custom".into(),
+        value: ProtectedValue::from_text("synthetic\0value"),
+        protected: false,
+        protect_in_memory: false,
+    });
+    database.root.entries.push(entry);
+
+    for version in [WriterVersion::Kdbx3, WriterVersion::Kdbx4] {
+        assert!(
+            write_database(&database, version, &mut Vec::new(), &limits).is_err(),
+            "{version:?} must reject forbidden text in unprotected data"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.kdbx");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let result = write_database(&database, version, &file, &limits);
+        assert!(result.is_err(), "{version:?} must fail closed");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "{version:?} must not write a partial file"
+        );
+    }
+
+    let mut protected = KeePassDatabase::default();
+    let mut entry = Entry::new("protected forbidden bytes");
+    entry.set_field(Field {
+        key: "Password".into(),
+        value: ProtectedValue::from_text("synthetic\0protected"),
+        protected: true,
+        protect_in_memory: true,
+    });
+    protected.root.entries.push(entry);
+    let mut bytes = Vec::new();
+    KdbxFile::save(
+        &protected,
+        &mut bytes,
+        &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &limits,
+    )
+    .unwrap();
+    let loaded = KdbxFile::load_password(bytes.as_slice(), "pw", &limits).unwrap();
+    assert_eq!(
+        loaded.root.entries[0]
+            .field("Password")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "synthetic\0protected"
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WriterVersion {
+    Kdbx3,
+    Kdbx4,
+}
+
+fn write_database(
+    database: &KeePassDatabase,
+    version: WriterVersion,
+    destination: impl std::io::Write,
+    limits: &KdbxReadLimits,
+) -> Result<(), KdbxError> {
+    match version {
+        WriterVersion::Kdbx3 => KdbxFile::save_kdbx3(
+            database,
+            destination,
+            &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+            Kdbx3WriteOptions {
+                aes_kdf_rounds: 8,
+                ..Kdbx3WriteOptions::default()
+            },
+            limits,
+        ),
+        WriterVersion::Kdbx4 => KdbxFile::save(
+            database,
+            destination,
+            &mut neotales_keepass::KdbxCredentials::password("pw").unwrap(),
+            KdbxWriteOptions {
+                aes_kdf_rounds: 8,
+                ..KdbxWriteOptions::default()
+            },
+            limits,
+        ),
+    }
+}
+
 #[test]
 fn writer_supports_outer_cipher_and_compression_matrix() {
     let limits = KdbxReadLimits::default();
