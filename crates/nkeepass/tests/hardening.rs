@@ -76,8 +76,8 @@ fn run_with_input(fixture: &Fixture, args: &[&str], input: &[u8]) -> Output {
         .env_remove("NKEEPASS_VAULT_PATH");
     let mut child = command
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .capture_stdout()
+        .capture_stderr()
         .spawn()
         .unwrap();
     child.take_stdin().unwrap().write_all(input).unwrap();

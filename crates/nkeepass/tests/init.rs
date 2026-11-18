@@ -1096,8 +1096,8 @@ fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
         .env_remove(PASSWORD_ENV);
     let mut child = command
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .capture_stdout()
+        .capture_stderr()
         .spawn()
         .unwrap();
     use std::io::Write as _;

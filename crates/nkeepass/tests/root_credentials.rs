@@ -192,8 +192,8 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
         command.env("NKEEPASS_PASSWORD", "wrong-password");
         let mut child = command
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .capture_stdout()
+            .capture_stderr()
             .spawn()
             .unwrap();
         child
@@ -463,8 +463,8 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
                     "wrong-password"
                 },
             )
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .capture_stdout()
+            .capture_stderr();
         let output = if stdin {
             cli.stdin(Stdio::piped());
             let mut child = cli.spawn().unwrap();

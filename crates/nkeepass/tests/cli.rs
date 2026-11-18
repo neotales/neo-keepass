@@ -303,7 +303,7 @@ fn isolated_child_drains_large_stdout_and_stderr_concurrently() {
         "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2",
     ]);
     let mut command = raw.isolate_application_environment();
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.capture_stdout().capture_stderr();
 
     let output = command.output().unwrap();
     assert!(output.status.success());
@@ -312,31 +312,17 @@ fn isolated_child_drains_large_stdout_and_stderr_concurrently() {
 }
 
 #[test]
-fn isolated_child_bounds_output_when_a_descendant_keeps_a_pipe_open() {
-    let tmp = tempfile::tempdir().unwrap();
-    let pid_file = tmp.path().join("descendant.pid");
+fn isolated_child_rejects_unclaimed_output_pipes() {
     let mut raw = Command::new("sh");
-    raw.args([
-        "-c",
-        "sleep 60 & printf '%s\\n' \"$!\" > \"$PID_FILE\"; exit 0",
-    ]);
-    raw.env("PID_FILE", &pid_file);
+    raw.args(["-c", "exec sleep 60"]);
     let mut command = raw.isolate_application_environment();
-
-    let started = std::time::Instant::now();
-    let error = command.output().unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-    assert!(started.elapsed() < std::time::Duration::from_secs(3));
-
-    let descendant_pid: u32 = std::fs::read_to_string(pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert!(
-        !process_is_alive(descendant_pid),
-        "descendant retaining the child's output pipe survived fixture cleanup"
-    );
+    command.stdout(Stdio::piped());
+    let child = command.spawn().unwrap();
+    let home = child.home().to_path_buf();
+    let pid = child.id();
+    assert!(child.wait_with_output().is_err());
+    assert!(!process_is_alive(pid));
+    assert!(!home.exists());
 }
 
 fn process_is_alive(pid: u32) -> bool {
@@ -1658,7 +1644,7 @@ fn shortcuts_fields_attachments_and_exec() {
     let mut isolated_stdin = isolated_command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .capture_stderr()
         .spawn()
         .unwrap();
     isolated_stdin
@@ -3038,9 +3024,11 @@ fn ls_propagates_a_closed_stdout_pipe() {
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
         .args(["secrets", "ls", "--password-env", "HOSTILE_TEST_PASSWORD"]);
+    // This command is the direct CLI child and does not spawn descendants.
+    // A real closed pipe is essential to exercise its broken-pipe handling.
     let mut child = command
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .capture_stderr()
         .spawn()
         .unwrap();
     drop(child.take_stdout());
@@ -3722,8 +3710,8 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
             .env("XDG_CONFIG_HOME", tmp.path())
             .env("XDG_DATA_HOME", tmp.path().join("data"))
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .capture_stdout()
+            .capture_stderr();
         let mut child = isolated_command.spawn().expect("nkp should start");
         child
             .take_stdin()
