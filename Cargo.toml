@@ -2,6 +2,7 @@
 members = [
     "crates/nkeepass",
     "crates/windows-clipboard",
+    "crates/windows-private-file",
     "crates/neotales-keepass",
     "crates/neotales-age",
     "crates/neotales-x509",

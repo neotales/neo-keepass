@@ -602,8 +602,8 @@ const INIT_OPTIONS: &[HelpOption] = &[
         summary: "Backup errors happen after vault creation; the vault remains installed and the cause is reported.",
     },
     HelpOption {
-        label: "Windows security limitation",
-        summary: "Secure file writes are currently unsupported on Windows, including vaults and backups.",
+        label: "Windows private files",
+        summary: "Vaults and backups use owner-only ACLs on supported filesystems.",
     },
     HelpOption {
         label: "--size N",
@@ -1277,13 +1277,8 @@ fn save_config(config: &Config) -> Result<()> {
     }
     let bytes =
         serde_json::to_vec_pretty(config).map_err(|_| err("cannot encode configuration"))?;
-    let mut temp = tempfile::NamedTempFile::new_in(&dir)
+    let mut temp = nkeepass::private_file::new_private_temp(&dir)
         .map_err(|_| err("cannot create configuration temporary file"))?;
-    nkeepass::private_file::set_owner_only(
-        temp.path(),
-        "cannot create configuration temporary file",
-    )
-    .map_err(err)?;
     temp.write_all(&bytes)
         .map_err(|_| err("cannot write configuration"))?;
     temp.as_file()
@@ -2221,17 +2216,20 @@ fn read_backup_identity(path: &Path) -> Result<AgeIdentity> {
             return Err(err("password backup identity permissions are too broad"));
         }
     }
-    #[cfg(windows)]
-    nkeepass::private_file::set_owner_only(path, "cannot secure password backup identity")
-        .map_err(err)?;
     #[cfg(not(any(unix, windows)))]
     return Err(err(
         "cannot verify password backup identity permissions on this platform",
     ));
 
-    let identity_text = Zeroizing::new(
-        fs::read_to_string(path).map_err(|_| err("cannot read password backup identity"))?,
-    );
+    let mut identity_file =
+        File::open(path).map_err(|_| err("cannot read password backup identity"))?;
+    #[cfg(windows)]
+    windows_private_file::verify(&identity_file)
+        .map_err(|_| err("password backup identity permissions are too broad"))?;
+    let mut identity_text = Zeroizing::new(String::new());
+    identity_file
+        .read_to_string(&mut identity_text)
+        .map_err(|_| err("cannot read password backup identity"))?;
     AgeIdentity::from_private_key(identity_text.trim())
         .map_err(|_| err("password backup identity is invalid"))
 }
@@ -2690,10 +2688,13 @@ impl StagedFile {
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let file =
-            tempfile::NamedTempFile::new_in(&parent).map_err(|_| err(diagnostics.staging))?;
-        nkeepass::private_file::set_owner_only(file.path(), diagnostics.permissions)
-            .map_err(err)?;
+        let file = nkeepass::private_file::new_private_temp(&parent).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                err(diagnostics.staging)
+            } else {
+                err(diagnostics.permissions)
+            }
+        })?;
         Ok(Self {
             file,
             target: target.to_path_buf(),
@@ -8847,32 +8848,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_vault_creation_refuses_without_installing_and_preserves_diagnostic() {
+    fn windows_vault_creation_installs_private_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("unsupported.kdbx");
-        let error = VaultService::default()
+        VaultService::default()
             .create(
                 &path,
                 &mut KdbxCredentials::password("synthetic-test-password").unwrap(),
                 KdbxWriteOptions::default(),
                 None,
             )
-            .unwrap_err();
-        assert_eq!(
-            error,
-            nkeepass::ServiceError::SecureFilePermissionsUnsupported
-        );
-        assert!(
-            error
-                .message()
-                .contains("secure owner-only file writes are unsupported")
-        );
-        assert!(!path.exists(), "refusal must not install the vault");
+            .unwrap();
+        windows_private_file::verify(&File::open(path).unwrap()).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_private_output_refuses_without_installing() {
+    fn windows_private_output_stages_with_private_acl() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("unsupported-output.txt");
         let result = StagedFile::new(
@@ -8885,11 +8877,9 @@ mod tests {
                 durable: "output durability unconfirmed",
             },
         );
-        assert_eq!(
-            result.err().expect("Windows restriction fails closed").0,
-            "owner-only Windows ACL replacement is unsupported"
-        );
-        assert!(!path.exists(), "refusal must not install output");
+        let staged = result.unwrap();
+        windows_private_file::verify(staged.file.as_file()).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

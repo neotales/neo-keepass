@@ -520,8 +520,8 @@ fn init_help_succeeds_and_documents_its_flags() {
             "age-encrypted",
             "Partial failure",
             "remains installed",
-            "Windows security limitation",
-            "vaults and backups",
+            "Windows private files",
+            "owner-only ACLs",
         ] {
             assert!(text.contains(expected), "init {flag} omits {expected}");
         }

@@ -1,23 +1,44 @@
 //! Owner-only permissions for files that may contain secrets.
 //!
-//! Unix permissions are restricted directly. Windows currently fails closed:
-//! the available command-line ACL update cannot prove that explicit ACEs for
-//! other principals were removed. This affects every caller of this module,
-//! including vault/config writes and CLI outputs, not only password backups.
+//! Unix permissions are restricted directly. Windows staging files are
+//! created with a protected user-only DACL, then verified before use.
+//! As on Unix, callers must not use a parent directory controlled by an
+//! adversary who can replace paths during staging or publication.
 
 use std::path::Path;
 
-/// Restricts a still-empty file to its owner before secret bytes are written.
+/// Restricts a still-empty Unix file or a Windows directory to its owner.
 ///
-/// Windows currently returns an unsupported-operation error because the
-/// available ACL update cannot prove that all other-principal ACEs are absent.
+/// On Windows this operation is only supported for directories; private files
+/// must instead be created with [`new_private_temp`].
 ///
 /// # Errors
 ///
-/// Returns the caller's diagnostic when the platform permission update fails,
-/// or a static diagnostic when the Windows account cannot be determined.
+/// Returns the caller's diagnostic when the platform permission update fails.
 pub fn set_owner_only(path: &Path, error: &'static str) -> Result<(), &'static str> {
     set_owner_only_platform(path, error)
+}
+
+/// Creates a private empty staging file in `parent`.
+///
+/// On Windows the DACL is applied at creation and verified before returning.
+/// The containing directory must not be controlled by an adversary.
+///
+/// # Errors
+///
+/// Returns an I/O error if staging or permission verification fails.
+pub fn new_private_temp(parent: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+    #[cfg(windows)]
+    {
+        tempfile::Builder::new().make_in(parent, windows_private_file::create_new)
+    }
+    #[cfg(not(windows))]
+    {
+        let file = tempfile::NamedTempFile::new_in(parent)?;
+        set_owner_only(file.path(), "cannot restrict temporary file")
+            .map_err(std::io::Error::other)?;
+        Ok(file)
+    }
 }
 
 /// Writes sensitive bytes to a new owner-only file without replacing a target.
@@ -42,8 +63,7 @@ fn write_private_noclobber_with(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let mut staging = tempfile::NamedTempFile::new_in(parent).map_err(|_| "cannot stage output")?;
-    set_owner_only(staging.path(), "cannot restrict output permissions")?;
+    let mut staging = new_private_temp(parent).map_err(|_| "cannot stage output")?;
     staging
         .write_all(bytes)
         .map_err(|_| "cannot write output")?;
@@ -80,11 +100,7 @@ fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'sta
 
 #[cfg(windows)]
 fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'static str> {
-    // `icacls /inheritance:r /grant:r` does not remove explicit ACEs for other
-    // principals. Until we can replace and verify the complete DACL natively,
-    // never claim that an existing Windows file or directory is owner-only.
-    let _ = (path, error);
-    Err("owner-only Windows ACL replacement is unsupported")
+    windows_private_file::secure_directory(path).map_err(|_| error)
 }
 
 #[cfg(any(windows, test))]
@@ -712,14 +728,36 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn forged_systemroot_cannot_redirect_windows_tool_paths() {
+    fn private_staging_is_verified_by_handle() {
         let temp = tempfile::tempdir().unwrap();
-        let file = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
-        assert_eq!(
-            super::set_owner_only(file.path(), "probe ACL failed"),
-            Err("owner-only Windows ACL replacement is unsupported"),
-            "Windows DACL changes fail closed until a complete replacement is implemented"
-        );
+        let file = super::new_private_temp(temp.path()).unwrap();
+        windows_private_file::verify(file.as_file()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_staging_rejects_inherited_everyone_access() {
+        let system_directory =
+            known_folders::get_known_folder_path(known_folders::KnownFolder::System)
+                .expect("Windows system directory");
+        let (system_root, _, icacls_path) =
+            super::windows_tool_paths(&system_directory).expect("absolute system directory");
+        let temp = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(icacls_path)
+            .env_clear()
+            .env("SystemRoot", system_root)
+            .arg(temp.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)(F)"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "grant inheritable Everyone ACE");
+        let private = super::new_private_temp(temp.path()).unwrap();
+        windows_private_file::verify(private.as_file()).unwrap();
+        let inherited = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
+        assert!(windows_private_file::verify(inherited.as_file()).is_err());
     }
 
     #[cfg(windows)]
@@ -756,10 +794,7 @@ mod tests {
         let before = inspect_acl();
         assert!(before.status.success());
 
-        assert_eq!(
-            super::set_owner_only(temp.path(), "owner-only restriction unavailable"),
-            Err("owner-only Windows ACL replacement is unsupported")
-        );
+        assert!(windows_private_file::verify(temp.as_file()).is_err());
         let after = inspect_acl();
         assert!(after.status.success());
         assert_eq!(
@@ -770,14 +805,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_secret_output_refuses_without_installing_a_file() {
+    fn windows_secret_output_is_private_and_refuses_overwrite() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("secret.bin");
-        assert_eq!(
-            super::write_private_noclobber(&path, b"secret"),
-            Err("owner-only Windows ACL replacement is unsupported")
-        );
-        assert!(!path.exists(), "secret bytes must not be installed");
+        super::write_private_noclobber(&path, b"secret").unwrap();
+        windows_private_file::verify(&std::fs::File::open(&path).unwrap()).unwrap();
+        assert!(super::write_private_noclobber(&path, b"other").is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"secret");
     }
 
     #[cfg(unix)]

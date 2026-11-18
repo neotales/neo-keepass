@@ -3,11 +3,7 @@ name: ci
 # Test matrix across Windows/Linux/macOS, lint, packaging self-tests, and
 # crate vulnerability audit.
 #
-# Windows note: the integration tests under crates/nkeepass/tests/ are
-# #![cfg(unix)], so the Windows job runs the unit and doc tests only. The
-# product-level limitation stands (owner-only secure writes are unsupported
-# on Windows, README "Current status"); this job does not yet claim Windows
-# coverage beyond that.
+# Windows includes native private-file integration tests in the test matrix.
 on:
   push:
     branches: [main, dev]
@@ -179,10 +175,7 @@ jobs:
           fi
           echo "NKEEPASS_REQUIRE_COMPLETION_BASH=1" >> "$GITHUB_ENV"
           printf 'bash for the completion matrix: %s\n' "$("$resolved" --version | head -1)"
-      # Windows runs unsuppressed. Coverage there is narrow by design: the
-      # integration test files under crates/nkeepass/tests/ are #![cfg(unix)]
-      # (they exercise real file permissions and PTY-style password prompts),
-      # so Windows runs the unit and doc tests only. The first Windows run
+      # Windows runs unsuppressed. The first Windows run
       # failed in the Test step with exit code 101 (logs need authenticated
       # access, so the failing test is not identifiable from public data).
       # The three steps narrow, but do not conclusively distinguish, the

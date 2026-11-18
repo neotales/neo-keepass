@@ -322,14 +322,6 @@ impl ServiceError {
     }
 }
 
-fn permission_failure(cause: &'static str, fallback: ServiceError) -> ServiceError {
-    if cause == "owner-only Windows ACL replacement is unsupported" {
-        ServiceError::SecureFilePermissionsUnsupported
-    } else {
-        fallback
-    }
-}
-
 /// Opaque identifier for one opened service session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionId(u64);
@@ -762,7 +754,7 @@ impl VaultService {
     /// replacing the target.
     /// On Unix, success includes syncing the containing directory after
     /// installation. On non-Unix platforms, the file is synced before the
-    /// atomic no-clobber install, but directory durability cannot be confirmed;
+    /// no-clobber install, but directory durability cannot be confirmed;
     /// success is therefore best-effort with respect to a sudden system crash.
     ///
     /// # Errors
@@ -1887,9 +1879,7 @@ impl VaultService {
         prepare_standard_fields_for_save(&mut live.database);
         let parent = save_parent(path);
         let mut temp =
-            tempfile::NamedTempFile::new_in(parent).map_err(|_| ServiceError::SaveStage)?;
-        crate::private_file::set_owner_only(temp.path(), "cannot set vault permissions")
-            .map_err(|cause| permission_failure(cause, ServiceError::SaveStage))?;
+            crate::private_file::new_private_temp(parent).map_err(|_| ServiceError::SaveStage)?;
         KdbxFile::save(
             &live.database,
             &mut temp,
@@ -1901,8 +1891,8 @@ impl VaultService {
         temp.as_file()
             .sync_all()
             .map_err(|_| ServiceError::SaveSync)?;
-        // NamedTempFile::persist replaces atomically on the same filesystem;
-        // its restrictive staging-file permissions are retained at the target.
+        // NamedTempFile::persist replaces the target on the same filesystem.
+        // The staging file's restrictive permissions are retained at the target.
         temp.persist(path).map_err(|_| ServiceError::SaveReplace)?;
         #[cfg(unix)]
         confirm_durable(parent)?;
@@ -3191,9 +3181,7 @@ fn install_new_vault_with_durability(
     }
 
     let mut staged =
-        tempfile::NamedTempFile::new_in(parent).map_err(|_| ServiceError::CreateStage)?;
-    crate::private_file::set_owner_only(staged.path(), "cannot set vault permissions")
-        .map_err(|cause| permission_failure(cause, ServiceError::CreatePermissions))?;
+        crate::private_file::new_private_temp(parent).map_err(|_| ServiceError::CreateStage)?;
     write(&mut staged)?;
     staged
         .as_file()
@@ -8432,20 +8420,5 @@ mod tests {
         let page = scan_page(&root, &mut state).unwrap();
         assert_eq!(page.hits.len(), MAX_RESULTS);
         assert!(state.has_more());
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_secure_write_tests {
-    use super::{ServiceError, permission_failure};
-
-    #[test]
-    fn unsupported_secure_permissions_survive_save_and_create_error_mapping() {
-        const PLATFORM_ERROR: &str = "owner-only Windows ACL replacement is unsupported";
-        for fallback in [ServiceError::SaveStage, ServiceError::CreatePermissions] {
-            let error = permission_failure(PLATFORM_ERROR, fallback);
-            assert_eq!(error, ServiceError::SecureFilePermissionsUnsupported);
-            assert!(error.message().contains("secure owner-only file writes"));
-        }
     }
 }

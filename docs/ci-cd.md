@@ -37,14 +37,9 @@ Triggered on push to `main`/`dev`, pull requests, and manual dispatch.
 | `packaging-tests` | `ubuntu-24.04` | builds the release binary, runs `packaging/test.sh` (real `dpkg-deb` builder path) |
 | `audit` | `ubuntu-24.04` | `cargo audit` against the pinned `Cargo.lock` |
 
-**Unix gating of the test matrix:** every integration test file under
-`crates/nkeepass/tests/` is `#![cfg(unix)]` — they exercise real file
-permissions and terminal password prompts that this checkout does not emulate
-elsewhere. The Windows job therefore runs the unit and doc tests only and can
-pass while knowing little about Windows behavior. The platform limitation is
-unchanged (owner-only secure writes are unsupported on Windows; README
-"Current status"); widening Windows coverage means writing `cfg(windows)`
-tests, not claiming this job provides it.
+**Platform gating:** most integration tests under `crates/nkeepass/tests/`
+exercise Unix permissions and terminal password prompts. `windows_private.rs`
+instead runs native Windows init, backup, mutation, and ACL checks.
 
 **Workflow run blocks:** `scripts/check-workflows.sh` (run in the `lint` job)
 fails any `run:` block that uses a backslash line continuation outside a
@@ -53,14 +48,10 @@ trailing backslash into an escaped space, which is valid bash with the wrong
 semantics — and `bash -n`-checks every rendered `run:` with `${{ }}`
 expressions substituted.
 
-**Windows coverage:** the Windows test job runs unsuppressed. Coverage there
-is gated by the documented platform limitation (README "Current status"):
-owner-only secure file writes are unsupported, so tests exercising vault
-creation/mutation, config writes, and CLI output files fail closed with an
-explicit unsupported-operation diagnostic. No Windows run of this matrix had
-executed at the time of writing, so the actual outcome is unobserved; the job
-is left unsuppressed so the first runs report exactly which scenarios fail.
-Do not silence them with `continue-on-error` or `#[cfg(windows)]` skips.
+**Windows coverage:** the Windows test job runs unsuppressed, including native
+private-write integration tests. A successful cross-check on another OS is not
+evidence that these tests passed on Windows. Do not silence failures with
+`continue-on-error` or additional platform skips.
 
 **Audit:** `cargo audit` scans the pinned `Cargo.lock` against the advisory
 database available at run time; the database is not pinned, so results can
@@ -426,9 +417,8 @@ steps succeed; a failed target produces no executable artifact, while another
 successful matrix target may still be downloadable. Build artifacts are not
 evidence that the separate `ci.yml` test matrix passed. No GUI (`nkpui`)
 executable is present in this revision, so CI does not produce or claim GUI
-artifacts. Windows artifacts remain subject to the documented fail-closed
-secure-write limitation; executable availability does not imply permission
-parity.
+artifacts. Executable availability does not imply the separate Windows
+private-write tests passed.
 
 ## `windows-build.yml` — Windows x64 build + packaging
 

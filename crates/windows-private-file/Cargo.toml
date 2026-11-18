@@ -1,0 +1,33 @@
+[package]
+name = "windows-private-file"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Windows private file security boundary"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"

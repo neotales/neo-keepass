@@ -49,12 +49,11 @@ also part of the master credentials, no password-only backup is made, because
 the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
 If backup installation fails, init reports the sanitized cause but leaves the
-already-created vault in place. Windows currently does not support secure
-owner-only file writes: the implementation cannot safely replace and verify
-the full ACL (including explicit grants to other principals). This limitation
-applies beyond password backups, including vault creation/mutation, config
-writes, and CLI output files; these operations fail closed with an explicit
-unsupported-operation diagnostic rather than claiming the file is private.
+already-created vault in place. On Windows, private files are created with a
+protected current-user-only DACL and verified before writing. Filesystems that
+cannot provide that protection are rejected. Like the Unix implementation,
+path-based staging assumes the containing directory is not controlled by an
+adversary; it does not defend against administrators or the same user.
 
 The `get` command can encrypt a selected value to native age or SSH recipients:
 

@@ -45,8 +45,8 @@ The CLI rejects KDF values outside its own read policy. The Argon2 memory,
 time, and combined-work limits apply together. On password-only init,
 it writes an age-encrypted password backup after creating the vault. The
 identity needed to decrypt the backup is stored separately. A backup failure
-does not remove the vault. Secure owner-only writes are unsupported on
-Windows, so init fails closed there.
+does not remove the vault. On Windows private staging requires a filesystem
+that supports protected, verified current-user-only DACLs.
 
 `init` accepts `--age-encrypt`, `--age-decrypt`, `-r` /
 `--age-recipient`, and `-i` / `--age-identity`, but ignores them. They do not

@@ -2239,25 +2239,17 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn vault_creation_fails_closed_when_owner_only_permissions_are_unsupported() {
+    fn vault_creation_uses_private_windows_permissions() {
         use super::VaultService;
         use neotales_keepass::{KdbxCredentials, KdbxWriteOptions};
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("unsupported.kdbx");
         let mut credentials = KdbxCredentials::password("windows-permissions-test").unwrap();
-        let error = VaultService::default()
+        VaultService::default()
             .create(&path, &mut credentials, KdbxWriteOptions::default(), None)
-            .expect_err("Windows secure file permissions are unsupported");
-
-        assert_eq!(
-            error,
-            nkeepass::ServiceError::SecureFilePermissionsUnsupported
-        );
-        assert!(
-            !path.exists(),
-            "refused vault creation must not install a file"
-        );
+            .unwrap();
+        windows_private_file::verify(&std::fs::File::open(path).unwrap()).unwrap();
     }
 
     #[test]
