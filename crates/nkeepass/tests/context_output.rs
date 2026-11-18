@@ -230,6 +230,12 @@ fn generated_master_is_recoverable_without_output_disclosure() {
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(report["master_password_generated"], true);
     assert_eq!(report["age_identity_created"], true);
+    assert_eq!(report["ancestor_durability"], "unconfirmed");
+    let association: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(report["recovery_association"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(association["ancestor_durability"], "unconfirmed");
     assert_eq!(
         report["directory_sync_policy"],
         if cfg!(unix) {
@@ -287,6 +293,7 @@ fn generated_master_is_recoverable_without_output_disclosure() {
         );
         assert!(second.status.success());
         let text = String::from_utf8_lossy(&second.stdout);
+        assert!(text.contains("Recovery directory ancestry durability: unconfirmed"));
         assert!(text.contains("Database:"));
         assert!(text.contains("Encrypted password backup:"));
         assert!(text.contains("Age identity reused:"));

@@ -614,6 +614,10 @@ const INIT_OPTIONS: &[HelpOption] = &[
         summary: "Password-only master passwords are saved age-encrypted in the data directory; identity is in config.",
     },
     HelpOption {
+        label: "Crash recovery",
+        summary: "Directory ancestry durability is unconfirmed; keep independent protected copies of the identity and encrypted backup.",
+    },
+    HelpOption {
         label: "Partial failure",
         summary: "Backup errors happen after vault creation; the vault remains installed and the cause is reported.",
     },
@@ -2270,6 +2274,7 @@ fn associate_init_backup_with(
         "age_identity": backup.identity_path.to_string_lossy(),
         "status": "candidate",
         "directory_sync_policy": backup_directory_sync_policy(),
+        "ancestor_durability": "unconfirmed",
     });
     let bytes = serde_json::to_vec(&record).map_err(|_| AssociationError {
         message: "cannot encode recovery association",
@@ -5241,6 +5246,7 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         "age_identity_created": backup.map(|value| value.identity_created),
         "recovery_association": backup.and_then(|value| value.association_path.as_ref()).map(|path| path.to_string_lossy().into_owned()),
         "directory_sync_policy": backup.map(|_| backup_directory_sync_policy()),
+        "ancestor_durability": backup.map(|_| "unconfirmed"),
     });
     if as_json {
         json(&result)
@@ -5281,7 +5287,7 @@ fn write_association_failure(
     if as_json {
         json(&record)
     } else {
-        writeln!(io::stdout(), "Vault creation not started.\nRecovery association candidate: {candidate}\n{}\nEncrypted password backup: {}\nAge identity: {}",
+        writeln!(io::stdout(), "Vault creation not started.\nRecovery association candidate: {candidate}\n{}\nEncrypted password backup: {}\nAge identity: {}\nRecovery directory ancestry durability: unconfirmed.",
             error.message, backup.path.display(), backup.identity_path.display())
             .map_err(|_| err("cannot write output"))
     }
@@ -5306,6 +5312,7 @@ fn association_failure_record(
         "age_identity": backup.identity_path.to_string_lossy(),
         "reason": error.message,
         "directory_sync_policy": backup_directory_sync_policy(),
+        "ancestor_durability": "unconfirmed",
     })
 }
 
@@ -5326,6 +5333,7 @@ fn write_init_recovery(
             "age_identity_created": backup.identity_created,
             "recovery_association": backup.association_path.as_ref().map(|path| path.to_string_lossy().into_owned()),
             "directory_sync_policy": backup_directory_sync_policy(),
+            "ancestor_durability": "unconfirmed",
         }))
     } else {
         let mut output = io::stdout().lock();
@@ -5364,6 +5372,11 @@ fn write_init_recovery(
             )
             .map_err(|_| err("cannot write output"))?;
         }
+        writeln!(
+            output,
+            "Recovery directory ancestry durability: unconfirmed. Keep independent protected copies of the identity and encrypted backup."
+        )
+        .map_err(|_| err("cannot write output"))?;
         if installed != Some(false) {
             writeln!(output, "Recovery: decrypt the backup with this identity in a private environment; see nkp init --help.")
                 .map_err(|_| err("cannot write output"))?;

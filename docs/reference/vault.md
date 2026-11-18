@@ -53,7 +53,8 @@ does not remove the vault. On Windows private staging requires a filesystem
 that supports protected, verified current-user-only DACLs.
 
 With `--generate-master-password`, init installs the encrypted backup **before**
-creating the vault, so backup failure cannot strand an inaccessible vault. If
+creating the vault, so a reported backup failure does not create an inaccessible
+vault. This ordering is not an unconditional power-loss guarantee. If
 vault creation or context persistence fails after that, stdout identifies the
 target and whether the vault was installed. If installation did not occur,
 the report says **unused backup**: that password cannot unlock an existing
@@ -73,13 +74,19 @@ can leave multiple candidates. In a private environment, try each candidate's
 backup with the corresponding identity against the target vault, as below.
 Only one that actually opens the vault is its recovery password. Keep candidate
 records private and retain them with their corresponding encrypted backups.
-On Unix the file and parent directory are synced before vault installation;
-Windows uses the existing private-file durability policy and owner-only DACL.
+On Unix the files and their containing directories are synced before vault
+installation; Windows uses the existing private-file durability policy and
+owner-only DACL. Neither policy confirms every ancestor directory entry is
+durable. A power loss could therefore lose an identity, backup, or candidate
+record even after init reports success. On all platforms, success and candidate
+records report `"ancestor_durability":"unconfirmed"`; text output warns about
+this too. Make independent protected copies of the identity and encrypted
+backup, and test recovery before relying on them.
 On Unix, reuse independently syncs the identity and its containing directory
 before making a new backup, including when another initializer has published
 the identity but not yet synced that directory. Preexisting directory entries
 and their ancestors are assumed durable; an externally or concurrently
-created configuration directory may not yet be durable.
+created configuration or data directory may not yet be durable.
 The existing Windows policy syncs the staged identity file but cannot confirm
 parent-directory durability after
 a crash. Windows reuses a validated private identity under that policy; after
