@@ -5,6 +5,21 @@ package lives under `crates/`; the root manifest contains workspace
 configuration. KDBX parsing is delegated to `neotales-keepass`, never
 reimplemented here.
 
+## Migrating from `nkeepass`
+
+The executable was renamed from `nkeepass` to `nkp`. A previously installed
+`nkeepass` binary may remain on your PATH and will keep running the old
+version, so uninstall it or point scripts at `nkp`. Diagnostics are now
+prefixed `nkp:` instead of `nkeepass:`, which matters if you match on stderr.
+Regenerate shell completion for the new name with `nkp completion SHELL`
+(`bash`, `sh`, `zsh`, `fish`, `powershell`, `pwsh`, or `nushell`; see the
+[command reference](docs/reference/system.md)) and replace the old
+`nkeepass` completion script. If you parse `github-actions` output, its
+heredoc delimiter changed from `NKEEPASS_EOF` to `NKP_EOF`. Everything else
+keeps its existing names: `NKEEPASS_*` environment variables, the
+`~/.config/nkeepass/` and `~/.local/share/nkeepass/` directories, and the
+config.json and KDBX formats, so existing setups and vaults keep working.
+
 ## Current status
 
 The CLI and interactive terminal browser cover vault navigation and entry
