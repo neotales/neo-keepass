@@ -36,7 +36,10 @@ decryption are wired into `get` and `set`; consult command help below for
 supported local key forms and current limitations. TOTP support is present too.
 
 `init` takes the vault master password from an explicit source or a non-echoing
-terminal prompt. After creating the vault, it stores a password-only unlock
+terminal prompt. `init --generate-master-password` instead generates a random
+master password and installs its encrypted backup before creating the vault.
+It never prints that password. See the [recovery instructions](docs/reference/vault.md#init)
+before using this option. For supplied passwords, after creating the vault it stores a password-only unlock
 password as age-encrypted data in a uniquely named file under
 `~/.local/share/nkeepass/`; the reusable native age identity is in
 `~/.config/nkeepass/init-password.agekey`. The `NKEEPASS_CONFIG_DIR` and
@@ -49,7 +52,8 @@ also part of the master credentials, no password-only backup is made, because
 the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
 If backup installation fails, init reports the sanitized cause but leaves the
-already-created vault in place. On Windows, private files are created with a
+already-created vault in place. Init reports paths in readable text; use
+`--json` for machine-readable output. On Windows, private files are created with a
 protected current-user-only DACL and verified before writing. Volumes must
 advertise persistent ACL enforcement; unsupported or unqueryable volumes are
 rejected. Private directories may be owned by the built-in Administrators

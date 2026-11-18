@@ -598,6 +598,18 @@ const FIELD_COMMANDS: &[HelpCommand] = &[
 ];
 const INIT_OPTIONS: &[HelpOption] = &[
     HelpOption {
+        label: "--json",
+        summary: "Print a machine-readable result instead of text.",
+    },
+    HelpOption {
+        label: "--generate-master-password",
+        summary: "Generate a random master password; recover it from the encrypted backup and age identity.",
+    },
+    HelpOption {
+        label: "Recovery",
+        summary: "Privately pipe age --decrypt -i IDENTITY BACKUP to nkp --vault DATABASE secrets ls --password-stdin. Protect the identity; see the vault reference.",
+    },
+    HelpOption {
         label: "Password persistence",
         summary: "Password-only master passwords are saved age-encrypted in the data directory; identity is in config.",
     },
@@ -2113,7 +2125,13 @@ fn credentials_with_password(
 ///
 /// The identity and ciphertext are installed with owner-only permissions and
 /// create-if-absent semantics. Existing files are never replaced.
-fn backup_init_password(password: &str) -> Result<PathBuf> {
+struct InitPasswordBackup {
+    path: PathBuf,
+    identity_path: PathBuf,
+    identity_created: bool,
+}
+
+fn backup_init_password(password: &str) -> Result<InitPasswordBackup> {
     backup_init_password_at(password, &config_dir()?, &data_dir()?)
 }
 
@@ -2124,13 +2142,19 @@ fn backup_init_password_in(password: &str, home: &Path) -> Result<PathBuf> {
         &home.join("config/nkeepass"),
         &home.join("data/nkeepass"),
     )
+    .map(|backup| backup.path)
 }
 
 fn backup_init_password_at(
     password: &str,
     config_root: &Path,
     data_root: &Path,
-) -> Result<PathBuf> {
+) -> Result<InitPasswordBackup> {
+    for path in [config_root, data_root] {
+        if !path.to_str().is_some_and(safe_metadata) {
+            return Err(err("password backup directory is not safe to report"));
+        }
+    }
     ensure_backup_dir(config_root, "cannot prepare password identity directory")?;
     ensure_backup_dir(data_root, "cannot prepare password backup directory")?;
     #[cfg(not(any(unix, windows)))]
@@ -2141,7 +2165,7 @@ fn backup_init_password_at(
     let config = config_root;
     let data = data_root;
     let identity_path = config.join("init-password.agekey");
-    let identity = load_or_create_backup_identity(&identity_path)?;
+    let (identity, identity_created) = load_or_create_backup_identity(&identity_path)?;
 
     let recipient = identity
         .recipient()
@@ -2173,7 +2197,11 @@ fn backup_init_password_at(
             _ => err("cannot install encrypted password backup"),
         },
     )?;
-    Ok(target)
+    Ok(InitPasswordBackup {
+        path: target,
+        identity_path,
+        identity_created,
+    })
 }
 
 fn ensure_backup_dir(path: &Path, diagnostic: &'static str) -> Result<()> {
@@ -2195,9 +2223,9 @@ fn ensure_backup_dir(path: &Path, diagnostic: &'static str) -> Result<()> {
     Ok(())
 }
 
-fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
+fn load_or_create_backup_identity(path: &Path) -> Result<(AgeIdentity, bool)> {
     match fs::symlink_metadata(path) {
-        Ok(_) => return read_backup_identity(path),
+        Ok(_) => return read_backup_identity(path).map(|identity| (identity, false)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(err("cannot inspect password backup identity")),
     }
@@ -2208,11 +2236,13 @@ fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
     let identity_bytes = Zeroizing::new(format!("{}\n", private_key.as_str()));
     match nkeepass::private_file::write_private_noclobber(path, identity_bytes.as_bytes()) {
         Ok(()) => AgeIdentity::from_private_key(private_key.as_str())
+            .map(|identity| (identity, true))
             .map_err(|_| err("cannot initialize password backup identity")),
         Err("output exists") => {
             // Another initializer may have installed the shared identity. Only
             // adopt it after the same type, permission, and key validation.
             read_backup_identity(path)
+                .map(|identity| (identity, false))
                 .map_err(|_| err("cannot install or validate password backup identity"))
         }
         Err("output installed but directory durability is unconfirmed") => Err(err(
@@ -4841,9 +4871,69 @@ fn kdf_parameters(write: &KdbxWriteOptions) -> serde_json::Value {
     reason = "the create-then-adopt ordering is the point, so it stays in one place"
 )]
 fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Result<()> {
-    let opts = options(args, Positional::Path)?;
+    // Filtering must not leave an extra, unwiped copy of --password VALUE.
+    let mut filtered = Zeroizing::new(Vec::with_capacity(args.len()));
+    let (mut as_json, mut generate_master) = (false, false);
+    let mut value_follows = false;
+    for arg in args {
+        if value_follows {
+            filtered.push(arg.clone());
+            value_follows = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--json" if !as_json => as_json = true,
+            "--generate-master-password" if !generate_master => generate_master = true,
+            "--json" | "--generate-master-password" => {
+                return Err(err("invalid or duplicate option"));
+            }
+            _ => {
+                value_follows = matches!(
+                    arg.as_str(),
+                    "--key"
+                        | "--field"
+                        | "--username"
+                        | "--url"
+                        | "--notes"
+                        | "--bin"
+                        | "-b"
+                        | "--name"
+                        | "--file"
+                        | "--output"
+                        | "--password"
+                        | "--password-env"
+                        | "--password-file"
+                        | "--key-file"
+                        | "--size"
+                        | "--format"
+                        | "--strategy"
+                        | "--kdf"
+                        | "--memory"
+                        | "--iterations"
+                        | "--parallelism"
+                        | "--age-recipient"
+                        | "-r"
+                        | "--age-identity"
+                        | "-i"
+                );
+                filtered.push(arg.clone());
+            }
+        }
+    }
+    let opts = options(&filtered, Positional::Path)?;
     validate_init_options(&opts)?;
     let write = init_write_options(&opts)?;
+    if generate_master
+        && (opts.password.is_some()
+            || opts.password_env.is_some()
+            || opts.password_file.is_some()
+            || opts.password_stdin
+            || opts.key_file.is_some())
+    {
+        return Err(err(
+            "generated master password cannot be combined with credential options",
+        ));
+    }
 
     // An explicit target wins over the ambient precedence. Supplying both a
     // positional PATH and the global --vault is not ordered but ambiguous, and
@@ -4870,9 +4960,27 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     }
     let path_text = normalized_vault_text(&path);
 
-    let master_password = password(&opts)?;
+    let master_password = if generate_master {
+        Some(
+            nkeepass::service::generate_master_password()
+                .map_err(|_| err("cannot generate master password"))?,
+        )
+    } else {
+        password(&opts)?
+    };
     let mut credentials =
         credentials_with_password(&opts, master_password.as_deref().map(String::as_str))?;
+    // A generated master password must be recoverable even if creation installs
+    // the vault but later reports a durability or configuration failure.
+    let generated_backup = if generate_master {
+        Some(backup_init_password(
+            master_password
+                .as_deref()
+                .ok_or_else(|| err("cannot generate master password"))?,
+        )?)
+    } else {
+        None
+    };
     let service = VaultService::default();
     // `init` exists so the next command works, and the context is what makes
     // that true with no extra step. Replacing a context the user chose is a
@@ -4882,7 +4990,9 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     // the way to change it. The flag is reported because "usable immediately"
     // and "did not touch your configuration" must not look identical.
     let create_result = service.create(&path, &mut credentials, write, opts.size);
-    let password_backup = if create_result.is_ok() {
+    let password_backup = if generated_backup.is_some() {
+        Ok(generated_backup)
+    } else if create_result.is_ok() {
         if opts.key_file.is_some() {
             Ok(None)
         } else {
@@ -4905,7 +5015,12 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         .map_err(|error| err(format!("encrypted password backup failed: {}", error.0)));
     let context_set = match (context_result, password_backup) {
         (Ok(context_set), Ok(backup)) => (context_set, backup),
-        (Err(context_error), Ok(_)) => return Err(context_error),
+        (Err(context_error), Ok(backup)) => {
+            if generate_master && let Some(backup) = &backup {
+                write_init_recovery(backup, as_json)?;
+            }
+            return Err(context_error);
+        }
         (Ok(_), Err(backup_error)) => {
             return Err(err(format!("vault created; {}", backup_error.0)));
         }
@@ -4917,7 +5032,8 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         }
     };
 
-    json(&serde_json::json!({
+    let backup = context_set.1.as_ref();
+    let result = serde_json::json!({
         "operation": "init",
         "path": path_text,
         "source": source,
@@ -4925,9 +5041,51 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         "kdf": kdf_name(write.kdf),
         "kdf_parameters": kdf_parameters(&write),
         "generated_password": opts.size.is_some(),
-        "password_backup": context_set.1.map(|path| path.to_string_lossy().into_owned()),
+        "password_backup": backup.map(|value| value.path.to_string_lossy().into_owned()),
         "password_backup_skipped": opts.key_file.is_some(),
-    }))
+        "master_password_generated": generate_master,
+        "age_identity": backup.map(|value| value.identity_path.to_string_lossy().into_owned()),
+        "age_identity_created": backup.map(|value| value.identity_created),
+    });
+    if as_json {
+        json(&result)
+    } else {
+        let mut output = io::stdout().lock();
+        writeln!(output, "Database: {path_text}").map_err(|_| err("cannot write output"))?;
+        writeln!(
+            output,
+            "Context selected: {}",
+            if context_set.0 { "yes" } else { "no" }
+        )
+        .map_err(|_| err("cannot write output"))?;
+        drop(output);
+        if let Some(backup) = backup {
+            write_init_recovery(backup, false)?;
+        } else {
+            writeln!(
+                io::stdout(),
+                "Encrypted password backup: skipped (key-file credentials)\nAge identity: not used"
+            )
+            .map_err(|_| err("cannot write output"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Reports where the encrypted backup and its identity were installed.
+fn write_init_recovery(backup: &InitPasswordBackup, as_json: bool) -> Result<()> {
+    if as_json {
+        json(&serde_json::json!({
+            "operation": "init-recovery",
+            "password_backup": backup.path.to_string_lossy(),
+            "age_identity": backup.identity_path.to_string_lossy(),
+            "age_identity_created": backup.identity_created,
+        }))
+    } else {
+        writeln!(io::stdout(), "Encrypted password backup: {}\nAge identity {}: {}\nRecovery: decrypt the backup with this identity in a private environment; see nkp init --help.",
+            backup.path.display(), if backup.identity_created { "created" } else { "reused" }, backup.identity_path.display())
+            .map_err(|_| err("cannot write output"))
+    }
 }
 
 fn adopt_after_init_create(
@@ -4970,25 +5128,35 @@ fn adopt_init_context_with(
         return Ok(false);
     }
     let current = if use_default_alias {
-        match config.aliases.get("default") {
-            Some(alias) if alias.kind == Kind::Vault && alias.target == path => "default",
-            Some(_) => return Ok(false),
-            None => {
-                config.aliases.insert(
-                    "default".to_owned(),
-                    Alias {
-                        kind: Kind::Vault,
-                        target: path.to_owned(),
-                        field: None,
-                    },
-                );
-                "default"
+        let mut name = "default".to_owned();
+        let mut suffix = 1_u64;
+        loop {
+            match config.aliases.get(&name) {
+                Some(alias) if alias.kind == Kind::Vault && alias.target == path => break,
+                Some(_) => {
+                    name = format!("default-{suffix}");
+                    suffix = suffix
+                        .checked_add(1)
+                        .ok_or_else(|| err("cannot select default context"))?;
+                }
+                None => {
+                    config.aliases.insert(
+                        name.clone(),
+                        Alias {
+                            kind: Kind::Vault,
+                            target: path.to_owned(),
+                            field: None,
+                        },
+                    );
+                    break;
+                }
             }
         }
+        name
     } else {
-        path
+        path.to_owned()
     };
-    config.current = Some(current.to_owned());
+    config.current = Some(current);
     persist(config)?;
     Ok(true)
 }
@@ -6154,27 +6322,56 @@ fn run(args: &[String], program: &str) -> Result<()> {
         "context" => match rest.first().map(String::as_str) {
             Some("ls" | "list") if rest.len() == 1 || (rest.len() == 2 && rest[1] == "--json") => {
                 let as_json = rest.len() == 2;
+                let current_path = config
+                    .current
+                    .as_deref()
+                    .map(|value| resolve_vault(value, &config))
+                    .transpose()?
+                    .map(|path| normalized_vault_text(&path));
+                let mut listed_paths = BTreeSet::new();
                 for (name, alias) in &config.aliases {
                     if alias.kind == Kind::Vault {
                         check_alias_metadata(name, alias)?;
                         let path = normalized_vault_text(&vault_path(&alias.target)?);
+                        let current = current_path.as_deref() == Some(path.as_str());
+                        listed_paths.insert(path.clone());
                         if as_json {
-                            json(&serde_json::json!({"alias": name, "path": path}))?;
+                            json(
+                                &serde_json::json!({"alias": name, "path": path, "current": current}),
+                            )?;
                         } else {
-                            writeln!(io::stdout(), "{name}\t{path}")
-                                .map_err(|_| err("cannot write output"))?;
+                            writeln!(
+                                io::stdout(),
+                                "{name}\t{path}{}",
+                                if current { "\t(current)" } else { "" }
+                            )
+                            .map_err(|_| err("cannot write output"))?;
                         }
                     }
                 }
-                if let Some(current) = &config.current
-                    && !config.aliases.contains_key(current)
+                if let Some(path) = &current_path
+                    && listed_paths.insert(path.clone())
                 {
-                    let path = normalized_vault_text(&vault_path(current)?);
                     if as_json {
-                        json(&serde_json::json!({"alias": null, "path": path}))?;
+                        json(
+                            &serde_json::json!({"alias": null, "path": path, "current": true, "source": "context"}),
+                        )?;
                     } else {
                         writeln!(io::stdout(), "(current)\t{path}")
                             .map_err(|_| err("cannot write output"))?;
+                    }
+                }
+                if let Some(default) = &config.default_vault {
+                    let path = normalized_vault_text(&resolve_vault(default, &config)?);
+                    if listed_paths.insert(path.clone()) {
+                        if as_json {
+                            json(
+                                &serde_json::json!({"alias": null, "path": path, "current": false, "source": "default"}),
+                            )?;
+                        } else {
+                            writeln!(io::stdout(), "(default)\t{path}")
+                                .map_err(|_| err("cannot write output"))?;
+                        }
                     }
                 }
                 Ok(())

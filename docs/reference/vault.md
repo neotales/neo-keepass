@@ -11,7 +11,8 @@ the command. Credential flags apply to `init` as listed in
 Create a KDBX 4.1 vault.
 
 ```text
-nkp [--vault PATH] init [PATH] [--size N] [--kdf aes|argon2d|argon2id]
+nkp [--vault PATH] init [PATH] [--json] [--generate-master-password]
+              [--size N] [--kdf aes|argon2d|argon2id]
               [--memory KIB] [--iterations N] [--parallelism N]
 ```
 
@@ -22,8 +23,9 @@ the current working directory. If you pass both a positional path and
 select the new vault only when no current context is set. It does not replace
 a context you already chose. If init selects the new vault, the JSON result
 has `"context_set": true`; otherwise it has `"context_set": false`. With no
-explicit target, init uses or creates the `default` vault alias unless that
-name already refers elsewhere. An explicit target can become the current
+explicit target, init uses or creates the `default` vault alias. If that name
+is occupied by a different target, it tries `default-1`, `default-2`, and so on
+without replacing existing aliases. An explicit target can become the current
 value when no context exists.
 See [vault credentials](credentials.md) for credential sources, key files,
 and their conflicts.
@@ -35,6 +37,8 @@ and their conflicts.
 | `--password-file PATH` | Read one password line from a file. |
 | `--key-file PATH` | Add a key-file credential component. |
 | `--password VALUE` | Compatibility option. Exposes the password in process listings and shell history. |
+| `--generate-master-password` | Generate a 32-character random master password. Cannot be combined with credential options or a key file. |
+| `--json` | Output a machine-readable result instead of the default text. |
 | `--size N` | Generate a 1 to 4096 character password for a new entry. Does not generate the master password. |
 | `--kdf aes\|argon2d\|argon2id` | Select the KDF. Default is `aes`. |
 | `--memory KIB` | Set Argon2 memory cost from 1 to 65,536 KiB. Default is 65,536 KiB. Only valid with Argon2. |
@@ -47,6 +51,37 @@ it writes an age-encrypted password backup after creating the vault. The
 identity needed to decrypt the backup is stored separately. A backup failure
 does not remove the vault. On Windows private staging requires a filesystem
 that supports protected, verified current-user-only DACLs.
+
+With `--generate-master-password`, init installs the encrypted backup **before**
+creating the vault, so backup failure cannot strand an inaccessible vault. If
+vault creation or context persistence fails after that, a recovery report on
+stdout identifies the backup and identity; an unused encrypted backup may
+remain after a failed attempt. `--json` reports this as an `init-recovery`
+object and retains a nonzero exit status. The generated master password is not
+printed. An ambient `NKEEPASS_PASSWORD` is ignored for this opt-in mode.
+
+Init reports the database path, backup path, and whether the age identity was
+created or reused. Treat the identity as a secret: anyone who obtains both it
+and the backup can recover the master password. Protect and back up both
+separately from the database, and test your recovery process. For example,
+using an independently installed [age](https://age-encryption.org/) executable,
+in a private shell where output and pipes are not recorded:
+
+```powershell
+age --decrypt -i "IDENTITY_PATH" "BACKUP_PATH" | nkp --vault "DATABASE_PATH" secrets ls --password-stdin
+```
+
+Replace the placeholders with the reported paths. This sends the password
+directly to `nkp` rather than displaying it; avoid transcript, screen capture,
+shell tracing, and untrusted processes. The same pipeline syntax works in POSIX
+shells. Do not send the plaintext to a file or a shared terminal.
+
+The generator uses operating-system randomness and unbiased sampling from 62
+ASCII letters and digits. The 32-character choice is this application's
+policy, not a NIST requirement. [NIST SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html)
+discusses randomly assigned passwords and password managers; its requirements
+address network authentication, not this local vault. This is not a claim of
+NIST or FIPS certification.
 
 `init` accepts `--age-encrypt`, `--age-decrypt`, `-r` /
 `--age-recipient`, and `-i` / `--age-identity`, but ignores them. They do not
@@ -65,7 +100,9 @@ nkp context remove ALIAS
 ```
 
 `ls` (also `list`) lists configured vault aliases and paths, as well as a
-directly selected path as `(current)`. `show` reports the selected vault,
+directly selected path as `(current)` and an otherwise unlisted configured
+default path as `(default)`. Paths already represented by aliases are not
+repeated as direct paths. Rows mark the configured current path. `show` reports the selected vault,
 its alias (or `(unnamed)`), and source. These commands print human-readable
 text by default; `--json` selects machine-readable records (`ls` emits one JSON
 object per line). `use` selects a configured vault alias. `set` creates or

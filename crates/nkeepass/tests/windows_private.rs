@@ -84,12 +84,64 @@ fn succeeded(output: &Output) {
 }
 
 #[test]
+fn generated_master_backup_and_default_context_are_private() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = run(
+        temp.path(),
+        &[
+            "init",
+            "--json",
+            "--generate-master-password",
+            "--iterations",
+            "64",
+        ],
+    );
+    succeeded(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let backup = Path::new(report["password_backup"].as_str().unwrap());
+    let identity = Path::new(report["age_identity"].as_str().unwrap());
+    let key = std::fs::read_to_string(identity).unwrap();
+    let password = zeroize::Zeroizing::new(
+        neotales_age::AgeFile::decrypt_armored(
+            &std::fs::read_to_string(backup).unwrap(),
+            &[neotales_age::AgeIdentity::from_private_key(key.trim()).unwrap()],
+        )
+        .unwrap(),
+    );
+    for channel in [&output.stdout, &output.stderr] {
+        assert!(
+            !channel
+                .windows(password.len())
+                .any(|bytes| bytes == password.as_slice())
+        );
+        assert!(
+            !channel
+                .windows(key.trim().len())
+                .any(|bytes| bytes == key.trim().as_bytes())
+        );
+    }
+    for path in [
+        backup,
+        identity,
+        temp.path().join("data/default.kdbx").as_path(),
+        temp.path().join("config/config.json").as_path(),
+    ] {
+        independently_assert_private(path);
+        windows_private_file::verify(&File::open(path).unwrap()).unwrap();
+    }
+    let listed = run(temp.path(), &["context", "list"]);
+    succeeded(&listed);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("default"));
+}
+
+#[test]
 fn init_backup_context_mutation_and_no_clobber_are_private() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let args = [
         "init",
         "vault.kdbx",
+        "--json",
         "--password-env",
         "NKEEPASS_WINDOWS_TEST_PASSWORD",
         "--size",

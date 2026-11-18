@@ -177,6 +177,7 @@ fn assert_reported_path(value: &serde_json::Value, expected: &Path) {
 fn with_password<'a>(args: &'a [&'a str]) -> Vec<&'a str> {
     args.iter()
         .copied()
+        .chain(args.contains(&"init").then_some("--json"))
         .chain(["--password-env", PASSWORD_ENV])
         .collect()
 }
@@ -671,18 +672,22 @@ fn bare_init_preserves_a_colliding_default_alias() {
 
     let result = created(&run(&fixture, &with_password(&["init"])));
     assert_reported_path(&result["path"], &fixture.default_vault());
-    assert_eq!(result["context_set"], false);
+    assert_eq!(result["context_set"], true);
     assert!(fixture.default_vault().is_file());
 
     let listed = run(&fixture, &["context", "ls", "--json"]);
-    let alias: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(alias["alias"], "default");
+    let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let alias = rows.iter().find(|row| row["alias"] == "default").unwrap();
     assert_reported_path(&alias["path"], &prior);
+    assert!(rows.iter().any(|row| row["alias"] == "default-1"));
 
     let shown = run(&fixture, &["context", "show", "--json"]);
     let context: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(context["source"], "data-directory");
-    assert!(context["alias"].is_null());
+    assert_eq!(context["source"], "context");
+    assert_eq!(context["alias"], "default-1");
     assert_reported_path(&context["path"], &fixture.default_vault());
 }
 
