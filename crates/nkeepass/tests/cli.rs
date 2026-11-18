@@ -76,24 +76,27 @@ fn context_alias_persistence_and_precedence() {
         .status
         .success()
     );
-    let output = cli(tmp.path(), &["context", "show"]);
+    let output = cli(tmp.path(), &["context", "show", "--json"]);
     assert!(output.status.success());
     let show: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(show["path"], vault);
     assert_eq!(show["source"], "context");
     assert_eq!(show["alias"], "work");
-    let output = cli(tmp.path(), &["context", "ls"]);
+    let output = cli(tmp.path(), &["context", "ls", "--json"]);
     let listed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(listed["alias"], "work");
     assert_eq!(listed["path"], vault);
     let completion = cli(tmp.path(), &["__complete", "vault-aliases", "w"]);
     assert_eq!(completion.stdout, b"work\n");
-    let output = cli(tmp.path(), &["--vault", "work", "context", "show"]);
+    let output = cli(
+        tmp.path(),
+        &["--vault", "work", "context", "show", "--json"],
+    );
     let show: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(show["source"], "argument");
     assert!(show["alias"].is_null());
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .args(["context", "show"])
+        .args(["context", "show", "--json"])
         .env("XDG_CONFIG_HOME", tmp.path())
         .env("NKEEPASS_VAULT", vault)
         .env_remove("NKEEPASS_VAULT_PATH")
@@ -143,7 +146,7 @@ fn alias_mutations_clear_the_selected_context() {
             .success()
     );
     assert!(cli(tmp.path(), &["alias", "rm", "work"]).status.success());
-    let output = cli(tmp.path(), &["context", "show"]);
+    let output = cli(tmp.path(), &["context", "show", "--json"]);
     assert!(output.status.success());
     let show: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_ne!(show["source"], "context");
@@ -167,7 +170,7 @@ fn alias_mutations_clear_the_selected_context() {
         .status
         .success()
     );
-    let output = cli(tmp.path(), &["context", "show"]);
+    let output = cli(tmp.path(), &["context", "show", "--json"]);
     assert!(output.status.success());
     let show: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_ne!(show["source"], "context");

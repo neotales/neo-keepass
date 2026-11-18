@@ -177,6 +177,7 @@ fn assert_reported_path(value: &serde_json::Value, expected: &Path) {
 fn with_password<'a>(args: &'a [&'a str]) -> Vec<&'a str> {
     args.iter()
         .copied()
+        .chain(args.contains(&"init").then_some("--json"))
         .chain(["--password-env", PASSWORD_ENV])
         .collect()
 }
@@ -277,7 +278,7 @@ fn creates_a_vault_that_reopens_with_the_same_password() {
     assert_eq!(result["context_set"], true);
     assert!(std::fs::metadata(&vault).unwrap().len() > 0);
 
-    let shown = run(&fixture, &["context", "show"]);
+    let shown = run(&fixture, &["context", "show", "--json"]);
     let context: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_reported_path(&context["path"], &vault);
     assert_eq!(context["source"], "context");
@@ -519,12 +520,18 @@ fn init_help_succeeds_and_documents_its_flags() {
             "Password persistence",
             "age-encrypted",
             "Partial failure",
-            "remains installed",
             "Windows private files",
             "owner-only ACLs",
         ] {
             assert!(text.contains(expected), "init {flag} omits {expected}");
         }
+        let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains(
+            "Supplied password-only: backup follows successful vault creation; backup failure leaves the vault installed."
+        ));
+        assert!(normalized.contains(
+            "Generated master: backup and association precede vault creation; their failure stops creation."
+        ));
     }
 
     let help = run(&fixture, &["--help"]);
@@ -532,6 +539,30 @@ fn init_help_succeeds_and_documents_its_flags() {
     let root_help = String::from_utf8_lossy(&help.stdout);
     assert!(root_help.contains("COMMANDS:"));
     assert!(root_help.lines().any(|line| line.starts_with("  init ")));
+}
+
+#[test]
+fn initialization_docs_distinguish_backup_failure_ordering() {
+    let readme = include_str!("../../../README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(readme.contains(
+        "master password and installs its encrypted backup and recovery association before attempting vault creation; a failure in either stops vault creation."
+    ));
+    assert!(readme.contains(
+        "If that supplied-password backup fails, init reports the sanitized cause and leaves the already-created vault in place."
+    ));
+    let reference = include_str!("../../../docs/reference/vault.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(reference.contains(
+        "With a supplied password and no key file, init attempts the age-encrypted backup after successful vault creation. A failure of that backup leaves the created vault in place."
+    ));
+    assert!(reference.contains(
+        "With a generated master password, backup and recovery association are attempted before vault creation; a failure in either stops vault creation."
+    ));
 }
 
 #[test]
@@ -578,14 +609,14 @@ fn a_bare_init_creates_the_resolved_default_and_adopts_the_context() {
     assert_eq!(config["aliases"]["default"]["kind"], "vault");
     assert_eq!(config["aliases"]["default"]["target"], result["path"]);
 
-    let shown = run(&fixture, &["context", "show"]);
+    let shown = run(&fixture, &["context", "show", "--json"]);
     assert!(shown.status.success());
     let context: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_reported_path(&context["path"], &fixture.default_vault());
     assert_eq!(context["source"], "context");
     assert_eq!(context["alias"], "default");
 
-    let listed = run(&fixture, &["context", "ls"]);
+    let listed = run(&fixture, &["context", "ls", "--json"]);
     assert!(listed.status.success());
     let alias: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(alias["alias"], "default");
@@ -599,7 +630,7 @@ fn a_bare_init_creates_the_resolved_default_and_adopts_the_context() {
             .status
             .success()
     );
-    let selected = run(&fixture, &["context", "show"]);
+    let selected = run(&fixture, &["context", "show", "--json"]);
     let selected: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
     assert_eq!(selected["source"], "context");
     assert_eq!(selected["alias"], "default");
@@ -649,7 +680,7 @@ fn bare_init_does_not_replace_a_user_selected_context() {
     assert!(selected.is_file());
     assert!(!fixture.default_vault().exists());
 
-    let shown = run(&fixture, &["context", "show"]);
+    let shown = run(&fixture, &["context", "show", "--json"]);
     let context: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_eq!(context["source"], "context");
     assert_eq!(context["alias"], "chosen");
@@ -671,18 +702,22 @@ fn bare_init_preserves_a_colliding_default_alias() {
 
     let result = created(&run(&fixture, &with_password(&["init"])));
     assert_reported_path(&result["path"], &fixture.default_vault());
-    assert_eq!(result["context_set"], false);
+    assert_eq!(result["context_set"], true);
     assert!(fixture.default_vault().is_file());
 
-    let listed = run(&fixture, &["context", "ls"]);
-    let alias: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(alias["alias"], "default");
+    let listed = run(&fixture, &["context", "ls", "--json"]);
+    let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let alias = rows.iter().find(|row| row["alias"] == "default").unwrap();
     assert_reported_path(&alias["path"], &prior);
+    assert!(rows.iter().any(|row| row["alias"] == "default-1"));
 
-    let shown = run(&fixture, &["context", "show"]);
+    let shown = run(&fixture, &["context", "show", "--json"]);
     let context: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(context["source"], "data-directory");
-    assert!(context["alias"].is_null());
+    assert_eq!(context["source"], "context");
+    assert_eq!(context["alias"], "default-1");
     assert_reported_path(&context["path"], &fixture.default_vault());
 }
 
@@ -736,7 +771,7 @@ fn an_explicit_path_beats_the_context_but_an_existing_context_is_never_replaced(
     assert_eq!(result["source"], "argument");
     assert_eq!(result["context_set"], false);
 
-    let shown = run(&fixture, &["context", "show"]);
+    let shown = run(&fixture, &["context", "show", "--json"]);
     let context: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_reported_path(&context["path"], &existing);
     assert!(other.is_file());

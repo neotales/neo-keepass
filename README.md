@@ -36,8 +36,12 @@ decryption are wired into `get` and `set`; consult command help below for
 supported local key forms and current limitations. TOTP support is present too.
 
 `init` takes the vault master password from an explicit source or a non-echoing
-terminal prompt. After creating the vault, it stores a password-only unlock
-password as age-encrypted data in a uniquely named file under
+terminal prompt. `init --generate-master-password` instead generates a random
+master password and installs its encrypted backup and recovery association
+before attempting vault creation; a failure in either stops vault creation.
+It never prints that password. See the [recovery instructions](docs/reference/vault.md#init)
+before using this option. With a supplied password and no key file, init
+attempts an age-encrypted password backup after successful vault creation, in a uniquely named file under
 `~/.local/share/nkeepass/`; the reusable native age identity is in
 `~/.config/nkeepass/init-password.agekey`. The `NKEEPASS_CONFIG_DIR` and
 `NKEEPASS_DATA_DIR` app overrides and XDG directory settings select these
@@ -48,8 +52,9 @@ vault integration, this file-based backup is the fallback. When a key file is
 also part of the master credentials, no password-only backup is made, because
 the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
-If backup installation fails, init reports the sanitized cause but leaves the
-already-created vault in place. On Windows, private files are created with a
+If that supplied-password backup fails, init reports the sanitized cause and
+leaves the already-created vault in place. Init reports paths in readable text; use
+`--json` for machine-readable output. On Windows, private files are created with a
 protected current-user-only DACL and verified before writing. Volumes must
 advertise persistent ACL enforcement; unsupported or unqueryable volumes are
 rejected. Private directories may be owned by the built-in Administrators

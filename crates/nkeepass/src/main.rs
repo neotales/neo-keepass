@@ -149,19 +149,23 @@ const YES_OPTION: HelpOption = HelpOption {
     summary: "Confirm a destructive operation without prompting.",
 };
 
+const CONTEXT_OUTPUT_OPTIONS: &[HelpOption] = &[HelpOption {
+    label: "--json",
+    summary: "Print machine-readable JSON instead of text.",
+}];
 const CONTEXT_COMMANDS: &[HelpCommand] = &[
     help_command(
         "ls|list",
         "ls",
         "List configured vault aliases and paths.",
-        NO_OPTIONS,
+        CONTEXT_OUTPUT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "show",
         "show",
         "Show the selected vault and its source.",
-        NO_OPTIONS,
+        CONTEXT_OUTPUT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
@@ -594,12 +598,28 @@ const FIELD_COMMANDS: &[HelpCommand] = &[
 ];
 const INIT_OPTIONS: &[HelpOption] = &[
     HelpOption {
+        label: "--json",
+        summary: "Print a machine-readable result instead of text.",
+    },
+    HelpOption {
+        label: "--generate-master-password",
+        summary: "Generate a random master password; recover it from the encrypted backup and age identity.",
+    },
+    HelpOption {
+        label: "Recovery",
+        summary: "Privately pipe age --decrypt -i IDENTITY BACKUP to nkp --vault DATABASE secrets ls --password-stdin. Protect the identity; see the vault reference.",
+    },
+    HelpOption {
         label: "Password persistence",
         summary: "Password-only master passwords are saved age-encrypted in the data directory; identity is in config.",
     },
     HelpOption {
+        label: "Crash recovery",
+        summary: "Directory ancestry durability is unconfirmed; keep independent protected copies of the identity and encrypted backup.",
+    },
+    HelpOption {
         label: "Partial failure",
-        summary: "Backup errors happen after vault creation; the vault remains installed and the cause is reported.",
+        summary: "Supplied password-only: backup follows successful vault creation; backup failure leaves the vault installed. Generated master: backup and association precede vault creation; their failure stops creation.",
     },
     HelpOption {
         label: "Windows private files",
@@ -1470,6 +1490,20 @@ fn normalized_vault_text(path: &Path) -> String {
     }
 }
 
+/// Lexical comparison key; Windows comparisons do not change displayed paths.
+fn vault_path_key(text: &str) -> String {
+    vault_path_key_for_platform(text, cfg!(windows))
+}
+
+/// Applies the platform's lexical comparison policy without changing output.
+fn vault_path_key_for_platform(text: &str, windows: bool) -> String {
+    if windows {
+        text.replace('/', "\\")
+    } else {
+        text.to_owned()
+    }
+}
+
 /// Resolves an explicit `init` target to an absolute, lexically normalized
 /// path. `.` components are harmless and removed; `..` is rejected rather than
 /// allowed to escape the invocation directory or masquerade as a normalized
@@ -2133,7 +2167,14 @@ fn credentials_with_password(
 ///
 /// The identity and ciphertext are installed with owner-only permissions and
 /// create-if-absent semantics. Existing files are never replaced.
-fn backup_init_password(password: &str) -> Result<PathBuf> {
+struct InitPasswordBackup {
+    path: PathBuf,
+    identity_path: PathBuf,
+    identity_created: bool,
+    association_path: Option<PathBuf>,
+}
+
+fn backup_init_password(password: &str) -> Result<InitPasswordBackup> {
     backup_init_password_at(password, &config_dir()?, &data_dir()?)
 }
 
@@ -2144,13 +2185,33 @@ fn backup_init_password_in(password: &str, home: &Path) -> Result<PathBuf> {
         &home.join("config/nkeepass"),
         &home.join("data/nkeepass"),
     )
+    .map(|backup| backup.path)
 }
 
 fn backup_init_password_at(
     password: &str,
     config_root: &Path,
     data_root: &Path,
-) -> Result<PathBuf> {
+) -> Result<InitPasswordBackup> {
+    backup_init_password_at_with(
+        password,
+        config_root,
+        data_root,
+        confirm_backup_identity_durability,
+    )
+}
+
+fn backup_init_password_at_with(
+    password: &str,
+    config_root: &Path,
+    data_root: &Path,
+    confirm: impl FnOnce(&File, &Path) -> Result<()>,
+) -> Result<InitPasswordBackup> {
+    for path in [config_root, data_root] {
+        if !path.to_str().is_some_and(safe_metadata) {
+            return Err(err("password backup directory is not safe to report"));
+        }
+    }
     ensure_backup_dir(config_root, "cannot prepare password identity directory")?;
     ensure_backup_dir(data_root, "cannot prepare password backup directory")?;
     #[cfg(not(any(unix, windows)))]
@@ -2161,7 +2222,8 @@ fn backup_init_password_at(
     let config = config_root;
     let data = data_root;
     let identity_path = config.join("init-password.agekey");
-    let identity = load_or_create_backup_identity(&identity_path)?;
+    let (identity, identity_created) =
+        load_or_create_backup_identity_with(&identity_path, confirm)?;
 
     let recipient = identity
         .recipient()
@@ -2193,10 +2255,105 @@ fn backup_init_password_at(
             _ => err("cannot install encrypted password backup"),
         },
     )?;
-    Ok(target)
+    Ok(InitPasswordBackup {
+        path: target,
+        identity_path,
+        identity_created,
+        association_path: None,
+    })
+}
+
+/// Installs a private, no-clobber recovery candidate before vault creation.
+///
+/// The record describes an attempt, not proof that the vault was installed.
+#[derive(Debug)]
+struct AssociationError {
+    message: &'static str,
+    installed: bool,
+}
+
+fn associate_init_backup(
+    backup: &mut InitPasswordBackup,
+    vault: &str,
+) -> std::result::Result<(), AssociationError> {
+    associate_init_backup_with(
+        backup,
+        vault,
+        nkeepass::private_file::write_private_noclobber,
+    )
+}
+
+fn associate_init_backup_with(
+    backup: &mut InitPasswordBackup,
+    vault: &str,
+    install: impl FnOnce(&Path, &[u8]) -> std::result::Result<(), &'static str>,
+) -> std::result::Result<(), AssociationError> {
+    let mut name = backup.path.as_os_str().to_os_string();
+    name.push(".json");
+    let path = PathBuf::from(name);
+    let record = serde_json::json!({
+        "version": 1,
+        "vault": vault,
+        "password_backup": backup.path.to_string_lossy(),
+        "age_identity": backup.identity_path.to_string_lossy(),
+        "status": "candidate",
+        "directory_sync_policy": backup_directory_sync_policy(),
+        "ancestor_durability": "unconfirmed",
+    });
+    let bytes = serde_json::to_vec(&record).map_err(|_| AssociationError {
+        message: "cannot encode recovery association",
+        installed: false,
+    })?;
+    if let Err(cause) = install(&path, &bytes) {
+        let installed = cause == "output installed but directory durability is unconfirmed";
+        if installed {
+            backup.association_path = Some(path);
+        }
+        return Err(AssociationError {
+            message: match cause {
+                "output installed but directory durability is unconfirmed" => {
+                    "recovery association installed but directory durability is unconfirmed"
+                }
+                "output exists" => "recovery association already exists",
+                "filesystem cannot verify persistent owner-only ACL support" => {
+                    "filesystem cannot verify persistent owner-only ACL support"
+                }
+                "cannot query filesystem ACL capability" => {
+                    "cannot query filesystem ACL capability"
+                }
+                "cannot restrict output permissions" => {
+                    "cannot restrict recovery association permissions"
+                }
+                "cannot stage output" => "cannot stage recovery association",
+                "cannot write output" => "cannot write recovery association",
+                "cannot sync output" => "cannot sync recovery association",
+                "cannot install output" => "cannot install recovery association",
+                _ => "cannot securely install recovery association",
+            },
+            installed,
+        });
+    }
+    backup.association_path = Some(path);
+    Ok(())
 }
 
 fn ensure_backup_dir(path: &Path, diagnostic: &'static str) -> Result<()> {
+    #[cfg(unix)]
+    let mut new_dirs = {
+        let mut dirs = Vec::new();
+        let mut current = path;
+        loop {
+            match fs::symlink_metadata(current) {
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    dirs.push(current.to_path_buf());
+                    current = current.parent().ok_or_else(|| err(diagnostic))?;
+                }
+                Err(_) => return Err(err(diagnostic)),
+            }
+        }
+        dirs
+    };
     fs::create_dir_all(path).map_err(|_| err(diagnostic))?;
     let metadata = fs::symlink_metadata(path).map_err(|_| err(diagnostic))?;
     if !metadata.file_type().is_dir() {
@@ -2209,15 +2366,30 @@ fn ensure_backup_dir(path: &Path, diagnostic: &'static str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(|_| err(diagnostic))?;
+        // Sync each newly created directory and its parent so the directory
+        // entries themselves survive, not just files later installed within it.
+        while let Some(dir) = new_dirs.pop() {
+            File::open(&dir)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| err(diagnostic))?;
+            if let Some(parent) = dir.parent() {
+                File::open(parent)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| err(diagnostic))?;
+            }
+        }
     }
     #[cfg(windows)]
     nkeepass::private_file::set_owner_only(path, diagnostic).map_err(err)?;
     Ok(())
 }
 
-fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
+fn load_or_create_backup_identity_with(
+    path: &Path,
+    confirm: impl FnOnce(&File, &Path) -> Result<()>,
+) -> Result<(AgeIdentity, bool)> {
     match fs::symlink_metadata(path) {
-        Ok(_) => return read_backup_identity(path),
+        Ok(_) => return read_backup_identity(path, confirm).map(|identity| (identity, false)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(err("cannot inspect password backup identity")),
     }
@@ -2228,12 +2400,12 @@ fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
     let identity_bytes = Zeroizing::new(format!("{}\n", private_key.as_str()));
     match nkeepass::private_file::write_private_noclobber(path, identity_bytes.as_bytes()) {
         Ok(()) => AgeIdentity::from_private_key(private_key.as_str())
+            .map(|identity| (identity, true))
             .map_err(|_| err("cannot initialize password backup identity")),
         Err("output exists") => {
             // Another initializer may have installed the shared identity. Only
             // adopt it after the same type, permission, and key validation.
-            read_backup_identity(path)
-                .map_err(|_| err("cannot install or validate password backup identity"))
+            read_backup_identity(path, confirm).map(|identity| (identity, false))
         }
         Err("output installed but directory durability is unconfirmed") => Err(err(
             "password backup identity was installed but directory durability is unconfirmed",
@@ -2252,7 +2424,10 @@ fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
     }
 }
 
-fn read_backup_identity(path: &Path) -> Result<AgeIdentity> {
+fn read_backup_identity(
+    path: &Path,
+    confirm: impl FnOnce(&File, &Path) -> Result<()>,
+) -> Result<AgeIdentity> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| err("cannot inspect password backup identity"))?;
     if !metadata.file_type().is_file() {
@@ -2286,8 +2461,45 @@ fn read_backup_identity(path: &Path) -> Result<AgeIdentity> {
     identity_file
         .read_to_string(&mut identity_text)
         .map_err(|_| err("cannot read password backup identity"))?;
-    AgeIdentity::from_private_key(identity_text.trim())
-        .map_err(|_| err("password backup identity is invalid"))
+    let identity = AgeIdentity::from_private_key(identity_text.trim())
+        .map_err(|_| err("password backup identity is invalid"))?;
+    confirm(&identity_file, path)?;
+    Ok(identity)
+}
+
+/// Applies the platform's existing durability policy to a reused identity.
+fn confirm_backup_identity_durability(file: &File, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        file.sync_all()
+            .map_err(|_| err("cannot confirm password backup identity durability"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| err("cannot confirm password backup identity durability"))?;
+        // Sync the directory containing the identity, not unrelated ancestors:
+        // traversable parent directories need not be readable. As with existing
+        // private-file writes, preexisting directory entries are assumed durable.
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| err("cannot confirm password backup identity durability"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        // The identity file is synced before publication. The Windows private
+        // file policy cannot confirm directory sync; report that limitation
+        // rather than claiming a power-loss guarantee or rejecting reuse.
+        let _ = (file, path);
+    }
+    Ok(())
+}
+
+/// Describes the directory-sync policy, not an assertion of actual durability.
+fn backup_directory_sync_policy() -> &'static str {
+    if cfg!(unix) {
+        "required"
+    } else {
+        "unconfirmed"
+    }
 }
 
 fn bounded_file(path: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
@@ -4861,9 +5073,69 @@ fn kdf_parameters(write: &KdbxWriteOptions) -> serde_json::Value {
     reason = "the create-then-adopt ordering is the point, so it stays in one place"
 )]
 fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Result<()> {
-    let opts = options(args, Positional::Path)?;
+    // Filtering must not leave an extra, unwiped copy of --password VALUE.
+    let mut filtered = Zeroizing::new(Vec::with_capacity(args.len()));
+    let (mut as_json, mut generate_master) = (false, false);
+    let mut value_follows = false;
+    for arg in args {
+        if value_follows {
+            filtered.push(arg.clone());
+            value_follows = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--json" if !as_json => as_json = true,
+            "--generate-master-password" if !generate_master => generate_master = true,
+            "--json" | "--generate-master-password" => {
+                return Err(err("invalid or duplicate option"));
+            }
+            _ => {
+                value_follows = matches!(
+                    arg.as_str(),
+                    "--key"
+                        | "--field"
+                        | "--username"
+                        | "--url"
+                        | "--notes"
+                        | "--bin"
+                        | "-b"
+                        | "--name"
+                        | "--file"
+                        | "--output"
+                        | "--password"
+                        | "--password-env"
+                        | "--password-file"
+                        | "--key-file"
+                        | "--size"
+                        | "--format"
+                        | "--strategy"
+                        | "--kdf"
+                        | "--memory"
+                        | "--iterations"
+                        | "--parallelism"
+                        | "--age-recipient"
+                        | "-r"
+                        | "--age-identity"
+                        | "-i"
+                );
+                filtered.push(arg.clone());
+            }
+        }
+    }
+    let opts = options(&filtered, Positional::Path)?;
     validate_init_options(&opts)?;
     let write = init_write_options(&opts)?;
+    if generate_master
+        && (opts.password.is_some()
+            || opts.password_env.is_some()
+            || opts.password_file.is_some()
+            || opts.password_stdin
+            || opts.key_file.is_some())
+    {
+        return Err(err(
+            "generated master password cannot be combined with credential options",
+        ));
+    }
 
     // An explicit target wins over the ambient precedence. Supplying both a
     // positional PATH and the global --vault is not ordered but ambiguous, and
@@ -4890,9 +5162,37 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     }
     let path_text = normalized_vault_text(&path);
 
-    let master_password = password(&opts)?;
+    let master_password = if generate_master {
+        Some(
+            nkeepass::service::generate_master_password()
+                .map_err(|_| err("cannot generate master password"))?,
+        )
+    } else {
+        password(&opts)?
+    };
     let mut credentials =
         credentials_with_password(&opts, master_password.as_deref().map(String::as_str))?;
+    // A generated master password must be recoverable even if creation installs
+    // the vault but later reports a durability or configuration failure.
+    let generated_backup = if generate_master {
+        let mut backup = backup_init_password(
+            master_password
+                .as_deref()
+                .ok_or_else(|| err("cannot generate master password"))?,
+        )?;
+        if let Err(error) = associate_init_backup(&mut backup, &path_text) {
+            // Reporting must not replace the original failure when stdout is
+            // also unavailable. No vault installation has been attempted.
+            let _ = write_association_failure(&backup, &path_text, &error, as_json);
+            return Err(err(format!(
+                "vault creation not started; {}",
+                error.message
+            )));
+        }
+        Some(backup)
+    } else {
+        None
+    };
     let service = VaultService::default();
     // `init` exists so the next command works, and the context is what makes
     // that true with no extra step. Replacing a context the user chose is a
@@ -4902,7 +5202,13 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
     // the way to change it. The flag is reported because "usable immediately"
     // and "did not touch your configuration" must not look identical.
     let create_result = service.create(&path, &mut credentials, write, opts.size);
-    let password_backup = if create_result.is_ok() {
+    let vault_installed = matches!(
+        create_result,
+        Ok(()) | Err(nkeepass::ServiceError::CreateDurability)
+    );
+    let password_backup = if generated_backup.is_some() {
+        Ok(generated_backup)
+    } else if create_result.is_ok() {
         if opts.key_file.is_some() {
             Ok(None)
         } else {
@@ -4925,7 +5231,18 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         .map_err(|error| err(format!("encrypted password backup failed: {}", error.0)));
     let context_set = match (context_result, password_backup) {
         (Ok(context_set), Ok(backup)) => (context_set, backup),
-        (Err(context_error), Ok(_)) => return Err(context_error),
+        (Err(context_error), Ok(backup)) => {
+            if generate_master && let Some(backup) = &backup {
+                if write_init_recovery(backup, as_json, &path_text, Some(vault_installed)).is_err()
+                {
+                    return Err(CliError(
+                        format!("{}; recovery report could not be written", context_error.0),
+                        context_error.1,
+                    ));
+                }
+            }
+            return Err(context_error);
+        }
         (Ok(_), Err(backup_error)) => {
             return Err(err(format!("vault created; {}", backup_error.0)));
         }
@@ -4937,7 +5254,8 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         }
     };
 
-    json(&serde_json::json!({
+    let backup = context_set.1.as_ref();
+    let result = serde_json::json!({
         "operation": "init",
         "path": path_text,
         "source": source,
@@ -4945,9 +5263,150 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         "kdf": kdf_name(write.kdf),
         "kdf_parameters": kdf_parameters(&write),
         "generated_password": opts.size.is_some(),
-        "password_backup": context_set.1.map(|path| path.to_string_lossy().into_owned()),
+        "password_backup": backup.map(|value| value.path.to_string_lossy().into_owned()),
         "password_backup_skipped": opts.key_file.is_some(),
-    }))
+        "master_password_generated": generate_master,
+        "age_identity": backup.map(|value| value.identity_path.to_string_lossy().into_owned()),
+        "age_identity_created": backup.map(|value| value.identity_created),
+        "recovery_association": backup.and_then(|value| value.association_path.as_ref()).map(|path| path.to_string_lossy().into_owned()),
+        "directory_sync_policy": backup.map(|_| backup_directory_sync_policy()),
+        "ancestor_durability": backup.map(|_| "unconfirmed"),
+    });
+    if as_json {
+        json(&result)
+    } else {
+        let mut output = io::stdout().lock();
+        writeln!(output, "Database: {path_text}").map_err(|_| err("cannot write output"))?;
+        writeln!(
+            output,
+            "Context selected: {}",
+            if context_set.0 { "yes" } else { "no" }
+        )
+        .map_err(|_| err("cannot write output"))?;
+        drop(output);
+        if let Some(backup) = backup {
+            write_init_recovery(backup, false, &path_text, None)?;
+        } else {
+            writeln!(
+                io::stdout(),
+                "Encrypted password backup: skipped (key-file credentials)\nAge identity: not used"
+            )
+            .map_err(|_| err("cannot write output"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Reports an association failure without revealing the backed-up password.
+fn write_association_failure(
+    backup: &InitPasswordBackup,
+    vault: &str,
+    error: &AssociationError,
+    as_json: bool,
+) -> Result<()> {
+    let record = association_failure_record(backup, vault, error);
+    let candidate = record["association_candidate"]
+        .as_str()
+        .ok_or_else(|| err("cannot encode recovery association"))?;
+    if as_json {
+        json(&record)
+    } else {
+        writeln!(io::stdout(), "Vault creation not started.\nRecovery association candidate: {candidate}\n{}\nEncrypted password backup: {}\nAge identity: {}\nRecovery directory ancestry durability: unconfirmed.",
+            error.message, backup.path.display(), backup.identity_path.display())
+            .map_err(|_| err("cannot write output"))
+    }
+}
+
+/// The non-secret partial-state report emitted before vault creation starts.
+fn association_failure_record(
+    backup: &InitPasswordBackup,
+    vault: &str,
+    error: &AssociationError,
+) -> serde_json::Value {
+    let mut candidate = backup.path.as_os_str().to_os_string();
+    candidate.push(".json");
+    let candidate = PathBuf::from(candidate);
+    serde_json::json!({
+        "operation": "init-association-failed",
+        "path": vault,
+        "vault_install_started": false,
+        "association_installed": error.installed,
+        "association_candidate": candidate.to_string_lossy(),
+        "password_backup": backup.path.to_string_lossy(),
+        "age_identity": backup.identity_path.to_string_lossy(),
+        "reason": error.message,
+        "directory_sync_policy": backup_directory_sync_policy(),
+        "ancestor_durability": "unconfirmed",
+    })
+}
+
+/// Reports where the encrypted backup and its identity were installed.
+fn write_init_recovery(
+    backup: &InitPasswordBackup,
+    as_json: bool,
+    vault: &str,
+    installed: Option<bool>,
+) -> Result<()> {
+    if as_json {
+        json(&serde_json::json!({
+            "operation": if installed == Some(false) { "init-unused-backup" } else { "init-recovery" },
+            "path": vault,
+            "vault_installed": installed,
+            "password_backup": backup.path.to_string_lossy(),
+            "age_identity": backup.identity_path.to_string_lossy(),
+            "age_identity_created": backup.identity_created,
+            "recovery_association": backup.association_path.as_ref().map(|path| path.to_string_lossy().into_owned()),
+            "directory_sync_policy": backup_directory_sync_policy(),
+            "ancestor_durability": "unconfirmed",
+        }))
+    } else {
+        let mut output = io::stdout().lock();
+        if let Some(installed) = installed {
+            writeln!(
+                output,
+                "Database: {vault}\n{}",
+                if installed {
+                    "Vault installed; recovery backup follows."
+                } else {
+                    "Vault not created; unused backup follows and cannot unlock an existing vault."
+                }
+            )
+            .map_err(|_| err("cannot write output"))?;
+        }
+        writeln!(
+            output,
+            "Encrypted password backup: {}\nAge identity {}: {}",
+            backup.path.display(),
+            if backup.identity_created {
+                "created"
+            } else {
+                "reused"
+            },
+            backup.identity_path.display()
+        )
+        .map_err(|_| err("cannot write output"))?;
+        if let Some(path) = &backup.association_path {
+            writeln!(output, "Recovery candidate record: {}", path.display())
+                .map_err(|_| err("cannot write output"))?;
+        }
+        if !cfg!(unix) {
+            writeln!(
+                output,
+                "Directory durability: unconfirmed on this platform."
+            )
+            .map_err(|_| err("cannot write output"))?;
+        }
+        writeln!(
+            output,
+            "Recovery directory ancestry durability: unconfirmed. Keep independent protected copies of the identity and encrypted backup."
+        )
+        .map_err(|_| err("cannot write output"))?;
+        if installed != Some(false) {
+            writeln!(output, "Recovery: decrypt the backup with this identity in a private environment; see nkp init --help.")
+                .map_err(|_| err("cannot write output"))?;
+        }
+        Ok(())
+    }
 }
 
 fn adopt_after_init_create(
@@ -4990,25 +5449,40 @@ fn adopt_init_context_with(
         return Ok(false);
     }
     let current = if use_default_alias {
-        match config.aliases.get("default") {
-            Some(alias) if alias.kind == Kind::Vault && alias.target == path => "default",
-            Some(_) => return Ok(false),
-            None => {
-                config.aliases.insert(
-                    "default".to_owned(),
-                    Alias {
-                        kind: Kind::Vault,
-                        target: path.to_owned(),
-                        field: None,
-                    },
-                );
-                "default"
+        let mut name = "default".to_owned();
+        let mut suffix = 1_u64;
+        loop {
+            match config.aliases.get(&name) {
+                Some(alias)
+                    if alias.kind == Kind::Vault
+                        && vault_path_key(&alias.target) == vault_path_key(path) =>
+                {
+                    break;
+                }
+                Some(_) => {
+                    name = format!("default-{suffix}");
+                    suffix = suffix
+                        .checked_add(1)
+                        .ok_or_else(|| err("cannot select default context"))?;
+                }
+                None => {
+                    config.aliases.insert(
+                        name.clone(),
+                        Alias {
+                            kind: Kind::Vault,
+                            target: path.to_owned(),
+                            field: None,
+                        },
+                    );
+                    break;
+                }
             }
         }
+        name
     } else {
-        path
+        path.to_owned()
     };
-    config.current = Some(current.to_owned());
+    config.current = Some(current);
     persist(config)?;
     Ok(true)
 }
@@ -6172,30 +6646,99 @@ fn run(args: &[String], program: &str) -> Result<()> {
     match command {
         "init" => init_command(rest, vault, &mut config),
         "context" => match rest.first().map(String::as_str) {
-            Some("ls" | "list") if rest.len() == 1 => {
+            Some("ls" | "list") if rest.len() == 1 || (rest.len() == 2 && rest[1] == "--json") => {
+                let as_json = rest.len() == 2;
+                let current_path = config
+                    .current
+                    .as_deref()
+                    .map(|value| resolve_vault(value, &config))
+                    .transpose()?
+                    .map(|path| normalized_vault_text(&path));
+                let mut listed_paths = BTreeSet::new();
                 for (name, alias) in &config.aliases {
                     if alias.kind == Kind::Vault {
                         check_alias_metadata(name, alias)?;
                         let path = normalized_vault_text(&vault_path(&alias.target)?);
-                        json(&serde_json::json!({"alias": name, "path": path}))?;
+                        let key = vault_path_key(&path);
+                        let current = current_path
+                            .as_deref()
+                            .is_some_and(|value| vault_path_key(value) == key);
+                        listed_paths.insert(key);
+                        if as_json {
+                            json(&serde_json::json!({"alias": name, "path": path}))?;
+                        } else {
+                            writeln!(
+                                io::stdout(),
+                                "{name}\t{path}{}",
+                                if current { "\t(current)" } else { "" }
+                            )
+                            .map_err(|_| err("cannot write output"))?;
+                        }
+                    }
+                }
+                if let Some(path) = &current_path
+                    && listed_paths.insert(vault_path_key(path))
+                {
+                    if as_json {
+                        json(&serde_json::json!({"alias": null, "path": path}))?;
+                    } else {
+                        writeln!(io::stdout(), "(current)\t{path}")
+                            .map_err(|_| err("cannot write output"))?;
+                    }
+                }
+                if let Some(default) = &config.default_vault {
+                    let path = normalized_vault_text(&resolve_vault(default, &config)?);
+                    if listed_paths.insert(vault_path_key(&path)) {
+                        if as_json {
+                            json(
+                                &serde_json::json!({"alias": null, "path": path, "source": "default"}),
+                            )?;
+                        } else {
+                            writeln!(io::stdout(), "(default)\t{path}")
+                                .map_err(|_| err("cannot write output"))?;
+                        }
                     }
                 }
                 Ok(())
             }
-            Some("show") if rest.len() == 1 => {
+            Some("show") if rest.len() == 1 || (rest.len() == 2 && rest[1] == "--json") => {
                 let (path, source) = active_vault(vault, &config)?;
                 let path = normalized_vault_text(&path);
-                let alias = (source == "context")
-                    .then_some(config.current.as_deref())
-                    .flatten()
-                    .and_then(|current| {
-                        config
-                            .aliases
-                            .get(current)
-                            .filter(|alias| alias.kind == Kind::Vault)
-                            .map(|_| current)
-                    });
-                json(&serde_json::json!({"path": path, "source": source, "alias": alias}))
+                let environment = if source == "environment" {
+                    match environment_vault("NKEEPASS_VAULT")? {
+                        Some(value) => Some(value),
+                        None => environment_vault("NKEEPASS_VAULT_PATH")?,
+                    }
+                } else {
+                    None
+                };
+                let selected = match source {
+                    "context" => config.current.as_deref(),
+                    "argument" => vault,
+                    "environment" => environment.as_deref(),
+                    "default" => config.default_vault.as_deref(),
+                    _ => None,
+                };
+                let alias = selected.and_then(|current| {
+                    config
+                        .aliases
+                        .get(current)
+                        .filter(|alias| alias.kind == Kind::Vault)
+                        .map(|_| current)
+                });
+                if rest.len() == 2 {
+                    let legacy_alias = if source == "context" { alias } else { None };
+                    json(
+                        &serde_json::json!({"path": path, "source": source, "alias": legacy_alias}),
+                    )
+                } else {
+                    writeln!(
+                        io::stdout(),
+                        "Name: {}\nPath: {path}\nSource: {source}",
+                        alias.unwrap_or("(unnamed)")
+                    )
+                    .map_err(|_| err("cannot write output"))
+                }
             }
             Some("use") if rest.len() == 2 => {
                 use_context_alias(&mut config, &rest[1])?;
@@ -8324,6 +8867,147 @@ mod tests {
         );
         assert_eq!(retry, Err(nkeepass::ServiceError::CreateExists));
         assert_eq!(fs::read(path).unwrap(), installed);
+    }
+
+    #[test]
+    fn generated_backup_association_survives_context_save_failure_without_clobber() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("synthetic.kdbx");
+        let password = "synthetic-generated-password-for-test";
+        let mut backup = backup_init_password_at(
+            password,
+            &temp.path().join("config"),
+            &temp.path().join("data"),
+        )
+        .unwrap();
+        associate_init_backup(&mut backup, vault.to_str().unwrap()).unwrap();
+        let association = backup.association_path.as_ref().unwrap().clone();
+        let initial = fs::read(&association).unwrap();
+        assert!(associate_init_backup(&mut backup, vault.to_str().unwrap()).is_err());
+        assert_eq!(fs::read(&association).unwrap(), initial);
+        let mut credentials = KdbxCredentials::password(password).unwrap();
+        let created = VaultService::default().create(
+            &vault,
+            &mut credentials,
+            KdbxWriteOptions {
+                aes_kdf_rounds: 8,
+                ..Default::default()
+            },
+            None,
+        );
+        let error = adopt_after_init_create(
+            &mut Config::default(),
+            vault.to_str().unwrap(),
+            true,
+            created,
+            |_| Err(err("injected configuration persistence failure")),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .0
+                .contains("injected configuration persistence failure")
+        );
+        assert!(vault.is_file());
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(association).unwrap()).unwrap();
+        assert_eq!(record["vault"], vault.to_str().unwrap());
+        assert_eq!(record["password_backup"], backup.path.to_str().unwrap());
+        assert_eq!(record["status"], "candidate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reused_published_identity_requires_its_own_durability_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let data = temp.path().join("data");
+        ensure_backup_dir(&config, "synthetic failure").unwrap();
+        let identity_path = config.join("init-password.agekey");
+        let key = neotales_age::AgeKey::generate().unwrap();
+        let private = Zeroizing::new(key.private_key);
+        // Simulate the publisher after no-clobber publication, but before its
+        // parent sync has finished. The reader must perform its own barrier.
+        let mut stage = nkeepass::private_file::new_private_temp(&config).unwrap();
+        stage.write_all(private.as_bytes()).unwrap();
+        stage.as_file().sync_all().unwrap();
+        stage.persist_noclobber(&identity_path).unwrap();
+        let called = std::cell::Cell::new(false);
+        let result =
+            backup_init_password_at_with("synthetic-password", &config, &data, |file, path| {
+                called.set(true);
+                assert_eq!(path, identity_path);
+                assert!(file.metadata().unwrap().is_file());
+                Err(err("injected identity parent durability failure"))
+            });
+        assert!(called.get());
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().0,
+            "injected identity parent durability failure"
+        );
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
+        let retry =
+            backup_init_password_at_with("synthetic-password", &config, &data, |file, path| {
+                confirm_backup_identity_durability(file, path)
+            })
+            .unwrap();
+        assert!(!retry.identity_created);
+        assert!(retry.path.is_file());
+    }
+
+    #[test]
+    fn association_durability_failure_reports_installed_candidate_before_vault_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault.kdbx");
+        let mut backup = backup_init_password_at(
+            "synthetic-password",
+            &temp.path().join("config"),
+            &temp.path().join("data"),
+        )
+        .unwrap();
+        let error =
+            associate_init_backup_with(&mut backup, vault.to_str().unwrap(), |path, bytes| {
+                nkeepass::private_file::write_private_noclobber(path, bytes)?;
+                Err("output installed but directory durability is unconfirmed")
+            })
+            .unwrap_err();
+        assert!(error.installed);
+        assert!(error.message.contains("durability is unconfirmed"));
+        let candidate = backup.association_path.as_ref().unwrap();
+        assert!(candidate.is_file());
+        assert!(!vault.exists());
+        let report = association_failure_record(&backup, vault.to_str().unwrap(), &error);
+        assert_eq!(report["operation"], "init-association-failed");
+        assert_eq!(report["vault_install_started"], false);
+        assert_eq!(report["association_installed"], true);
+        assert_eq!(report["association_candidate"], candidate.to_str().unwrap());
+        assert!(!report.to_string().contains("synthetic-password"));
+        let failure = associate_init_backup_with(&mut backup, vault.to_str().unwrap(), |_, _| {
+            Err("output exists")
+        })
+        .unwrap_err();
+        assert!(!failure.installed);
+        assert_eq!(failure.message, "recovery association already exists");
+        let report = association_failure_record(&backup, vault.to_str().unwrap(), &failure);
+        assert_eq!(report["association_installed"], false);
+        assert_eq!(report["vault_install_started"], false);
+    }
+
+    #[test]
+    fn vault_comparison_policy_preserves_case_and_normalizes_windows_separators() {
+        assert_eq!(
+            vault_path_key_for_platform("C:/Users/Work/Vault.kdbx", true),
+            vault_path_key_for_platform("C:\\Users\\Work\\Vault.kdbx", true)
+        );
+        assert_ne!(
+            vault_path_key_for_platform("C:/Users/Work/Vault.kdbx", true),
+            vault_path_key_for_platform("C:\\Users\\Work\\vault.kdbx", true)
+        );
+        assert_ne!(
+            vault_path_key_for_platform("/work/Vault.kdbx", false),
+            vault_path_key_for_platform("/work/vault.kdbx", false)
+        );
     }
 
     #[test]

@@ -26,8 +26,11 @@ nkp context use work
 nkp context show
 ```
 
-`context show` reports the selected vault and its source. `context ls` lists
-configured vault aliases and paths.
+`context show` prints the selected name, path and source. `context ls` and
+`context list` print configured vault aliases and paths, plus a directly
+selected path and an otherwise unlisted configured default path. A current
+path is marked. These commands use readable text by default; add `--json` for
+machine-readable records.
 
 To use an environment selection for one shell:
 

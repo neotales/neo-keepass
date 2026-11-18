@@ -3707,6 +3707,16 @@ fn set_ensured_password(entry: &mut Entry, value: ProtectedValue) -> Result<(), 
     Ok(())
 }
 
+/// Generates a 32-character random master password using the same unbiased
+/// operating-system random generator as entry passwords.
+///
+/// # Errors
+///
+/// Returns an error if the operating system cannot provide randomness.
+pub fn generate_master_password() -> Result<Zeroizing<String>, ServiceError> {
+    generate_password(32).map(Zeroizing::new)
+}
+
 fn generate_password(size: usize) -> Result<String, ServiceError> {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut password = Zeroizing::new(String::with_capacity(size));
