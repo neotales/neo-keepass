@@ -1580,6 +1580,388 @@ define_nushell_completion!(
 mod tests {
     use super::{POWERSHELL, generate};
     use crate::CONFIG_KEYS;
+    #[cfg(unix)]
+    use std::ffi::OsStr;
+    #[cfg(unix)]
+    use std::time::Duration;
+
+    /// Deadline for the driver PROCESS to exit, per case. Streams are
+    /// drained under separate allowances. Healthy cases finish in a few
+    /// seconds; a driver that exceeds this is killed as a tree and the case
+    /// fails with diagnostics. The whole bounded run is therefore this
+    /// deadline plus at most four drain/recovery allowances
+    /// ([`PYTHON_DRIVER_DRAIN_ALLOWANCE`] × 4: two streams × drain and
+    /// post-kill recovery) plus kill-helper spawn time.
+    #[cfg(unix)]
+    const PYTHON_DRIVER_DEADLINE: Duration = Duration::from_secs(20);
+
+    /// Bounded allowance per drain or recovery attempt on a captured stream:
+    /// the first drain after the driver exits, then — only after a group
+    /// kill in the overflow path — one recovery attempt per stream. An
+    /// expired attempt sets `drain_overflow` and is never retried within
+    /// the same stage; the reader thread of an unrecovered stream leaks
+    /// until process exit rather than risk blocking the harness forever —
+    /// the same trade-off the packaging smoke harness documents for a
+    /// failed Windows drain.
+    #[cfg(unix)]
+    const PYTHON_DRIVER_DRAIN_ALLOWANCE: Duration = Duration::from_secs(2);
+
+    /// Outcome of [`run_python_bounded`] — everything a failure diagnostic
+    /// needs, including what was captured before a kill.
+    #[derive(Debug)]
+    #[cfg(unix)]
+    struct BoundedDriverRun {
+        /// Exit status of the direct child, including the post-kill reap
+        /// when the deadline fired.
+        status: std::process::ExitStatus,
+        /// Whether the deadline expired and the tree was killed.
+        timed_out: bool,
+        /// True when a captured stream failed to drain within the cleanup
+        /// allowance — typically a descendant that kept the inherited pipe
+        /// open past the driver's own exit.
+        drain_overflow: bool,
+        /// Wall-clock time of the whole run, deadline and cleanup included.
+        elapsed: Duration,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    }
+
+    #[cfg(unix)]
+    impl BoundedDriverRun {
+        fn success(&self) -> bool {
+            !self.timed_out && self.status.success()
+        }
+
+        fn failure_summary(&self) -> String {
+            format!(
+                "timed_out={} status={:?} elapsed={:?} drain_overflow={}\n\
+                 -- driver stdout --\n{}\n\
+                 -- driver stderr --\n{}",
+                self.timed_out,
+                self.status,
+                self.elapsed,
+                self.drain_overflow,
+                String::from_utf8_lossy(&self.stdout),
+                String::from_utf8_lossy(&self.stderr),
+            )
+        }
+    }
+
+    /// Run `python3 -c <script> <arguments>` bounded: one deadline for the
+    /// driver PROCESS to exit, then separate bounded allowances to drain
+    /// each captured stream — and, after a group kill in the overflow path,
+    /// to recover what was captured before the kill. The test-side analogue
+    /// of the packaging smoke-harness contract in `docs/ci-cd.md` and the
+    /// direct answer to the macOS hang documented there: a wedged driver
+    /// fails within a bounded budget instead of hanging the test binary,
+    /// and no descendant holding inherited pipes survives the harness.
+    ///
+    /// Unix-only: every caller drives a pty or asserts process-group
+    /// cleanup, and the kill needs process-group semantics. Native Windows
+    /// tree containment is the packaging harness's job object, not this
+    /// helper's. On Unix the driver is born into its own process group so
+    /// the kill reaches every descendant, not just the direct child.
+    #[cfg(unix)]
+    fn run_python_bounded(
+        script: &str,
+        arguments: &[&OsStr],
+        deadline: Duration,
+    ) -> BoundedDriverRun {
+        let started = std::time::Instant::now();
+        let mut command = std::process::Command::new("python3");
+        command
+            .arg("-c")
+            .arg(script)
+            .args(arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // Own process group: killpg then reaches descendants that inherited
+        // the redirected pipes, not just the direct child.
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        let mut child = command.spawn().expect("python3 driver should start");
+        let mut stdout_pipe = child.stdout.take().expect("driver stdout is piped");
+        let mut stderr_pipe = child.stderr.take().expect("driver stderr is piped");
+        let (stdout_sender, stdout_receiver) = std::sync::mpsc::channel();
+        let (stderr_sender, stderr_receiver) = std::sync::mpsc::channel();
+        // Drains read to EOF on threads, so a full pipe can never deadlock a
+        // wedged driver against the harness.
+        std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stdout_pipe, &mut captured);
+            let _ = stdout_sender.send(captured);
+        });
+        std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr_pipe, &mut captured);
+            let _ = stderr_sender.send(captured);
+        });
+
+        let mut timed_out = false;
+        loop {
+            match child.try_wait().expect("driver status should be readable") {
+                Some(_) => break,
+                None if started.elapsed() >= deadline => {
+                    timed_out = true;
+                    break;
+                }
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        if timed_out {
+            kill_driver_tree(&mut child);
+        }
+        let status = child.wait().expect("driver reaping should succeed");
+
+        let mut drain_overflow = false;
+        let stdout = drain_capture(&stdout_receiver, &mut drain_overflow);
+        let stderr = drain_capture(&stderr_receiver, &mut drain_overflow);
+        if drain_overflow {
+            // A descendant outlived the driver while holding the redirected
+            // pipes. The direct child is already reaped here, so cleanup is
+            // group-only — `Child::kill` on a reaped child could signal a
+            // reused pid. The group kill closes the surviving write ends, so
+            // one bounded recovery drain per stream can now reach EOF.
+            kill_driver_group(child.id());
+            let recovered_stdout = stdout_receiver
+                .recv_timeout(PYTHON_DRIVER_DRAIN_ALLOWANCE)
+                .unwrap_or_default();
+            let recovered_stderr = stderr_receiver
+                .recv_timeout(PYTHON_DRIVER_DRAIN_ALLOWANCE)
+                .unwrap_or_default();
+            return BoundedDriverRun {
+                status,
+                timed_out,
+                drain_overflow,
+                elapsed: started.elapsed(),
+                stdout: if recovered_stdout.is_empty() {
+                    stdout
+                } else {
+                    recovered_stdout
+                },
+                stderr: if recovered_stderr.is_empty() {
+                    stderr
+                } else {
+                    recovered_stderr
+                },
+            };
+        }
+        BoundedDriverRun {
+            status,
+            timed_out,
+            drain_overflow,
+            elapsed: started.elapsed(),
+            stdout,
+            stderr,
+        }
+    }
+
+    /// Drain one captured stream, bounded by a single allowance. An expired
+    /// attempt sets the overflow flag; recovery happens only after the
+    /// group kill in the caller, when EOF is actually reachable — the
+    /// harness never stacks attempts on a pipe a live descendant still
+    /// holds.
+    #[cfg(unix)]
+    fn drain_capture(
+        receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+        overflow: &mut bool,
+    ) -> Vec<u8> {
+        if let Ok(captured) = receiver.recv_timeout(PYTHON_DRIVER_DRAIN_ALLOWANCE) {
+            return captured;
+        }
+        *overflow = true;
+        Vec::new()
+    }
+
+    /// Send SIGKILL to a driver process group via the python3 helper — this
+    /// crate forbids `unsafe`, so libc/nix wrappers are unavailable, and
+    /// python3 is already the hard dependency of every driver test here.
+    /// Never passes 0: that would target our own group.
+    #[cfg(unix)]
+    fn signal_driver_group(group: i32) {
+        let group_kill = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
+                &group.to_string(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = group_kill;
+    }
+
+    /// Kill the driver tree while the direct child is still live: the
+    /// process group first (the driver was born into its own group, so
+    /// this reaches descendants that inherited the redirected pipes), then
+    /// the direct child.
+    #[cfg(unix)]
+    fn kill_driver_tree(child: &mut std::process::Child) {
+        if let Ok(group) = i32::try_from(child.id()) {
+            signal_driver_group(group);
+        }
+        let _ = child.kill();
+    }
+
+    /// Group-only cleanup after the direct child was reaped. Never
+    /// `Child::kill()` a reaped child — its pid may already have been
+    /// reused for an unrelated process. `killpg` stays correct here: this
+    /// path only runs while a descendant still holds a redirected pipe,
+    /// and a process group with live members never recycles its id.
+    #[cfg(unix)]
+    fn kill_driver_group(driver_pid: u32) {
+        if let Ok(group) = i32::try_from(driver_pid) {
+            signal_driver_group(group);
+        }
+    }
+
+    /// A wedged driver is killed within the deadline instead of hanging the
+    /// test binary, with its captured output preserved in the diagnostic.
+    /// This is the direct regression for the 75-minute macOS CI hang that
+    /// orphaned python3 on cancellation (incident facts in
+    /// `docs/ci-cd.md`); the wedging syscall itself was never captured, so
+    /// the mitigation is OS-agnostic bounded cleanup, not a platform patch.
+    #[test]
+    #[cfg(unix)]
+    fn bounded_driver_kills_wedged_python_within_deadline() {
+        let run = run_python_bounded(
+            "import time; print('wedged', flush=True); time.sleep(600)",
+            &[],
+            Duration::from_secs(3),
+        );
+        assert!(
+            run.timed_out,
+            "deadline should fire against a wedged driver: {}",
+            run.failure_summary()
+        );
+        assert!(
+            String::from_utf8_lossy(&run.stdout).contains("wedged"),
+            "captured output should survive the kill: {}",
+            run.failure_summary()
+        );
+        assert!(
+            !run.drain_overflow,
+            "drain should finish once the tree is killed: {}",
+            run.failure_summary()
+        );
+        assert!(
+            run.elapsed < Duration::from_secs(15),
+            "deadline kill exceeded the bounded budget: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// A driver whose descendant holds the inherited stdout pipe cannot pin
+    /// the harness: the drain overflows bounded, the group is killed, and
+    /// the escapee is asserted dead BY PID — the same pattern as the
+    /// packaging smoke harness's orphan fixture. This also covers the
+    /// post-reap cleanup path: the driver exits and is reaped BEFORE the
+    /// drain overflows, so the kill must come from `kill_driver_group`
+    /// alone, without touching the reaped child.
+    #[test]
+    #[cfg(unix)]
+    fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives() {
+        let script = r#"
+import subprocess, sys
+descendant = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+print("descendant", descendant.pid, flush=True)
+"#;
+        let run = run_python_bounded(script, &[], Duration::from_secs(3));
+        assert!(
+            !run.timed_out && run.status.success(),
+            "the driver itself exited cleanly: {}",
+            run.failure_summary()
+        );
+        assert!(
+            run.drain_overflow,
+            "the pipe-holding descendant should overflow the drain allowance: {}",
+            run.failure_summary()
+        );
+        assert!(
+            run.elapsed < Duration::from_secs(15),
+            "orphan removal exceeded the bounded budget: {:?}",
+            run.elapsed
+        );
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let descendant: u32 = stdout
+            .split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .parse()
+            .expect("driver should report the escapee pid on stdout");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut alive = true;
+        while std::time::Instant::now() < deadline {
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &descendant.to_string(), "-o", "pid="])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("ps should run");
+            if !probe.success() {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !alive,
+            "pipe-holding escapee {descendant} SURVIVED the bounded tree kill"
+        );
+    }
+
+    /// Every PTY-harness item stays `#[cfg(unix)]`-gated, item by item. The
+    /// harness needs a pty and process-group kills, and an ungated
+    /// `impl BoundedDriverRun` of a gated struct fails to compile the
+    /// Windows unit-test job even though nothing here runs on Windows.
+    /// This check is deliberately NOT `#[cfg(unix)]`: it reads the source
+    /// as text, so it runs wherever the unit tests run and catches a lost
+    /// gate on Linux before Windows CI does. It does not replace a real
+    /// cross-target check — `cargo check --target x86_64-pc-windows-msvc`
+    /// needs that target's std installed, which this machine does not have —
+    /// it guards the one structural rule this file must keep.
+    #[test]
+    fn pty_harness_items_stay_unix_gated() {
+        let source =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion.rs source should be readable");
+        let lines: Vec<&str> = source.lines().collect();
+        let gated_items = [
+            "use std::ffi::OsStr;",
+            "use std::time::Duration;",
+            "const PYTHON_DRIVER_DEADLINE",
+            "const PYTHON_DRIVER_DRAIN_ALLOWANCE",
+            "struct BoundedDriverRun",
+            "impl BoundedDriverRun",
+            "fn run_python_bounded",
+            "fn drain_capture",
+            "fn signal_driver_group",
+            "fn kill_driver_tree",
+            "fn kill_driver_group",
+            "fn bash_binary_completion_uses_readline_quoting_for_hostile_filenames",
+            "fn bounded_driver_kills_wedged_python_within_deadline",
+            "fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives",
+        ];
+        for item in gated_items {
+            let position = lines
+                .iter()
+                .position(|line| line.trim_start().starts_with(item))
+                .unwrap_or_else(|| panic!("unix-gated item not found: {item}"));
+            let previous = lines[..position]
+                .iter()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .copied()
+                .unwrap_or("");
+            assert_eq!(
+                previous.trim(),
+                "#[cfg(unix)]",
+                "unix-gated item `{item}` lost its #[cfg(unix)] attribute — \
+                 the Windows unit-test job would fail to compile"
+            );
+        }
+    }
 
     fn fixture_vault_argument(pattern: &str, context: &str) -> Option<String> {
         assert_eq!(pattern, super::NUSHELL_VAULT_CONTEXT_REGEX);
@@ -2154,72 +2536,139 @@ directory, completion, line, expected_args, wordbreaks, close_quote, expect_matc
 expect_match = expect_match == "true"
 import json
 expected_args = json.loads(expected_args)
+transcript = b""
+
+def fail(message):
+    raise SystemExit(message + "; PTY transcript: " + repr(transcript))
+
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(directory)
     os.execvp("bash", ["bash", "--noprofile", "--norc", "-i"])
+# A macOS CI run hung >75 minutes with this driver orphaned on cancel; the
+# exact blocking syscall was never captured (incident facts: docs/ci-cd.md).
+# The mitigation is OS-agnostic rather than a platform patch: with a
+# blocking master fd, os.read can wedge after a select-reported readiness
+# that no longer holds, and os.write can wedge when bash stops consuming
+# input. Keep the master non-blocking and bound every write instead.
+os.set_blocking(fd, False)
+
 def drain(timeout=0.15):
+    global transcript
     end = time.monotonic() + timeout
     data = b""
     while time.monotonic() < end:
         ready, _, _ = select.select([fd], [], [], 0.05)
-        if ready:
-            try: data += os.read(fd, 65536)
-            except OSError: break
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            continue
+        except OSError:
+            break
+        if not chunk:
+            break
+        data += chunk
+    transcript += data
     return data
-transcript = drain()
-if wordbreaks == "exclude_equals":
-    os.write(fd, b'COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"\n')
-    transcript += drain()
-os.write(fd, b"nkp() { printf '%s\\0' \"$@\" > args.bin; }; source " +
-         completion.encode() + b"\n")
-transcript += drain()
-os.write(fd, line.encode() + b"\t")
-result = drain()
-transcript += result
-no_match = b"\x07" in result
-if no_match:
-    os.write(fd, b"\x03")
-    transcript += drain()
-else:
-    os.write(fd, close_quote.encode() + b"\n")
-    transcript += drain()
-os.write(fd, b"exit\n")
-deadline = time.monotonic() + 3
-while time.monotonic() < deadline:
-    waited, _ = os.waitpid(pid, os.WNOHANG)
-    if waited == pid:
-        break
-    time.sleep(0.02)
-else:
-    os.kill(pid, signal.SIGKILL)
-    os.waitpid(pid, 0)
-    raise SystemExit("timed out waiting for interactive bash; PTY transcript: " + repr(transcript))
-if no_match == expect_match:
-    raise SystemExit("unexpected completion match state; PTY transcript: " + repr(transcript))
-if no_match:
-    raise SystemExit(0)
-with open(os.path.join(directory, "args.bin"), "rb") as stream:
-    actual = stream.read().split(b"\0")[:-1]
-if actual != [arg.encode() for arg in expected_args]:
-    raise SystemExit("completion produced unexpected literal argv: " + repr(actual))
+
+def write_bounded(data, timeout=5.0):
+    end = time.monotonic() + timeout
+    pending = memoryview(data)
+    while pending:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            fail("pty stopped accepting input within the write deadline")
+        _, writable, _ = select.select([], [fd], [], min(0.1, remaining))
+        if not writable:
+            continue
+        try:
+            sent = os.write(fd, pending)
+        except BlockingIOError:
+            continue
+        except OSError:
+            fail("pty master rejected input; bash is gone")
+        pending = pending[sent:]
+
+def stop_child():
+    # pty.fork()'s child called setsid(): bash leads its own session and
+    # process group, so killpg reaches every job it spawned. Kill even on the
+    # success paths, so a straggler subshell never outlives the driver.
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            return
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited == pid:
+            return
+        time.sleep(0.02)
+    fail("interactive bash survived SIGKILL")
+
+try:
+    drain()
+    if wordbreaks == "exclude_equals":
+        write_bounded(b'COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"\n')
+        drain()
+    write_bounded(b"nkp() { printf '%s\\0' \"$@\" > args.bin; }; source " + completion.encode() + b"\n")
+    drain()
+    write_bounded(line.encode() + b"\t")
+    result = drain()
+    no_match = b"\x07" in result
+    if no_match:
+        write_bounded(b"\x03")
+        drain()
+    else:
+        write_bounded(close_quote.encode() + b"\n")
+        drain()
+    write_bounded(b"exit\n")
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        waited, _ = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            break
+        time.sleep(0.02)
+    else:
+        stop_child()
+        fail("timed out waiting for interactive bash to exit")
+    if no_match == expect_match:
+        fail("unexpected completion match state")
+    if no_match:
+        raise SystemExit(0)
+    with open(os.path.join(directory, "args.bin"), "rb") as stream:
+        actual = stream.read().split(b"\0")[:-1]
+    if actual != [arg.encode() for arg in expected_args]:
+        raise SystemExit("completion produced unexpected literal argv: " + repr(actual))
+finally:
+    stop_child()
 "#;
-            let output = std::process::Command::new("python3")
-                .arg("-c")
-                .arg(script)
-                .arg(directory.path())
-                .arg(&completion_path)
-                .arg(line)
-                .arg(serde_json::to_string(&expected_args).unwrap())
-                .arg(wordbreaks)
-                .arg(close_quote)
-                .arg(expect_match.to_string())
-                .output()
-                .expect("python3 PTY driver should run");
+            let expected_json = serde_json::to_string(&expected_args).unwrap();
+            let expect_match_flag = expect_match.to_string();
+            let run = run_python_bounded(
+                script,
+                &[
+                    directory.path().as_os_str(),
+                    completion_path.as_os_str(),
+                    OsStr::new(line),
+                    OsStr::new(&expected_json),
+                    OsStr::new(wordbreaks),
+                    OsStr::new(close_quote),
+                    OsStr::new(&expect_match_flag),
+                ],
+                PYTHON_DRIVER_DEADLINE,
+            );
             assert!(
-                output.status.success(),
-                "Readline PTY failed for {expected_filename:?}: {}",
-                String::from_utf8_lossy(&output.stderr),
+                run.success(),
+                "Readline PTY failed for {expected_filename:?} (line {line:?}): {}",
+                run.failure_summary(),
             );
             assert!(!marker.exists(), "completion executed an injected command");
             let _ = std::fs::remove_file(directory.path().join("args.bin"));

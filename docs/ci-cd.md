@@ -89,6 +89,30 @@ nowhere else); a Test-compile failure is a test-binary build/link defect; a
 Test failure with both predecessors green is an assertion failure, a doctest
 compile error, or a runtime error.
 
+**macOS hang of run 134478538047
+(`completion::tests::bash_binary_completion_uses_readline_quoting_for_hostile_filenames`):**
+the authenticated macOS `test` job ran past 75 minutes on this one test
+while the other 133 tests completed, and job cancellation left an orphaned
+`python3` child — the test's PTY driver for interactive bash. What the
+incident does and does NOT establish: the wedging syscall was never
+captured (the job was cancelled before any dump, and no macOS-native
+reproduction is available to this checkout), so the standing explanation —
+a blocking pty-master `read` after a select-reported readiness that no
+longer held, or a blocking `write` into a tty bash had stopped consuming —
+is a hypothesis, not an observed fact. The fix therefore bounds every I/O
+and lifecycle path instead of patching a platform: the driver keeps the
+master fd non-blocking with deadline-bounded writes and kills bash's
+process group on every exit path, and the harness runs the driver under
+one exit deadline with separate bounded drain/recovery allowances, in its
+own process group with a whole-tree kill. Regression fixtures
+(`bounded_driver_kills_wedged_python_within_deadline`,
+`bounded_driver_removes_pipe_holding_descendant_no_orphan_survives`)
+assert bounded return and by-PID orphan death; both are unix-gated, which
+is honest about reach: Windows tree containment is the packaging harness's
+job object, not this test helper's, and macOS-native verification of the
+fix has not been performed — the hang mechanism is addressed
+OS-agnostically, not observed and not skipped.
+
 ## `build.yml` — Linux amd64/arm64 build + packaging
 
 Triggered by tag push `v*`, manual dispatch with an optional `ref`, or pull
