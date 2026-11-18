@@ -580,7 +580,14 @@ _nkp_complete() {
     done
     if (( index >= COMP_CWORD )); then
         if (( COMP_CWORD > 0 )) && [[ "${COMP_WORDS[COMP_CWORD - 1]}" == "--vault" || "${COMP_WORDS[COMP_CWORD - 1]}" == "-V" ]]; then
-            mapfile -t COMPREPLY < <(command nkp __complete vaults "$current" 2>/dev/null)
+            # A while-read accumulator instead of mapfile: mapfile is
+            # bash 4.0+, and on bash 3.2 it would print an unredirected
+            # "command not found" on every vault completion while leaving
+            # COMPREPLY empty. The loop below behaves identically on
+            # every bash that can source this script.
+            COMPREPLY=()
+            while IFS= read -r candidate; do COMPREPLY+=("$candidate"); done \
+                < <(command nkp __complete vaults "$current" 2>/dev/null)
         else
             choices='init context alias config secrets automation get getx list ls search show env set rm remove ensure otp setx import export sync files attachment attachments group groups field custom-field exec x version completion --help -h --version --vault -V --password-env --password-stdin'
             COMPREPLY=( $(compgen -W "$choices" -- "$current") )
@@ -615,7 +622,11 @@ _nkp_complete() {
         kind='vaults'
     fi
     if [[ -n "$kind" ]]; then
-        mapfile -t COMPREPLY < <(command nkp "${vault_args[@]}" __complete "$kind" "$current" 2>/dev/null)
+        # Same while-read accumulator as the vault branch: mapfile is
+        # bash 4.0+ and macOS's default /bin/bash is 3.2.
+        COMPREPLY=()
+        while IFS= read -r candidate; do COMPREPLY+=("$candidate"); done \
+            < <(command nkp "${vault_args[@]}" __complete "$kind" "$current" 2>/dev/null)
         return
     fi
     if [[ "$previous" == "--" ]]; then
