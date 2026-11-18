@@ -244,6 +244,33 @@ independently checks the leader is gone; it also verifies a close error
 fails the case. It simulates a dependency rather than reproducing Darwin.
 Native macOS confirmation is still required.
 
+**Group fixture failure at 7e189fb (native run 44259959300):** the hostile
+filename PTY passed; the owned-group fixture reported
+`p,r,o,b,e,-,e,r,r,n,o,-,1`. Its old fixture returned the string
+`probe-errno-1` rather than an event list on error and then joined it as
+characters. Thus the decoded observation is errno 1 (`EPERM`), not
+`ESRCH`. The fixture's leader starts a same-group background `sleep` and
+exits; the sleep is consequently reparented. Its final state at the failed
+probe was not recorded, so reparenting or a zombie cannot be asserted as
+the particular cause.
+
+Apple's published [XNU signal implementation](
+https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c)
+shows `killpg1` filtering `SZOMB` members before counting signalable
+processes and returning `EPERM` for a POSIX group probe with no eligible
+members. An all-zombie group is therefore one possible explanation, as is
+a permission or policy failure; this source is not a capture of the
+runner's kernel state. Both fixture and actual driver now retry `EPERM`
+within their existing bounded group-absence window and succeed only on
+`ESRCH`. Persistent `EPERM` still fails, with the straggler's bounded
+`ps` metadata captured in the fixture. Its independently grouped
+bystander is now killed and reaped by its owning process even when the
+probe fails. Fault injection exercises transient and persistent `EPERM` in
+both the actual driver and the fixture. The reported 78.81 seconds cannot
+be attributed to this probe from the available output; the fixture now
+reports leader-wait and cleanup timings on failure. Native confirmation
+is still required.
+
 The ownership protocol uses CPython `os.waitid(..., WNOWAIT)`. CPython's
 official [Python 3.13 `os.waitid` documentation](https://docs.python.org/3.13/library/os.html#os.waitid)
 states that `os.waitid` became available on macOS in 3.13. The macOS CI

@@ -2081,16 +2081,17 @@ raise SystemExit(failures)
     /// An exited-but-unreaped group leader pins its PGID while cleanup
     /// signals the group. After reaping that leader, cleanup only probes
     /// for group absence and never signals the numeric PGID again.
-    #[test]
     #[cfg(unix)]
-    fn bounded_driver_owned_group_cleanup_kills_descendant_before_reap() {
-        let script = r#"
-import errno, os, signal, subprocess, time
+    fn owned_group_fixture() -> &'static str {
+        r#"
+import errno, os, signal, subprocess, sys, time
 
 transcript = b""
+started = time.monotonic()
 
 def stop_child(pid):
     events = []
+    last_probe = "none"
     # The leader has been observed exited via waitid(WNOWAIT) and remains
     # unreaped. Its PID was also its session/process-group ID at creation;
     # do not call getpgid on a zombie, which can return ESRCH on macOS.
@@ -2105,13 +2106,18 @@ def stop_child(pid):
     while time.monotonic() < deadline:
         try:
             os.killpg(pid, 0)
+            last_probe = "exists"
         except OSError as error:
             if error.errno == errno.ESRCH:
                 events.append("absent")
                 return events
-            return "probe-errno-%s" % error.errno
+            last_probe = "errno-%s" % error.errno
+            if error.errno != errno.EPERM:
+                return events + ["probe-errno-%s" % error.errno]
+            # Darwin can report EPERM for a group with no signalable
+            # members, including an unreaped zombie. EPERM is not absence.
         time.sleep(0.02)
-    return "group-still-exists"
+    return events + ["group-absence-unconfirmed-" + last_probe]
 
 # pty.fork() gives the real driver's child its own session and group;
 # this replicates that shape so the group semantics are the real ones.
@@ -2131,6 +2137,7 @@ while time.monotonic() < deadline:
         break
     time.sleep(0.02)
 assert observation is not None and observation.si_pid == child.pid
+leader_observed_at = time.monotonic()
 # A bystander in its own group, outside everything the cleanup owns: it
 # must come through the cleanup untouched.
 victim = subprocess.Popen(
@@ -2139,9 +2146,39 @@ victim = subprocess.Popen(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 )
-events = stop_child(child.pid)
-print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), flush=True)
-"#;
+try:
+    events = stop_child(child.pid)
+    bystander_alive = victim.poll() is None
+    print("straggler", straggler, "victim", victim.pid,
+          "bystander_alive", bystander_alive,
+          "events", ",".join(events),
+          "leader_wait_s", round(leader_observed_at - started, 3),
+          "cleanup_s", round(time.monotonic() - leader_observed_at, 3),
+          flush=True)
+    if events[-1] != "absent":
+        try:
+            snapshot = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,stat=,pgid=,uid=", "-p", str(straggler)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, timeout=1, check=False,
+            )
+            print("straggler ps exit=%s data=%r" %
+                  (snapshot.returncode, snapshot.stdout.strip()), file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print("straggler ps unavailable: %s" % type(error).__name__, file=sys.stderr)
+finally:
+    # The fixture owns this child; clean it even if an earlier assertion
+    # fails, before its PID can be reused, and never orphan the bystander.
+    if victim.poll() is None:
+        os.killpg(victim.pid, signal.SIGKILL)
+    victim.wait(timeout=3)
+"#
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bounded_driver_owned_group_cleanup_kills_descendant_before_reap() {
+        let script = owned_group_fixture();
         let run = run_python_bounded(script, &[], Duration::from_secs(15));
         assert!(
             run.success(),
@@ -2158,6 +2195,7 @@ print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), 
         let mut straggler: Option<u32> = None;
         let mut victim: Option<u32> = None;
         let mut events = None;
+        let mut bystander_alive = None;
         let mut fields = stdout.split_whitespace();
         while let Some(field) = fields.next() {
             match field {
@@ -2168,6 +2206,7 @@ print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), 
                     victim = fields.next().and_then(|value| value.parse().ok());
                 }
                 "events" => events = fields.next(),
+                "bystander_alive" => bystander_alive = fields.next(),
                 _ => {}
             }
         }
@@ -2177,7 +2216,8 @@ print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), 
         assert_eq!(
             events,
             Some("continue,kill,reap,absent"),
-            "signals must precede reap, then cleanup must observe group absence"
+            "signals must precede reap, then cleanup must observe group absence: {}",
+            run.failure_summary()
         );
         // The straggler must be dead by pid: the group kill reached it
         // while the unreaped leader still pinned the process group.
@@ -2200,49 +2240,56 @@ print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), 
             !straggler_alive,
             "straggler {straggler} SURVIVED the owned-group kill"
         );
-        // The bystander must still be alive: the cleanup signaled its OWN
-        // group only, never a pid it no longer owned.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut victim_alive = false;
-        while std::time::Instant::now() < deadline {
-            let probe = std::process::Command::new("ps")
-                .args(["-p", &victim.to_string(), "-o", "pid="])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .expect("ps should run");
-            if probe.success() {
-                victim_alive = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(
-            victim_alive,
+        assert_eq!(
+            bystander_alive,
+            Some("True"),
             "bystander {victim} was killed by a cleanup it never belonged to"
         );
-        // Leave nothing behind: the bystander leads its own group, so the
-        // established group-kill helper removes it — still no pid kill.
-        signal_driver_group(i32::try_from(victim).expect("bystander pid should fit i32"));
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let mut victim_dead = false;
-        while std::time::Instant::now() < deadline {
-            let probe = std::process::Command::new("ps")
-                .args(["-p", &victim.to_string(), "-o", "pid="])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .expect("ps should run");
-            if !probe.success() {
-                victim_dead = true;
-                break;
+    }
+
+    /// Exercise the real fixture's probe, rather than a copy of its loop:
+    /// transient EPERM may settle, but persistent EPERM is never absence.
+    #[test]
+    #[cfg(unix)]
+    fn owned_group_fixture_retries_but_never_accepts_eperm() {
+        let script = owned_group_fixture();
+        assert_eq!(script.matches("os.killpg(pid, 0)").count(), 1);
+        for persistent in [false, true] {
+            let probe = format!(
+                "probes = 0\ndef probe_group(pid):\n    global probes\n    probes += 1\n    if probes == 1 or {persistent}:\n        raise OSError(errno.EPERM, 'injected')\n    return os.killpg(pid, 0)\n\ndef stop_child(pid):",
+                persistent = if persistent { "True" } else { "False" }
+            );
+            let injected = script
+                .replace("os.killpg(pid, 0)", "probe_group(pid)")
+                .replace("def stop_child(pid):", &probe);
+            let run = run_python_bounded(&injected, &[], Duration::from_secs(15));
+            assert!(
+                run.success() && !run.drain_overflow,
+                "fixture must finish boundedly: {}",
+                run.failure_summary()
+            );
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            let expected = if persistent {
+                "events continue,kill,reap,group-absence-unconfirmed-errno-1"
+            } else {
+                "events continue,kill,reap,absent"
+            };
+            assert!(stdout.contains(expected), "unexpected output: {stdout}");
+            assert!(stdout.contains("bystander_alive True"));
+            let fields: Vec<_> = stdout.split_whitespace().collect();
+            for name in ["straggler", "victim"] {
+                let index = fields.iter().position(|value| *value == name).unwrap();
+                let pid = fields[index + 1];
+                let probe = std::process::Command::new("ps")
+                    .args(["-p", pid, "-o", "pid="])
+                    .output()
+                    .expect("ps must check fixture processes");
+                assert!(
+                    !probe.status.success() || probe.stdout.trim_ascii().is_empty(),
+                    "{name} {pid} leaked: {stdout}"
+                );
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(
-            victim_dead,
-            "bystander {victim} could not be cleaned up after the assertion"
-        );
     }
 
     /// The diagnostic-only exit handshake records what it observed
@@ -2771,6 +2818,71 @@ else:
             "the actual driver should report its safe preflight failure: {}",
             run.failure_summary()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pty_driver_requires_esrch_after_eperm() {
+        let source = lf_script(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion source"),
+        );
+        let driver = hostile_filename_driver_slice(&source)
+            .expect("driver slice")
+            .strip_prefix("r#\"\n")
+            .expect("raw string prefix");
+        assert_eq!(driver.matches("os.killpg(group_id, 0)").count(), 1);
+        let directory = tempfile::tempdir().expect("PTY test directory");
+        std::fs::write(directory.path().join("present.bin"), b"").unwrap();
+        let completion = directory.path().join("completion.bash");
+        std::fs::write(&completion, generate("bash").unwrap()).unwrap();
+        let expected = serde_json::to_string(&["set", "--bin", "payload=present.bin"]).unwrap();
+        for persistent in [false, true] {
+            let replacement = format!(
+                "probe_count = 0\ndef probe_group(group):\n    global probe_count\n    probe_count += 1\n    if probe_count == 1 or {persistent}:\n        raise OSError(errno.EPERM, 'injected')\n    return os.killpg(group, 0)\n\ndef stop_child():",
+                persistent = if persistent { "True" } else { "False" }
+            );
+            let injected = driver
+                .replace("os.killpg(group_id, 0)", "probe_group(group_id)")
+                .replace("def stop_child():", &replacement)
+                .replace(
+                    "os.set_blocking(fd, False)",
+                    "os.set_blocking(fd, False)\nprint('PTY-TEST-PID', pid, flush=True)",
+                );
+            let _ = std::fs::remove_file(directory.path().join("args.bin"));
+            let run = run_python_bounded(
+                &injected,
+                &[
+                    directory.path().as_os_str(),
+                    completion.as_os_str(),
+                    OsStr::new("nkp set --bin payload=present"),
+                    OsStr::new(&expected),
+                    OsStr::new("default"),
+                    OsStr::new(""),
+                    OsStr::new("true"),
+                ],
+                Duration::from_secs(15),
+            );
+            assert!(!run.timed_out && !run.drain_overflow);
+            assert_eq!(
+                run.success(),
+                !persistent,
+                "EPERM must settle to ESRCH, not pass by itself: {}",
+                run.failure_summary()
+            );
+            if persistent {
+                let stderr = String::from_utf8_lossy(&run.stderr);
+                assert!(stderr.contains("process group absence not established"));
+                assert!(stderr.contains("group probe: errno-1:"));
+            }
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            let pid = stdout.split_whitespace().nth(1).expect("leader pid");
+            let probe = std::process::Command::new("ps")
+                .args(["-p", pid, "-o", "pid="])
+                .output()
+                .expect("ps should check for leaked leader");
+            assert!(!probe.status.success() || probe.stdout.trim_ascii().is_empty());
+        }
     }
 
     /// Exercise the actual driver with a simulated exit that cannot become
@@ -5013,7 +5125,11 @@ def stop_child():
             if error.errno == errno.ESRCH:
                 return close_error
             group_probe = "errno-%s:%s" % (error.errno, error.strerror)
-            break
+            # EPERM is not absence. Darwin can return it while a group
+            # exists but has no signalable members (including zombies);
+            # allow bounded settlement, failing if ESRCH never appears.
+            if error.errno != errno.EPERM:
+                break
         time.sleep(0.02)
     return (
         "process group absence not established after bounded cleanup; "
