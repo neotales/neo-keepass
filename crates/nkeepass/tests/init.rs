@@ -203,7 +203,7 @@ fn empty_data_alias_does_not_fall_through_to_lower_priority_directory() {
 }
 
 #[test]
-fn app_directory_aliases_accept_os_native_paths() {
+fn app_directory_alias_handles_nonunicode_paths_according_to_filesystem_capability() {
     use std::os::unix::ffi::OsStringExt;
 
     let fixture = Fixture::new();
@@ -219,8 +219,37 @@ fn app_directory_aliases_accept_os_native_paths() {
             .chain([0xff])
             .collect(),
     ));
+    // Test the same parent and filename bytes the CLI will use. An unrelated
+    // permissions or I/O error must not masquerade as lack of byte support.
+    let control = fixture.root.path().join("config-control");
+    std::fs::create_dir(&control).expect("create ASCII control directory");
+    std::fs::remove_dir(&control).expect("remove ASCII control directory");
+    let supports_nonunicode = match std::fs::create_dir(&config) {
+        Ok(()) => {
+            std::fs::remove_dir(&config).expect("remove non-Unicode probe directory");
+            true
+        }
+        Err(error) => {
+            let invalid_name = error.kind() == std::io::ErrorKind::InvalidInput
+                || error.kind() == std::io::ErrorKind::InvalidData
+                || cfg!(target_os = "macos") && error.raw_os_error() == Some(92)
+                || cfg!(target_os = "linux") && error.raw_os_error() == Some(84);
+            assert!(
+                invalid_name,
+                "unexpected non-Unicode mkdir error: {error:?}"
+            );
+            eprintln!("filesystem rejected non-Unicode mkdir: {error:?}");
+            false
+        }
+    };
+
     let output = command(&fixture, PASSWORD)
         .env("NEO_KEEPASS_CONFIG_DIR", &config)
+        .env("NKP_CONFIG_DIR", fixture.root.path().join("short-fallback"))
+        .env(
+            "NKEEPASS_CONFIG_DIR",
+            fixture.root.path().join("legacy-fallback"),
+        )
         .args([
             "context",
             "set",
@@ -229,12 +258,30 @@ fn app_directory_aliases_accept_os_native_paths() {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "OS-native directory paths should work: {}",
-        stderr(&output)
-    );
-    assert!(config.join("config.json").is_file());
+    if supports_nonunicode {
+        assert!(
+            output.status.success(),
+            "OS-native directory paths should work: {}",
+            stderr(&output)
+        );
+        assert!(config.join("config.json").is_file());
+    } else {
+        assert!(
+            !output.status.success(),
+            "unsupported filename was accepted"
+        );
+        assert!(
+            stderr(&output).contains("cannot create configuration directory"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!fixture.config_home().join("nkeepass/config.json").exists());
+        assert!(!fixture.data_home().exists());
+        assert!(!fixture.vault("native.kdbx").exists());
+        assert_no_password(&output);
+    }
+    assert!(!fixture.root.path().join("short-fallback").exists());
+    assert!(!fixture.root.path().join("legacy-fallback").exists());
 }
 
 #[test]
