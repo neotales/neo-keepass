@@ -100,6 +100,7 @@ fn generated_master_backup_and_default_context_are_private() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let backup = Path::new(report["password_backup"].as_str().unwrap());
     let identity = Path::new(report["age_identity"].as_str().unwrap());
+    let association = Path::new(report["recovery_association"].as_str().unwrap());
     let key = std::fs::read_to_string(identity).unwrap();
     let password = zeroize::Zeroizing::new(
         neotales_age::AgeFile::decrypt_armored(
@@ -123,6 +124,7 @@ fn generated_master_backup_and_default_context_are_private() {
     for path in [
         backup,
         identity,
+        association,
         temp.path().join("data/default.kdbx").as_path(),
         temp.path().join("config/config.json").as_path(),
     ] {

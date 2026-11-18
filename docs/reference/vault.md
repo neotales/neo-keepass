@@ -54,11 +54,27 @@ that supports protected, verified current-user-only DACLs.
 
 With `--generate-master-password`, init installs the encrypted backup **before**
 creating the vault, so backup failure cannot strand an inaccessible vault. If
-vault creation or context persistence fails after that, a recovery report on
-stdout identifies the backup and identity; an unused encrypted backup may
-remain after a failed attempt. `--json` reports this as an `init-recovery`
-object and retains a nonzero exit status. The generated master password is not
-printed. An ambient `NKEEPASS_PASSWORD` is ignored for this opt-in mode.
+vault creation or context persistence fails after that, stdout identifies the
+target and whether the vault was installed. If installation did not occur,
+the report says **unused backup**: that password cannot unlock an existing
+vault. JSON uses `init-unused-backup` with `vault_installed: false`; an
+installed vault with a later failure uses `init-recovery` with
+`vault_installed: true`. Both retain a nonzero exit status.
+
+Before installing a generated-password vault, init also creates a private
+no-clobber `init-password-*.age.json` candidate record beside the encrypted
+backup, containing its vault path, backup path and identity path, but no secret.
+If output is lost, inspect those records in the configured data directory and
+find candidates for the target path. Each record describes an **attempt**, not
+proof of installation: collisions, interrupted attempts, and concurrent init
+can leave multiple candidates. In a private environment, try each candidate's
+backup with the corresponding identity against the target vault, as below.
+Only one that actually opens the vault is its recovery password. Keep candidate
+records private and retain them with their corresponding encrypted backups.
+On Unix the file and parent directory are synced before vault installation;
+Windows uses the existing private-file durability policy and owner-only DACL.
+The generated master password is not printed. An ambient `NKEEPASS_PASSWORD`
+is ignored for this opt-in mode.
 
 Init reports the database path, backup path, and whether the age identity was
 created or reused. Treat the identity as a secret: anyone who obtains both it
@@ -105,7 +121,13 @@ default path as `(default)`. Paths already represented by aliases are not
 repeated as direct paths. Rows mark the configured current path. `show` reports the selected vault,
 its alias (or `(unnamed)`), and source. These commands print human-readable
 text by default; `--json` selects machine-readable records (`ls` emits one JSON
-object per line). `use` selects a configured vault alias. `set` creates or
+object per line). Existing alias records retain `alias` and `path`; a direct
+current path has a null `alias`, while a newly reported direct default has a
+null `alias` and `"source":"default"`. Current status appears in text; use
+`context show --json` for machine-readable selection and source. On Windows
+path comparisons normalize separators and lowercase text for deduplication;
+displayed spelling is unchanged. This lexical policy does not resolve symlinks,
+hard links, or every filesystem-specific Unicode equivalence. `use` selects a configured vault alias. `set` creates or
 updates an alias. `rm` (also `remove`) removes an alias and clears it as current if needed.
 Other subcommands have no command-specific options.
 
