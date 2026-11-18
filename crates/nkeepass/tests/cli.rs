@@ -311,6 +311,34 @@ fn isolated_child_drains_large_stdout_and_stderr_concurrently() {
     assert_eq!(output.stderr.len(), 131072);
 }
 
+#[test]
+fn isolated_child_bounds_output_when_a_descendant_keeps_a_pipe_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pid_file = tmp.path().join("descendant.pid");
+    let mut raw = Command::new("sh");
+    raw.args([
+        "-c",
+        "sleep 60 & printf '%s\\n' \"$!\" > \"$PID_FILE\"; exit 0",
+    ]);
+    raw.env("PID_FILE", &pid_file);
+    let mut command = raw.isolate_application_environment();
+
+    let started = std::time::Instant::now();
+    let error = command.output().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+
+    let descendant_pid: u32 = std::fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        !process_is_alive(descendant_pid),
+        "descendant retaining the child's output pipe survived fixture cleanup"
+    );
+}
+
 fn process_is_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])

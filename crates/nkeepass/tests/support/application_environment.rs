@@ -4,7 +4,12 @@ use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
+use std::time::{Duration, Instant};
+
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+const OUTPUT_READER_JOIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Owns a child command and its disposable home directory until the command
 /// has completed and the fixture is dropped.
@@ -25,6 +30,11 @@ impl IsolatedCommand {
     /// owned temporary directory whose lifetime covers the command fixture.
     #[must_use]
     pub fn new(mut command: Command) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         for name in [
             "NEO_KEEPASS_PASSWORD",
             "NKP_PASSWORD",
@@ -189,9 +199,11 @@ impl IsolatedCommand {
                 return Err(error);
             }
         };
+        let process_group = child.id();
         Ok(IsolatedChild {
             child: Some(child),
             _home: home,
+            process_group,
             reaped: false,
         })
     }
@@ -202,6 +214,7 @@ impl IsolatedCommand {
 pub struct IsolatedChild {
     child: Option<Child>,
     _home: tempfile::TempDir,
+    process_group: u32,
     reaped: bool,
 }
 
@@ -245,18 +258,18 @@ impl IsolatedChild {
     pub fn wait_with_output(mut self) -> io::Result<Output> {
         let child = self.child.as_mut().expect("child is present");
         drop(child.stdin.take());
+        let process_group = self.process_group;
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
         let status = match self.wait() {
             Ok(status) => status,
             Err(error) => {
                 self.kill_and_reap();
-                let _ = collect(stdout);
-                let _ = collect(stderr);
+                let _ = collect_output(stdout, stderr, process_group);
                 return Err(error);
             }
         };
-        let (stdout, stderr) = collect_output(stdout, stderr)?;
+        let (stdout, stderr) = collect_output(stdout, stderr, process_group)?;
         Ok(Output {
             status,
             stdout,
@@ -267,6 +280,7 @@ impl IsolatedChild {
 
 impl IsolatedChild {
     fn kill_and_reap(&mut self) {
+        terminate_process_group(self.process_group);
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
@@ -283,44 +297,107 @@ impl Drop for IsolatedChild {
     }
 }
 
-fn drain<R: Read + Send + 'static>(
-    reader: Option<R>,
-) -> Option<thread::JoinHandle<io::Result<Vec<u8>>>> {
+type Drain = (Receiver<io::Result<Vec<u8>>>, thread::JoinHandle<()>);
+
+fn drain<R: Read + Send + 'static>(reader: Option<R>) -> Option<Drain> {
     reader.map(|mut reader| {
-        thread::spawn(move || {
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
             let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
+            let result = reader.read_to_end(&mut bytes).map(|_| bytes);
+            let _ = sender.send(result);
+        });
+        (receiver, handle)
     })
 }
 
-fn collect(reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>) -> io::Result<Vec<u8>> {
-    reader
-        .map(|reader| {
-            reader
-                .join()
-                .map_err(|_| io::Error::other("child output reader panicked"))?
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
+fn collect(reader: Option<Drain>, process_group: u32) -> io::Result<Vec<u8>> {
+    let Some((receiver, handle)) = reader else {
+        return Ok(Vec::new());
+    };
+    let result = match receiver.recv_timeout(OUTPUT_DRAIN_TIMEOUT) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => {
+            terminate_process_group(process_group);
+            if let Ok(result) = receiver.recv_timeout(OUTPUT_DRAIN_TIMEOUT) {
+                // The reader sent its result, so joining it is immediate and
+                // ensures no completed reader is left detached.
+                let _ = result;
+                let _ = join_finished(handle);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "child output remained open after the child exited",
+            ));
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(io::Error::other("child output reader panicked"));
+        }
+    };
+    join_finished(handle)?;
+    result
+}
+
+fn join_finished(handle: thread::JoinHandle<()>) -> io::Result<()> {
+    let deadline = Instant::now() + OUTPUT_READER_JOIN_TIMEOUT;
+    while !handle.is_finished() && Instant::now() < deadline {
+        thread::park_timeout(Duration::from_millis(1));
+    }
+    if handle.is_finished() {
+        handle
+            .join()
+            .map_err(|_| io::Error::other("child output reader panicked"))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "child output reader did not finish promptly",
+        ))
+    }
 }
 
 fn collect_output(
-    stdout: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
-    stderr: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stdout: Option<Drain>,
+    stderr: Option<Drain>,
+    process_group: u32,
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
-    // Join both readers before propagating either error, so no reader is
-    // detached if one stream fails.
-    let stdout = collect(stdout);
-    let stderr = collect(stderr);
+    let stdout = collect(stdout, process_group);
+    let stderr = collect(stderr, process_group);
+    if stdout
+        .as_ref()
+        .is_err_and(|error| error.kind() == io::ErrorKind::TimedOut)
+    {
+        return Err(stdout.unwrap_err());
+    }
+    if stderr
+        .as_ref()
+        .is_err_and(|error| error.kind() == io::ErrorKind::TimedOut)
+    {
+        return Err(stderr.unwrap_err());
+    }
+    // Observe both readers before propagating a non-timeout stream error.
     Ok((stdout?, stderr?))
+}
+
+fn terminate_process_group(process_group: u32) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{process_group}");
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = process_group;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::collect_output;
+    use super::{Drain, collect_output};
     use std::io;
+    use std::sync::mpsc;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -331,16 +408,27 @@ mod tests {
     fn reader_failure_still_joins_the_other_stream() {
         let stderr_joined = Arc::new(AtomicBool::new(false));
         let stderr_joined_by_thread = Arc::clone(&stderr_joined);
-        let stdout = Some(thread::spawn(|| {
+        let stdout = Some(spawn_result(|| {
             Err(io::Error::other("injected reader failure"))
         }));
-        let stderr = Some(thread::spawn(move || {
+        let stderr = Some(spawn_result(move || {
             stderr_joined_by_thread.store(true, Ordering::SeqCst);
             Ok(vec![b'e'])
         }));
 
-        assert!(collect_output(stdout, stderr).is_err());
+        assert!(collect_output(stdout, stderr, 0).is_err());
         assert!(stderr_joined.load(Ordering::SeqCst));
+    }
+
+    fn spawn_result<F>(read: F) -> Drain
+    where
+        F: FnOnce() -> io::Result<Vec<u8>> + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = sender.send(read());
+        });
+        (receiver, handle)
     }
 }
 
