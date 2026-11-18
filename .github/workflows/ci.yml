@@ -96,6 +96,35 @@ jobs:
         with:
           toolchain: "1.98.1" # matches rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # macOS still ships bash 3.2.57 as /bin/bash, which predates
+      # `compopt` (bash 4.0+): the hostile-filename readline matrix in
+      # crates/nkeepass/src/completion.rs pins quoting behavior only a
+      # bash >= 4 can express, and against 3.2 its candidates get
+      # re-quoted and misplaced (proven on a readline-enabled bash
+      # 3.2.57 build). Homebrew's bash (5.x) resolves first on the
+      # runner PATH, so the PTY driver's execvp and every
+      # `Command::new("bash")` test reach it. The floor is asserted,
+      # not the exact version pinned: brew bottles move, and the
+      # requirement is the compopt contract, not one build. The
+      # resolution check proves the PATH actually hands that bash to
+      # the tests; without it a silently missing brew bash would turn
+      # the matrix into a skip instead of the intended failure.
+      - name: Install modern bash for the completion matrix (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install bash
+          major="$(/opt/homebrew/bin/bash --version | sed -n 's/^GNU bash, version \([0-9][0-9]*\).*/\1/p')"
+          if [ "${major:-0}" -lt 4 ]; then
+            echo "::error::Homebrew bash must be 4.0 or newer for the hostile-filename readline matrix (compopt contract)"
+            exit 1
+          fi
+          resolved="$(command -v bash)"
+          if [ "$resolved" != "/opt/homebrew/bin/bash" ]; then
+            echo "::error::PATH resolves bash to $resolved, not the Homebrew build; the completion matrix would skip"
+            exit 1
+          fi
+          printf 'bash for the completion matrix: %s\n' "$(/opt/homebrew/bin/bash --version | head -1)"
       # Windows runs unsuppressed. Coverage there is narrow by design: the
       # integration test files under crates/nkeepass/tests/ are #![cfg(unix)]
       # (they exercise real file permissions and PTY-style password prompts),

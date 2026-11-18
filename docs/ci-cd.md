@@ -121,6 +121,64 @@ job object, not this test helper's, and macOS-native verification of the
 fix has not been performed — the hang mechanism is addressed
 OS-agnostically, not observed and not skipped.
 
+**macOS completion failure of run 134548307280 (post-bounds):** with the
+hang bounds in place, the same test failed fast (~4.15s) instead of
+hanging. The authenticated transcript proved the proximate cause:
+macOS's default `/bin/bash` is 3.2.57, which aborts sourcing the
+generated completion at parse time — `local -a vault_args=()` is
+array-assignment syntax that bash 3.2 rejects, so no `complete -F`
+registration ever happened and the TAB fell back to readline's default
+filename completion. The parse failure is reproduced exactly on Linux
+against a readline-enabled bash 3.2.57 build (`bash -n` fails at HEAD,
+passes with the fix): the initializer is now a bare `local -a
+vault_args`, and the two `mapfile` accumulators (bash 4.0+) became
+while-read loops, so the script loads and its dynamic vault/keys
+completions work on 3.2 too. What remains version-bound, deliberately:
+the hostile-filename matrix pins `compopt -o noquote -o nospace`
+quoting, which is only expressible from bash 4.0 on — proven on the
+same 3.2.57 build, readline 5.2 re-quotes and misplaces the candidate
+(`payload\=space\\ name.bin` into the post-`=` word slot). The test
+therefore gates on the ambient bash major: below 4 it prints the reason
+and yields unless `NKEEPASS_REQUIRE_COMPLETION_SHELLS` is set, and the
+macOS leg installs Homebrew's bash with an asserted major floor and an
+asserted PATH resolution, so CI runs the matrix against a real bash ≥ 4
+instead of degrading on 3.2. The one macOS behavior NOT reproduced or
+explained: the transcript shows `exit\n` never echoed or processed
+after the completion line returned to the prompt, so the driver waited
+its full 3s exit deadline before the group kill — that did not occur
+against bash 3.2.57 on Linux, so it is macOS-PTY-specific or timing-
+dependent and stays unverified without a native run; the bounded
+failure and transcript are the observation vehicle, and the brew-bash
+macOS leg now exercises the matrix for real there.
+
+**Windows failures of run 134548307275 (first matrix test results):**
+four unit-test failures, with two distinct proven causes and two left
+to diagnostics. (1) `recipient_fetch_disables_curl_globbing...` —
+proven: a socket accepted from the non-blocking fixture listener
+inherits Winsock's non-blocking mode, so the fixture's blocking request
+read panicked with WouldBlock (os error 10035) and curl exited 56
+while the fixture thread died; the fixture now sets the accepted
+stream to blocking explicitly, and a regression test replays the
+exact accept-then-delayed-write sequence the fixture depends on.
+(2) `pty_driver_cleanup_owns_the_group_and_composes_failures` — proven
+locally by reproducing the exact logged failure under a CRLF-mangled
+working copy: the test reads this file's raw bytes with
+`fs::read_to_string`, which bypasses the lexer's CRLF→LF
+normalization, and the slice-opening assertion has exactly one failure
+mechanism — a line-ending shift — so the Windows runner's checkout
+carried CRLF (Git's Windows default; this repo has no
+`.gitattributes` override). The source text is now LF-normalized
+before the slice, with a synthetic CRLF regression. (3 and 4)
+`generated_bash_and_posix_scripts_parse...` and
+`bash_filename_completion_does_not_cross...` — root cause NOT proven:
+CRLF cannot explain them (rustc normalizes CRLF to LF inside string
+literals while lexing, verified by mangling this whole file to CRLF and
+watching both tests pass), and their silent `exit N` failures carried
+no diagnostics. Both tests now report the exit code, both streams, and
+the PATH-resolved interpreter's own `--version` and `command -v`
+self-report, so the next Windows run identifies which bash answered
+and why it disagreed; nothing was skipped or suppressed.
+
 ## `build.yml` — Linux amd64/arm64 build + packaging
 
 Triggered by tag push `v*`, manual dispatch with an optional `ref`, or pull

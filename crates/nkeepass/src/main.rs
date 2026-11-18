@@ -6494,6 +6494,23 @@ mod tests {
         );
     }
 
+    /// Puts a fixture connection into the mode its bounded blocking
+    /// reads assume. The fixture listener is non-blocking so its accept
+    /// loop can poll, and POSIX `accept` always yields a blocking socket —
+    /// but Winsock sockets accepted from a non-blocking listener INHERIT
+    /// the non-blocking mode, so the fixture's first request read failed
+    /// with WouldBlock (os error 10035) and curl exited 56 while the
+    /// fixture thread panicked (Windows run 134548307275). Making the
+    /// accepted mode explicit keeps the read governed by the read timeout
+    /// on every platform instead of relying on platform-specific
+    /// inheritance.
+    fn accepted_request_stream_blocking(stream: std::net::TcpStream) -> std::net::TcpStream {
+        stream
+            .set_nonblocking(false)
+            .expect("fixture connection blocking mode");
+        stream
+    }
+
     fn recipient_http_fixture(
         status: &'static str,
         body: &'static str,
@@ -6524,7 +6541,8 @@ mod tests {
                     break;
                 }
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
+                    Ok((stream, _)) => {
+                        let mut stream = accepted_request_stream_blocking(stream);
                         requests += 1;
                         stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -6586,6 +6604,82 @@ mod tests {
             request.starts_with("GET /keys/{one,two} HTTP/1.1\r\n"),
             "{request}"
         );
+    }
+
+    /// Pins the blocking-read contract the HTTP fixture depends on after
+    /// `accept`: the client deliberately writes its bytes only after the
+    /// accept returned, so a socket still in the listener's non-blocking
+    /// mode fails the read immediately instead of waiting. Winsock
+    /// inheritance of the listener mode is what broke the fixture in
+    /// Windows run 134548307275 (WouldBlock, os error 10035); POSIX
+    /// `accept` always returns a blocking socket, so on Unix this can
+    /// only ever validate the same sequence the fixture runs — the
+    /// regression it guards is observable on Windows alone, the same
+    /// honest reach note the completion source-gating test carries.
+    /// The read timeout bounds the wait, so a lost mode flip fails fast
+    /// instead of hanging the test binary.
+    #[test]
+    fn accepted_fixture_stream_blocks_until_the_client_writes() {
+        use std::{
+            io::{ErrorKind, Read},
+            net::{TcpListener, TcpStream},
+            sync::mpsc,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind regression listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking regression listener");
+        let address = listener.local_addr().expect("regression address");
+        let (connected, connected_rx) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let mut client = TcpStream::connect(address).expect("regression client connect");
+            connected.send(()).expect("regression connect handshake");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            client
+                .write_all(b"regression-payload")
+                .expect("regression client write");
+        });
+        let accepted = {
+            // Same poll shape as the fixture loop: a non-blocking
+            // listener's accept reports WouldBlock until the handshake
+            // completes, so retry within a bound instead of racing it.
+            let deadline = std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(2))
+                .expect("regression accept deadline");
+            loop {
+                match listener.accept() {
+                    Ok((accepted, _)) => break accepted,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "regression client never reached the listener"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("regression accept failed: {error}"),
+                }
+            }
+        };
+        let mut stream = accepted_request_stream_blocking(accepted);
+        connected_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("client handshake before the delayed write");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("regression read timeout");
+        let mut read = Vec::new();
+        let expected = b"regression-payload";
+        while read.len() < expected.len() {
+            let mut chunk = [0_u8; 64];
+            let count = stream
+                .read(&mut chunk)
+                .expect("accepted stream blocks until the client writes");
+            assert!(count > 0, "accepted stream closed before the payload");
+            read.extend_from_slice(&chunk[..count]);
+        }
+        writer.join().expect("regression writer thread");
+        assert_eq!(read, expected);
     }
 
     #[test]

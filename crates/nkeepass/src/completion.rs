@@ -18,6 +18,11 @@ const MAX_METADATA_INDEX_ITEMS: usize = 10_000;
 const MAX_METADATA_INDEX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_METADATA_COMPLETION_ITEMS: usize = 1_000;
 
+/// Generates the completion script for `shell`.
+///
+/// The embedded scripts are LF under every checkout — rustc normalizes
+/// CRLF to LF inside string literals while lexing — so the generated
+/// text is byte-stable and safe to hand to `bash -n` on any platform.
 pub fn generate(shell: &str) -> Result<&'static str> {
     match shell {
         "bash" => Ok(BASH),
@@ -2292,6 +2297,7 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             "fn signal_driver_group",
             "fn kill_driver_tree",
             "fn kill_driver_group",
+            "fn ambient_shell_major",
             "fn bash_binary_completion_uses_readline_quoting_for_hostile_filenames",
             "fn bounded_driver_kills_wedged_python_within_deadline",
             "fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives",
@@ -2319,6 +2325,37 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         }
     }
 
+    /// Collapses CRLF pairs to LF in raw source-file bytes.
+    ///
+    /// This exists for the source-text assertions that read
+    /// `completion.rs` itself via `fs::read_to_string`: that path
+    /// returns the working copy's raw bytes — a CRLF checkout (Git's
+    /// default on Windows, the shape CI run 134548307275 hit) carries
+    /// `\r\n`, and the line-sensitive `find`/`starts_with` boundaries
+    /// in the driver-slice extraction would shift. String literals, by
+    /// contrast, never need this: rustc normalizes CRLF (and lone CR)
+    /// to LF before lexing, so the embedded completion scripts come out
+    /// LF under any checkout — a guarantee
+    /// `generated_scripts_carry_no_carriage_returns` pins.
+    fn lf_script(script: &str) -> String {
+        script.replace("\r\n", "\n")
+    }
+
+    /// Slices the hostile-filename PTY driver's raw-string script out of
+    /// `source`, bounded by the driver's `r#"` opening and its `"#;`
+    /// terminator. `source` must already be LF-normalized (`lf_script`):
+    /// a CRLF working copy bakes `\r\n` into the line after `r#"`, and
+    /// the slice-opening boundary below is line-ending sensitive —
+    /// Windows CI run 134548307275 checked this file out with CRLF and
+    /// failed the slice-opening assertion while every LF runner passed.
+    fn hostile_filename_driver_slice(source: &str) -> Option<&str> {
+        let execvp_at =
+            source.find("os.execvp(\"bash\", [\"bash\", \"--noprofile\", \"--norc\", \"-i\"])")?;
+        let script_open = source[..execvp_at].rfind("r#\"")?;
+        let script_close = source[execvp_at..].find("\"#;").map(|at| execvp_at + at)?;
+        Some(&source[script_open..script_close])
+    }
+
     /// The PTY driver's cleanup must own the process GROUP, never the pid
     /// number: once the child is reaped its pid can be recycled into an
     /// unrelated process, and a direct kill on that path would target
@@ -2338,26 +2375,21 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
     /// ships.
     #[test]
     fn pty_driver_cleanup_owns_the_group_and_composes_failures() {
-        let source =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
-                .expect("completion.rs source should be readable");
+        // LF-normalize first: the boundary assertions below read this
+        // file's own source text, and a CRLF checkout (Git's default on
+        // Windows) shifts the driver slice's opening line.
+        let source = lf_script(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion.rs source should be readable"),
+        );
         // Everything asserted below must live in the hostile-filename
         // driver's own raw-string script — bounded exactly by its `r#"`
         // opening and its `"#;` terminator — not in a copy of its protocol
         // kept elsewhere in this file, and not in the Rust code before or
         // after the driver, where an un-reaped-child Rust kill stays
         // legitimate.
-        let execvp_at = source
-            .find("os.execvp(\"bash\", [\"bash\", \"--noprofile\", \"--norc\", \"-i\"])")
-            .expect("the PTY driver should fork interactive bash");
-        let script_open = source[..execvp_at]
-            .rfind("r#\"")
-            .expect("the driver should be a raw string literal");
-        let script_close = source[execvp_at..]
-            .find("\"#;")
-            .map(|at| execvp_at + at)
-            .expect("the driver raw string should terminate");
-        let driver = &source[script_open..script_close];
+        let driver = hostile_filename_driver_slice(&source)
+            .expect("the PTY driver's script should be sliceable from this file");
         // The boundary must be non-vacuous: the slice opens on the
         // driver's own first line and stops at its raw-string terminator,
         // swallowing neither the Rust before it nor the Rust after it — a
@@ -2699,6 +2731,63 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         }
     }
 
+    /// Everything a failing interpreter run should report: the exit code
+    /// (or signal), plus both captured streams. The silent Windows CI
+    /// failures of the generated-script and boundary tests (run
+    /// 134548307275) carried only a bare `exit N` with nothing on
+    /// stderr, so the failure messages asserted below must surface the
+    /// code and stdout too — an empty diagnostic cannot distinguish a
+    /// real boundary regression from a wrong interpreter.
+    fn subprocess_failure_detail(output: &std::process::Output) -> String {
+        let exit = match output.status.code() {
+            Some(code) => code.to_string(),
+            None => "terminated-by-signal".to_owned(),
+        };
+        format!(
+            "exit={} stdout={:?} stderr={:?}",
+            exit,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    /// The interpreter identity for failure diagnostics: how the
+    /// ambient PATH resolved `shell`, reported by the interpreter
+    /// itself. A bare `Command::new(shell)` inherits the test process's
+    /// PATH, which on the Windows runner can resolve differently from
+    /// GitHub's own `shell: bash` selection (that one prefers Git for
+    /// Windows' bash over the WSL launcher stub in System32); printing
+    /// the interpreter's self-report keeps every assertion failure able
+    /// to name exactly which program answered.
+    fn shell_interpreter_identity(shell: &str) -> String {
+        let report = std::process::Command::new(shell).arg("--version").output();
+        let version = match report {
+            Ok(output) => format!(
+                "`{}` --version -> {}",
+                output.status.code().map_or_else(
+                    || "terminated-by-signal".to_owned(),
+                    |code| code.to_string()
+                ),
+                String::from_utf8_lossy(&output.stdout).trim_end()
+            ),
+            Err(error) => format!("`{shell}` did not start ({error})"),
+        };
+        let location = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(format!("command -v {shell}"))
+            .output();
+        let resolved = match location {
+            Ok(output) if output.status.success() => {
+                format!(
+                    "resolved: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                )
+            }
+            _ => "resolution unknown".to_owned(),
+        };
+        format!("{version}; {resolved}")
+    }
+
     #[test]
     fn generated_bash_and_posix_scripts_parse_and_posix_files_group_completes() {
         let directory = tempfile::tempdir().unwrap();
@@ -2712,8 +2801,9 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
                 .unwrap();
             assert!(
                 output.status.success(),
-                "{shell} syntax failed: {}",
-                String::from_utf8_lossy(&output.stderr)
+                "{shell} syntax check of the generated completion failed: {} [interpreter: {}]",
+                subprocess_failure_detail(&output),
+                shell_interpreter_identity(shell),
             );
         }
 
@@ -2725,10 +2815,25 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             .current_dir(directory.path())
             .output()
             .unwrap();
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "POSIX sh helper run of the generated completion failed: {} [interpreter: {}]",
+            subprocess_failure_detail(&output),
+            shell_interpreter_identity("sh"),
+        );
         let completions = String::from_utf8_lossy(&output.stdout);
-        assert!(completions.lines().any(|line| line == "ls"));
-        assert!(completions.lines().any(|line| line == "--file"));
+        assert!(
+            completions.lines().any(|line| line == "ls"),
+            "files completion lost the `ls` group [stdout: {:?}][interpreter: {}]",
+            completions,
+            shell_interpreter_identity("sh"),
+        );
+        assert!(
+            completions.lines().any(|line| line == "--file"),
+            "files-add completion lost `--file` [stdout: {:?}][interpreter: {}]",
+            completions,
+            shell_interpreter_identity("sh"),
+        );
     }
 
     #[test]
@@ -2796,9 +2901,59 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         }
     }
 
+    /// Major version of the ambient `shell`, parsed from its own
+    /// `--version` first line (`GNU bash, version 5.3.20(1)-release`).
+    /// `None` when the probe cannot run or parse — callers treat that
+    /// as "run anyway and let the driver report the evidence", never
+    /// as a skip.
+    #[cfg(unix)]
+    fn ambient_shell_major(shell: &str) -> Option<u32> {
+        let output = std::process::Command::new(shell)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let first_line = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()?
+            .to_owned();
+        let version = first_line.split("version ").nth(1)?.trim().to_owned();
+        version.split('.').next()?.parse().ok()
+    }
+
     #[test]
     #[cfg(unix)]
     fn bash_binary_completion_uses_readline_quoting_for_hostile_filenames() {
+        // The readline quoting contract this matrix pins — candidates
+        // inserted verbatim because the script asks readline for
+        // `compopt -o noquote -o nospace` — is only expressible from
+        // bash 4.0 on. macOS still ships bash 3.2.57 as /bin/bash,
+        // which predates compopt: proven against a readline-enabled
+        // bash 3.2.57 build, the completion registers and produces
+        // the right whole-assignment candidate, but readline 5.2 then
+        // re-quotes it and inserts it into the post-`=` word slot
+        // (`payload\=space\\ name.bin`), so no candidate can round
+        // trip. The generated-script parse test still proves the
+        // script LOADS on bash 3.2 (its `bash -n` runs on the same
+        // ambient interpreter); only this interactive matrix needs a
+        // bash that can honor the script's compopt requests. When the
+        // ambient one cannot, say so with its version and yield — the
+        // requirement flag turns the notice into a failure.
+        let ambient_major = ambient_shell_major("bash");
+        if ambient_major.is_some_and(|major| major < 4) {
+            eprintln!(
+                "SKIP: hostile-filename readline matrix; ambient bash {} predates \
+                 compopt (bash 4.0+) and re-quotes candidates itself",
+                ambient_major.map_or_else(|| "?".to_owned(), |major| major.to_string())
+            );
+            assert!(
+                !std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some(),
+                "required completion bash (>= 4, for compopt noquote/nospace) is unavailable"
+            );
+            return;
+        }
         let bash = generate("bash").unwrap();
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("injected");
@@ -3166,6 +3321,77 @@ finally:
         }
     }
 
+    /// Windows CI run 134548307275 checked this file out with CRLF
+    /// line endings and failed the driver-slice opening assertion
+    /// while every LF runner passed: the slice extraction reads this
+    /// file's own source, and every `find`/`rfind`/`starts_with`
+    /// boundary in it is line-ending sensitive. This regression feeds
+    /// the extraction a minimal source shaped like the real driver —
+    /// Rust before, raw string, terminator, Rust after — mangled to
+    /// CRLF and back through the same LF normalization the driver-slice
+    /// test now applies, and proves the boundaries survive the round
+    /// trip. It must stay BELOW the real driver in this file: the
+    /// production extraction finds the first `os.execvp(...)` spelling
+    /// in the source, and this test's synthetic copy of that line
+    /// must never precede the real one.
+    #[test]
+    fn driver_slice_extraction_survives_a_crlf_working_copy() {
+        let synthetic = concat!(
+            "fn rust_before() {}\n",
+            "let script = r#\"\n",
+            "import os, pty, select, sys, time, signal\n",
+            "os.execvp(\"bash\", [\"bash\", \"--noprofile\", \"--norc\", \"-i\"])\n",
+            "raise primary\n",
+            "\"#;\n",
+            "fn tests_after() {}\n",
+        );
+        for line_ending in ["\n", "\r\n"] {
+            let source = lf_script(&synthetic.replace('\n', line_ending));
+            let driver =
+                hostile_filename_driver_slice(&source).expect("slice of the synthetic source");
+            assert!(
+                driver.starts_with("r#\"\nimport os, pty, select, sys, time, signal"),
+                "the driver slice should open on its own first line under {line_ending:?}"
+            );
+            assert!(
+                driver.contains(
+                    "os.execvp(\"bash\", [\"bash\", \"--noprofile\", \"--norc\", \"-i\"])"
+                )
+            );
+            assert!(driver.contains("raise primary"));
+            assert!(
+                !driver.contains("rust_before"),
+                "the slice must not swallow the Rust before the driver"
+            );
+            assert!(
+                !driver.contains("tests_after"),
+                "the slice must not swallow the tests after the driver"
+            );
+        }
+    }
+
+    /// Generated completion scripts must never carry a carriage
+    /// return: POSIX interpreters treat a stray `\r` as input, and
+    /// `bash -n` on a CRLF script fails with ``syntax error near
+    /// unexpected token `$'{\r''`` — verified by feeding a CRLF copy
+    /// of the bash completion to `bash -n`. The guarantee holds under
+    /// any checkout because rustc normalizes CRLF (and lone CR) to LF
+    /// inside string literals while lexing — proven empirically: with
+    /// this very file CRLF-mangled end to end, the generated bash
+    /// script still parses. This test pins that invariant where the
+    /// lexer provides it; if it ever fails, the `bash -n` assumption
+    /// behind the generated-script tests is broken.
+    #[test]
+    fn generated_scripts_carry_no_carriage_returns() {
+        for shell in ["bash", "sh", "zsh", "fish", "powershell", "pwsh", "nushell"] {
+            let script = generate(shell).unwrap();
+            assert!(
+                !script.contains('\r'),
+                "{shell} completion carries a carriage return"
+            );
+        }
+    }
+
     #[test]
     fn bash_filename_completion_does_not_cross_command_or_option_value_boundaries() {
         let bash = generate("bash").unwrap();
@@ -3189,10 +3415,24 @@ _nkp_complete
             .args(["-c", &script])
             .output()
             .expect("bash should run");
+        // The script's exit codes name the crossed boundary; the
+        // detail carries the streams because a bare `exit N` prints
+        // nothing (the silent Windows failure of run 134548307275
+        // carried no diagnostics at all), and the interpreter report
+        // names which PATH-resolved bash actually judged the case.
         assert!(
             output.status.success(),
-            "Bash option ownership failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "Bash option ownership failed: {} [crossed boundary: {}] [interpreter: {}]",
+            subprocess_failure_detail(&output),
+            match output.status.code() {
+                Some(1) =>
+                    "nkp exec -- set --bin payload = candidate completed a candidate".to_owned(),
+                Some(2) => "nkp set -- --bin payload = candidate completed a candidate".to_owned(),
+                Some(3) =>
+                    "nkp set --notes --bin payload = candidate completed a candidate".to_owned(),
+                other => format!("unexpected exit status {other:?}"),
+            },
+            shell_interpreter_identity("bash"),
         );
     }
 
