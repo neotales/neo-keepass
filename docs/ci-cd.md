@@ -223,6 +223,16 @@ the controlling tty's foreground group before sending test input. The
 next native macOS run is still needed to validate the ownership and
 absence protocol on that runner.
 
+The ownership protocol uses CPython `os.waitid(..., WNOWAIT)`. CPython's
+official [Python 3.13 `os.waitid` documentation](https://docs.python.org/3.13/library/os.html#os.waitid)
+states that `os.waitid` became available on macOS in 3.13. The macOS CI
+leg therefore installs Homebrew `python@3.13`, asserts the PATH-selected
+`python3` exposes both `os.waitid` and `os.WNOWAIT` before building/running
+tests, and the embedded PTY driver independently checks those APIs before
+`pty.fork()`. Older/missing APIs fail explicitly before a child is created;
+there is no unsafe fallback signal and thus no cleanup exception can mask
+the primary failure or strand a PTY child.
+
 **Windows failures of run 134548307275 (first matrix test results):**
 four unit-test failures, with two distinct proven causes and two left
 to diagnostics. (1) `recipient_fetch_disables_curl_globbing...` —

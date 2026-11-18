@@ -2691,6 +2691,7 @@ else:
             "os.getpgid(pid)",
             "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)",
             "os.tcgetpgrp(fd)",
+            "no PTY child was started",
             "process group absence not established",
             "; cleanup also failed: ",
             "case ended with ",
@@ -2721,6 +2722,52 @@ else:
             group_kill < reap && reap < absence_probe,
             "group signal must precede reaping; only a non-signaling absence \
              probe may follow reaping"
+        );
+        let preflight = driver
+            .find("no PTY child was started")
+            .expect("unsupported Python must fail before creating the PTY child");
+        let fork = driver
+            .find("pid, fd = pty.fork()")
+            .expect("the driver should create its PTY child only after preflight");
+        assert!(
+            preflight < fork,
+            "waitid capability must be checked before the PTY child is started"
+        );
+    }
+
+    /// The actual PTY driver must reject a Python runtime without the
+    /// non-reaping wait API before it forks Bash or enters cleanup.
+    #[test]
+    #[cfg(unix)]
+    fn pty_driver_missing_waitid_fails_before_starting_a_child() {
+        let source = lf_script(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion.rs source should be readable"),
+        );
+        let driver = hostile_filename_driver_slice(&source)
+            .expect("the PTY driver's script should be sliceable")
+            .strip_prefix("r#\"\n")
+            .expect("the slice should start at the raw string");
+        let encoded_driver =
+            serde_json::to_string(driver).expect("the driver should encode as a JSON string");
+        let wrapper = format!(
+            "import os, sys\n\
+             delattr(os, 'waitid')\n\
+             delattr(os, 'WNOWAIT')\n\
+             sys.argv = ['driver', '', '', '', '[]', 'default', '', 'true']\n\
+             exec(compile({encoded_driver}, '<embedded-pty-driver>', 'exec'))\n"
+        );
+        let run = run_python_bounded(&wrapper, &[], Duration::from_secs(5));
+        assert!(
+            !run.timed_out && !run.success(),
+            "missing waitid must fail promptly without entering the PTY: {}",
+            run.failure_summary()
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains("os.waitid and WNOWAIT; no PTY child was started"),
+            "the actual driver should report its safe preflight failure: {}",
+            run.failure_summary()
         );
     }
 
@@ -4481,6 +4528,20 @@ transcript = b""
 
 def fail(message):
     raise SystemExit(message + "; PTY transcript: " + repr(transcript))
+
+# CPython added os.waitid on macOS in 3.13. Without WNOWAIT the leader
+# cannot safely pin its process group through the group kill. Fail before
+# pty.fork rather than start a child that this driver cannot clean safely.
+if (
+    not callable(getattr(os, "waitid", None))
+    or not all(hasattr(os, name) for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))
+):
+    print(
+        "PTY cleanup requires os.waitid and WNOWAIT; no PTY child was started",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise SystemExit(2)
 
 pid, fd = pty.fork()
 if pid == 0:

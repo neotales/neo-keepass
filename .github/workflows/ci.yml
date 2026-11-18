@@ -123,6 +123,18 @@ jobs:
         with:
           toolchain: "1.98.1" # matches rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # CPython only exposed os.waitid on macOS starting in 3.13. The PTY
+      # cleanup requires WNOWAIT to keep the session leader unreaped while
+      # it owns the PGID; fail before cargo tests if this API is unavailable.
+      - name: Install Python 3.13 for PTY process-group cleanup (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install python@3.13
+          python_prefix="$(brew --prefix python@3.13)"
+          python_bin="$python_prefix/bin/python3.13"
+          "$python_bin" -c 'import os, sys; assert sys.version_info >= (3, 13), sys.version; assert callable(getattr(os, "waitid", None)) and hasattr(os, "WNOWAIT"), "os.waitid/WNOWAIT is required"; print(sys.version)'
+          printf '%s\n' "$python_prefix/bin" >> "$GITHUB_PATH"
       # macOS still ships bash 3.2.57 as /bin/bash, which predates
       # `compopt` (new in bash 4.0 per bash-4.0's NEWS): the
       # hostile-filename readline matrix in
@@ -144,6 +156,13 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          python_prefix="$(brew --prefix python@3.13)"
+          resolved_python="$(command -v python3)"
+          if [ "$resolved_python" != "$python_prefix/bin/python3" ]; then
+            echo "::error::PATH resolves python3 to $resolved_python, not the checked Python 3.13 install at $python_prefix/bin/python3"
+            exit 1
+          fi
+          "$resolved_python" -c 'import os, sys; assert sys.version_info >= (3, 13), sys.version; assert callable(getattr(os, "waitid", None)) and hasattr(os, "WNOWAIT"), "os.waitid/WNOWAIT is required"; print("PTY Python:", sys.version)'
           brew install bash
           brew_prefix="$(brew --prefix)"
           resolved="$(command -v bash)"
