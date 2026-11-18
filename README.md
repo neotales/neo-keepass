@@ -15,10 +15,14 @@ Regenerate shell completion for the new name with `nkp completion SHELL`
 (`bash`, `sh`, `zsh`, `fish`, `powershell`, `pwsh`, or `nushell`; see the
 [command reference](docs/reference/system.md)) and replace the old
 `nkeepass` completion script. If you parse `github-actions` output, its
-heredoc delimiter changed from `NKEEPASS_EOF` to `NKP_EOF`. Everything else
-remains compatible: legacy `NKEEPASS_*` environment variables, the
-`~/.config/nkeepass/` and `~/.local/share/nkeepass/` directories, and the
-config.json and KDBX formats, so existing setups and vaults keep working.
+heredoc delimiter changed from `NKEEPASS_EOF` to `NKP_EOF`.
+
+Filesystem paths, config.json, and KDBX formats remain compatible. Legacy
+`NKEEPASS_*` application environment variables are no longer read; replace
+`NKEEPASS_PASSWORD`, `NKEEPASS_VAULT`, `NKEEPASS_VAULT_PATH`,
+`NKEEPASS_CONFIG_DIR`, `NKEEPASS_DATA_DIR`, and `NKEEPASS_COMPLETE_PASSWORD_ENV`
+with the corresponding `NEO_KEEPASS_*` name (or its `NKP_*` alias). Explicit
+`--password-env NAME` remains literal and can still name any variable.
 
 ## Current status
 
@@ -46,9 +50,8 @@ attempts an age-encrypted password backup after successful vault creation, in a 
 `~/.config/nkeepass/init-password.agekey`. The `NEO_KEEPASS_CONFIG_DIR` and
 `NEO_KEEPASS_DATA_DIR` app overrides (and their aliases below), and XDG
 directory settings select these locations.
-Application environment inputs accept `NEO_KEEPASS_*` and `NKP_*` forms of
-existing `NKEEPASS_*` names. For each setting, the first *present* name wins:
-`NEO_KEEPASS_*`, then `NKP_*`, then legacy `NKEEPASS_*`. An empty higher-priority
+Application environment inputs accept `NEO_KEEPASS_*` and `NKP_*` names. For
+each setting, the first *present* name wins: `NEO_KEEPASS_*`, then `NKP_*`. An empty higher-priority
 value does not fall through. Explicit CLI choices such as `--vault` or
 `--password-env` take precedence over defaults.
 

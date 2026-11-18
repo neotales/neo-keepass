@@ -96,8 +96,8 @@ power loss, directory entries for the identity or recovery files may not
 survive. Make protected independent backups of both the identity and encrypted
 password backup. Init reports `"directory_sync_policy":"unconfirmed"` in JSON
 and a text warning on Windows; candidate records retain the same policy marker.
-The generated master password is not printed. Ambient `NEO_KEEPASS_PASSWORD`,
-`NKP_PASSWORD`, and legacy `NKEEPASS_PASSWORD` are ignored for this opt-in mode.
+The generated master password is not printed. Ambient `NEO_KEEPASS_PASSWORD`
+and `NKP_PASSWORD` are ignored for this opt-in mode.
 For password-only init, both backup roots must be valid Unicode without control
 characters; init checks them before creating the vault so recovery paths can be
 reported safely. This backup-path restriction does not apply to key-file-only init.

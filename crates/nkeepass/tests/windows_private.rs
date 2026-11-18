@@ -67,14 +67,14 @@ fn command(root: &Path, args: &[&str]) -> Command {
     let mut command = command.isolate_application_environment();
     command
         .current_dir(root)
-        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
-        .env("NKEEPASS_DATA_DIR", root.join("data"))
+        .env("NEO_KEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.join("data"))
         .env(
             "NKEEPASS_WINDOWS_TEST_PASSWORD",
             "synthetic-windows-password",
         )
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args(args)
         .stdin(Stdio::null());
     command
@@ -167,7 +167,6 @@ fn mixed_case_password_alias_unlocks_and_exec_reserves_aliases() {
     for name in [
         "NEO_KEEPASS_PASSWORD",
         "NKP_PASSWORD",
-        "NKEEPASS_PASSWORD",
         "nEo_KeEpAsS_pAsSwOrD",
     ] {
         let output = command(
@@ -217,6 +216,8 @@ fn mixed_case_config_and_data_aliases_beat_short_and_legacy_names() {
     .env("NEO_KEEPASS_DATA_DIR", &selected_data)
     .env("NKP_CONFIG_DIR", &ignored_config)
     .env("NKP_DATA_DIR", &ignored_data)
+    .env("NKEEPASS_CONFIG_DIR", &ignored_config)
+    .env("NKEEPASS_DATA_DIR", &ignored_data)
     .output()
     .unwrap();
     succeeded(&output);
@@ -333,10 +334,10 @@ fn sequential_initializers_reuse_identity_and_recover_after_closed_output() {
         }
         let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
             .current_dir(root)
-            .env("NKEEPASS_CONFIG_DIR", root.join("config"))
-            .env("NKEEPASS_DATA_DIR", root.join("data"))
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
+            .env("NEO_KEEPASS_CONFIG_DIR", root.join("config"))
+            .env("NEO_KEEPASS_DATA_DIR", root.join("data"))
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
             .args([
                 "--vault",
                 report["path"].as_str().unwrap(),
@@ -355,10 +356,10 @@ fn sequential_initializers_reuse_identity_and_recover_after_closed_output() {
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root)
-        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
-        .env("NKEEPASS_DATA_DIR", root.join("data"))
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.join("data"))
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args([
             "init",
             "closed.kdbx",
@@ -405,10 +406,10 @@ fn sequential_initializers_reuse_identity_and_recover_after_closed_output() {
     );
     let mut opened = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root)
-        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
-        .env("NKEEPASS_DATA_DIR", root.join("data"))
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.join("data"))
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args([
             "--vault",
             target.to_str().unwrap(),
@@ -426,14 +427,14 @@ fn sequential_initializers_reuse_identity_and_recover_after_closed_output() {
     assert!(opened.wait().unwrap().success());
     let mut supplied = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root)
-        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
-        .env("NKEEPASS_DATA_DIR", root.join("data"))
+        .env("NEO_KEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.join("data"))
         .env(
             "NKEEPASS_WINDOWS_TEST_PASSWORD",
             "synthetic-windows-password",
         )
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args([
             "init",
             "supplied-closed.kdbx",

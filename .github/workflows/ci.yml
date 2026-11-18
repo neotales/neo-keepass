@@ -25,7 +25,7 @@ jobs:
     # conservative cap over a cold compile, not a measured multiple.
     timeout-minutes: 20
     env:
-      NKEEPASS_REQUIRE_COMPLETION_SHELLS: "1"
+      NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -146,7 +146,7 @@ jobs:
       # asserted, not the exact version pinned: brew bottles move, and
       # the requirement is the compopt contract, not one build. The
       # resolution check proves the PATH actually hands that bash to
-      # the tests, and NKEEPASS_REQUIRE_COMPLETION_BASH makes losing it
+      # the tests, and NEO_KEEPASS_REQUIRE_COMPLETION_BASH makes losing it
       # a loud matrix failure: without that flag a lost brew bash would
       # turn the matrix into a yield whose notice libtest captures and
       # never replays on a passing run.
@@ -173,7 +173,7 @@ jobs:
             echo "::error::the PATH-resolved bash reports major ${major:-unknown}; the hostile-filename readline matrix needs bash >= 4 (compopt contract)"
             exit 1
           fi
-          echo "NKEEPASS_REQUIRE_COMPLETION_BASH=1" >> "$GITHUB_ENV"
+          echo "NEO_KEEPASS_REQUIRE_COMPLETION_BASH=1" >> "$GITHUB_ENV"
           printf 'bash for the completion matrix: %s\n' "$("$resolved" --version | head -1)"
       # Windows runs unsuppressed. The first Windows run
       # failed in the Test step with exit code 101 (logs need authenticated
@@ -235,7 +235,7 @@ jobs:
       # script against the bash a stock macOS still ships. Pin the
       # parse, word-boundary, dynamic-path, and static command/option
       # vocabulary tests to the native /bin/bash through
-      # NKEEPASS_COMPLETION_BASH; the version assert keeps the canary
+      # NEO_KEEPASS_COMPLETION_BASH; the version assert keeps the canary
       # honest — if Apple ever replaces /bin/bash with a bash >= 4 the
       # step fails and the canary is revisited instead of silently
       # testing bash 5 twice. These are regression guards for what
@@ -252,7 +252,7 @@ jobs:
         # that never returns.
         timeout-minutes: 10
         env:
-          NKEEPASS_COMPLETION_BASH: /bin/bash
+          NEO_KEEPASS_COMPLETION_BASH: /bin/bash
         run: |
           major="$(/bin/bash --version | sed -n 's/^GNU bash, version \([0-9][0-9]*\).*/\1/p')"
           if [ "${major:-99}" -ge 4 ]; then
@@ -303,7 +303,7 @@ jobs:
       # one instead of mislabeling it a script or boundary failure).
       # Resolve the same standard Git for Windows locations the
       # test-side fallback probes, validate the binary reports GNU
-      # bash, and pin it through NKEEPASS_COMPLETION_BASH; the tests
+      # bash, and pin it through NEO_KEEPASS_COMPLETION_BASH; the tests
       # keep honoring an explicit override first and fail closed with an
       # interpreter-availability diagnostic if nothing usable is found.
       - name: Pin the test bash to Git for Windows (Windows)
@@ -339,7 +339,7 @@ jobs:
               exit 1
               ;;
           esac
-          echo "NKEEPASS_COMPLETION_BASH=$program" >> "$GITHUB_ENV"
+          echo "NEO_KEEPASS_COMPLETION_BASH=$program" >> "$GITHUB_ENV"
       - name: Test
         shell: bash
         # Integration tests include PTY-style password prompts (#![cfg(unix)]);

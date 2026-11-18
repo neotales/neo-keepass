@@ -59,8 +59,8 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
         .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
         .env("PW", PASSWORD)
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -74,8 +74,8 @@ fn run_with_input(fixture: &Fixture, args: &[&str], input: &[u8]) -> Output {
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
         .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env_remove("NKEEPASS_TEST_PASSWORD")
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH");
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH");
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -219,8 +219,8 @@ fn public_routes_reject_internal_actions_before_vault_access() {
             .args(&args)
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
             .env_remove("MISSING_PASSWORD")
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -297,8 +297,8 @@ fn generic_dry_run_is_rejected_by_non_dry_run_commands() {
             .args(["--vault", missing.to_str().unwrap()])
             .args(&args)
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -322,8 +322,8 @@ fn duplicate_global_vault_is_rejected() {
             "show",
         ])
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -513,8 +513,8 @@ fn secrets_env_rejects_unrelated_options_before_credentials_or_vault() {
             .args(&args)
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
             .env_remove("MISSING_PASSWORD")
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -771,8 +771,8 @@ fn config_directory_permissions_are_checked_on_read() {
             .isolate_application_environment()
             .args(["alias", "list"])
             .env("XDG_CONFIG_HOME", &config_home)
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -845,8 +845,8 @@ fn exec_does_not_pass_the_parent_environment_to_the_child() {
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
         .env("HARDENING_PASSWORD", PASSWORD)
         .env(sentinel, value)
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null())
         .output()
         .unwrap();

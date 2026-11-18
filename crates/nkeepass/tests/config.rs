@@ -192,8 +192,8 @@ fn run(home: &ConfigHome, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", home.home())
         .env("XDG_DATA_HOME", home.data.path())
         .env_remove("HOME")
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null());
     command.output().unwrap()
 }

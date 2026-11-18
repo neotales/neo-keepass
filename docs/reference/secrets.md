@@ -178,17 +178,17 @@ try {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = (Get-Command nkp -CommandType Application -ErrorAction Stop).Source
     $startInfo.Arguments =
-        'set "Services/Mail Account" --stdin --password-env NKEEPASS_PASSWORD'
+        'set "Services/Mail Account" --stdin --password-env NEO_KEEPASS_PASSWORD'
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardInput = $true
     # Set the unlock credential only in the child environment; don't mutate the shell.
-    $startInfo.EnvironmentVariables['NKEEPASS_PASSWORD'] = $vaultPassword
+    $startInfo.EnvironmentVariables['NEO_KEEPASS_PASSWORD'] = $vaultPassword
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($valueText)
     if (-not $process.Start()) { throw 'Could not start nkp.' }
     $started = $true
-    $startInfo.EnvironmentVariables.Remove('NKEEPASS_PASSWORD')
+    $startInfo.EnvironmentVariables.Remove('NEO_KEEPASS_PASSWORD')
     $stream = $process.StandardInput.BaseStream
     $stream.Write($bytes, 0, $bytes.Length)
     $stream.Flush()
@@ -202,7 +202,7 @@ finally {
         $process.WaitForExit()
     }
     if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
-    if ($startInfo) { $startInfo.EnvironmentVariables.Remove('NKEEPASS_PASSWORD') }
+    if ($startInfo) { $startInfo.EnvironmentVariables.Remove('NEO_KEEPASS_PASSWORD') }
     if ($process) { $process.Dispose() }
     $valueText = $null
     $vaultPassword = $null

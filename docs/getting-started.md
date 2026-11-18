@@ -42,8 +42,8 @@ nkp --vault "$HOME/nkeepass-demo/demo.kdbx" \
 
 The command prompts for the master password and stores the field in the vault.
 This sample value is public test data, not a credential. If your environment
-sets `NEO_KEEPASS_PASSWORD`, `NKP_PASSWORD`, or legacy `NKEEPASS_PASSWORD`,
-the CLI uses the first present value in that order instead of prompting.
+sets `NEO_KEEPASS_PASSWORD` or `NKP_PASSWORD`, the CLI uses the first present
+value in that order instead of prompting. Legacy `NKEEPASS_PASSWORD` is ignored.
 
 Read it back:
 

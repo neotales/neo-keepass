@@ -73,8 +73,8 @@ fn run(vault: &Path, home: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", home)
         .env("XDG_DATA_HOME", home.join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .output()
         .unwrap()
 }
@@ -121,8 +121,8 @@ fn automation_age_options_fail_before_vault_or_output_access() {
                 .env("XDG_CONFIG_HOME", home.path())
                 .env("XDG_DATA_HOME", home.path().join("data"))
                 .env_remove("NKEEPASS_TEST_PASSWORD")
-                .env_remove("NKEEPASS_VAULT")
-                .env_remove("NKEEPASS_VAULT_PATH")
+                .env_remove("NEO_KEEPASS_VAULT")
+                .env_remove("NEO_KEEPASS_VAULT_PATH")
                 .output()
                 .unwrap();
             assert!(!run.status.success(), "{action:?} {age_options:?}");

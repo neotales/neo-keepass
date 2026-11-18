@@ -78,10 +78,10 @@ fn command(fixture: &Fixture, password: &str) -> Command {
     child
         .current_dir(fixture.root.path())
         .env("HOME", fixture.root.path())
-        .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NEO_KEEPASS_CONFIG_DIR")
         .env_remove("NEO_KEEPASS_CONFIG_DIR")
         .env_remove("NKP_CONFIG_DIR")
-        .env_remove("NKEEPASS_DATA_DIR")
+        .env_remove("NEO_KEEPASS_DATA_DIR")
         .env_remove("NEO_KEEPASS_DATA_DIR")
         .env_remove("NKP_DATA_DIR")
         .env_remove("XDG_CONFIG_DIR")
@@ -89,16 +89,16 @@ fn command(fixture: &Fixture, password: &str) -> Command {
         .env("XDG_CONFIG_HOME", fixture.config_home())
         .env("XDG_DATA_HOME", fixture.data_home())
         .env(PASSWORD_ENV, password)
-        .env_remove("NKEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT")
         .env_remove("NEO_KEEPASS_VAULT")
         .env_remove("NKP_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .env_remove("NEO_KEEPASS_VAULT_PATH")
         .env_remove("NKP_VAULT_PATH")
-        .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_PASSWORD")
         .env_remove("NEO_KEEPASS_PASSWORD")
         .env_remove("NKP_PASSWORD")
-        .env_remove("NKEEPASS_COMPLETE_PASSWORD_ENV")
+        .env_remove("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
         .env_remove("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
         .env_remove("NKP_COMPLETE_PASSWORD_ENV")
         .stdin(Stdio::null());
@@ -112,8 +112,8 @@ fn password_backup_uses_app_specific_directory_overrides() {
     let config = fixture.root.path().join("override-config");
     let data = fixture.root.path().join("override-data");
     let output = command(&fixture, PASSWORD)
-        .env("NKEEPASS_CONFIG_DIR", &config)
-        .env("NKEEPASS_DATA_DIR", &data)
+        .env("NEO_KEEPASS_CONFIG_DIR", &config)
+        .env("NEO_KEEPASS_DATA_DIR", &data)
         .args(with_password(&["init", vault.to_str().unwrap()]))
         .output()
         .unwrap();
@@ -289,7 +289,7 @@ fn unsafe_backup_roots_stop_password_only_creation_before_any_vault() {
     use std::os::unix::ffi::OsStringExt;
 
     for suffix in ["CONFIG_DIR", "DATA_DIR"] {
-        for prefix in ["NEO_KEEPASS", "NKP", "NKEEPASS"] {
+        for prefix in ["NEO_KEEPASS", "NKP"] {
             for bad_byte in [0xff, b'\n'] {
                 for generated in [false, true] {
                     for json in [false, true] {
@@ -390,7 +390,7 @@ fn backup_failure_reports_cause_and_leaves_created_vault() {
     std::fs::create_dir(&target).unwrap();
     symlink(&target, data.join("nkeepass")).unwrap();
     let output = command(&fixture, PASSWORD)
-        .env("NKEEPASS_DATA_DIR", data.join("nkeepass"))
+        .env("NEO_KEEPASS_DATA_DIR", data.join("nkeepass"))
         .args(with_password(&["init", vault.to_str().unwrap()]))
         .output()
         .unwrap();
@@ -987,13 +987,13 @@ fn bare_init_works_without_home_with_explicit_app_directories() {
         .env_remove("XDG_DATA_HOME")
         .env_remove("APPDATA")
         .env_remove("LOCALAPPDATA")
-        .env("NKEEPASS_CONFIG_DIR", fixture.config_home())
-        .env("NKEEPASS_DATA_DIR", fixture.data_home())
+        .env("NEO_KEEPASS_CONFIG_DIR", fixture.config_home())
+        .env("NEO_KEEPASS_DATA_DIR", fixture.data_home())
         .args(with_password(&["init"]))
         .output()
         .unwrap();
     let result = created(&output);
-    // NKEEPASS_DATA_DIR is already the app-specific directory; unlike XDG data
+    // NEO_KEEPASS_DATA_DIR is already the app-specific directory; unlike XDG data
     // homes, it must not gain an additional `nkeepass` component.
     let expected = fixture.data_home().join("default.kdbx");
     assert_reported_path(&result["path"], &expected);

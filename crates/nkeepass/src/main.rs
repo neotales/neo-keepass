@@ -80,15 +80,13 @@ const GLOBAL_CREDENTIAL_OPTIONS: &[HelpOption] = &[
         summary: "Read one master-password line from stdin; before or after a vault command.",
     },
 ];
-const DEFAULT_PASSWORD_ENV: &str = "NKEEPASS_PASSWORD";
+const DEFAULT_PASSWORD_ENV: &str = "NEO_KEEPASS_PASSWORD";
 
 /// Reads a supported application environment variable using canonical-name
-/// precedence: `NEO_KEEPASS_*`, then `NKP_*`, then legacy `NKEEPASS_*`.
+/// precedence: `NEO_KEEPASS_*`, then `NKP_*`.
 fn app_env_var_os(name: &str) -> Option<std::ffi::OsString> {
-    let suffix = name.strip_prefix("NKEEPASS_")?;
-    env::var_os(format!("NEO_KEEPASS_{suffix}"))
-        .or_else(|| env::var_os(format!("NKP_{suffix}")))
-        .or_else(|| env::var_os(name))
+    let suffix = name.strip_prefix("NEO_KEEPASS_")?;
+    env::var_os(name).or_else(|| env::var_os(format!("NKP_{suffix}")))
 }
 const ROOT_ONLY_OPTIONS: &[HelpOption] = &[HelpOption {
     label: "--version",
@@ -1213,7 +1211,7 @@ fn resolve_app_dir(
 }
 
 fn config_dir() -> Result<PathBuf> {
-    let app_override = app_env_var_os("NKEEPASS_CONFIG_DIR");
+    let app_override = app_env_var_os("NEO_KEEPASS_CONFIG_DIR");
     let xdg_override = env::var_os("XDG_CONFIG_DIR");
     let standard_xdg_home = env::var_os("XDG_CONFIG_HOME");
     resolve_app_dir(
@@ -1228,7 +1226,7 @@ fn config_dir() -> Result<PathBuf> {
 }
 
 fn data_dir() -> Result<PathBuf> {
-    let app_override = app_env_var_os("NKEEPASS_DATA_DIR");
+    let app_override = app_env_var_os("NEO_KEEPASS_DATA_DIR");
     let xdg_override = env::var_os("XDG_DATA_DIR");
     let standard_xdg_home = env::var_os("XDG_DATA_HOME");
     resolve_app_dir(
@@ -1652,10 +1650,10 @@ fn active_vault<'a>(
     if let Some(path) = explicit {
         return Ok((resolve_vault(path, config)?, "argument"));
     }
-    if let Some(path) = environment_vault("NKEEPASS_VAULT")? {
+    if let Some(path) = environment_vault("NEO_KEEPASS_VAULT")? {
         return Ok((resolve_vault(&path, config)?, "environment"));
     }
-    if let Some(path) = environment_vault("NKEEPASS_VAULT_PATH")? {
+    if let Some(path) = environment_vault("NEO_KEEPASS_VAULT_PATH")? {
         return Ok((resolve_vault(&path, config)?, "environment"));
     }
     if let Some(path) = &config.current {
@@ -6160,7 +6158,7 @@ fn valid_env_name(name: &str) -> bool {
 }
 
 fn is_default_password_env_name(name: &str) -> bool {
-    const RESERVED: [&str; 3] = ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"];
+    const RESERVED: [&str; 2] = ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD"];
     RESERVED.iter().any(|reserved| {
         #[cfg(windows)]
         {
@@ -6432,7 +6430,7 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
         output.push_str("CREDENTIALS:\n");
         write_paragraph(
             &mut output,
-            "Without an explicit source, use NEO_KEEPASS_PASSWORD, then NKP_PASSWORD, then NKEEPASS_PASSWORD. Explicit sources override them; NKEEPASS_SECRET is not an alias.",
+            "Without an explicit source, use NEO_KEEPASS_PASSWORD, then NKP_PASSWORD. Explicit sources override them; NKEEPASS_SECRET is not an alias.",
             width,
             "  ",
         );
@@ -6756,9 +6754,9 @@ fn run(args: &[String], program: &str) -> Result<()> {
                 let (path, source) = active_vault(vault, &config)?;
                 let path = normalized_vault_text(&path);
                 let environment = if source == "environment" {
-                    match environment_vault("NKEEPASS_VAULT")? {
+                    match environment_vault("NEO_KEEPASS_VAULT")? {
                         Some(value) => Some(value),
-                        None => environment_vault("NKEEPASS_VAULT_PATH")?,
+                        None => environment_vault("NEO_KEEPASS_VAULT_PATH")?,
                     }
                 } else {
                     None
@@ -7010,7 +7008,7 @@ mod tests {
 
     #[test]
     fn exec_reserves_all_default_password_variable_names() {
-        for name in ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"] {
+        for name in ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD"] {
             assert!(is_default_password_env_name(name));
         }
         #[cfg(windows)]
@@ -7823,7 +7821,7 @@ mod tests {
             let global_options = &help[globals..];
             assert!(global_options.contains("--password-env NAME"));
             assert!(global_options.contains("--password-stdin"));
-            assert!(global_options.contains("NKEEPASS_PASSWORD"));
+            assert!(global_options.contains("NEO_KEEPASS_PASSWORD"));
             if !route.is_empty() {
                 let command_options = &help[options..globals];
                 assert!(command_options.contains("--key PATH"));

@@ -145,8 +145,8 @@ prints the reason and yields. That yield is quieter than it looks —
 libtest captures a passing test's output, so the notice is invisible in
 a default `cargo test` run unless the case fails or `--nocapture` is
 passed — which is why the macOS leg also exports
-`NKEEPASS_REQUIRE_COMPLETION_BASH`, the flag dedicated to this matrix
-(unlike `NKEEPASS_REQUIRE_COMPLETION_SHELLS`, which would also demand
+`NEO_KEEPASS_REQUIRE_COMPLETION_BASH`, the flag dedicated to this matrix
+(unlike `NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS`, which would also demand
 the unrelated zsh and PowerShell interpreters): a lost brew bash fails
 the matrix loudly instead of yielding silently. The leg installs
 Homebrew's bash (resolved through `brew --prefix`, with no hardcoded
@@ -156,7 +156,7 @@ PATH change displaces the legacy bash from PATH resolution for the
 whole leg, a canary step pins the generated-script parse, boundary,
 dynamic-path, and static command/option-vocabulary tests to the
 native `/bin/bash` through
-`NKEEPASS_COMPLETION_BASH`, with its own version assert so a future
+`NEO_KEEPASS_COMPLETION_BASH`, with its own version assert so a future
 Apple bash upgrade forces a canary revisit rather than silently
 testing bash 5 twice. Both filtered `cargo test` steps that name
 specific tests — this canary and the completion-interpreters lane's
@@ -311,7 +311,7 @@ exited 1 with a "no installed distributions" message in UTF-16 — a
 missing WSL distro is an interpreter-availability fact, not completion
 behavior, and no PATH arrangement can change the resolution. The
 generated-script tests now resolve their interpreters instead of
-assuming them: `NKEEPASS_COMPLETION_BASH` still wins unchanged when
+assuming them: `NEO_KEEPASS_COMPLETION_BASH` still wins unchanged when
 set; without it, candidates (the ambient PATH `bash` on unix, only the
 Git for Windows install locations on Windows — system-wide Program
 Files plus the per-user `%LOCALAPPDATA%\Programs\Git` install) must
@@ -347,7 +347,7 @@ promise that descendant or its detached reader thread was terminated.
 That platform limit is deliberate and explicit; this probe does not
 claim Windows tree containment. The Windows leg pins the resolved Git bash explicitly through the workflow
 (found in the standard install paths, validated, exported via
-`NKEEPASS_COMPLETION_BASH`), and the POSIX sh half resolves `sh.exe`
+`NEO_KEEPASS_COMPLETION_BASH`), and the POSIX sh half resolves `sh.exe`
 from the same Git installation, since Windows has no `sh` on PATH at
 all.
 

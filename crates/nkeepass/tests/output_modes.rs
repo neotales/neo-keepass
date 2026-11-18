@@ -127,8 +127,8 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
         .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -1141,8 +1141,8 @@ fn password_file_is_safe_for_automation_output_commands() {
             "XDG_CONFIG_HOME",
             fixture.directory.path().join("file-config"),
         )
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1166,8 +1166,8 @@ fn password_file_is_safe_for_automation_output_commands() {
             "XDG_CONFIG_HOME",
             fixture.directory.path().join("export-config"),
         )
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null())
         .output()
         .unwrap();

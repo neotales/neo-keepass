@@ -88,7 +88,7 @@ fn fixture_command(fixture: &Fixture, command: Command) -> Command {
         .current_dir(fixture.directory.path())
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
         .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
-        .env("NKEEPASS_VAULT", &fixture.vault)
+        .env("NEO_KEEPASS_VAULT", &fixture.vault)
         .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD);
     command
 }

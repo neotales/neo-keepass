@@ -5,12 +5,12 @@ use std::process::{Command, Output, Stdio};
 fn run(root: &std::path::Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root)
-        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
-        .env("NKEEPASS_DATA_DIR", root.join("data"))
+        .env("NEO_KEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.join("data"))
         .env("NKEEPASS_CONTEXT_TEST_PASSWORD", "synthetic-test-password")
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
-        .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_PASSWORD")
         .stdin(Stdio::null())
         .args(args)
         .output()
@@ -21,10 +21,10 @@ fn opens_with(root: &std::path::Path, vault: &str, password: &[u8]) -> bool {
     use std::io::Write;
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root)
-        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
-        .env("NKEEPASS_DATA_DIR", root.join("data"))
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.join("data"))
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args(["--vault", vault, "secrets", "ls", "--password-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -170,10 +170,10 @@ fn context_show_keeps_alias_name_for_explicit_and_environment_selection() {
     let text = run(root.path(), &["--vault", "work", "context", "show"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("Name: work"));
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
-        .env("NKEEPASS_DATA_DIR", root.path().join("data"))
-        .env("NKEEPASS_VAULT", "work")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_CONFIG_DIR", root.path().join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.path().join("data"))
+        .env("NEO_KEEPASS_VAULT", "work")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args(["context", "show"])
         .output()
         .unwrap();
@@ -181,10 +181,10 @@ fn context_show_keeps_alias_name_for_explicit_and_environment_selection() {
     assert!(text.contains("Name: work"));
     assert!(text.contains("Source: environment"));
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
-        .env("NKEEPASS_DATA_DIR", root.path().join("data"))
-        .env("NKEEPASS_VAULT", "work")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_CONFIG_DIR", root.path().join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.path().join("data"))
+        .env("NEO_KEEPASS_VAULT", "work")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args(["context", "show", "--json"])
         .output()
         .unwrap();
@@ -299,10 +299,10 @@ fn generated_master_is_recoverable_without_output_disclosure() {
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root.path())
-        .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
-        .env("NKEEPASS_DATA_DIR", root.path().join("data"))
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_CONFIG_DIR", root.path().join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.path().join("data"))
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args(["secrets", "ls", "--password-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -401,10 +401,10 @@ fn closed_output_recovers_from_multiple_private_candidate_records() {
                 "64",
             ])
             .current_dir(root.path())
-            .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
-            .env("NKEEPASS_DATA_DIR", root.path().join("data"))
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
+            .env("NEO_KEEPASS_CONFIG_DIR", root.path().join("config"))
+            .env("NEO_KEEPASS_DATA_DIR", root.path().join("data"))
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -529,12 +529,12 @@ fn identity_reuse_does_not_require_reading_traversable_ancestors() {
     let invoke = |name: &str| {
         Command::new(env!("CARGO_BIN_EXE_nkp"))
             .current_dir(root.path())
-            .env("NKEEPASS_CONFIG_DIR", &config)
-            .env("NKEEPASS_DATA_DIR", &data)
+            .env("NEO_KEEPASS_CONFIG_DIR", &config)
+            .env("NEO_KEEPASS_DATA_DIR", &data)
             .env("NKEEPASS_CONTEXT_TEST_PASSWORD", "synthetic-test-password")
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
-            .env_remove("NKEEPASS_PASSWORD")
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_PASSWORD")
             .args([
                 "init",
                 name,
@@ -586,10 +586,10 @@ fn collision_with_closed_stdout_preserves_original_failure() {
     let original = std::fs::read(&path).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root.path())
-        .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
-        .env("NKEEPASS_DATA_DIR", root.path().join("data"))
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_CONFIG_DIR", root.path().join("config"))
+        .env("NEO_KEEPASS_DATA_DIR", root.path().join("data"))
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .args([
             "init",
             "existing.kdbx",

@@ -190,8 +190,8 @@ fn valid_metadata_path(path: &str) -> bool {
 }
 
 fn completion_password() -> Result<Option<Zeroizing<String>>> {
-    let Some(name) =
-        crate::app_env_var_os("NKEEPASS_COMPLETE_PASSWORD_ENV").filter(|value| !value.is_empty())
+    let Some(name) = crate::app_env_var_os("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
+        .filter(|value| !value.is_empty())
     else {
         return Ok(None);
     };
@@ -3491,7 +3491,7 @@ else:
     /// The interpreter identity for failure diagnostics: how the
     /// program under test identifies itself, reported by that program.
     /// Callers pass either an ambient PATH-resolved shell name or an
-    /// explicit NKEEPASS_COMPLETION_BASH override path (the macOS
+    /// explicit NEO_KEEPASS_COMPLETION_BASH override path (the macOS
     /// canary passes `/bin/bash`), so a failure names exactly which
     /// program answered. On the Windows runner a bare PATH lookup can
     /// resolve differently from GitHub's own `shell: bash` selection
@@ -3531,7 +3531,7 @@ else:
     fn generated_bash_and_posix_scripts_parse_and_posix_files_group_completes() {
         let directory = tempfile::tempdir().unwrap();
         for (shell, args) in [("bash", vec!["-n"]), ("sh", vec!["-n"])] {
-            // The bash half honors NKEEPASS_COMPLETION_BASH — the macOS
+            // The bash half honors NEO_KEEPASS_COMPLETION_BASH — the macOS
             // leg pins the native /bin/bash (3.2.57) so CI keeps
             // exercising the generated script against the legacy bash
             // its PATH no longer resolves, and the Windows leg pins the
@@ -3595,7 +3595,7 @@ else:
     fn generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed() {
         let directory = tempfile::tempdir().unwrap();
         let require_interpreters =
-            crate::app_env_var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some();
+            crate::app_env_var_os("NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS").is_some();
         let zsh_available = std::process::Command::new("zsh")
             .arg("--version")
             .output()
@@ -3680,15 +3680,15 @@ else:
     }
 
     /// Whether the environment demands a bash the readline matrix can
-    /// actually exercise. `NKEEPASS_REQUIRE_COMPLETION_BASH` is the
+    /// actually exercise. `NEO_KEEPASS_REQUIRE_COMPLETION_BASH` is the
     /// dedicated knob, so a leg can demand this one capability without
     /// also demanding the unrelated zsh and PowerShell interpreters
-    /// that `NKEEPASS_REQUIRE_COMPLETION_SHELLS` covers; the older
+    /// that `NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS` covers; the older
     /// flag still counts, because a leg demanding every completion
     /// shell demands this one too.
     fn completion_requirement_requested() -> bool {
-        crate::app_env_var_os("NKEEPASS_REQUIRE_COMPLETION_BASH").is_some()
-            || crate::app_env_var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some()
+        crate::app_env_var_os("NEO_KEEPASS_REQUIRE_COMPLETION_BASH").is_some()
+            || crate::app_env_var_os("NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS").is_some()
     }
 
     /// How long a `--version` probe may run before it is killed and
@@ -4215,7 +4215,7 @@ else:
     }
 
     /// The bash interpreter for the generated-script tests. The
-    /// `NKEEPASS_COMPLETION_BASH` value when set — the override wins
+    /// `NEO_KEEPASS_COMPLETION_BASH` value when set — the override wins
     /// unchanged, and a missing or non-executable override still fails
     /// the tests' own spawn loudly with the interpreter's identity in
     /// the message. Without an override the interpreter is resolved AND
@@ -4236,7 +4236,7 @@ else:
     /// cannot express and must keep testing whatever bash the ambient
     /// PATH provides.
     fn completion_bash_program() -> String {
-        if let Some(program) = crate::app_env_var_os("NKEEPASS_COMPLETION_BASH") {
+        if let Some(program) = crate::app_env_var_os("NEO_KEEPASS_COMPLETION_BASH") {
             return program.to_string_lossy().into_owned();
         }
         static RESOLVED: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
@@ -4727,7 +4727,7 @@ else:
         // legacy bash is a separate regression-guard concern, pinned
         // where it belongs: the macOS leg runs the generated-script
         // parse and boundary tests against the native /bin/bash
-        // through NKEEPASS_COMPLETION_BASH, and the dynamic-path
+        // through NEO_KEEPASS_COMPLETION_BASH, and the dynamic-path
         // accumulator test below drives the while-read loops there
         // too. This interactive matrix alone needs the ambient bash to
         // honor compopt, which every CI leg's PATH provides.
@@ -4736,7 +4736,7 @@ else:
             // The notice below is quiet, not loud: libtest captures a
             // passing test's output and only replays it on failure or
             // with --nocapture. That is exactly why a leg that must run
-            // this matrix also sets NKEEPASS_REQUIRE_COMPLETION_BASH —
+            // this matrix also sets NEO_KEEPASS_REQUIRE_COMPLETION_BASH —
             // the assertion then fails, and libtest replays the notice.
             eprintln!(
                 "SKIP: hostile-filename readline matrix; ambient bash {} predates \
@@ -5512,7 +5512,7 @@ _nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 3
 "#
         );
-        // Honors NKEEPASS_COMPLETION_BASH alongside the parse test:
+        // Honors NEO_KEEPASS_COMPLETION_BASH alongside the parse test:
         // the macOS canary pins this boundary contract to the native
         // /bin/bash too, not just to the modern bash the PATH prefers.
         let bash_program = completion_bash_program();
@@ -5543,7 +5543,7 @@ _nkp_complete
     }
 
     /// Drives the generated bash completion's 3.2-relevant paths
-    /// through whatever bash `NKEEPASS_COMPLETION_BASH` selects: both
+    /// through whatever bash `NEO_KEEPASS_COMPLETION_BASH` selects: both
     /// dynamic completion sites — the `--vault` branch and the metadata
     /// `kind` branch, the two sites whose `mapfile` accumulators became
     /// while-read loops — plus positive cases for the static command

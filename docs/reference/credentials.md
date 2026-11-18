@@ -33,17 +33,16 @@ Use at most one of these options:
 | `--password VALUE` | The literal command-line value. Avoid this option for real passwords. |
 
 If you omit these options and `--key-file`, the CLI uses `NEO_KEEPASS_PASSWORD`,
-then `NKP_PASSWORD`, then legacy `NKEEPASS_PASSWORD` (the first set name)
-when it is set to a non-empty, valid Unicode value. If all are unset, the CLI
+then `NKP_PASSWORD` (the first set name) when it is set to a non-empty, valid
+Unicode value. Legacy `NKEEPASS_PASSWORD` is ignored; migrate it to one of the
+supported names. If both are unset, the CLI
 prompts without echo when stdin is a terminal. The first present name wins:
 an empty or non-Unicode higher-priority value fails instead of falling back or
 prompting.
 Without a password source or terminal prompt, the command fails. Explicit
-password options override all three names. Across the three default names,
-`NEO_KEEPASS_*` takes precedence over `NKP_*`, which takes precedence over
-legacy `NKEEPASS_*`. An explicit source that cannot
-be read fails; the CLI does not fall back to another source. `NKEEPASS_SECRET`
-is not recognized.
+password options override both names. Across the two default names,
+`NEO_KEEPASS_*` takes precedence over `NKP_*`. An explicit source that cannot
+be read fails; the CLI does not fall back to another source.
 
 The parser rejects more than one password source. For example, do not combine
 `--password-env` with `--password-stdin`.
@@ -53,8 +52,8 @@ The parser rejects more than one password source. For example, do not combine
 `--key-file PATH` adds the key-file component to the credentials. It is
 independent of the password-source options, so you can combine it with one
 password source. If you give only `--key-file`, the CLI uses the key file
-without reading `NEO_KEEPASS_PASSWORD`, `NKP_PASSWORD`, or legacy
-`NKEEPASS_PASSWORD`, or asking for a password.
+without reading `NEO_KEEPASS_PASSWORD` or `NKP_PASSWORD`, or asking for a
+password.
 
 Use the non-echoing prompt for interactive work. For scripts, prefer a
 restricted environment variable or a file with suitable access controls.

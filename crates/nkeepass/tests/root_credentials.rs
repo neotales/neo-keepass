@@ -40,23 +40,17 @@ fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
         .args(args)
         .env("XDG_CONFIG_HOME", home)
         .env("XDG_DATA_HOME", home.join("data"))
-        .env_remove("NKEEPASS_CONFIG_DIR")
         .env_remove("NEO_KEEPASS_CONFIG_DIR")
         .env_remove("NKP_CONFIG_DIR")
-        .env_remove("NKEEPASS_DATA_DIR")
         .env_remove("NEO_KEEPASS_DATA_DIR")
         .env_remove("NKP_DATA_DIR")
         .env_remove("XDG_CONFIG_DIR")
-        .env_remove("NKEEPASS_VAULT")
         .env_remove("NEO_KEEPASS_VAULT")
         .env_remove("NKP_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
         .env_remove("NEO_KEEPASS_VAULT_PATH")
         .env_remove("NKP_VAULT_PATH")
-        .env_remove("NKEEPASS_PASSWORD")
         .env_remove("NEO_KEEPASS_PASSWORD")
         .env_remove("NKP_PASSWORD")
-        .env_remove("NKEEPASS_COMPLETE_PASSWORD_ENV")
         .env_remove("NEO_KEEPASS_COMPLETE_PASSWORD_ENV")
         .env_remove("NKP_COMPLETE_PASSWORD_ENV")
         .env_remove("NKEEPASS_SECRET")
@@ -69,15 +63,22 @@ fn default_password_environment_names_follow_documented_precedence() {
     let temp = tempfile::tempdir().unwrap();
     let vault = vault(temp.path());
     for (variables, expected_success) in [
-        (vec![("NKEEPASS_PASSWORD", "vault-password")], true),
-        (vec![("NKP_PASSWORD", "vault-password")], true),
         (vec![("NEO_KEEPASS_PASSWORD", "vault-password")], true),
+        (vec![("NKP_PASSWORD", "vault-password")], true),
+        (vec![("NKEEPASS_PASSWORD", "vault-password")], false),
         (
             vec![
                 ("NKEEPASS_PASSWORD", "wrong"),
                 ("NKP_PASSWORD", "vault-password"),
             ],
             true,
+        ),
+        (
+            vec![
+                ("NEO_KEEPASS_PASSWORD", "wrong"),
+                ("NKP_PASSWORD", "vault-password"),
+            ],
+            false,
         ),
         (
             vec![
@@ -95,10 +96,10 @@ fn default_password_environment_names_follow_documented_precedence() {
         ),
         (
             vec![
-                ("NKEEPASS_PASSWORD", "vault-password"),
-                ("NEO_KEEPASS_PASSWORD", "wrong"),
+                ("NEO_KEEPASS_PASSWORD", "vault-password"),
+                ("NKEEPASS_PASSWORD", "wrong"),
             ],
-            false,
+            true,
         ),
         (
             vec![
@@ -162,7 +163,7 @@ fn root_credentials_reach_shared_vault_commands_and_explicit_sources_override_de
     ] {
         let output = command(temp.path(), &vault, &args)
             .env("EXPLICIT_PASSWORD", "vault-password")
-            .env("NKEEPASS_PASSWORD", "wrong-password")
+            .env("NEO_KEEPASS_PASSWORD", "wrong-password")
             .output()
             .unwrap();
         success(&output);
@@ -174,7 +175,7 @@ fn root_credentials_reach_shared_vault_commands_and_explicit_sources_override_de
     }
     success(
         &command(temp.path(), &vault, &["group", "ls"])
-            .env("NKEEPASS_PASSWORD", "vault-password")
+            .env("NEO_KEEPASS_PASSWORD", "vault-password")
             .output()
             .unwrap(),
     );
@@ -190,7 +191,7 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
         vec!["secrets", "get", "--password-stdin", "--key", "login"],
     ] {
         let mut command = command(temp.path(), &vault, &args);
-        command.env("NKEEPASS_PASSWORD", "wrong-password");
+        command.env("NEO_KEEPASS_PASSWORD", "wrong-password");
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -225,7 +226,7 @@ fn global_credential_help_and_static_completions_show_both_sources() {
     let globals = help.split_once("GLOBAL OPTIONS:").unwrap().1;
     assert!(globals.contains("--password-env NAME"));
     assert!(globals.contains("--password-stdin"));
-    assert!(help.contains("NKEEPASS_PASSWORD"));
+    assert!(help.contains("NEO_KEEPASS_PASSWORD"));
     for shell in ["bash", "sh", "zsh", "fish", "powershell", "nushell"] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
             .isolate_application_environment()
@@ -359,7 +360,7 @@ fn absent_and_empty_password_variables_fail_without_default_aliases() {
             ],
         );
         cli.env_remove("EXPLICIT_PASSWORD")
-            .env("NKEEPASS_PASSWORD", "vault-password");
+            .env("NEO_KEEPASS_PASSWORD", "vault-password");
         if let Some(value) = value {
             cli.env("EXPLICIT_PASSWORD", value);
         }
@@ -372,7 +373,7 @@ fn absent_and_empty_password_variables_fail_without_default_aliases() {
         );
     }
     let output = command(temp.path(), &vault, &["get", "--key", "login"])
-        .env("NKEEPASS_PASSWORD", "")
+        .env("NEO_KEEPASS_PASSWORD", "")
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -402,7 +403,7 @@ fn non_utf8_password_variables_fail_without_disclosure() {
     let vault = vault(temp.path());
     for name in [
         "EXPLICIT_PASSWORD",
-        "NKEEPASS_PASSWORD",
+        "NEO_KEEPASS_PASSWORD",
         "NKP_PASSWORD",
         "NEO_KEEPASS_PASSWORD",
     ] {
@@ -438,7 +439,7 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
         "--",
         "/bin/sh",
         "-c",
-        "test \"$APP_PASSWORD\" = app-secret && test \"${NKEEPASS_PASSWORD+x}\" != x && test \"${EXPLICIT_PASSWORD+x}\" != x && test \"$1\" = --password-env && test \"$2\" = child-source && test \"$3\" = --password-stdin",
+        "test \"$APP_PASSWORD\" = app-secret && test \"${NEO_KEEPASS_PASSWORD+x}\" != x && test \"${EXPLICIT_PASSWORD+x}\" != x && test \"$1\" = --password-env && test \"$2\" = child-source && test \"$3\" = --password-stdin",
         "child",
         "--password-env",
         "child-source",
@@ -458,7 +459,7 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
         let mut cli = command(temp.path(), &vault, &args);
         cli.env("EXPLICIT_PASSWORD", "vault-password")
             .env(
-                "NKEEPASS_PASSWORD",
+                "NEO_KEEPASS_PASSWORD",
                 if fallback {
                     "vault-password"
                 } else {
@@ -498,7 +499,7 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
         ],
     )
     .env("PATH", "vault-password")
-    .env("NKEEPASS_PASSWORD", "wrong-password")
+    .env("NEO_KEEPASS_PASSWORD", "wrong-password")
     .output()
     .unwrap();
     success(&output);
@@ -506,7 +507,7 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
     assert!(
         !environment
             .lines()
-            .any(|line| line.starts_with("PATH=") || line.starts_with("NKEEPASS_PASSWORD="))
+            .any(|line| line.starts_with("PATH=") || line.starts_with("NEO_KEEPASS_PASSWORD="))
     );
     assert!(
         environment
@@ -519,7 +520,11 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
 fn exec_rejects_every_default_password_alias_as_a_child_binding() {
     let temp = tempfile::tempdir().unwrap();
     let vault = vault(temp.path());
-    for name in ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD", "NKEEPASS_PASSWORD"] {
+    for name in [
+        "NEO_KEEPASS_PASSWORD",
+        "NKP_PASSWORD",
+        "NEO_KEEPASS_PASSWORD",
+    ] {
         let output = command(
             temp.path(),
             &vault,

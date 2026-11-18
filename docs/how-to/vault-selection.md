@@ -3,8 +3,8 @@
 `nkp` chooses a vault using the first available source in this order:
 
 1. Explicit `-V PATH` or `--vault PATH`.
-2. `NEO_KEEPASS_VAULT`, `NKP_VAULT`, then legacy `NKEEPASS_VAULT`.
-3. `NEO_KEEPASS_VAULT_PATH`, `NKP_VAULT_PATH`, then legacy `NKEEPASS_VAULT_PATH`.
+2. `NEO_KEEPASS_VAULT`, then `NKP_VAULT`.
+3. `NEO_KEEPASS_VAULT_PATH`, then `NKP_VAULT_PATH`.
 4. The current vault context.
 5. The configured default vault.
 6. `default.kdbx` in the application data directory.
@@ -43,7 +43,8 @@ nkp secrets ls
 
 An explicit `--vault` overrides both vault environment variables, even if an
 environment value is empty or invalid. For each name, `NEO_KEEPASS_*` takes
-precedence over `NKP_*`, which takes precedence over legacy `NKEEPASS_*`.
+precedence over `NKP_*`. Legacy `NKEEPASS_*` variables are ignored; migrate
+them by replacing the prefix with `NEO_KEEPASS_` (or `NKP_`).
 The first present `VAULT` name takes precedence over every `VAULT_PATH` name.
 A selected empty or non-Unicode vault value is an error; it does not fall
 through to another alias, `VAULT_PATH`, context, or configured default. Unset

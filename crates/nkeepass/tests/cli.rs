@@ -37,19 +37,19 @@ fn cli(home: &Path, args: &[&str]) -> Output {
         .env("XDG_DATA_HOME", home.join("data"))
         .env_remove("NEO_KEEPASS_VAULT")
         .env_remove("NKP_VAULT")
-        .env_remove("NKEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT")
         .env_remove("NEO_KEEPASS_VAULT_PATH")
         .env_remove("NKP_VAULT_PATH")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .env_remove("NEO_KEEPASS_PASSWORD")
         .env_remove("NKP_PASSWORD")
-        .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_PASSWORD")
         .env_remove("NEO_KEEPASS_CONFIG_DIR")
         .env_remove("NKP_CONFIG_DIR")
-        .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NEO_KEEPASS_CONFIG_DIR")
         .env_remove("NEO_KEEPASS_DATA_DIR")
         .env_remove("NKP_DATA_DIR")
-        .env_remove("NKEEPASS_DATA_DIR")
+        .env_remove("NEO_KEEPASS_DATA_DIR")
         .output()
         .unwrap()
 }
@@ -115,9 +115,7 @@ fn vault_environment_aliases_are_ordered_and_empty_values_fail_closed() {
 
     for (empty_name, fallback_name) in [
         ("NEO_KEEPASS_VAULT", "NKP_VAULT"),
-        ("NKP_VAULT", "NKEEPASS_VAULT"),
         ("NEO_KEEPASS_VAULT_PATH", "NKP_VAULT_PATH"),
-        ("NKP_VAULT_PATH", "NKEEPASS_VAULT_PATH"),
     ] {
         let output = command(binary, &fixture)
             .env("XDG_CONFIG_HOME", &config)
@@ -333,8 +331,8 @@ fn context_alias_persistence_and_precedence() {
         .isolate_application_environment()
         .args(["context", "show", "--json"])
         .env("XDG_CONFIG_HOME", tmp.path())
-        .env("NKEEPASS_VAULT", vault)
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_VAULT", vault)
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -425,8 +423,8 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
         .current_dir(tmp.path())
         .args(["alias", "list"])
         .env("XDG_CONFIG_HOME", "relative-config")
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .output()
         .unwrap();
     assert!(!relative.status.success());
@@ -458,8 +456,8 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
         .isolate_application_environment()
         .args(["context", "show"])
         .env("XDG_CONFIG_HOME", &env_home)
-        .env("NKEEPASS_VAULT", invalid_env)
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env("NEO_KEEPASS_VAULT", invalid_env)
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .output()
         .unwrap();
     assert!(!environment.status.success());
@@ -511,8 +509,8 @@ fn metadata_listing_never_prints_password_or_values() {
         ])
         .env("XDG_CONFIG_HOME", fixture.directory())
         .env("FIXTURE_PASSWORD", MASTER_PASSWORD)
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -765,9 +763,9 @@ fn completion_scripts_are_static_for_every_advertised_shell() {
             .isolate_application_environment()
             .current_dir(tmp.path())
             .env_clear()
-            .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "COMPLETION_PASSWORD")
+            .env("NEO_KEEPASS_COMPLETE_PASSWORD_ENV", "COMPLETION_PASSWORD")
             .env("COMPLETION_PASSWORD", marker)
-            .env("NKEEPASS_VAULT", marker)
+            .env("NEO_KEEPASS_VAULT", marker)
             .env("XDG_CONFIG_HOME", "relative-config-must-not-be-read")
             .args(["completion", shell])
             .stdin(Stdio::null())
@@ -860,7 +858,7 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
 
     let locked = command(binary, &fixture)
         .env("XDG_CONFIG_HOME", "relative-config-must-not-be-read")
-        .env("NKEEPASS_VAULT", vault)
+        .env("NEO_KEEPASS_VAULT", vault)
         .args(["__complete", "entries", "fixture"])
         .stdin(Stdio::null())
         .output()
@@ -934,7 +932,7 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
     let authenticated = |kind: &str, prefix: &str| {
         command(binary, &fixture)
             .env("XDG_CONFIG_HOME", &config_home)
-            .env("NKEEPASS_VAULT", vault)
+            .env("NEO_KEEPASS_VAULT", vault)
             .env(
                 "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
                 "NKEEPASS_COMPLETE_TEST_PASSWORD",
@@ -962,7 +960,7 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
 
     let empty_completion_name = command(binary, &fixture)
         .env("XDG_CONFIG_HOME", &config_home)
-        .env("NKEEPASS_VAULT", vault)
+        .env("NEO_KEEPASS_VAULT", vault)
         .env("NEO_KEEPASS_COMPLETE_PASSWORD_ENV", "")
         .env(
             "NKP_COMPLETE_PASSWORD_ENV",
@@ -985,7 +983,7 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
         use std::os::unix::ffi::OsStringExt;
         let non_unicode_name = command(binary, &fixture)
             .env("XDG_CONFIG_HOME", &config_home)
-            .env("NKEEPASS_VAULT", vault)
+            .env("NEO_KEEPASS_VAULT", vault)
             .env(
                 "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
                 std::ffi::OsString::from_vec(vec![0xff]),
@@ -1008,9 +1006,9 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
     // command being completed; an environment fallback must not win.
     let forwarded = command(binary, &fixture)
         .env("XDG_CONFIG_HOME", &config_home)
-        .env("NKEEPASS_VAULT", "/path/that/must/not/be-used.kdbx")
+        .env("NEO_KEEPASS_VAULT", "/path/that/must/not/be-used.kdbx")
         .env(
-            "NKEEPASS_COMPLETE_PASSWORD_ENV",
+            "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
             "NKEEPASS_COMPLETE_TEST_PASSWORD",
         )
         .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
@@ -1024,9 +1022,9 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
 
     let wrong = command(binary, &fixture)
         .env("XDG_CONFIG_HOME", &config_home)
-        .env("NKEEPASS_VAULT", vault)
+        .env("NEO_KEEPASS_VAULT", vault)
         .env(
-            "NKEEPASS_COMPLETE_PASSWORD_ENV",
+            "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
             "NKEEPASS_COMPLETE_TEST_PASSWORD",
         )
         .env("NKEEPASS_COMPLETE_TEST_PASSWORD", nkp_cli::WRONG_PASSWORD)
@@ -1093,8 +1091,11 @@ fn completion_protocol_omits_ambiguous_entry_and_group_paths() {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
             .isolate_application_environment()
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
-            .env("NKEEPASS_VAULT", &vault)
-            .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "COMPLETION_TEST_PASSWORD")
+            .env("NEO_KEEPASS_VAULT", &vault)
+            .env(
+                "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
+                "COMPLETION_TEST_PASSWORD",
+            )
             .env("COMPLETION_TEST_PASSWORD", "completion-test-password")
             .args(["__complete", kind, prefix])
             .stdin(Stdio::null())
@@ -1234,8 +1235,8 @@ fn shortcuts_fields_attachments_and_exec() {
             .args(args)
             .env("XDG_CONFIG_HOME", tmp.path())
             .env("TEST_VAULT_PASSWORD", "test-password")
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
             .output()
             .unwrap()
     };
@@ -1581,8 +1582,8 @@ fn shortcuts_fields_attachments_and_exec() {
             "IFS= read -r line; test \"$line\" = child-input-SENTINEL",
         ])
         .env("XDG_CONFIG_HOME", tmp.path())
-        .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH");
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT_PATH");
     let mut isolated_stdin = isolated_command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1722,7 +1723,7 @@ fn run_against(vault: &Path, config: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
         .isolate_application_environment()
         .env("XDG_CONFIG_HOME", config)
-        .env("NKEEPASS_VAULT", vault)
+        .env("NEO_KEEPASS_VAULT", vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
         .args(args)
         .args(["--password-env", "HOSTILE_TEST_PASSWORD"])
@@ -2023,9 +2024,9 @@ fn root_prefixed_selectors_survive_unaddressable_siblings() {
     let candidates = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .isolate_application_environment()
         .env("XDG_CONFIG_HOME", &config)
-        .env("NKEEPASS_VAULT", &vault)
+        .env("NEO_KEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
-        .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "HOSTILE_TEST_PASSWORD")
+        .env("NEO_KEEPASS_COMPLETE_PASSWORD_ENV", "HOSTILE_TEST_PASSWORD")
         .args(["__complete", "entries", "Root/Valid/bad/"])
         .stdin(Stdio::null())
         .output()
@@ -2035,9 +2036,9 @@ fn root_prefixed_selectors_survive_unaddressable_siblings() {
     let hidden = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .isolate_application_environment()
         .env("XDG_CONFIG_HOME", &config)
-        .env("NKEEPASS_VAULT", &vault)
+        .env("NEO_KEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
-        .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "HOSTILE_TEST_PASSWORD")
+        .env("NEO_KEEPASS_COMPLETE_PASSWORD_ENV", "HOSTILE_TEST_PASSWORD")
         .args(["__complete", "entries", "Root/bad/group/"])
         .stdin(Stdio::null())
         .output()
@@ -2825,7 +2826,7 @@ fn ls_glob_withholds_only_matching_hostile_rows() {
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
         .isolate_application_environment()
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
-        .env("NKEEPASS_VAULT", &vault)
+        .env("NEO_KEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
         .args([
             "secrets",
@@ -2964,7 +2965,7 @@ fn ls_propagates_a_closed_stdout_pipe() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
     command
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
-        .env("NKEEPASS_VAULT", &vault)
+        .env("NEO_KEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
         .args(["secrets", "ls", "--password-env", "HOSTILE_TEST_PASSWORD"]);
     let mut child = command
@@ -3175,7 +3176,7 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
     assert!(normalized_help.contains("Glob syntax"));
     assert!(normalized_help.contains("Automation and interchange"));
     for obsolete_detail in [
-        "NKEEPASS_VAULT_PATH",
+        "NEO_KEEPASS_VAULT_PATH",
         "timestamp is read ONCE",
         "passwords_pending",
         "MAXIMUM 64 KiB",
@@ -3592,8 +3593,8 @@ fn help_uses_the_argv0_basename_including_executable_extension() {
             .arg("get")
             .arg("--help")
             .env("XDG_CONFIG_HOME", tmp.path())
-            .env_remove("NKEEPASS_VAULT")
-            .env_remove("NKEEPASS_VAULT_PATH");
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH");
         let output = command.output().unwrap();
         let help = String::from_utf8(output.stdout).unwrap();
         assert!(output.status.success());
@@ -3723,8 +3724,8 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
         isolated_command
             .args(args)
             .env("HOME", tmp.path())
-            .env_remove("NKEEPASS_CONFIG_DIR")
-            .env_remove("NKEEPASS_DATA_DIR")
+            .env_remove("NEO_KEEPASS_CONFIG_DIR")
+            .env_remove("NEO_KEEPASS_DATA_DIR")
             .env_remove("XDG_CONFIG_DIR")
             .env_remove("XDG_DATA_DIR")
             .env("XDG_CONFIG_HOME", tmp.path())
