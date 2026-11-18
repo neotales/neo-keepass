@@ -1993,10 +1993,14 @@ def fail(message):
     raise SystemExit(message + "; PTY transcript: " + repr(transcript))
 
 def stop_child():
-    # Simulated: the real driver only reaches this return when a SIGKILLed
-    # group ignores its reap allowance, which no test can force. What is
-    # under test is the finally that composes the two diagnostics.
-    return "interactive bash survived SIGKILL; PTY transcript: " + repr(transcript)
+    # Simulated: the real driver only reaches this return when the group
+    # is still unreaped after its SIGKILL+SIGCONT allowance, which no
+    # test can force. What is under test is the finally that composes
+    # the two diagnostics.
+    return (
+        "interactive bash was still unreaped 3s after group SIGKILL+SIGCONT"
+        "; PTY transcript: " + repr(transcript)
+    )
 
 def compose_failure(primary, cleanup):
     # The hostile-filename driver's finally protocol, in the shape a
@@ -2065,7 +2069,7 @@ raise SystemExit(failures)
             run.failure_summary()
         );
         assert!(
-            stderr.contains("interactive bash survived SIGKILL"),
+            stderr.contains("still unreaped 3s after group SIGKILL+SIGCONT"),
             "the cleanup detail must be part of the composed diagnostic: {}",
             run.failure_summary()
         );
@@ -2096,7 +2100,12 @@ transcript = b""
 
 def stop_child(pid):
     # The hostile-filename driver's cleanup, verbatim in shape: a group
-    # kill only, on every path — never a direct pid kill.
+    # kill only, on every path — never a direct pid kill — with the
+    # SIGCONT first and the WUNTRACED observation the real driver uses.
+    try:
+        os.killpg(pid, signal.SIGCONT)
+    except OSError:
+        return None
     try:
         os.killpg(pid, signal.SIGKILL)
     except OSError:
@@ -2104,13 +2113,22 @@ def stop_child(pid):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         try:
-            waited, _ = os.waitpid(pid, os.WNOHANG)
+            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
         except ChildProcessError:
             return None
         if waited == pid:
             return None
+        if os.WIFSTOPPED(status):
+            return (
+                "interactive bash is stopped by signal %d and did not "
+                "continue after SIGCONT; PTY transcript: " % os.WSTOPSIG(status)
+                + repr(transcript)
+            )
         time.sleep(0.02)
-    return "interactive bash survived SIGKILL; PTY transcript: " + repr(transcript)
+    return (
+        "interactive bash was still unreaped 3s after group SIGKILL+SIGCONT"
+        "; PTY transcript: " + repr(transcript)
+    )
 
 # pty.fork() gives the real driver's child its own session and group;
 # this replicates that shape so the group semantics are the real ones.
@@ -2439,8 +2457,9 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         for marker in [
             "import os, pty, select, sys, time, signal",
             "def stop_child():",
+            "os.killpg(pid, signal.SIGCONT)",
             "os.killpg(pid, signal.SIGKILL)",
-            "; cleanup: ",
+            "still unreaped 3s after group SIGKILL+SIGCONT",
             "; cleanup also failed: ",
             "case ended with ",
             "raise primary",
@@ -2449,7 +2468,8 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             assert!(
                 driver.contains(marker),
                 "the PTY driver must keep `{marker}` — its cleanup owns the \
-                 group, composes failures, and reports the transcript"
+                 group (SIGCONT first, so a stopped member cannot hold the \
+                 SIGKILL), composes failures, and reports the transcript"
             );
         }
     }
@@ -2797,13 +2817,17 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             // The bash half honors NKEEPASS_COMPLETION_BASH — the macOS
             // leg pins the native /bin/bash (3.2.57) so CI keeps
             // exercising the generated script against the legacy bash
-            // its PATH no longer resolves — while the POSIX half stays
-            // on the ambient sh (macOS /bin/sh already is the legacy
-            // bash in sh mode).
+            // its PATH no longer resolves, and the Windows leg pins the
+            // validated Git for Windows bash (a bare `bash` there is
+            // always the WSL stub in System32) — while the POSIX half
+            // stays on the ambient sh on unix (macOS /bin/sh already is
+            // the legacy bash in sh mode) and resolves sh.exe from the
+            // same Git for Windows installation on Windows, where no
+            // `sh` is on PATH at all.
             let program = if shell == "bash" {
                 completion_bash_program()
             } else {
-                shell.to_owned()
+                completion_posix_program()
             };
             let path = directory.path().join(format!("completion.{shell}"));
             std::fs::write(&path, generate(shell).unwrap()).unwrap();
@@ -2822,7 +2846,8 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
 
         let path = directory.path().join("completion.sh");
         std::fs::write(&path, generate("sh").unwrap()).unwrap();
-        let output = std::process::Command::new("sh")
+        let posix = completion_posix_program();
+        let output = std::process::Command::new(&posix)
             .arg("-c")
             .arg(". ./completion.sh; nkp_complete '' '' files; nkp_complete '' '' files add")
             .current_dir(directory.path())
@@ -2832,20 +2857,20 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             output.status.success(),
             "POSIX sh helper run of the generated completion failed: {} [interpreter: {}]",
             subprocess_failure_detail(&output),
-            shell_interpreter_identity("sh"),
+            shell_interpreter_identity(&posix),
         );
         let completions = String::from_utf8_lossy(&output.stdout);
         assert!(
             completions.lines().any(|line| line == "ls"),
             "files completion lost the `ls` group [stdout: {:?}][interpreter: {}]",
             completions,
-            shell_interpreter_identity("sh"),
+            shell_interpreter_identity(&posix),
         );
         assert!(
             completions.lines().any(|line| line == "--file"),
             "files-add completion lost `--file` [stdout: {:?}][interpreter: {}]",
             completions,
-            shell_interpreter_identity("sh"),
+            shell_interpreter_identity(&posix),
         );
     }
 
@@ -2948,21 +2973,187 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             || std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some()
     }
 
-    /// The bash interpreter for the generated-script tests: the
-    /// `NKEEPASS_COMPLETION_BASH` value when set, else the ambient
-    /// PATH-resolved `bash`. The macOS CI leg pins this to the native
-    /// `/bin/bash` (3.2.57) as a canary: that leg's PATH otherwise
-    /// resolves `bash` to Homebrew's 5.x, and without the pin nothing
-    /// in CI would keep exercising the generated script against the
-    /// legacy bash a stock macOS still ships. A missing or
-    /// non-executable override fails these tests' own spawn loudly.
-    /// The interactive PTY matrix deliberately ignores it — that matrix
-    /// pins `compopt` quoting 3.2 cannot express and must keep testing
-    /// whatever bash the ambient PATH provides.
+    /// Probe whether `program` is a usable shell: a `--version` spawn
+    /// that exits 0 with output, and — when `required_output` is set —
+    /// stdout that contains it. `None` means usable; `Some` carries the
+    /// one-line detail of what actually happened, for the fail-closed
+    /// diagnostic. The WSL launcher stub in System32 (see
+    /// [`completion_bash_program`]) fails this probe with exit 1 and a
+    /// "no installed distributions" message, which is exactly the
+    /// distinction resolution needs: a missing interpreter is never
+    /// mislabeled as a script or boundary failure.
+    fn shell_probe_failure(program: &str, required_output: Option<&str>) -> Option<String> {
+        let report = std::process::Command::new(program)
+            .arg("--version")
+            .output();
+        let output = match report {
+            Ok(output) => output,
+            Err(error) => return Some(format!("`{program}` did not start ({error})")),
+        };
+        if !output.status.success() {
+            return Some(format!(
+                "`{program}` --version exited {}: {}",
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "by-signal".to_owned(), |code| code.to_string()),
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or_default(),
+            ));
+        }
+        let first_line = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        if first_line.is_empty() {
+            return Some(format!(
+                "`{program}` --version exited 0 but printed nothing"
+            ));
+        }
+        if let Some(required) = required_output
+            && !String::from_utf8_lossy(&output.stdout).contains(required)
+        {
+            return Some(format!(
+                "`{program}` --version is not the required interpreter: {first_line}"
+            ));
+        }
+        None
+    }
+
+    /// Root directories that carry a Git for Windows installation, most
+    /// likely first: the runner images and default installers use the
+    /// 64-bit Program Files, the x86 root is the legacy fallback.
+    #[cfg(windows)]
+    fn git_for_windows_roots() -> Vec<String> {
+        let mut roots = Vec::new();
+        for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Ok(value) = std::env::var(key) {
+                if !value.trim().is_empty() {
+                    roots.push(value);
+                }
+            }
+        }
+        for fallback in ["C:\\Program Files", "C:\\Program Files (x86)"] {
+            if !roots.iter().any(|root| root == fallback) {
+                roots.push(fallback.to_owned());
+            }
+        }
+        roots
+    }
+
+    /// The bash candidates [`completion_bash_program`] probes, in
+    /// order. Unix: the ambient PATH `bash`. Windows: only the standard
+    /// Git for Windows install locations — a bare `bash` on Windows
+    /// always resolves to the WSL launcher stub in System32 (the
+    /// `CreateProcess` search order checks System32 before any PATH
+    /// entry, so no PATH arrangement can fix it), and it is never a
+    /// candidate here: a missing WSL distro is an interpreter problem,
+    /// not test behavior.
+    #[cfg(not(windows))]
+    fn completion_bash_candidates() -> Vec<String> {
+        vec!["bash".to_owned()]
+    }
+
+    #[cfg(windows)]
+    fn completion_bash_candidates() -> Vec<String> {
+        let mut candidates = Vec::new();
+        for root in git_for_windows_roots() {
+            candidates.push(format!("{root}\\Git\\bin\\bash.exe"));
+            candidates.push(format!("{root}\\Git\\usr\\bin\\bash.exe"));
+        }
+        candidates
+    }
+
+    /// The bash interpreter for the generated-script tests. The
+    /// `NKEEPASS_COMPLETION_BASH` value when set — the override wins
+    /// unchanged, and a missing or non-executable override still fails
+    /// the tests' own spawn loudly with the interpreter's identity in
+    /// the message. Without an override the interpreter is resolved AND
+    /// validated, never assumed: every candidate must pass the
+    /// `--version` probe and identify as GNU bash, the first that does
+    /// wins, and if none does the test panics fail-closed with each
+    /// candidate's observed failure, stated as an
+    /// interpreter-availability problem — never as a generated-script
+    /// or completion-boundary failure. Resolution runs once per test
+    /// binary and is cached.
+    ///
+    /// The macOS CI leg pins this to the native `/bin/bash` (3.2.57) as
+    /// a canary: that leg's PATH otherwise resolves `bash` to
+    /// Homebrew's 5.x, and without the pin nothing in CI would keep
+    /// exercising the generated script against the legacy bash a stock
+    /// macOS still ships. The interactive PTY matrix deliberately
+    /// ignores this helper — that matrix pins `compopt` quoting 3.2
+    /// cannot express and must keep testing whatever bash the ambient
+    /// PATH provides.
     fn completion_bash_program() -> String {
-        match std::env::var_os("NKEEPASS_COMPLETION_BASH") {
-            Some(program) => program.to_string_lossy().into_owned(),
-            None => "bash".to_owned(),
+        if let Some(program) = std::env::var_os("NKEEPASS_COMPLETION_BASH") {
+            return program.to_string_lossy().into_owned();
+        }
+        static RESOLVED: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+        RESOLVED
+            .get_or_init(|| {
+                let mut failures = Vec::new();
+                for candidate in completion_bash_candidates() {
+                    match shell_probe_failure(&candidate, Some("GNU bash, version")) {
+                        None => return Ok(candidate),
+                        Some(failure) => failures.push(failure),
+                    }
+                }
+                Err(format!(
+                    "no bash interpreter for the generated-script tests — an \
+                     interpreter-availability failure, not a generated-script or \
+                     completion-boundary failure (candidates: {})",
+                    failures.join("; ")
+                ))
+            })
+            .clone()
+            .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+    }
+
+    /// The POSIX sh interpreter for the generated-script tests' sh
+    /// half. The ambient `sh` on every unix leg is used exactly as
+    /// before (macOS `/bin/sh` already is the legacy bash in sh mode,
+    /// and probing dash's `--version` support is a behavior change unix
+    /// legs do not need). Windows has no `sh` on PATH at all — Git for
+    /// Windows keeps `sh.exe` in `usr\bin`, which installers do not add
+    /// to PATH — so the candidates there come from the same Git for
+    /// Windows locations [`completion_bash_program`] targets, probed
+    /// for a usable spawn and failing closed with the same honest
+    /// interpreter-availability diagnostic.
+    fn completion_posix_program() -> String {
+        #[cfg(windows)]
+        {
+            static RESOLVED: std::sync::OnceLock<Result<String, String>> =
+                std::sync::OnceLock::new();
+            RESOLVED
+                .get_or_init(|| {
+                    let mut candidates = Vec::new();
+                    for root in git_for_windows_roots() {
+                        candidates.push(format!("{root}\\Git\\usr\\bin\\sh.exe"));
+                    }
+                    let mut failures = Vec::new();
+                    for candidate in &candidates {
+                        match shell_probe_failure(candidate, None) {
+                            None => return Ok(candidate.clone()),
+                            Some(failure) => failures.push(failure),
+                        }
+                    }
+                    Err(format!(
+                        "no POSIX sh interpreter for the generated-script tests — an \
+                         interpreter-availability failure, not a generated-script or \
+                         completion-boundary failure (candidates: {})",
+                        failures.join("; ")
+                    ))
+                })
+                .clone()
+                .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+        }
+        #[cfg(not(windows))]
+        {
+            "sh".to_owned()
         }
     }
 
@@ -3269,6 +3460,18 @@ def stop_child():
     # and the pid of a reaped child may already belong to an unrelated
     # process. NEVER fall back to a direct kill by pid on that path: after
     # a reap the number is not ours to signal; the group id was.
+    #
+    # SIGCONT precedes the SIGKILL: a job-control-stopped member holds a
+    # posted SIGKILL until it is continued (the BSD-class behavior that
+    # fits macOS job 134579897677, where the pid was still unreaped 3s
+    # after a plain SIGKILL), and to a running member SIGCONT's default
+    # action is to continue — a no-op. The reap loop below observes with
+    # WUNTRACED, so a member still stopped despite the SIGCONT names its
+    # stop signal in the diagnostic instead of the cleanup guessing.
+    try:
+        os.killpg(pid, signal.SIGCONT)
+    except OSError:
+        return None
     try:
         os.killpg(pid, signal.SIGKILL)
     except OSError:
@@ -3276,7 +3479,7 @@ def stop_child():
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         try:
-            waited, _ = os.waitpid(pid, os.WNOHANG)
+            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
         except ChildProcessError:
             # Already reaped (by the exit wait above, or an earlier
             # cleanup): nothing left to signal or reap, and killpg has
@@ -3284,11 +3487,30 @@ def stop_child():
             return None
         if waited == pid:
             return None
+        if os.WIFSTOPPED(status):
+            return (
+                "interactive bash is stopped by signal %d and did not "
+                "continue after SIGCONT; PTY transcript: " % os.WSTOPSIG(status)
+                + repr(transcript)
+            )
         time.sleep(0.02)
     # NOT raised: raising here — especially out of a finally — would mask
     # whatever failure is already propagating. Return the diagnostic; the
     # caller composes it with the primary one.
-    return "interactive bash survived SIGKILL; PTY transcript: " + repr(transcript)
+    #
+    # macOS job 134579897677 wording note: the old text said "survived
+    # SIGKILL", which overclaimed what this loop can know. An
+    # already-reaped child reports ECHILD above and returns success, and
+    # a child that died from the SIGKILL reaps on the first WNOHANG wait
+    # — so reaching this return only ever proved that, for the window,
+    # the pid was neither terminated-and-reaped nor already-reaped. A
+    # SIGKILL held by a stopped member and an uninterruptible kernel
+    # wait both fit; "the shell survived" does not follow. The wording
+    # below states exactly what was observed.
+    return (
+        "interactive bash was still unreaped 3s after group SIGKILL+SIGCONT"
+        "; PTY transcript: " + repr(transcript)
+    )
 
 primary = None
 try:
@@ -3307,27 +3529,50 @@ try:
     else:
         write_bounded(close_quote.encode() + b"\n")
         drain()
+    if no_match == expect_match:
+        fail("unexpected completion match state")
+    if not no_match:
+        # The stub writes args.bin synchronously before the prompt
+        # returns, but the drain above can return early on a slow
+        # machine; wait bounded for the file instead of racing it.
+        args_path = os.path.join(directory, "args.bin")
+        deadline = time.monotonic() + 2
+        while not os.path.exists(args_path):
+            if time.monotonic() >= deadline:
+                fail("args.bin never appeared; the completed command did not run")
+            time.sleep(0.02)
+        with open(args_path, "rb") as stream:
+            actual = stream.read().split(b"\0")[:-1]
+        if actual != [arg.encode() for arg in expected_args]:
+            fail("completion produced unexpected literal argv: " + repr(actual))
+    # The case's own behavior is now asserted; bash's exit is CLEANUP,
+    # not the behavior under test. macOS job 134579897677 completed the
+    # case exactly to here — the completed command executed and the
+    # prompt returned — and then bash never consumed `exit` (the exit
+    # wedge documented in docs/ci-cd.md), so the old flow failed an
+    # otherwise-passing case at the handshake. Attempt the polite exit
+    # anyway, bounded; a non-exit is a recorded diagnostic, never a
+    # failure, and the finally's group cleanup owns the shutdown.
     write_bounded(b"exit\n")
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        waited, _ = os.waitpid(pid, os.WNOHANG)
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            # Already reaped: nothing left to wait for.
+            break
         if waited == pid:
             break
         time.sleep(0.02)
     else:
-        # The timeout is the primary failure; a cleanup that could not
-        # finish is appended to it, never raised over it.
-        cleanup = stop_child()
-        fail("timed out waiting for interactive bash to exit"
-             + (("; cleanup: " + cleanup) if cleanup else ""))
-    if no_match == expect_match:
-        fail("unexpected completion match state")
-    if no_match:
-        raise SystemExit(0)
-    with open(os.path.join(directory, "args.bin"), "rb") as stream:
-        actual = stream.read().split(b"\0")[:-1]
-    if actual != [arg.encode() for arg in expected_args]:
-        fail("completion produced unexpected literal argv: " + repr(actual))
+        print(
+            "interactive bash did not exit within 3s after 'exit'; the case "
+            "itself passed and the group cleanup follows; PTY transcript: "
+            + repr(transcript),
+            file=sys.stderr,
+            flush=True,
+        )
+    raise SystemExit(0)
 except BaseException as raised:
     # Hold the primary diagnostic — fail() raises SystemExit, and an
     # unexpected exception is held the same way. The finally decides what

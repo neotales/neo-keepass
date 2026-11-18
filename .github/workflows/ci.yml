@@ -247,6 +247,53 @@ jobs:
             echo "::error::canary expected exactly 3 passing tests; see the output above"
             exit 1
           fi
+      # Windows pins the bash the tests see, the way the macOS canary
+      # above pins /bin/bash. A bare `bash` on Windows can never resolve
+      # to Git for Windows' bash: the CreateProcess search order checks
+      # System32 before any PATH entry, so `bash.exe` there is always
+      # the WSL launcher stub (run 44238368217's Windows job: exit 1,
+      # "no installed distributions" in UTF-16 — a missing WSL distro is
+      # an interpreter-availability fact, and the tests now report it as
+      # one instead of mislabeling it a script or boundary failure).
+      # Resolve the same standard Git for Windows locations the
+      # test-side fallback probes, validate the binary reports GNU
+      # bash, and pin it through NKEEPASS_COMPLETION_BASH; the tests
+      # keep honoring an explicit override first and fail closed with an
+      # interpreter-availability diagnostic if nothing usable is found.
+      - name: Pin the test bash to Git for Windows (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          program=""
+          for candidate in \
+            "/c/Program Files/Git/bin/bash.exe" \
+            "/c/Program Files/Git/usr/bin/bash.exe" \
+            "/c/Program Files (x86)/Git/bin/bash.exe" \
+            "/c/Program Files (x86)/Git/usr/bin/bash.exe"
+          do
+            if [ -x "$candidate" ]; then
+              program="$(cygpath -w "$candidate")"
+              break
+            fi
+          done
+          if [ -z "$program" ]; then
+            echo "::error::no Git for Windows bash found in the standard install locations; the tests fail closed on interpreter availability"
+            exit 1
+          fi
+          if ! version="$( "$program" --version | head -1 )"; then
+            echo "::error::$program did not report a version"
+            exit 1
+          fi
+          echo "resolved: $program"
+          echo "version:  $version"
+          case "$version" in
+            "GNU bash, version"*) ;;
+            *)
+              echo "::error::resolved bash is not GNU bash: $version"
+              exit 1
+              ;;
+          esac
+          echo "NKEEPASS_COMPLETION_BASH=$program" >> "$GITHUB_ENV"
       - name: Test
         shell: bash
         # Integration tests include PTY-style password prompts (#![cfg(unix)]);

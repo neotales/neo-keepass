@@ -182,6 +182,34 @@ without a native run; the bounded failure and transcript are the
 observation vehicle, and the brew-bash macOS leg now exercises the
 matrix for real there.
 
+**Exit-wedge first native occurrence (run 44238368217, job
+134579897677, brew bash 5.3):** the exact-argv case completed — the
+transcript shows the completed `nkp set --bin payload=space\ name.bin`
+and the stub's prompt returning — and then bash never consumed `exit`;
+the driver failed after 6.94s with `timed out waiting for interactive
+bash to exit; cleanup: interactive bash survived SIGKILL`, and no
+orphans remained at job cleanup. Two corrections followed from the
+transcript, not from a repro. First, the exit wait is CLEANUP, not the
+behavior under test: the case's assertions now run first (with a
+bounded wait for the stub's `args.bin` instead of racing the drain),
+the polite `exit` attempt stays bounded and diagnostic-only — a
+non-exit is recorded on stderr and the group cleanup owns the
+shutdown — so the wedge can no longer fail an otherwise-passing case.
+Second, the cleanup message no longer claims survival:
+`survived SIGKILL` overclaimed what the reaping loop can know — an
+already-reaped child reports ECHILD and returns success, and a child
+that died from the SIGKILL reaps on the first `WNOHANG` wait — so
+reaching that return only ever proved the pid was neither
+terminated-and-reaped nor already-reaped for the window, which a
+SIGKILL held by a stopped group member and an uninterruptible kernel
+wait both fit. The cleanup now sends `SIGCONT` before the group
+`SIGKILL` (a stopped member holds a posted SIGKILL until continued; to
+a running member SIGCONT is a no-op), observes the reap with
+`WUNTRACED` so a still-stopped member names its stop signal, and
+reports `still unreaped 3s after group SIGKILL+SIGCONT` when the
+window closes. Why bash never consumed `exit` after the prompt
+returned remains unexplained.
+
 **Windows failures of run 134548307275 (first matrix test results):**
 four unit-test failures, with two distinct proven causes and two left
 to diagnostics. (1) `recipient_fetch_disables_curl_globbing...` —
@@ -209,6 +237,27 @@ no diagnostics. Both tests now report the exit code, both streams, and
 the PATH-resolved interpreter's own `--version` and `command -v`
 self-report, so the next Windows run identifies which bash answered
 and why it disagreed; nothing was skipped or suppressed.
+
+**Windows interpreter resolution (run 44238368217):** the job's step
+shell is real Git for Windows bash, but the tests' own
+`Command::new("bash")` could never reach it: the CreateProcess search
+order checks System32 before any PATH entry, so a bare `bash` on
+Windows always resolves to the WSL launcher stub, which on that runner
+exited 1 with a "no installed distributions" message in UTF-16 — a
+missing WSL distro is an interpreter-availability fact, not completion
+behavior, and no PATH arrangement can change the resolution. The
+generated-script tests now resolve their interpreters instead of
+assuming them: `NKEEPASS_COMPLETION_BASH` still wins unchanged when
+set; without it, candidates (the ambient PATH `bash` on unix, only the
+standard Git for Windows install locations on Windows) must each pass
+a `--version` probe identifying as GNU bash, the first that does wins,
+and a failed resolution fails closed stating it is an
+interpreter-availability problem, not a generated-script or
+completion-boundary failure. The Windows leg pins the resolved Git
+bash explicitly through the workflow (found in the standard install
+paths, validated, exported via `NKEEPASS_COMPLETION_BASH`), and the
+POSIX sh half resolves `sh.exe` from the same Git installation, since
+Windows has no `sh` on PATH at all.
 
 ## `build.yml` — Linux amd64/arm64 build + packaging
 
