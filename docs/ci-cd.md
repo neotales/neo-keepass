@@ -199,18 +199,16 @@ and diagnostic-only — a non-exit, an exit-by-signal, or a nonzero code
 is recorded on stderr, never hidden, and the group cleanup owns the
 shutdown — so the wedge can no longer fail an otherwise-passing case.
 Second, the cleanup message no longer claims survival:
-`survived SIGKILL` overclaimed what the reaping loop can know — an
-already-reaped child reports ECHILD and returns success, and a child
-that died from the SIGKILL reaps on the first `WNOHANG` wait — so
-reaching that return only ever proved the pid was neither
-terminated-and-reaped nor already-reaped for the window, which a
-SIGKILL held by a stopped group member and an uninterruptible kernel
-wait both fit. The cleanup now sends `SIGCONT` before the group
-`SIGKILL` (a stopped member holds a posted SIGKILL until continued; to
-a running member SIGCONT is a no-op), observes the reap with
-`WUNTRACED` so a still-stopped member names its stop signal, and
-reports `still unreaped 3s after group SIGKILL+SIGCONT` when the
-window closes. Why bash never consumed `exit` after the prompt
+`survived SIGKILL` overclaimed what a wait result can establish. The
+first revision's post-reap group signal was also unsafe: after reaping
+the session leader, the numeric PGID could be reused. The driver now
+observes a polite exit with `waitid(WNOWAIT)`, keeping Bash unreaped as
+the PGID ownership anchor while it sends `SIGCONT` and `SIGKILL`. It
+then reaps Bash and never signals that PGID again. Cleanup succeeds only
+after a bounded, non-signaling `killpg(pgid, 0)` observes `ESRCH`;
+reaping Bash alone is not evidence that descendants are gone. If the
+group remains or the probe is inconclusive, cleanup reports unresolved
+and fails closed. Why bash never consumed `exit` after the prompt
 returned remains unexplained.
 
 **Repeat at 6f8391d (native run 44249069901, macOS):** canary still
@@ -220,13 +218,10 @@ the filename command and returned to the prompt, but did not consume
 `still unreaped 3s after group SIGKILL+SIGCONT` after 7.38s, so that
 run does not establish whether signaling failed, the bash PGID differed
 from the `pty.fork()` PID, the process was stopped, or waitpid failed.
-The driver now waits boundedly for Bash's observed process group to
-match the controlling tty's foreground group before sending test input.
-If cleanup remains unresolved, it records the SIGCONT/SIGKILL results
-and errno, the before/after PID/PGID/session/foreground snapshot, the
-last waitpid status/error, and a non-signaling process-group existence
-probe. This is diagnostic instrumentation, not a causal conclusion;
-the next native macOS run is needed to identify the actual state.
+The driver waits boundedly for Bash's observed process group to match
+the controlling tty's foreground group before sending test input. The
+next native macOS run is still needed to validate the ownership and
+absence protocol on that runner.
 
 **Windows failures of run 134548307275 (first matrix test results):**
 four unit-test failures, with two distinct proven causes and two left

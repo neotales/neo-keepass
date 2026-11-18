@@ -1992,12 +1992,10 @@ def fail(message):
     raise SystemExit(message + "; PTY transcript: " + repr(transcript))
 
 def stop_child():
-    # Simulated: the real driver only reaches this return when the group
-    # is still unreaped after its SIGKILL+SIGCONT allowance, which no
-    # test can force. What is under test is the finally that composes
-    # the two diagnostics.
+    # Simulated unresolved group; the real driver fails closed unless it
+    # positively observes process-group absence.
     return (
-        "interactive bash state unresolved after bounded group cleanup"
+        "process group absence not established after bounded cleanup"
         "; PTY transcript: " + repr(transcript)
     )
 
@@ -2068,7 +2066,7 @@ raise SystemExit(failures)
             run.failure_summary()
         );
         assert!(
-            stderr.contains("state unresolved after bounded group cleanup"),
+            stderr.contains("process group absence not established"),
             "the cleanup detail must be part of the composed diagnostic: {}",
             run.failure_summary()
         );
@@ -2079,55 +2077,45 @@ raise SystemExit(failures)
         );
     }
 
-    /// Post-reap is exactly the state where the retired fallback killed by
-    /// pid: the child has already been waited for, its pid may already
-    /// have been recycled, and a direct `os.kill(pid)` there would signal
-    /// whoever owns the number now. This drives the driver's cleanup shape
-    /// end to end: a session-leading bash leaves a straggler in its group,
-    /// the child is REAPED before any cleanup runs, and the group-only
-    /// cleanup then executes. It asserts the straggler dies by pid, a
-    /// bystander outside the group survives untouched, and the cleanup
-    /// reports no failure — the group id is what the cleanup owns, not the
-    /// pid number.
+    /// An exited-but-unreaped group leader pins its PGID while cleanup
+    /// signals the group. After reaping that leader, cleanup only probes
+    /// for group absence and never signals the numeric PGID again.
     #[test]
     #[cfg(unix)]
-    fn bounded_driver_post_reap_cleanup_kills_group_members_only() {
+    fn bounded_driver_owned_group_cleanup_kills_descendant_before_reap() {
         let script = r#"
-import os, signal, subprocess, time
+import errno, os, signal, subprocess, time
 
 transcript = b""
 
 def stop_child(pid):
-    # The hostile-filename driver's cleanup, verbatim in shape: a group
-    # kill only, on every path — never a direct pid kill — with the
-    # SIGCONT first and the WUNTRACED observation the real driver uses.
+    events = []
     try:
-        os.killpg(pid, signal.SIGCONT)
-    except OSError:
-        return None
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        return None
+        actual_group = os.getpgid(pid)
+    except OSError as error:
+        return "ownership-query-errno-%s" % error.errno
+    if actual_group != pid:
+        return "leader-left-group"
+    # The leader has been observed exited via waitid(WNOWAIT) and remains
+    # unreaped, so its process identity still pins the PGID.
+    os.killpg(pid, signal.SIGCONT)
+    events.append("continue")
+    os.killpg(pid, signal.SIGKILL)
+    events.append("kill")
+    waited, _ = os.waitpid(pid, 0)
+    assert waited == pid
+    events.append("reap")
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         try:
-            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-        except ChildProcessError:
-            return None
-        if waited == pid:
-            return None
-        if os.WIFSTOPPED(status):
-            return (
-                "interactive bash is stopped by signal %d and did not "
-                "continue after SIGCONT; PTY transcript: " % os.WSTOPSIG(status)
-                + repr(transcript)
-            )
+            os.killpg(pid, 0)
+        except OSError as error:
+            if error.errno == errno.ESRCH:
+                events.append("absent")
+                return events
+            return "probe-errno-%s" % error.errno
         time.sleep(0.02)
-    return (
-        "interactive bash state unresolved after bounded group cleanup"
-        "; PTY transcript: " + repr(transcript)
-    )
+    return "group-still-exists"
 
 # pty.fork() gives the real driver's child its own session and group;
 # this replicates that shape so the group semantics are the real ones.
@@ -2137,10 +2125,16 @@ child = subprocess.Popen(
     stdout=subprocess.PIPE,
 )
 straggler = int(child.stdout.readline().decode())
-# The dangerous state comes first: reap the child BEFORE any cleanup runs,
-# so the cleanup executes against a reaped pid.
-_, status = os.waitpid(child.pid, 0)
-child.returncode = os.waitstatus_to_exitcode(status)
+# Observe leader exit without reaping it. It must stay waitable while the
+# descendant remains in the same process group.
+deadline = time.monotonic() + 3
+observation = None
+while time.monotonic() < deadline:
+    observation = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    if observation is not None and observation.si_pid == child.pid:
+        break
+    time.sleep(0.02)
+assert observation is not None and observation.si_pid == child.pid
 # A bystander in its own group, outside everything the cleanup owns: it
 # must come through the cleanup untouched.
 victim = subprocess.Popen(
@@ -2149,13 +2143,13 @@ victim = subprocess.Popen(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 )
-failure = stop_child(child.pid)
-print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), flush=True)
+events = stop_child(child.pid)
+print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), flush=True)
 "#;
         let run = run_python_bounded(script, &[], Duration::from_secs(15));
         assert!(
             run.success(),
-            "the post-reap cleanup scenario should complete: {}",
+            "the owned-group cleanup scenario should complete: {}",
             run.failure_summary()
         );
         assert!(
@@ -2167,7 +2161,7 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         let stdout = String::from_utf8_lossy(&run.stdout);
         let mut straggler: Option<u32> = None;
         let mut victim: Option<u32> = None;
-        let mut cleanup = None;
+        let mut events = None;
         let mut fields = stdout.split_whitespace();
         while let Some(field) = fields.next() {
             match field {
@@ -2177,7 +2171,7 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
                 "victim" => {
                     victim = fields.next().and_then(|value| value.parse().ok());
                 }
-                "cleanup" => cleanup = fields.next(),
+                "events" => events = fields.next(),
                 _ => {}
             }
         }
@@ -2185,12 +2179,12 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             straggler.unwrap_or_else(|| panic!("driver should report the straggler pid"));
         let victim = victim.unwrap_or_else(|| panic!("driver should report the bystander pid"));
         assert_eq!(
-            cleanup,
-            Some("None"),
-            "a reaped child's cleanup should report no failure"
+            events,
+            Some("continue,kill,reap,absent"),
+            "signals must precede reap, then cleanup must observe group absence"
         );
         // The straggler must be dead by pid: the group kill reached it
-        // after the reap, without any pid-based kill existing in the driver.
+        // while the unreaped leader still pinned the process group.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut straggler_alive = true;
         while std::time::Instant::now() < deadline {
@@ -2208,7 +2202,7 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         }
         assert!(
             !straggler_alive,
-            "straggler {straggler} SURVIVED the post-reap group kill"
+            "straggler {straggler} SURVIVED the owned-group kill"
         );
         // The bystander must still be alive: the cleanup signaled its OWN
         // group only, never a pid it no longer owned.
@@ -2553,7 +2547,7 @@ else:
             "fn bounded_driver_kills_wedged_python_within_deadline",
             "fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives",
             "fn bounded_driver_cleanup_failure_appends_to_primary_diagnostic",
-            "fn bounded_driver_post_reap_cleanup_kills_group_members_only",
+            "fn bounded_driver_owned_group_cleanup_kills_descendant_before_reap",
             "fn bounded_kill_helper_returns_within_deadline_from_unresponsive_helper",
         ];
         for item in gated_items {
@@ -2647,7 +2641,7 @@ else:
         // future test after the driver may legitimately keep an
         // un-reaped-child Rust kill.
         assert!(
-            driver.starts_with("r#\"\nimport os, pty, select, sys, time, signal"),
+            driver.starts_with("r#\"\nimport errno, os, pty, select, sys, time, signal"),
             "the driver slice should open on the driver's own first line"
         );
         assert!(
@@ -2688,19 +2682,22 @@ else:
             );
         }
         for marker in [
-            "import os, pty, select, sys, time, signal",
+            "import errno, os, pty, select, sys, time, signal",
             "def stop_child():",
             "os.killpg(group_id, signal.SIGCONT)",
             "os.killpg(group_id, signal.SIGKILL)",
+            "os.killpg(group_id, 0)",
+            "os.WNOWAIT",
             "os.getpgid(pid)",
+            "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)",
             "os.tcgetpgrp(fd)",
-            "state unresolved after bounded group cleanup",
+            "process group absence not established",
             "; cleanup also failed: ",
             "case ended with ",
             "raise primary",
             "fail(\"completion produced unexpected literal argv",
             "last observed after the bounded wait",
-            "exited to signal",
+            "exit observation",
         ] {
             assert!(
                 driver.contains(marker),
@@ -2711,6 +2708,20 @@ else:
                  records the exit handshake's actual status"
             );
         }
+        let group_kill = driver
+            .find("os.killpg(group_id, signal.SIGKILL)")
+            .expect("cleanup should group-kill while the leader pins its PGID");
+        let reap = driver
+            .find("os.waitpid(pid, os.WNOHANG)")
+            .expect("cleanup should reap the leader after signaling");
+        let absence_probe = driver
+            .find("os.killpg(group_id, 0)")
+            .expect("cleanup should probe group absence");
+        assert!(
+            group_kill < reap && reap < absence_probe,
+            "group signal must precede reaping; only a non-signaling absence \
+             probe may follow reaping"
+        );
     }
 
     fn fixture_vault_argument(pattern: &str, context: &str) -> Option<String> {
@@ -4461,7 +4472,7 @@ else:
             &cases
         {
             let script = r#"
-import os, pty, select, sys, time, signal
+import errno, os, pty, select, sys, time, signal
 directory, completion, line, expected_args, wordbreaks, close_quote, expect_match = sys.argv[1:]
 expect_match = expect_match == "true"
 import json
@@ -4532,27 +4543,45 @@ def write_bounded(data, timeout=5.0):
         pending = pending[sent:]
 
 def stop_child():
-    # pty.fork()'s child called setsid(): bash leads its own session and
-    # process group, so killpg reaches every job it spawned. Kill even on
-    # the success paths, so a straggler subshell never outlives the
-    # driver. Group kill ONLY, on every path: an un-reaped child — even
-    # as a zombie — still counts as a group member, so killpg cannot miss
-    # a child that is still ours, and a group with live members never has
-    # its id recycled. killpg raising OSError therefore means the whole
-    # group is gone, which is only possible once the child was reaped —
-    # and the pid of a reaped child may already belong to an unrelated
-    # process. NEVER fall back to a direct kill by pid on that path: after
-    # a reap the number is not ours to signal; the group id was.
-    #
-    # SIGCONT precedes the SIGKILL: a job-control-stopped member holds a
-    # posted SIGKILL until it is continued (the BSD-class behavior that
-    # fits macOS job 134579897677, where the pid was still unreaped 3s
-    # after a plain SIGKILL), and to a running member SIGCONT's default
-    # action is to continue — a no-op. The reap loop below observes with
-    # WUNTRACED, so a member still stopped despite the SIGCONT names its
-    # stop signal in the diagnostic instead of the cleanup guessing.
+    # Keep the session-leading bash unreaped until after the group signals:
+    # its unreaped process pins the PGID against reuse. Once waitpid reaps
+    # bash, never signal that numeric PGID again. Success requires a
+    # subsequent killpg(pgid, 0) to report ESRCH; reaping bash alone does
+    # not prove its descendants are gone.
     identity_before = pty_job_control_state()
     signal_results = []
+    try:
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return (
+            "PTY leader is no longer an owned waitable child; refusing "
+            "to signal recorded PGID; before: %s; PTY transcript: "
+            % identity_before
+            + repr(transcript)
+        )
+    except OSError as error:
+        return (
+            "cannot confirm PTY leader ownership before cleanup; "
+            "waitid errno-%s:%s; before: %s; PTY transcript: "
+            % (error.errno, error.strerror, identity_before)
+            + repr(transcript)
+        )
+    try:
+        actual_group = os.getpgid(pid)
+    except OSError as error:
+        return (
+            "cannot confirm PTY group ownership before cleanup; "
+            "query errno-%s:%s; before: %s; PTY transcript: "
+            % (error.errno, error.strerror, identity_before)
+            + repr(transcript)
+        )
+    if actual_group != group_id:
+        return (
+            "PTY leader no longer owns the recorded process group; "
+            "recorded=%d actual=%d; before: %s; PTY transcript: "
+            % (group_id, actual_group, identity_before)
+            + repr(transcript)
+        )
     try:
         os.killpg(group_id, signal.SIGCONT)
         signal_results.append("SIGCONT=sent")
@@ -4563,23 +4592,18 @@ def stop_child():
         signal_results.append("SIGKILL=sent")
     except OSError as error:
         signal_results.append("SIGKILL=errno-%s:%s" % (error.errno, error.strerror))
-    if any(result.startswith("SIGKILL=errno-3:") for result in signal_results):
-        # ESRCH proves the process group is absent. There is nothing left
-        # to clean up; do not signal the numeric group id again.
-        return None
     deadline = time.monotonic() + 3
     last_wait = "not-attempted"
+    reaped = False
+    group_probe = "not-probed"
     while time.monotonic() < deadline:
         try:
-            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            waited, status = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
-            # Already reaped. If SIGKILL got ESRCH, the process group
-            # is gone too; that is the normal post-exit state.
-            if "SIGKILL=sent" in signal_results:
-                return None
-            if any(result.startswith("SIGKILL=errno-3:") for result in signal_results):
-                return None
-            last_wait = "ECHILD"
+            # Ownership is lost: do not signal again. Continue only with
+            # the non-signaling group-absence observation below.
+            last_wait = "ECHILD-before-observed-reap"
+            reaped = True
             break
         except OSError as error:
             last_wait = "errno-%s:%s" % (error.errno, error.strerror)
@@ -4590,45 +4614,33 @@ def stop_child():
                 last_wait += "-signal-%d" % os.WTERMSIG(status)
             elif os.WIFEXITED(status):
                 last_wait += "-exit-%d" % os.WEXITSTATUS(status)
-            if "SIGKILL=sent" in signal_results:
-                return None
+            reaped = True
             break
         last_wait = "no-status"
-        if os.WIFSTOPPED(status):
-            return (
-                "interactive bash is stopped by signal %d and did not "
-                "continue after SIGCONT; cleanup: %s; PTY transcript: "
-                % (
-                    os.WSTOPSIG(status),
-                    ", ".join(signal_results),
-                )
-                + repr(transcript)
-            )
         time.sleep(0.02)
-    # NOT raised: raising here — especially out of a finally — would mask
-    # whatever failure is already propagating. Return the diagnostic; the
-    # caller composes it with the primary one.
-    #
-    # macOS job 134579897677 wording note: the old text said "survived
-    # SIGKILL", which overclaimed what this loop can know. An
-    # already-reaped child reports ECHILD above and returns success, and
-    # a child that died from the SIGKILL reaps on the first WNOHANG wait
-    # — so reaching this return only ever proved that, for the window,
-    # the pid was neither terminated-and-reaped nor already-reaped. A
-    # SIGKILL held by a stopped member and an uninterruptible kernel
-    # wait both fit; "the shell survived" does not follow. The wording
-    # below states exactly what was observed.
-    if last_wait == "ECHILD" and any(
-        result.startswith("SIGKILL=errno-3:") for result in signal_results
-    ):
-        return None
-    try:
-        os.killpg(group_id, 0)
-        group_probe = "exists"
-    except OSError as error:
-        group_probe = "errno-%s:%s" % (error.errno, error.strerror)
+    if not reaped:
+        return (
+            "PTY leader was not reaped within bounded group cleanup; "
+            "cleanup: %s; before: %s; last waitpid: %s; PTY transcript: "
+            % (", ".join(signal_results), identity_before, last_wait)
+            + repr(transcript)
+        )
+    # The leader is now reaped, so the PGID is no longer ours to signal.
+    # killpg(..., 0) is observation only. ESRCH is the sole success proof;
+    # an extant group or any other errno fails closed.
+    group_deadline = time.monotonic() + 3
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(group_id, 0)
+            group_probe = "exists"
+        except OSError as error:
+            if error.errno == errno.ESRCH:
+                return None
+            group_probe = "errno-%s:%s" % (error.errno, error.strerror)
+            break
+        time.sleep(0.02)
     return (
-        "interactive bash state unresolved after bounded group cleanup; "
+        "process group absence not established after bounded cleanup; "
         "cleanup: %s; before: %s; after: %s; last waitpid: %s; "
         "group probe: %s; PTY transcript: "
         % (
@@ -4722,15 +4734,21 @@ try:
     # failure, and the finally's group cleanup owns the shutdown.
     write_bounded(b"exit\n")
     deadline = time.monotonic() + 3
-    exit_status = None
+    exit_observation = None
     while time.monotonic() < deadline:
         try:
-            waited, status = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            # Already reaped: nothing left to wait for.
+            # WNOWAIT observes the polite exit without consuming the
+            # child. stop_child needs the unreaped leader to pin its PGID
+            # while it signals the group.
+            observed = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except OSError as error:
+            exit_observation = "waitid-errno-%s:%s" % (error.errno, error.strerror)
             break
-        if waited == pid:
-            exit_status = status
+        if observed is not None and observed.si_pid:
+            exit_observation = "exit-code=%s signal=%s" % (
+                observed.si_status if observed.si_code == os.CLD_EXITED else "n/a",
+                observed.si_status if observed.si_code == os.CLD_KILLED else "n/a",
+            )
             break
         time.sleep(0.02)
     # Diagnostic-only on every branch: the case itself already passed,
@@ -4738,7 +4756,7 @@ try:
     # prints nothing; the other observations are recorded, not hidden —
     # an exit-by-signal or a nonzero code after `exit` is exactly the
     # kind of interpreter behavior the wedge investigation needs.
-    if exit_status is None:
+    if exit_observation is None:
         print(
             "interactive bash did not exit within 3s after 'exit'; the case "
             "itself passed and the group cleanup follows; PTY transcript: "
@@ -4746,21 +4764,11 @@ try:
             file=sys.stderr,
             flush=True,
         )
-    elif os.WIFSIGNALED(exit_status):
+    elif exit_observation != "exit-code=0 signal=n/a":
         print(
-            "interactive bash exited to signal %d after 'exit'; the case "
+            "interactive bash exit observation %s after 'exit'; the case "
             "itself passed and the group cleanup follows; PTY transcript: "
-            % os.WTERMSIG(exit_status)
-            + repr(transcript),
-            file=sys.stderr,
-            flush=True,
-        )
-    elif os.WEXITSTATUS(exit_status) != 0:
-        print(
-            "interactive bash exited %d after 'exit'; the case itself "
-            "passed and the group cleanup follows; PTY transcript: "
-            % os.WEXITSTATUS(exit_status)
-            + repr(transcript),
+            % exit_observation + repr(transcript),
             file=sys.stderr,
             flush=True,
         )
