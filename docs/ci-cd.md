@@ -267,10 +267,14 @@ a descendant inherits stdout/stderr, Unix kills the owned process group
 and returns a stream-cleanup failure; a live sentinel stays in the group
 through cleanup, so the PGID cannot be recycled after the probed parent
 exits. If the external group-kill helper fails or times out, the
-sentinel is asked to kill its own group while still alive. If both paths
-fail, cleanup is reported as unsuccessful; the sentinel is directly
-killed/reaped while still owned, and the probe never sends another
-signal to that PGID. Same-group descendants may then remain. A descendant
+sentinel is asked to kill its own group while still alive. That fallback
+counts as successful only if writing/flushing the command succeeds and
+the sentinel is observed to exit by SIGKILL; a clean or otherwise
+unexplained sentinel exit is not proof that the group was killed. If
+both paths fail, cleanup is reported as unsuccessful; the sentinel is
+directly killed/reaped while still owned, and the probe never sends
+another signal to that PGID. Same-group descendants may then remain. A
+descendant
 that calls `setsid` (or otherwise escapes the group) is outside the Unix
 cleanup boundary: the probe returns boundedly and reports open streams,
 but cannot promise the escaped process or its reader thread was

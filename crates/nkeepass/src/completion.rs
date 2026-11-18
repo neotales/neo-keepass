@@ -3249,8 +3249,12 @@ else:
             sentinel_command
                 .args([
                     "-c",
-                    "import os, signal, sys; sys.stdin.readline(); \
-                     os.killpg(os.getpgrp(), signal.SIGKILL)",
+                    concat!(
+                        "import os, signal, sys\n",
+                        "command = sys.stdin.readline().strip()\n",
+                        "if command == 'terminate':\n",
+                        "    os.killpg(os.getpgrp(), signal.SIGKILL)\n",
+                    ),
                 ])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::null())
@@ -3292,6 +3296,7 @@ else:
             };
             match sentinel.try_wait() {
                 Ok(None) => {
+                    use std::os::unix::process::ExitStatusExt;
                     let pgid = self.pgid.to_string();
                     let helper_succeeded = !force_failure
                         && run_python_helper_bounded(
@@ -3300,6 +3305,7 @@ else:
                             PYTHON_HELPER_DEADLINE,
                         )
                         .success();
+                    let mut fallback_write_succeeded = false;
                     if !helper_succeeded {
                         // Never release the sentinel after helper failure
                         // without first asking the sentinel itself to kill
@@ -3307,16 +3313,26 @@ else:
                         // numeric PGID, and the sentinel remains unreaped
                         // throughout the fallback.
                         if let Some(mut input) = self.sentinel_stdin.take() {
-                            let _ = std::io::Write::write_all(&mut input, b"terminate\n");
-                            let _ = std::io::Write::flush(&mut input);
+                            fallback_write_succeeded =
+                                std::io::Write::write_all(&mut input, b"terminate\n")
+                                    .and_then(|()| std::io::Write::flush(&mut input))
+                                    .is_ok();
                         }
                     }
                     let deadline = std::time::Instant::now() + Duration::from_secs(2);
                     loop {
                         match sentinel.try_wait() {
-                            Ok(Some(_)) => {
+                            Ok(Some(status)) => {
+                                // A successful stdin write alone proves
+                                // only that bytes entered the pipe. Count
+                                // the fallback as successful only if the
+                                // sentinel actually died from the
+                                // SIGKILL it sends to its own group.
+                                let fallback_succeeded =
+                                    fallback_write_succeeded && status.signal() == Some(9);
                                 self.sentinel = None;
-                                return true;
+                                self.sentinel_stdin = None;
+                                return helper_succeeded || fallback_succeeded;
                             }
                             Ok(None) if std::time::Instant::now() < deadline => {
                                 std::thread::sleep(Duration::from_millis(10));
@@ -3983,6 +3999,63 @@ else:
             reaped,
             "same-group child remained after the helper-failure fallback"
         );
+    }
+
+    /// If the sentinel exits cleanly before reading the fallback command,
+    /// neither successful stdin buffering nor that arbitrary exit may be
+    /// mistaken for group cleanup. The same-group child must remain
+    /// untouched, cleanup must report failure without signaling the PGID
+    /// after the sentinel was reaped, and the test's directly-owned child
+    /// guard cleans its fixture safely.
+    #[test]
+    #[cfg(unix)]
+    fn probe_group_reports_failure_if_sentinel_exits_before_fallback() {
+        use std::os::unix::process::CommandExt;
+
+        let mut group = ProbeGroup::start().expect("start owned probe group");
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .process_group(group.pgid)
+            .spawn()
+            .expect("same-group child should start");
+        let mut child = ProbeChildGuard(child);
+
+        // EOF on the sentinel's input makes its readline return empty, so
+        // it exits 0 without trying to kill the group.
+        drop(group.sentinel_stdin.take());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut sentinel_exited = false;
+        while std::time::Instant::now() < deadline {
+            if group
+                .sentinel
+                .as_mut()
+                .expect("sentinel still owned")
+                .try_wait()
+                .expect("sentinel status should be readable")
+                .is_some()
+            {
+                sentinel_exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(sentinel_exited, "sentinel should exit on stdin EOF");
+        assert!(
+            !group.terminate_with_helper_failure(true),
+            "an unrelated sentinel exit must not claim process-group cleanup"
+        );
+        assert!(
+            child
+                .0
+                .try_wait()
+                .expect("same-group child status should be readable")
+                .is_none(),
+            "a same-group child must remain when the sentinel never accepted fallback"
+        );
+        // Explicitly terminate/reap only the directly-owned child. The
+        // sentinel has exited, so no numeric process-group signal is safe.
+        let _ = child.0.kill();
+        let _ = child.0.wait();
     }
 
     /// A descendant can call setsid and escape the probe's group. The
