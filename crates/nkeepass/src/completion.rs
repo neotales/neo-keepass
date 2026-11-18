@@ -1774,21 +1774,67 @@ mod tests {
         Vec::new()
     }
 
+    /// Deadline for the python3 kill-helper to exit. A healthy helper
+    /// starts one interpreter, issues one `killpg`, and is done in well
+    /// under a second; a helper that exceeds this is wedged the same way
+    /// the macOS incident's driver was, so the harness kills and reaps it
+    /// instead of waiting without end.
+    #[cfg(unix)]
+    const PYTHON_HELPER_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Run a one-shot `python3 -c <script> <arguments>` helper whose exit
+    /// wait is bounded — never `.status()`, which can block forever on a
+    /// wedged interpreter. On deadline the helper is killed while it is
+    /// still OUR un-reaped child — no pid-reuse window, the same rule the
+    /// driver's cleanup follows — and then ALWAYS reaped, so nothing
+    /// leaks. Best-effort by design: a helper that fails or wedges
+    /// changes no verdict on its own; the consequence (a descendant
+    /// surviving with a redirected pipe) surfaces as `drain_overflow` in
+    /// the run's failure diagnostics.
+    #[cfg(unix)]
+    fn run_python_helper_bounded(
+        script: &str,
+        arguments: &[&str],
+        deadline: Duration,
+    ) -> std::process::ExitStatus {
+        let mut helper = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .args(arguments)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 helper should start");
+        let started = std::time::Instant::now();
+        loop {
+            match helper.try_wait().expect("helper status should be readable") {
+                Some(status) => return status,
+                None if started.elapsed() >= deadline => break,
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        // Deadline fired: the helper is still our un-reaped child, so a
+        // direct kill is exact here — and it must happen BEFORE the reap
+        // below, while that is still true.
+        let _ = helper.kill();
+        helper.wait().expect("helper reaping should succeed")
+    }
+
     /// Send SIGKILL to a driver process group via the python3 helper — this
     /// crate forbids `unsafe`, so libc/nix wrappers are unavailable, and
     /// python3 is already the hard dependency of every driver test here.
-    /// Never passes 0: that would target our own group.
+    /// Never passes 0: that would target our own group. The helper itself
+    /// runs bounded ([`run_python_helper_bounded`]): a wedged helper is
+    /// killed and reaped within its deadline, so nothing in the cleanup
+    /// path can block the harness without end.
     #[cfg(unix)]
     fn signal_driver_group(group: i32) {
-        let group_kill = std::process::Command::new("python3")
-            .args([
-                "-c",
-                "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
-                &group.to_string(),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let group = group.to_string();
+        let group_kill = run_python_helper_bounded(
+            "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
+            &[&group],
+            PYTHON_HELPER_DEADLINE,
+        );
         let _ = group_kill;
     }
 
@@ -2176,6 +2222,35 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         );
     }
 
+    /// The kill helper is itself a python3 process, and the macOS incident
+    /// was precisely a python3 that stopped responding: waiting on it
+    /// unbounded would reintroduce the hang class this harness exists to
+    /// end. This simulates the unresponsive helper directly — a script
+    /// that sleeps instead of signaling — and asserts the exit wait
+    /// honors its full deadline, returns past it, and leaves the helper
+    /// killed (the kill lands while it is still our un-reaped child, so
+    /// no pid-reuse window) and reaped by the returning call.
+    #[test]
+    #[cfg(unix)]
+    fn bounded_kill_helper_returns_within_deadline_from_unresponsive_helper() {
+        let deadline = Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        let status = run_python_helper_bounded("import time; time.sleep(600)", &[], deadline);
+        let elapsed = started.elapsed();
+        assert!(
+            !status.success(),
+            "a wedged helper must exit killed, not successfully"
+        );
+        assert!(
+            elapsed >= deadline,
+            "the helper wait should honor its full deadline before killing"
+        );
+        assert!(
+            elapsed < deadline + Duration::from_secs(3),
+            "a wedged helper must not pin the harness: waited {elapsed:?}"
+        );
+    }
+
     /// Every PTY-harness item stays `#[cfg(unix)]`-gated, item by item. The
     /// harness needs a pty and process-group kills, and an ungated
     /// `impl BoundedDriverRun` of a gated struct fails to compile the
@@ -2197,10 +2272,12 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             "use std::time::Duration;",
             "const PYTHON_DRIVER_DEADLINE",
             "const PYTHON_DRIVER_DRAIN_ALLOWANCE",
+            "const PYTHON_HELPER_DEADLINE",
             "struct BoundedDriverRun",
             "impl BoundedDriverRun",
             "fn run_python_bounded",
             "fn drain_capture",
+            "fn run_python_helper_bounded",
             "fn signal_driver_group",
             "fn kill_driver_tree",
             "fn kill_driver_group",
@@ -2209,6 +2286,7 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             "fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives",
             "fn bounded_driver_cleanup_failure_appends_to_primary_diagnostic",
             "fn bounded_driver_post_reap_cleanup_kills_group_members_only",
+            "fn bounded_kill_helper_returns_within_deadline_from_unresponsive_helper",
         ];
         for item in gated_items {
             let position = lines
@@ -2235,13 +2313,15 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
     /// unrelated process, and a direct kill on that path would target
     /// whoever owns the number now. This pins, in the driver's own
     /// source, the contract the behavior regressions above exercise: no
-    /// direct pid kill exists anywhere in this file, the driver kills
-    /// through the group on every exit path, a cleanup failure is
-    /// composed with the primary diagnostic instead of masking it, and an
-    /// argv mismatch reports the PTY transcript. Like the gating check it
-    /// reads the source as text and runs wherever the unit tests run — a
-    /// Linux-side edit that loses one of these fails here before it
-    /// ships.
+    /// direct pid kill exists anywhere in this file, and within the
+    /// driver's own script no direct-kill spelling survives at all —
+    /// `os.kill(` and `.kill(` are both forbidden there while `killpg`
+    /// alone is sanctioned — the driver kills through the group on every
+    /// exit path, a cleanup failure is composed with the primary
+    /// diagnostic instead of masking it, and an argv mismatch reports the
+    /// PTY transcript. Like the gating check it reads the source as text
+    /// and runs wherever the unit tests run — a Linux-side edit that
+    /// loses one of these fails here before it ships.
     #[test]
     fn pty_driver_cleanup_owns_the_group_and_composes_failures() {
         let source =
@@ -2262,6 +2342,22 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             "the PTY driver must never kill by pid: a reaped pid can be \
              recycled into an unrelated process"
         );
+        // Broadened beyond one spelling: within the driver slice, ANY
+        // direct-kill form is forbidden — os.kill(...) calls and .kill()
+        // methods alike, since both signal by number and a reaped number
+        // can be recycled — while os.killpg(...) stays sanctioned. The
+        // harness cluster lives before this slice and may keep its own
+        // un-reaped-child kills.
+        let os_kill_call = ["os.", "kill("].concat();
+        let method_kill_call = [".", "kill("].concat();
+        for forbidden in [os_kill_call.as_str(), method_kill_call.as_str()] {
+            assert!(
+                !driver.contains(forbidden),
+                "the PTY driver must never signal by pid: `{forbidden}` is a \
+                 direct kill and a reaped pid can be recycled; killpg is the \
+                 only sanctioned kill in the driver"
+            );
+        }
         for marker in [
             "def stop_child():",
             "os.killpg(pid, signal.SIGKILL)",

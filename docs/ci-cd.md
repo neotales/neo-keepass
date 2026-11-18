@@ -110,7 +110,9 @@ since it may already be recycled — and a cleanup failure composes with
 the case's primary diagnostic instead of masking it;
 `bounded_driver_post_reap_cleanup_kills_group_members_only` and
 `bounded_driver_cleanup_failure_appends_to_primary_diagnostic` pin
-those contracts. Regression fixtures
+those contracts. The tree kill's python helper is itself waited under
+a deadline and killed-and-reaped if it wedges — no wait in the cleanup
+path is unbounded. Regression fixtures
 (`bounded_driver_kills_wedged_python_within_deadline`,
 `bounded_driver_removes_pipe_holding_descendant_no_orphan_survives`)
 assert bounded return and by-PID orphan death; both are unix-gated, which
