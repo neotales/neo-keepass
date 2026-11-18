@@ -61,9 +61,13 @@
 #      holding the redirected pipes is terminated when the job handle
 #      closes (the smoke-ok line reports the containment it actually
 #      got). stdin is a real handle to NUL. Every native handle is
-#      closed on every error path. On non-Windows hosts the smoke run
-#      is a test seam: bounded waits, best-effort tree kill, containment
-#      reported as n/a.
+#      closed on every path EXCEPT the undrained pipe read handles after
+#      a drain failure: with the whole tree killed by the job close they
+#      can no longer receive data, but a still-blocked reader would make
+#      CloseHandle itself block, so they are leaked and reclaimed at
+#      process exit — the run has already failed by then. On non-Windows
+#      hosts the smoke run is a test seam: bounded waits, best-effort
+#      tree kill, containment reported as n/a.
 #
 # Usage:
 #   windows-verify-artifact.ps1 -Zip <zip> -BuiltExe <exe> -Version <v> `
@@ -274,11 +278,16 @@ public static class ZipRaw {
 
 // Windows-only RUNTIME (never invoked off Windows, but compiled
 // everywhere): kill-on-close job object plus a bounded, race-free
-// process runner. The child is created SUSPENDED, assigned to the job
-// BEFORE its first instruction runs, then resumed — a suspended process
-// cannot create descendants, so there is no window in which anything can
-// be outside the job; descendants inherit the membership. Every native
-// handle is closed on every path.
+// process runner. The child is born INTO the job (create-time
+// assignment via PROC_THREAD_ATTRIBUTE_JOB_LIST — no assignment race
+// and no assign-after-create compatibility call) and its stdin is a
+// real handle to NUL. Job creation or jobbed start failure fails the
+// run closed with the exact Win32 error — there is no uncontained run.
+// Every native handle is closed on every path EXCEPT the undrained pipe
+// read handles after a drain failure: with the whole tree killed by the
+// job close they can no longer receive data, but a still-blocked reader
+// would make CloseHandle itself block, so they are leaked and reclaimed
+// at process exit — the run has already failed by then.
 public static class JobOps {
     [StructLayout(LayoutKind.Sequential)]
     struct IO_COUNTERS { public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; }

@@ -119,12 +119,13 @@ jobs:
       # named file is read), reparse points and hashes, require the
       # canonical dist zip to BE the checked zip, and smoke-run the
       # EXTRACTED exe (--version, --help) under one deadline covering
-      # execution, stream completion and cleanup — whole-tree kill on
-      # expiry, the whole tree is killed — on Windows the child is born
-      # into a kill-on-close job object (create-time assignment; required,
-      # fail-closed if the job cannot be established), stdin is a real
-      # NUL handle, and the smoke-ok line reports the containment it
-      # actually got. A binary that failed any check is never executed,
+      # execution and stream completion; cleanup is a separate bounded
+      # allowance after it (terminate+join <=5s, pipe-drain joins <=2s
+      # each) — on expiry the whole tree is killed. On Windows the child
+      # is born into a kill-on-close job object (create-time assignment;
+      # required, fail-closed if the job cannot be established), stdin is
+      # a real NUL handle, and the smoke-ok line reports the containment
+      # it actually got. A binary that failed any check is never executed,
       # and a mismatching artifact never reaches upload.
       - name: Package and verify artifact
         shell: bash

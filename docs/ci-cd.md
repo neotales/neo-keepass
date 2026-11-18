@@ -211,16 +211,19 @@ Verification before anything is executed or uploaded:
      run FAILS CLOSED with the exact Win32 error — it never proceeds
      with only direct-child termination dressed up as a tree kill. The
      job handle is closed in a finally that also terminates the child
-     and closes every native handle, so a descendant that outlives the
+     and closes the native handles, so a descendant that outlives the
      parent while holding the redirected pipes cannot survive the
-     harness; the smoke-ok line reports the containment actually
-     established, asserted natively on Windows, and the orphan fixture
-     (spawned with `-NoNewWindow -ErrorAction Stop` so the descendant
-     inherits the redirected handles and spawn failures are recorded)
-     asserts the escapee's death by PID. Non-Windows smoke runs are a
-     test seam: bounded waits, best-effort tree kill, containment
-     reported as n/a; failed assertions print the captured child
-     output, so a native failure carries its own diagnostic.
+     harness; the one exception is stated where it occurs: after a
+     failed drain the undrained pipe read handles are leaked until
+     process exit rather than risk a CloseHandle that blocks on the
+     escapee's open handles. The smoke-ok line reports the containment
+     actually established, asserted natively on Windows, and the orphan
+     fixture (spawned with `-NoNewWindow -ErrorAction Stop` so the
+     descendant inherits the redirected handles and spawn failures are
+     recorded) asserts the escapee's death by PID. Non-Windows smoke
+     runs are a test seam: bounded waits, best-effort tree kill,
+     containment reported as n/a; failed assertions print the captured
+     child output, so a native failure carries its own diagnostic.
 
 A binary that failed any check is never executed, and a mismatching
 artifact never reaches upload.
