@@ -269,7 +269,12 @@ fn legacy_completion_selector_is_ignored_when_set_alone() {
     let fixture = CliFixture::new(false);
     let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
     let vault = fixture.vault().to_str().unwrap();
-    let output = command(binary, &fixture)
+    let config_home = fixture.directory().join("isolated-config");
+    let data_home = fixture.directory().join("isolated-data");
+    let legacy_only = command(binary, &fixture)
+        .env("HOME", fixture.directory())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
         .env(
             "NKEEPASS_COMPLETE_PASSWORD_ENV",
             "LEGACY_COMPLETION_TEST_PASSWORD",
@@ -279,14 +284,33 @@ fn legacy_completion_selector_is_ignored_when_set_alone() {
         .output()
         .unwrap();
     assert!(
-        output.status.success(),
+        legacy_only.status.success(),
         "legacy completion selector changed unauthenticated completion"
     );
     assert!(
-        output.stdout.is_empty(),
+        legacy_only.stdout.is_empty(),
         "legacy completion selector enabled authenticated suggestions"
     );
-    nkp_cli::assert_no_secrets(&output);
+    nkp_cli::assert_no_secrets(&legacy_only);
+
+    let canonical = command(binary, &fixture)
+        .env("HOME", fixture.directory())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env(
+            "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
+            "LEGACY_COMPLETION_TEST_PASSWORD",
+        )
+        .env("LEGACY_COMPLETION_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
+        .args(["--vault", vault, "__complete", "entries", "Root/fixture"])
+        .output()
+        .unwrap();
+    assert!(
+        canonical.status.success(),
+        "supported completion selector failed"
+    );
+    assert_eq!(canonical.stdout, b"Root/fixture-login\n");
+    nkp_cli::assert_no_secrets(&canonical);
 }
 
 #[test]
