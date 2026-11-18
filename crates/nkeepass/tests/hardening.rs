@@ -56,6 +56,7 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
         .env("PW", PASSWORD)
         .env_remove("NKEEPASS_VAULT")
@@ -71,16 +72,17 @@ fn run_with_input(fixture: &Fixture, args: &[&str], input: &[u8]) -> Output {
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env_remove("NKEEPASS_TEST_PASSWORD")
         .env_remove("NKEEPASS_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH");
     let mut child = command
         .stdin(Stdio::piped())
-        .capture_stdout()
-        .capture_stderr()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.take_stdin().unwrap().write_all(input).unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
     child.wait_with_output().unwrap()
 }
 

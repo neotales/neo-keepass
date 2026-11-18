@@ -13,6 +13,7 @@ mod application_environment;
 use application_environment::IsolatedApplicationEnvironment;
 
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -33,6 +34,7 @@ fn cli(home: &Path, args: &[&str]) -> Output {
         .isolate_application_environment()
         .args(args)
         .env("XDG_CONFIG_HOME", home)
+        .env("XDG_DATA_HOME", home.join("data"))
         .env_remove("NEO_KEEPASS_VAULT")
         .env_remove("NKP_VAULT")
         .env_remove("NKEEPASS_VAULT")
@@ -161,6 +163,7 @@ fn subprocess_fixture_clears_xdg_config_dir() {
     raw.env("XDG_CONFIG_DIR", &canary);
     let output = raw
         .isolate_application_environment()
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .args(["context", "set", "canary", vault.to_str().unwrap()])
         .output()
         .unwrap();
@@ -174,12 +177,12 @@ fn subprocess_fixture_clears_xdg_config_dir() {
 }
 
 #[test]
-fn subprocess_fixture_clears_xdg_config_home() {
+fn subprocess_fixture_preserves_explicit_xdg_config_home() {
     let temp = tempfile::tempdir().unwrap();
-    let canary = temp.path().join("config-home-canary");
+    let config = temp.path().join("config-home");
     let vault = temp.path().join("synthetic.kdbx");
     let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
-    raw.env("XDG_CONFIG_HOME", &canary);
+    raw.env("XDG_CONFIG_HOME", &config);
     let output = raw
         .isolate_application_environment()
         .args(["context", "set", "canary", vault.to_str().unwrap()])
@@ -187,7 +190,10 @@ fn subprocess_fixture_clears_xdg_config_home() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(!canary.exists(), "XDG_CONFIG_HOME escaped the fixture");
+    assert!(
+        config.exists(),
+        "explicit XDG_CONFIG_HOME was not preserved"
+    );
 }
 
 #[test]
@@ -197,7 +203,10 @@ fn subprocess_fixture_clears_xdg_data_dir() {
     let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
     raw.env("XDG_DATA_DIR", &canary);
     let mut command = raw.isolate_application_environment();
-    let expected_data = command.home().join("data/nkeepass/default.kdbx");
+    let data_home = temp.path().join("data");
+    command.env("XDG_CONFIG_HOME", temp.path().join("config"));
+    command.env("XDG_DATA_HOME", &data_home);
+    let expected_data = data_home.join("nkeepass/default.kdbx");
     let output = command.args(["context", "show"]).output().unwrap();
 
     assert!(
@@ -212,126 +221,39 @@ fn subprocess_fixture_clears_xdg_data_dir() {
 }
 
 #[test]
-fn subprocess_fixture_clears_xdg_data_home() {
+fn subprocess_fixture_preserves_explicit_xdg_data_home() {
     let temp = tempfile::tempdir().unwrap();
-    let canary = temp.path().join("data-home-canary");
+    let data_home = temp.path().join("data-home");
     let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
-    raw.env("XDG_DATA_HOME", &canary);
+    raw.env("XDG_DATA_HOME", &data_home);
     let mut command = raw.isolate_application_environment();
-    let expected_data = command.home().join("data/nkeepass/default.kdbx");
+    command.env("XDG_CONFIG_HOME", temp.path().join("config"));
+    let expected_data = data_home.join("nkeepass/default.kdbx");
     let output = command.args(["context", "show"]).output().unwrap();
 
     assert!(output.status.success());
     let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(context["path"], expected_data.to_string_lossy().as_ref());
-    assert!(!canary.exists(), "XDG_DATA_HOME escaped the fixture");
 }
 
 #[test]
-fn subprocess_fixture_clears_home_for_default_data_resolution() {
+fn subprocess_fixture_preserves_explicit_home_for_default_data_resolution() {
     let temp = tempfile::tempdir().unwrap();
-    let canary = temp.path().join("home-canary");
+    let home = temp.path().join("home");
     let mut raw = Command::new(env!("CARGO_BIN_EXE_nkp"));
-    raw.env("HOME", &canary);
+    raw.env("HOME", &home);
     let mut command = raw.isolate_application_environment();
-    // Remove the XDG data candidates so resolution must use the sanitized HOME.
+    // Remove the XDG data candidates so resolution uses the explicit HOME.
     command
         .env_remove("XDG_DATA_DIR")
-        .env_remove("XDG_DATA_HOME");
-    let expected_data = command.home().join(".local/share/nkeepass/default.kdbx");
+        .env_remove("XDG_DATA_HOME")
+        .env("XDG_CONFIG_HOME", temp.path().join("config"));
+    let expected_data = home.join(".local/share/nkeepass/default.kdbx");
     let output = command.args(["context", "show"]).output().unwrap();
 
     assert!(output.status.success());
     let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(context["path"], expected_data.to_string_lossy().as_ref());
-    assert!(!canary.exists(), "HOME escaped the fixture");
-}
-
-#[test]
-fn isolated_command_home_lives_through_spawn_and_wait_then_is_removed() {
-    let mut raw = Command::new("sh");
-    raw.args(["-c", "test -d \"$HOME\" && sleep 0.05 && test -d \"$HOME\""]);
-    let mut command = raw.isolate_application_environment();
-    let mut child = command.spawn().unwrap();
-    let home = child.home().to_path_buf();
-    assert!(
-        home.is_dir(),
-        "owned home disappeared immediately after spawn"
-    );
-
-    let status = child.wait().unwrap();
-    assert!(status.success());
-    assert!(home.is_dir(), "owned home disappeared before guard drop");
-    drop(child);
-    assert!(!home.exists(), "owned home leaked after child guard drop");
-}
-
-#[test]
-fn isolated_child_kills_and_reaps_on_unwind_before_removing_home() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
-    let mut home = None;
-    let mut pid = None;
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut raw = Command::new("sh");
-        raw.args(["-c", "exec sleep 60"]);
-        let mut command = raw.isolate_application_environment();
-        let child = command.spawn().unwrap();
-        home = Some(child.home().to_path_buf());
-        pid = Some(child.id());
-        assert!(home.as_ref().unwrap().is_dir());
-        assert!(process_is_alive(pid.unwrap()));
-        panic!("exercise isolated child cleanup during unwind");
-    }));
-
-    assert!(result.is_err());
-    assert!(
-        !home.as_ref().unwrap().exists(),
-        "child home survived guard unwinding"
-    );
-    assert!(
-        !process_is_alive(pid.unwrap()),
-        "child survived or was not reaped during guard unwinding"
-    );
-}
-
-#[test]
-fn isolated_child_drains_large_stdout_and_stderr_concurrently() {
-    let mut raw = Command::new("sh");
-    raw.args([
-        "-c",
-        "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2",
-    ]);
-    let mut command = raw.isolate_application_environment();
-    command.capture_stdout().capture_stderr();
-
-    let output = command.output().unwrap();
-    assert!(output.status.success());
-    assert_eq!(output.stdout.len(), 131072);
-    assert_eq!(output.stderr.len(), 131072);
-}
-
-#[test]
-fn isolated_child_rejects_unclaimed_output_pipes() {
-    let mut raw = Command::new("sh");
-    raw.args(["-c", "exec sleep 60"]);
-    let mut command = raw.isolate_application_environment();
-    command.stdout(Stdio::piped());
-    let child = command.spawn().unwrap();
-    let home = child.home().to_path_buf();
-    let pid = child.id();
-    assert!(child.wait_with_output().is_err());
-    assert!(!process_is_alive(pid));
-    assert!(!home.exists());
-}
-
-fn process_is_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 #[test]
@@ -1644,11 +1566,12 @@ fn shortcuts_fields_attachments_and_exec() {
     let mut isolated_stdin = isolated_command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .capture_stderr()
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     isolated_stdin
-        .take_stdin()
+        .stdin
+        .take()
         .unwrap()
         .write_all(b"test-password\nchild-input-SENTINEL\n")
         .unwrap();
@@ -3024,14 +2947,12 @@ fn ls_propagates_a_closed_stdout_pipe() {
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
         .args(["secrets", "ls", "--password-env", "HOSTILE_TEST_PASSWORD"]);
-    // This command is the direct CLI child and does not spawn descendants.
-    // A real closed pipe is essential to exercise its broken-pipe handling.
     let mut child = command
         .stdout(Stdio::piped())
-        .capture_stderr()
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    drop(child.take_stdout());
+    drop(child.stdout.take());
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(output.stderr, b"nkp: cannot write output\n");
@@ -3710,11 +3631,12 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
             .env("XDG_CONFIG_HOME", tmp.path())
             .env("XDG_DATA_HOME", tmp.path().join("data"))
             .stdin(Stdio::piped())
-            .capture_stdout()
-            .capture_stderr();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = isolated_command.spawn().expect("nkp should start");
         child
-            .take_stdin()
+            .stdin
+            .take()
             .expect("stdin was piped")
             .write_all(b"pw-for-this-test\n")
             .expect("the password should reach the child");

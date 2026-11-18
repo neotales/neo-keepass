@@ -2,7 +2,7 @@
 
 #[path = "support/application_environment.rs"]
 mod application_environment;
-use application_environment::{IsolatedApplicationEnvironment, IsolatedCommand};
+use application_environment::IsolatedApplicationEnvironment;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -32,13 +32,14 @@ fn vault(home: &Path) -> PathBuf {
     path
 }
 
-fn command(home: &Path, vault: &Path, args: &[&str]) -> IsolatedCommand {
+fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
     let command = Command::new(env!("CARGO_BIN_EXE_nkp"));
     let mut command = command.isolate_application_environment();
     command
         .args(["--vault", vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", home)
+        .env("XDG_DATA_HOME", home.join("data"))
         .env_remove("NKEEPASS_CONFIG_DIR")
         .env_remove("NEO_KEEPASS_CONFIG_DIR")
         .env_remove("NKP_CONFIG_DIR")
@@ -192,12 +193,13 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
         command.env("NKEEPASS_PASSWORD", "wrong-password");
         let mut child = command
             .stdin(Stdio::piped())
-            .capture_stdout()
-            .capture_stderr()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         child
-            .take_stdin()
+            .stdin
+            .take()
             .unwrap()
             .write_all(b"vault-password\n")
             .unwrap();
@@ -463,13 +465,14 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
                     "wrong-password"
                 },
             )
-            .capture_stdout()
-            .capture_stderr();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let output = if stdin {
             cli.stdin(Stdio::piped());
             let mut child = cli.spawn().unwrap();
             child
-                .take_stdin()
+                .stdin
+                .take()
                 .unwrap()
                 .write_all(b"vault-password\n")
                 .unwrap();

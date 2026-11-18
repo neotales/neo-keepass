@@ -3,7 +3,7 @@
 
 #[path = "support/application_environment.rs"]
 mod application_environment;
-use application_environment::{IsolatedApplicationEnvironment, IsolatedCommand};
+use application_environment::IsolatedApplicationEnvironment;
 
 use std::fs::File;
 use std::path::Path;
@@ -62,8 +62,8 @@ fn secure_directory_rejects_regular_file_without_changing_acl() {
     assert_eq!(std::fs::read(&file).unwrap(), b"synthetic");
 }
 
-fn command(root: &Path, args: &[&str]) -> IsolatedCommand {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+fn command(root: &Path, args: &[&str]) -> Command {
+    let command = Command::new(env!("CARGO_BIN_EXE_nkp"));
     let mut command = command.isolate_application_environment();
     command
         .current_dir(root)

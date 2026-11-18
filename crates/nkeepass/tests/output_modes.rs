@@ -125,6 +125,7 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
         .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
         .env_remove("NKEEPASS_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")

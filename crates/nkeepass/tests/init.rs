@@ -9,7 +9,7 @@
 
 #[path = "support/application_environment.rs"]
 mod application_environment;
-use application_environment::{IsolatedApplicationEnvironment, IsolatedCommand};
+use application_environment::IsolatedApplicationEnvironment;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -72,7 +72,7 @@ impl Fixture {
     }
 }
 
-fn command(fixture: &Fixture, password: &str) -> IsolatedCommand {
+fn command(fixture: &Fixture, password: &str) -> Command {
     let child = Command::new(env!("CARGO_BIN_EXE_nkp"));
     let mut child = child.isolate_application_environment();
     child
@@ -1096,13 +1096,14 @@ fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
         .env_remove(PASSWORD_ENV);
     let mut child = command
         .stdin(Stdio::piped())
-        .capture_stdout()
-        .capture_stderr()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     use std::io::Write as _;
     child
-        .take_stdin()
+        .stdin
+        .take()
         .unwrap()
         .write_all(format!("{PASSWORD}\n").as_bytes())
         .unwrap();
