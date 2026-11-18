@@ -42,6 +42,17 @@ password as age-encrypted data in a uniquely named file under
 `~/.config/nkeepass/init-password.agekey`. The `NKEEPASS_CONFIG_DIR` and
 `NKEEPASS_DATA_DIR` app overrides and XDG directory settings select these
 locations.
+Application environment inputs also accept the `NEO_KEEPASS_*` and `NKP_*`
+forms of the existing `NKEEPASS_*` names. If more than one form is set,
+`NEO_KEEPASS_*` wins over `NKP_*`, which wins over legacy `NKEEPASS_*`.
+Explicit command-line flags remain higher priority than all environment
+forms. For example, `NEO_KEEPASS_VAULT` wins over `NKP_VAULT` and
+`NKEEPASS_VAULT`; unset `NEO_KEEPASS_VAULT` to fall back to the shorter or
+legacy name. This applies to vault selection, password default, app config/data
+directory overrides, and completion-related application settings. Arbitrary
+environment names supplied to `--password-env` remain literal names.
+Environment-name matching follows the host operating system; Windows
+environment names are case-insensitive, while Unix names are case-sensitive.
 Both files are installed privately without overwriting existing files. Keep the
 identity safe: it decrypts the backup. Since this checkout has no OS credential
 vault integration, this file-based backup is the fallback. When a key file is

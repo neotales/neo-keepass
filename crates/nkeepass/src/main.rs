@@ -81,6 +81,15 @@ const GLOBAL_CREDENTIAL_OPTIONS: &[HelpOption] = &[
     },
 ];
 const DEFAULT_PASSWORD_ENV: &str = "NKEEPASS_PASSWORD";
+
+/// Reads a supported application environment variable using canonical-name
+/// precedence: `NEO_KEEPASS_*`, then `NKP_*`, then legacy `NKEEPASS_*`.
+fn app_env_var_os(name: &str) -> Option<std::ffi::OsString> {
+    let suffix = name.strip_prefix("NKEEPASS_")?;
+    env::var_os(format!("NEO_KEEPASS_{suffix}"))
+        .or_else(|| env::var_os(format!("NKP_{suffix}")))
+        .or_else(|| env::var_os(name))
+}
 const ROOT_ONLY_OPTIONS: &[HelpOption] = &[HelpOption {
     label: "--version",
     summary: "Print version information.",
@@ -1184,7 +1193,7 @@ fn resolve_app_dir(
 }
 
 fn config_dir() -> Result<PathBuf> {
-    let app_override = env::var_os("NKEEPASS_CONFIG_DIR");
+    let app_override = app_env_var_os("NKEEPASS_CONFIG_DIR");
     let xdg_override = env::var_os("XDG_CONFIG_DIR");
     let standard_xdg_home = env::var_os("XDG_CONFIG_HOME");
     resolve_app_dir(
@@ -1199,7 +1208,7 @@ fn config_dir() -> Result<PathBuf> {
 }
 
 fn data_dir() -> Result<PathBuf> {
-    let app_override = env::var_os("NKEEPASS_DATA_DIR");
+    let app_override = app_env_var_os("NKEEPASS_DATA_DIR");
     let xdg_override = env::var_os("XDG_DATA_DIR");
     let standard_xdg_home = env::var_os("XDG_DATA_HOME");
     resolve_app_dir(
@@ -1590,7 +1599,7 @@ fn remove_context_alias(config: &mut Config, name: &str) -> Result<()> {
 }
 
 fn environment_vault(name: &str) -> Result<Option<String>> {
-    let Some(path) = env::var_os(name).filter(|value| !value.is_empty()) else {
+    let Some(path) = app_env_var_os(name).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
     path.into_string()
@@ -2019,12 +2028,12 @@ fn password(opts: &Options<'_>) -> Result<Option<Zeroizing<String>>> {
     if opts.key_file.is_some() {
         return Ok(None);
     }
-    match env::var(DEFAULT_PASSWORD_ENV) {
-        Ok(value) if !value.is_empty() => return Ok(Some(Zeroizing::new(value))),
-        Err(env::VarError::NotPresent) => {}
-        Ok(_) | Err(env::VarError::NotUnicode(_)) => {
-            return Err(err("password environment variable unavailable"));
-        }
+    match app_env_var_os(DEFAULT_PASSWORD_ENV) {
+        Some(value) => match value.into_string() {
+            Ok(value) if !value.is_empty() => return Ok(Some(Zeroizing::new(value))),
+            Ok(_) | Err(_) => return Err(err("password environment variable unavailable")),
+        },
+        None => {}
     }
     if !io::stdin().is_terminal() {
         return Err(err("password source required for non-interactive input"));
@@ -5882,7 +5891,7 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
         output.push_str("CREDENTIALS:\n");
         write_paragraph(
             &mut output,
-            "Without an explicit credential source, use NKEEPASS_PASSWORD when set. Explicit sources override it; NKEEPASS_SECRET is not an alias.",
+            "Without an explicit source, use NEO_KEEPASS_PASSWORD, then NKP_PASSWORD, then NKEEPASS_PASSWORD. Explicit sources override them; NKEEPASS_SECRET is not an alias.",
             width,
             "  ",
         );

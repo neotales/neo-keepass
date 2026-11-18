@@ -35,13 +35,81 @@ fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
         .args(args)
         .env("XDG_CONFIG_HOME", home)
         .env_remove("NKEEPASS_CONFIG_DIR")
+        .env_remove("NEO_KEEPASS_CONFIG_DIR")
+        .env_remove("NKP_CONFIG_DIR")
         .env_remove("XDG_CONFIG_DIR")
         .env_remove("NKEEPASS_VAULT")
+        .env_remove("NEO_KEEPASS_VAULT")
+        .env_remove("NKP_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NEO_KEEPASS_VAULT_PATH")
+        .env_remove("NKP_VAULT_PATH")
         .env_remove("NKEEPASS_PASSWORD")
+        .env_remove("NEO_KEEPASS_PASSWORD")
+        .env_remove("NKP_PASSWORD")
         .env_remove("NKEEPASS_SECRET")
         .stdin(Stdio::null());
     command
+}
+
+#[test]
+fn default_password_environment_names_follow_documented_precedence() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = vault(temp.path());
+    for (variables, expected_success) in [
+        (vec![("NKEEPASS_PASSWORD", "vault-password")], true),
+        (vec![("NKP_PASSWORD", "vault-password")], true),
+        (vec![("NEO_KEEPASS_PASSWORD", "vault-password")], true),
+        (
+            vec![
+                ("NKEEPASS_PASSWORD", "wrong"),
+                ("NKP_PASSWORD", "vault-password"),
+            ],
+            true,
+        ),
+        (
+            vec![
+                ("NKEEPASS_PASSWORD", "vault-password"),
+                ("NKP_PASSWORD", "wrong"),
+            ],
+            false,
+        ),
+        (
+            vec![
+                ("NKP_PASSWORD", "wrong"),
+                ("NEO_KEEPASS_PASSWORD", "vault-password"),
+            ],
+            true,
+        ),
+        (
+            vec![
+                ("NKEEPASS_PASSWORD", "vault-password"),
+                ("NEO_KEEPASS_PASSWORD", "wrong"),
+            ],
+            false,
+        ),
+        (
+            vec![
+                ("NKP_PASSWORD", "vault-password"),
+                ("NEO_KEEPASS_PASSWORD", ""),
+            ],
+            false,
+        ),
+    ] {
+        let mut command = command(temp.path(), &vault, &["get", "--key", "login"]);
+        for &(name, value) in &variables {
+            command.env(name, value);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            expected_success,
+            "unexpected result with environment names: {:?}; stdout: {}; stderr: {}",
+            variables.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
 
 fn success(output: &Output) {
@@ -317,7 +385,12 @@ fn non_utf8_password_variables_fail_without_disclosure() {
     use std::os::unix::ffi::OsStringExt;
     let temp = tempfile::tempdir().unwrap();
     let vault = vault(temp.path());
-    for name in ["EXPLICIT_PASSWORD", "NKEEPASS_PASSWORD"] {
+    for name in [
+        "EXPLICIT_PASSWORD",
+        "NKEEPASS_PASSWORD",
+        "NKP_PASSWORD",
+        "NEO_KEEPASS_PASSWORD",
+    ] {
         let mut args = Vec::new();
         if name == "EXPLICIT_PASSWORD" {
             args.extend(["--password-env", name]);

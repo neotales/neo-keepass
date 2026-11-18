@@ -191,7 +191,7 @@ fn valid_metadata_path(path: &str) -> bool {
 
 fn completion_password() -> Result<Option<Zeroizing<String>>> {
     let Some(name) =
-        env::var_os("NKEEPASS_COMPLETE_PASSWORD_ENV").filter(|value| !value.is_empty())
+        crate::app_env_var_os("NKEEPASS_COMPLETE_PASSWORD_ENV").filter(|value| !value.is_empty())
     else {
         return Ok(None);
     };
@@ -3505,7 +3505,8 @@ else:
     #[test]
     fn generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed() {
         let directory = tempfile::tempdir().unwrap();
-        let require_interpreters = std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some();
+        let require_interpreters =
+            crate::app_env_var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some();
         let zsh_available = std::process::Command::new("zsh")
             .arg("--version")
             .output()
@@ -3597,8 +3598,8 @@ else:
     /// flag still counts, because a leg demanding every completion
     /// shell demands this one too.
     fn completion_requirement_requested() -> bool {
-        std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_BASH").is_some()
-            || std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some()
+        crate::app_env_var_os("NKEEPASS_REQUIRE_COMPLETION_BASH").is_some()
+            || crate::app_env_var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some()
     }
 
     /// How long a `--version` probe may run before it is killed and
@@ -4146,7 +4147,7 @@ else:
     /// cannot express and must keep testing whatever bash the ambient
     /// PATH provides.
     fn completion_bash_program() -> String {
-        if let Some(program) = std::env::var_os("NKEEPASS_COMPLETION_BASH") {
+        if let Some(program) = crate::app_env_var_os("NKEEPASS_COMPLETION_BASH") {
             return program.to_string_lossy().into_owned();
         }
         static RESOLVED: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
