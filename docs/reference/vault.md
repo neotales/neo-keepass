@@ -59,7 +59,9 @@ target and whether the vault was installed. If installation did not occur,
 the report says **unused backup**: that password cannot unlock an existing
 vault. JSON uses `init-unused-backup` with `vault_installed: false`; an
 installed vault with a later failure uses `init-recovery` with
-`vault_installed: true`. Both retain a nonzero exit status.
+`vault_installed: true`. Both retain a nonzero exit status. If stdout is
+unavailable, stderr retains the original failure and notes that the recovery
+report could not be written.
 
 Before installing a generated-password vault, init also creates a private
 no-clobber `init-password-*.age.json` candidate record beside the encrypted
@@ -73,10 +75,13 @@ Only one that actually opens the vault is its recovery password. Keep candidate
 records private and retain them with their corresponding encrypted backups.
 On Unix the file and parent directory are synced before vault installation;
 Windows uses the existing private-file durability policy and owner-only DACL.
-On Unix, reuse independently syncs the identity and its directory ancestry
+On Unix, reuse independently syncs the identity and its containing directory
 before making a new backup, including when another initializer has published
-the identity but not yet synced its parent. The existing Windows policy syncs
-the staged identity file but cannot confirm parent-directory durability after
+the identity but not yet synced that directory. Preexisting directory entries
+and their ancestors are assumed durable; an externally or concurrently
+created configuration directory may not yet be durable.
+The existing Windows policy syncs the staged identity file but cannot confirm
+parent-directory durability after
 a crash. Windows reuses a validated private identity under that policy; after
 power loss, directory entries for the identity or recovery files may not
 survive. Make protected independent backups of both the identity and encrypted

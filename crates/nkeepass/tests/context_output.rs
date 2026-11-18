@@ -466,6 +466,107 @@ fn generated_master_requires_backup_and_rejects_other_credentials() {
     assert!(!root.path().join("vault.kdbx").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn identity_reuse_does_not_require_reading_traversable_ancestors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let restricted = root.path().join("traverse-only");
+    std::fs::create_dir(&restricted).unwrap();
+    let config = restricted.join("config");
+    let data = restricted.join("data");
+    let invoke = |name: &str| {
+        Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .current_dir(root.path())
+            .env("NKEEPASS_CONFIG_DIR", &config)
+            .env("NKEEPASS_DATA_DIR", &data)
+            .env("NKEEPASS_CONTEXT_TEST_PASSWORD", "synthetic-test-password")
+            .env_remove("NKEEPASS_VAULT")
+            .env_remove("NKEEPASS_VAULT_PATH")
+            .env_remove("NKEEPASS_PASSWORD")
+            .args([
+                "init",
+                name,
+                "--json",
+                "--password-env",
+                "NKEEPASS_CONTEXT_TEST_PASSWORD",
+                "--iterations",
+                "64",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert!(invoke("first.kdbx").status.success());
+    std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o111)).unwrap();
+    if std::fs::read_dir(&restricted).is_ok() {
+        std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("SKIP execute-only ancestor: test user can read mode 0111 directories");
+        return;
+    }
+    let second = invoke("second.kdbx");
+    std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(root.path().join("second.kdbx").is_file());
+    let report: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(report["age_identity_created"], false);
+}
+
+#[test]
+fn collision_with_closed_stdout_preserves_original_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let first = run(
+        root.path(),
+        &[
+            "init",
+            "existing.kdbx",
+            "--password-env",
+            "NKEEPASS_CONTEXT_TEST_PASSWORD",
+            "--iterations",
+            "64",
+        ],
+    );
+    assert!(first.status.success());
+    let path = root.path().join("existing.kdbx");
+    let original = std::fs::read(&path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .current_dir(root.path())
+        .env("NKEEPASS_CONFIG_DIR", root.path().join("config"))
+        .env("NKEEPASS_DATA_DIR", root.path().join("data"))
+        .env_remove("NKEEPASS_VAULT")
+        .env_remove("NKEEPASS_VAULT_PATH")
+        .args([
+            "init",
+            "existing.kdbx",
+            "--generate-master-password",
+            "--iterations",
+            "64",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("vault already exists or cannot be created"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("recovery report could not be written"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+
 #[test]
 fn generated_init_refuses_invalid_existing_identity_without_clobber() {
     let root = tempfile::tempdir().unwrap();

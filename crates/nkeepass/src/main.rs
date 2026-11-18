@@ -2447,11 +2447,12 @@ fn confirm_backup_identity_durability(file: &File, path: &Path) -> Result<()> {
         let parent = path
             .parent()
             .ok_or_else(|| err("cannot confirm password backup identity durability"))?;
-        for ancestor in parent.ancestors() {
-            File::open(ancestor)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| err("cannot confirm password backup identity durability"))?;
-        }
+        // Sync the directory containing the identity, not unrelated ancestors:
+        // traversable parent directories need not be readable. As with existing
+        // private-file writes, preexisting directory entries are assumed durable.
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| err("cannot confirm password backup identity durability"))?;
     }
     #[cfg(not(unix))]
     {
@@ -5203,7 +5204,13 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         (Ok(context_set), Ok(backup)) => (context_set, backup),
         (Err(context_error), Ok(backup)) => {
             if generate_master && let Some(backup) = &backup {
-                write_init_recovery(backup, as_json, &path_text, Some(vault_installed))?;
+                if write_init_recovery(backup, as_json, &path_text, Some(vault_installed)).is_err()
+                {
+                    return Err(CliError(
+                        format!("{}; recovery report could not be written", context_error.0),
+                        context_error.1,
+                    ));
+                }
             }
             return Err(context_error);
         }
