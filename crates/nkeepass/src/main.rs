@@ -6399,7 +6399,12 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
         output.push('\n');
         write_paragraph(&mut output, &format!("Usage: {program} {usage}"), width, "");
         output.push('\n');
-        write_paragraph(&mut output, command.summary, width, "");
+        let summary = if route.len() == 1 {
+            shortcut_summary(command).unwrap_or(command.summary)
+        } else {
+            command.summary
+        };
+        write_paragraph(&mut output, summary, width, "");
         output.push('\n');
     }
 
@@ -7801,6 +7806,28 @@ mod tests {
         let context = render_help("nkp", &["context".to_owned()], HELP_WIDTH);
         for action in ["ls", "show", "use", "rm", "set"] {
             assert!(context.contains(action));
+        }
+    }
+
+    #[test]
+    fn root_shortcut_help_uses_the_secrets_command_summary() {
+        for shortcut in ["set", "get", "list", "ls", "rm", "remove"] {
+            let shortcut_help = render_help("nkp", &[shortcut.to_owned()], HELP_WIDTH);
+            let secrets_help = render_help(
+                "nkp",
+                &["secrets".to_owned(), shortcut.to_owned()],
+                HELP_WIDTH,
+            );
+            let shortcut_summary = shortcut_help
+                .lines()
+                .find(|line| !line.starts_with("nkp ") && !line.starts_with("Usage:"))
+                .unwrap();
+            let secrets_summary = secrets_help
+                .lines()
+                .find(|line| !line.starts_with("nkp ") && !line.starts_with("Usage:"))
+                .unwrap();
+            assert_eq!(shortcut_summary, secrets_summary, "{shortcut} summary");
+            assert!(!shortcut_summary.contains("Shortcut for"));
         }
     }
 
