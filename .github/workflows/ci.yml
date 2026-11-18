@@ -97,18 +97,22 @@ jobs:
           toolchain: "1.98.1" # matches rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # macOS still ships bash 3.2.57 as /bin/bash, which predates
-      # `compopt` (bash 4.0+): the hostile-filename readline matrix in
+      # `compopt` (new in bash 4.0 per bash-4.0's NEWS): the
+      # hostile-filename readline matrix in
       # crates/nkeepass/src/completion.rs pins quoting behavior only a
       # bash >= 4 can express, and against 3.2 its candidates get
       # re-quoted and misplaced (proven on a readline-enabled bash
       # 3.2.57 build). Homebrew's bash (5.x) resolves first on the
-      # runner PATH, so the PTY driver's execvp and every
-      # `Command::new("bash")` test reach it. The floor is asserted,
-      # not the exact version pinned: brew bottles move, and the
-      # requirement is the compopt contract, not one build. The
+      # runner PATH, so the PTY driver's execvp and the interactive
+      # matrix reach it; the generated-script tests are pinned to the
+      # native /bin/bash by the canary step below instead. The floor is
+      # asserted, not the exact version pinned: brew bottles move, and
+      # the requirement is the compopt contract, not one build. The
       # resolution check proves the PATH actually hands that bash to
-      # the tests; without it a silently missing brew bash would turn
-      # the matrix into a skip instead of the intended failure.
+      # the tests, and NKEEPASS_REQUIRE_COMPLETION_BASH makes losing it
+      # a loud matrix failure: without that flag a lost brew bash would
+      # turn the matrix into a yield whose notice libtest captures and
+      # never replays on a passing run.
       - name: Install modern bash for the completion matrix (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -121,9 +125,10 @@ jobs:
           fi
           resolved="$(command -v bash)"
           if [ "$resolved" != "/opt/homebrew/bin/bash" ]; then
-            echo "::error::PATH resolves bash to $resolved, not the Homebrew build; the completion matrix would skip"
+            echo "::error::PATH resolves bash to $resolved, not the Homebrew build; the completion matrix would yield silently"
             exit 1
           fi
+          echo "NKEEPASS_REQUIRE_COMPLETION_BASH=1" >> "$GITHUB_ENV"
           printf 'bash for the completion matrix: %s\n' "$(/opt/homebrew/bin/bash --version | head -1)"
       # Windows runs unsuppressed. Coverage there is narrow by design: the
       # integration test files under crates/nkeepass/tests/ are #![cfg(unix)]
@@ -150,6 +155,34 @@ jobs:
       - name: Test compile
         shell: bash
         run: cargo test --workspace --no-run
+      # Canary for the legacy bash the brew step displaced from this
+      # leg's PATH: the generated-script parse and boundary tests
+      # otherwise exercise Homebrew's 5.x here, and nothing in CI would
+      # keep testing the script against the bash a stock macOS still
+      # ships. Pin them to the native /bin/bash through
+      # NKEEPASS_COMPLETION_BASH; the version assert keeps the canary
+      # honest — if Apple ever replaces /bin/bash with a bash >= 4 the
+      # step fails and the canary is revisited instead of silently
+      # testing bash 5 twice. This pins load/parse and word-boundary
+      # behavior only, NOT completion parity: the interactive matrix on
+      # this leg runs against the brew bash by design.
+      - name: Canary - generated completion against the native /bin/bash (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        # Executes compiled test code: bounded like every executing
+        # step in this file, against an interpreter wedging on a prompt
+        # that never returns.
+        timeout-minutes: 10
+        env:
+          NKEEPASS_COMPLETION_BASH: /bin/bash
+        run: |
+          major="$(/bin/bash --version | sed -n 's/^GNU bash, version \([0-9][0-9]*\).*/\1/p')"
+          if [ "${major:-99}" -ge 4 ]; then
+            echo "::error::the /bin/bash canary reports major ${major:-unknown}; it exists to keep exercising the legacy (pre-4) macOS bash"
+            exit 1
+          fi
+          /bin/bash --version | head -1
+          cargo test -p nkeepass --bin nkp -- generated_bash_and_posix bash_filename_completion
       - name: Test
         shell: bash
         # Integration tests include PTY-style password prompts (#![cfg(unix)]);

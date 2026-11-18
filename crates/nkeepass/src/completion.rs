@@ -2752,13 +2752,15 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
     }
 
     /// The interpreter identity for failure diagnostics: how the
-    /// ambient PATH resolved `shell`, reported by the interpreter
-    /// itself. A bare `Command::new(shell)` inherits the test process's
-    /// PATH, which on the Windows runner can resolve differently from
-    /// GitHub's own `shell: bash` selection (that one prefers Git for
-    /// Windows' bash over the WSL launcher stub in System32); printing
-    /// the interpreter's self-report keeps every assertion failure able
-    /// to name exactly which program answered.
+    /// program under test identifies itself, reported by that program.
+    /// Callers pass either an ambient PATH-resolved shell name or an
+    /// explicit NKEEPASS_COMPLETION_BASH override path (the macOS
+    /// canary passes `/bin/bash`), so a failure names exactly which
+    /// program answered. On the Windows runner a bare PATH lookup can
+    /// resolve differently from GitHub's own `shell: bash` selection
+    /// (that one prefers Git for Windows' bash over the WSL launcher
+    /// stub in System32) — which is why this self-report is part of
+    /// every generated-script assertion message.
     fn shell_interpreter_identity(shell: &str) -> String {
         let report = std::process::Command::new(shell).arg("--version").output();
         let version = match report {
@@ -2792,9 +2794,20 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
     fn generated_bash_and_posix_scripts_parse_and_posix_files_group_completes() {
         let directory = tempfile::tempdir().unwrap();
         for (shell, args) in [("bash", vec!["-n"]), ("sh", vec!["-n"])] {
+            // The bash half honors NKEEPASS_COMPLETION_BASH — the macOS
+            // leg pins the native /bin/bash (3.2.57) so CI keeps
+            // exercising the generated script against the legacy bash
+            // its PATH no longer resolves — while the POSIX half stays
+            // on the ambient sh (macOS /bin/sh already is the legacy
+            // bash in sh mode).
+            let program = if shell == "bash" {
+                completion_bash_program()
+            } else {
+                shell.to_owned()
+            };
             let path = directory.path().join(format!("completion.{shell}"));
             std::fs::write(&path, generate(shell).unwrap()).unwrap();
-            let output = std::process::Command::new(shell)
+            let output = std::process::Command::new(&program)
                 .args(args)
                 .arg(&path)
                 .output()
@@ -2803,7 +2816,7 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
                 output.status.success(),
                 "{shell} syntax check of the generated completion failed: {} [interpreter: {}]",
                 subprocess_failure_detail(&output),
-                shell_interpreter_identity(shell),
+                shell_interpreter_identity(&program),
             );
         }
 
@@ -2923,33 +2936,69 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         version.split('.').next()?.parse().ok()
     }
 
+    /// Whether the environment demands a bash the readline matrix can
+    /// actually exercise. `NKEEPASS_REQUIRE_COMPLETION_BASH` is the
+    /// dedicated knob, so a leg can demand this one capability without
+    /// also demanding the unrelated zsh and PowerShell interpreters
+    /// that `NKEEPASS_REQUIRE_COMPLETION_SHELLS` covers; the older
+    /// flag still counts, because a leg demanding every completion
+    /// shell demands this one too.
+    fn completion_requirement_requested() -> bool {
+        std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_BASH").is_some()
+            || std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some()
+    }
+
+    /// The bash interpreter for the generated-script tests: the
+    /// `NKEEPASS_COMPLETION_BASH` value when set, else the ambient
+    /// PATH-resolved `bash`. The macOS CI leg pins this to the native
+    /// `/bin/bash` (3.2.57) as a canary: that leg's PATH otherwise
+    /// resolves `bash` to Homebrew's 5.x, and without the pin nothing
+    /// in CI would keep exercising the generated script against the
+    /// legacy bash a stock macOS still ships. A missing or
+    /// non-executable override fails these tests' own spawn loudly.
+    /// The interactive PTY matrix deliberately ignores it — that matrix
+    /// pins `compopt` quoting 3.2 cannot express and must keep testing
+    /// whatever bash the ambient PATH provides.
+    fn completion_bash_program() -> String {
+        match std::env::var_os("NKEEPASS_COMPLETION_BASH") {
+            Some(program) => program.to_string_lossy().into_owned(),
+            None => "bash".to_owned(),
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn bash_binary_completion_uses_readline_quoting_for_hostile_filenames() {
         // The readline quoting contract this matrix pins — candidates
         // inserted verbatim because the script asks readline for
         // `compopt -o noquote -o nospace` — is only expressible from
-        // bash 4.0 on. macOS still ships bash 3.2.57 as /bin/bash,
-        // which predates compopt: proven against a readline-enabled
-        // bash 3.2.57 build, the completion registers and produces
-        // the right whole-assignment candidate, but readline 5.2 then
-        // re-quotes it and inserts it into the post-`=` word slot
-        // (`payload\=space\\ name.bin`), so no candidate can round
-        // trip. The generated-script parse test still proves the
-        // script LOADS on bash 3.2 (its `bash -n` runs on the same
-        // ambient interpreter); only this interactive matrix needs a
-        // bash that can honor the script's compopt requests. When the
-        // ambient one cannot, say so with its version and yield — the
-        // requirement flag turns the notice into a failure.
+        // bash 4.0 on (compopt is new in 4.0 per bash-4.0's NEWS).
+        // macOS still ships bash 3.2.57 as /bin/bash, which predates
+        // it: proven against a readline-enabled bash 3.2.57 build, the
+        // completion registers and produces the right whole-assignment
+        // candidate, but readline 5.2 then re-quotes it and inserts it
+        // into the post-`=` word slot (`payload\=space\\ name.bin`),
+        // so no candidate can round trip. Load/parse compatibility with
+        // the legacy bash is pinned separately, not here: the macOS leg
+        // runs the generated-script parse and boundary tests against
+        // the native /bin/bash through NKEEPASS_COMPLETION_BASH, and
+        // the same tests reproduce against a local 3.2.57 build — this
+        // interactive matrix alone needs a bash that honors compopt,
+        // which every CI leg's ambient PATH provides.
         let ambient_major = ambient_shell_major("bash");
         if ambient_major.is_some_and(|major| major < 4) {
+            // The notice below is quiet, not loud: libtest captures a
+            // passing test's output and only replays it on failure or
+            // with --nocapture. That is exactly why a leg that must run
+            // this matrix also sets NKEEPASS_REQUIRE_COMPLETION_BASH —
+            // the assertion then fails, and libtest replays the notice.
             eprintln!(
                 "SKIP: hostile-filename readline matrix; ambient bash {} predates \
                  compopt (bash 4.0+) and re-quotes candidates itself",
                 ambient_major.map_or_else(|| "?".to_owned(), |major| major.to_string())
             );
             assert!(
-                !std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some(),
+                !completion_requirement_requested(),
                 "required completion bash (>= 4, for compopt noquote/nospace) is unavailable"
             );
             return;
@@ -3411,7 +3460,11 @@ _nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 3
 "#
         );
-        let output = std::process::Command::new("bash")
+        // Honors NKEEPASS_COMPLETION_BASH alongside the parse test:
+        // the macOS canary pins this boundary contract to the native
+        // /bin/bash too, not just to the modern bash the PATH prefers.
+        let bash_program = completion_bash_program();
+        let output = std::process::Command::new(&bash_program)
             .args(["-c", &script])
             .output()
             .expect("bash should run");
@@ -3419,7 +3472,7 @@ _nkp_complete
         // detail carries the streams because a bare `exit N` prints
         // nothing (the silent Windows failure of run 134548307275
         // carried no diagnostics at all), and the interpreter report
-        // names which PATH-resolved bash actually judged the case.
+        // names which bash actually judged the case.
         assert!(
             output.status.success(),
             "Bash option ownership failed: {} [crossed boundary: {}] [interpreter: {}]",
@@ -3432,7 +3485,7 @@ _nkp_complete
                     "nkp set --notes --bin payload = candidate completed a candidate".to_owned(),
                 other => format!("unexpected exit status {other:?}"),
             },
-            shell_interpreter_identity("bash"),
+            shell_interpreter_identity(&bash_program),
         );
     }
 

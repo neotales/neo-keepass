@@ -131,18 +131,33 @@ registration ever happened and the TAB fell back to readline's default
 filename completion. The parse failure is reproduced exactly on Linux
 against a readline-enabled bash 3.2.57 build (`bash -n` fails at HEAD,
 passes with the fix): the initializer is now a bare `local -a
-vault_args`, and the two `mapfile` accumulators (bash 4.0+) became
-while-read loops, so the script loads and its dynamic vault/keys
-completions work on 3.2 too. What remains version-bound, deliberately:
-the hostile-filename matrix pins `compopt -o noquote -o nospace`
-quoting, which is only expressible from bash 4.0 on — proven on the
-same 3.2.57 build, readline 5.2 re-quotes and misplaces the candidate
-(`payload\=space\\ name.bin` into the post-`=` word slot). The test
-therefore gates on the ambient bash major: below 4 it prints the reason
-and yields unless `NKEEPASS_REQUIRE_COMPLETION_SHELLS` is set, and the
-macOS leg installs Homebrew's bash with an asserted major floor and an
-asserted PATH resolution, so CI runs the matrix against a real bash ≥ 4
-instead of degrading on 3.2. The one macOS behavior NOT reproduced or
+vault_args`, and the two `mapfile` accumulators (mapfile/readarray are
+new in bash 4.0 per bash-4.0's NEWS) became while-read loops, so the
+script loads on 3.2 without an unredirected `mapfile: command not
+found` on the dynamic completion paths. Load/parse compatibility is
+what is pinned for 3.2; completion parity on 3.2 is deliberately not
+asserted. What remains version-bound, deliberately: the
+hostile-filename matrix pins `compopt -o noquote -o nospace` quoting,
+which is only expressible from bash 4.0 on (compopt is new in 4.0 per
+the same NEWS) — proven on the same 3.2.57 build, readline 5.2
+re-quotes and misplaces the candidate (`payload\=space\\ name.bin`
+into the post-`=` word slot). The test therefore gates on the ambient
+bash major: below 4 it prints the reason and yields. That yield is
+quieter than it looks — libtest captures a passing test's output, so
+the notice is invisible in a default `cargo test` run unless the case
+fails or `--nocapture` is passed — which is why the macOS leg also
+exports `NKEEPASS_REQUIRE_COMPLETION_BASH`, the flag dedicated to this
+matrix (unlike `NKEEPASS_REQUIRE_COMPLETION_SHELLS`, which would also
+demand the unrelated zsh and PowerShell interpreters): a lost brew bash
+fails the matrix loudly instead of yielding silently. The leg installs
+Homebrew's bash with an asserted major floor and an asserted PATH
+resolution, so CI runs the matrix against a real bash >= 4 instead of
+degrading on 3.2; and because that PATH change displaces the legacy
+bash from everything the leg runs, a canary step pins the
+generated-script parse and boundary tests to the native `/bin/bash`
+through `NKEEPASS_COMPLETION_BASH`, with its own version assert so a
+future Apple bash upgrade forces a canary revisit rather than silently
+testing bash 5 twice. The one macOS behavior NOT reproduced or
 explained: the transcript shows `exit\n` never echoed or processed
 after the completion line returned to the prompt, so the driver waited
 its full 3s exit deadline before the group kill — that did not occur
