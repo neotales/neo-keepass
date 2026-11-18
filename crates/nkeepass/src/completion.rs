@@ -2978,13 +2978,16 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         // completion registers and produces the right whole-assignment
         // candidate, but readline 5.2 then re-quotes it and inserts it
         // into the post-`=` word slot (`payload\=space\\ name.bin`),
-        // so no candidate can round trip. Load/parse compatibility with
-        // the legacy bash is pinned separately, not here: the macOS leg
-        // runs the generated-script parse and boundary tests against
-        // the native /bin/bash through NKEEPASS_COMPLETION_BASH, and
-        // the same tests reproduce against a local 3.2.57 build — this
-        // interactive matrix alone needs a bash that honors compopt,
-        // which every CI leg's ambient PATH provides.
+        // so no candidate can round trip — identically before and
+        // after the mapfile change, which is a dynamic-path fix, not a
+        // quoting fix. Parse and boundary compatibility with the
+        // legacy bash is a separate regression-guard concern, pinned
+        // where it belongs: the macOS leg runs the generated-script
+        // parse and boundary tests against the native /bin/bash
+        // through NKEEPASS_COMPLETION_BASH, and the dynamic-path
+        // accumulator test below drives the while-read loops there
+        // too. This interactive matrix alone needs the ambient bash to
+        // honor compopt, which every CI leg's PATH provides.
         let ambient_major = ambient_shell_major("bash");
         if ambient_major.is_some_and(|major| major < 4) {
             // The notice below is quiet, not loud: libtest captures a
@@ -3374,15 +3377,21 @@ finally:
     /// line endings and failed the driver-slice opening assertion
     /// while every LF runner passed: the slice extraction reads this
     /// file's own source, and every `find`/`rfind`/`starts_with`
-    /// boundary in it is line-ending sensitive. This regression feeds
-    /// the extraction a minimal source shaped like the real driver —
-    /// Rust before, raw string, terminator, Rust after — mangled to
-    /// CRLF and back through the same LF normalization the driver-slice
-    /// test now applies, and proves the boundaries survive the round
-    /// trip. It must stay BELOW the real driver in this file: the
-    /// production extraction finds the first `os.execvp(...)` spelling
-    /// in the source, and this test's synthetic copy of that line
-    /// must never precede the real one.
+    /// boundary in it is line-ending sensitive. The positive half
+    /// below feeds the extraction a minimal source shaped like the
+    /// real driver — Rust before, raw string, terminator, Rust
+    /// after — mangled to CRLF and back through the same LF
+    /// normalization the driver-slice test applies, proving the
+    /// boundaries survive the normalization. The negative half slices
+    /// the raw CRLF copy WITHOUT that normalization and requires the
+    /// opening boundary to fail, proving the normalization is
+    /// load-bearing rather than decorative. Position in this file is
+    /// not a constraint on this test: the synthetic's marker lines are
+    /// ordinary escaped Rust strings, so the file bytes never contain
+    /// the plain-quote `os.execvp(...)` or `r#"` spellings the
+    /// production extraction searches for — only the real driver's
+    /// raw string carries them, and nothing written here can shadow
+    /// it.
     #[test]
     fn driver_slice_extraction_survives_a_crlf_working_copy() {
         let synthetic = concat!(
@@ -3417,6 +3426,16 @@ finally:
                 "the slice must not swallow the tests after the driver"
             );
         }
+        // Negative half: without the LF normalization, the same CRLF
+        // copy must fail the slice-opening boundary — the exact
+        // assertion the Windows run failed.
+        let raw = synthetic.replace('\n', "\r\n");
+        let driver = hostile_filename_driver_slice(&raw)
+            .expect("the raw copy still slices; only its boundaries shift");
+        assert!(
+            !driver.starts_with("r#\"\nimport os, pty, select, sys, time, signal"),
+            "a raw CRLF copy must fail the slice-opening boundary the Windows run failed"
+        );
     }
 
     /// Generated completion scripts must never carry a carriage
@@ -3486,6 +3505,74 @@ _nkp_complete
                 other => format!("unexpected exit status {other:?}"),
             },
             shell_interpreter_identity(&bash_program),
+        );
+    }
+
+    /// Drives both dynamic completion sites in the generated bash
+    /// script — the `--vault` branch and the metadata `kind` branch —
+    /// through whatever bash `NKEEPASS_COMPLETION_BASH` selects. These
+    /// are the two sites whose `mapfile` accumulators became
+    /// while-read loops: mapfile/readarray are new in bash 4.0 (per
+    /// bash-4.0's NEWS) and bash 3.2 — still stock macOS's /bin/bash —
+    /// has no mapfile, so the old code failed every dynamic completion
+    /// with an unredirected "mapfile: command not found" and left
+    /// COMPREPLY empty. `command nkp` bypasses shell functions, so a
+    /// stub EXECUTABLE on the child PATH is the only way to answer the
+    /// `__complete` queries; without it both branches would leave
+    /// COMPREPLY empty and the count assertions would fail, so the
+    /// stub keeps the test non-vacuous. The macOS canary step runs
+    /// this against the native /bin/bash alongside the parse and
+    /// boundary tests.
+    #[test]
+    #[cfg(unix)]
+    fn bash_dynamic_completion_accumulates_candidates_without_mapfile() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("dynamic completion tempdir");
+        let stub = directory.path().join("nkp");
+        std::fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' vault-one vault-two\n")
+            .expect("write stub nkp");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700))
+            .expect("stub nkp executable");
+        let bash = generate("bash").unwrap();
+        let script = format!(
+            r#"{bash}
+COMP_WORDS=(nkp --vault pre)
+COMP_CWORD=2
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 2 ]] || exit 1
+[[ "${{COMPREPLY[0]}}" == "vault-one" ]] || exit 2
+COMP_WORDS=(nkp --key pre)
+COMP_CWORD=2
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 2 ]] || exit 3
+[[ "${{COMPREPLY[1]}}" == "vault-two" ]] || exit 4
+"#
+        );
+        let program = completion_bash_program();
+        let child_path = std::env::join_paths(std::iter::once(directory.path().to_owned()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .expect("child PATH with the stub directory");
+        let output = std::process::Command::new(&program)
+            .args(["-c", &script])
+            .env("PATH", &child_path)
+            .output()
+            .expect("bash should run");
+        assert!(
+            output.status.success(),
+            "dynamic vault/keys completion failed: {} [failed check: {}] [interpreter: {}]",
+            subprocess_failure_detail(&output),
+            match output.status.code() {
+                Some(1) =>
+                    "the --vault branch did not accumulate the stub's two candidates".to_owned(),
+                Some(2) => "the --vault branch lost vault-one".to_owned(),
+                Some(3) =>
+                    "the --key branch did not accumulate the stub's two candidates".to_owned(),
+                Some(4) => "the --key branch lost vault-two".to_owned(),
+                other => format!("unexpected exit status {other:?}"),
+            },
+            shell_interpreter_identity(&program),
         );
     }
 

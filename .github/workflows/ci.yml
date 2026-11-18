@@ -118,18 +118,19 @@ jobs:
         shell: bash
         run: |
           brew install bash
-          major="$(/opt/homebrew/bin/bash --version | sed -n 's/^GNU bash, version \([0-9][0-9]*\).*/\1/p')"
-          if [ "${major:-0}" -lt 4 ]; then
-            echo "::error::Homebrew bash must be 4.0 or newer for the hostile-filename readline matrix (compopt contract)"
+          brew_prefix="$(brew --prefix)"
+          resolved="$(command -v bash)"
+          if [ "${resolved#"$brew_prefix"/}" = "$resolved" ]; then
+            echo "::error::PATH resolves bash to $resolved, outside the Homebrew prefix $brew_prefix; the completion matrix would yield silently"
             exit 1
           fi
-          resolved="$(command -v bash)"
-          if [ "$resolved" != "/opt/homebrew/bin/bash" ]; then
-            echo "::error::PATH resolves bash to $resolved, not the Homebrew build; the completion matrix would yield silently"
+          major="$("$resolved" --version | sed -n 's/^GNU bash, version \([0-9][0-9]*\).*/\1/p')"
+          if [ "${major:-0}" -lt 4 ]; then
+            echo "::error::the PATH-resolved bash reports major ${major:-unknown}; the hostile-filename readline matrix needs bash >= 4 (compopt contract)"
             exit 1
           fi
           echo "NKEEPASS_REQUIRE_COMPLETION_BASH=1" >> "$GITHUB_ENV"
-          printf 'bash for the completion matrix: %s\n' "$(/opt/homebrew/bin/bash --version | head -1)"
+          printf 'bash for the completion matrix: %s\n' "$("$resolved" --version | head -1)"
       # Windows runs unsuppressed. Coverage there is narrow by design: the
       # integration test files under crates/nkeepass/tests/ are #![cfg(unix)]
       # (they exercise real file permissions and PTY-style password prompts),
@@ -156,16 +157,18 @@ jobs:
         shell: bash
         run: cargo test --workspace --no-run
       # Canary for the legacy bash the brew step displaced from this
-      # leg's PATH: the generated-script parse and boundary tests
-      # otherwise exercise Homebrew's 5.x here, and nothing in CI would
-      # keep testing the script against the bash a stock macOS still
-      # ships. Pin them to the native /bin/bash through
-      # NKEEPASS_COMPLETION_BASH; the version assert keeps the canary
-      # honest — if Apple ever replaces /bin/bash with a bash >= 4 the
-      # step fails and the canary is revisited instead of silently
-      # testing bash 5 twice. This pins load/parse and word-boundary
-      # behavior only, NOT completion parity: the interactive matrix on
-      # this leg runs against the brew bash by design.
+      # leg's PATH: the generated-script tests otherwise exercise
+      # Homebrew's 5.x here, and nothing in CI would keep testing the
+      # script against the bash a stock macOS still ships. Pin the
+      # parse, word-boundary, and dynamic-path tests to the native
+      # /bin/bash through NKEEPASS_COMPLETION_BASH; the version assert
+      # keeps the canary honest — if Apple ever replaces /bin/bash with
+      # a bash >= 4 the step fails and the canary is revisited instead
+      # of silently testing bash 5 twice. These are regression guards
+      # for what works on the legacy bash today — parse, boundaries,
+      # and the while-read dynamic accumulators — NOT completion
+      # parity: the interactive matrix on this leg runs against the
+      # brew bash by design.
       - name: Canary - generated completion against the native /bin/bash (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -182,7 +185,7 @@ jobs:
             exit 1
           fi
           /bin/bash --version | head -1
-          cargo test -p nkeepass --bin nkp -- generated_bash_and_posix bash_filename_completion
+          cargo test -p nkeepass --bin nkp -- generated_bash_and_posix bash_filename_completion bash_dynamic_completion
       - name: Test
         shell: bash
         # Integration tests include PTY-style password prompts (#![cfg(unix)]);

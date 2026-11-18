@@ -123,48 +123,55 @@ OS-agnostically, not observed and not skipped.
 
 **macOS completion failure of run 134548307280 (post-bounds):** with the
 hang bounds in place, the same test failed fast (~4.15s) instead of
-hanging. The authenticated transcript proved the proximate cause:
-macOS's default `/bin/bash` is 3.2.57, which aborts sourcing the
-generated completion at parse time — `local -a vault_args=()` is
-array-assignment syntax that bash 3.2 rejects, so no `complete -F`
-registration ever happened and the TAB fell back to readline's default
-filename completion. The parse failure is reproduced exactly on Linux
-against a readline-enabled bash 3.2.57 build (`bash -n` fails at HEAD,
-passes with the fix): the initializer is now a bare `local -a
-vault_args`, and the two `mapfile` accumulators (mapfile/readarray are
-new in bash 4.0 per bash-4.0's NEWS) became while-read loops, so the
-script loads on 3.2 without an unredirected `mapfile: command not
-found` on the dynamic completion paths. Load/parse compatibility is
-what is pinned for 3.2; completion parity on 3.2 is deliberately not
-asserted. What remains version-bound, deliberately: the
-hostile-filename matrix pins `compopt -o noquote -o nospace` quoting,
-which is only expressible from bash 4.0 on (compopt is new in 4.0 per
-the same NEWS) — proven on the same 3.2.57 build, readline 5.2
-re-quotes and misplaces the candidate (`payload\=space\\ name.bin`
-into the post-`=` word slot). The test therefore gates on the ambient
-bash major: below 4 it prints the reason and yields. That yield is
-quieter than it looks — libtest captures a passing test's output, so
-the notice is invisible in a default `cargo test` run unless the case
-fails or `--nocapture` is passed — which is why the macOS leg also
-exports `NKEEPASS_REQUIRE_COMPLETION_BASH`, the flag dedicated to this
-matrix (unlike `NKEEPASS_REQUIRE_COMPLETION_SHELLS`, which would also
-demand the unrelated zsh and PowerShell interpreters): a lost brew bash
-fails the matrix loudly instead of yielding silently. The leg installs
-Homebrew's bash with an asserted major floor and an asserted PATH
-resolution, so CI runs the matrix against a real bash >= 4 instead of
-degrading on 3.2; and because that PATH change displaces the legacy
-bash from everything the leg runs, a canary step pins the
-generated-script parse and boundary tests to the native `/bin/bash`
-through `NKEEPASS_COMPLETION_BASH`, with its own version assert so a
-future Apple bash upgrade forces a canary revisit rather than silently
-testing bash 5 twice. The one macOS behavior NOT reproduced or
-explained: the transcript shows `exit\n` never echoed or processed
-after the completion line returned to the prompt, so the driver waited
-its full 3s exit deadline before the group kill — that did not occur
-against bash 3.2.57 on Linux, so it is macOS-PTY-specific or timing-
-dependent and stays unverified without a native run; the bounded
-failure and transcript are the observation vehicle, and the brew-bash
-macOS leg now exercises the matrix for real there.
+hanging. What the authenticated transcript shows — and all it shows:
+sourcing the generated completion succeeded, TAB produced a completion
+display, submitting the line returned to the `bash-3.2$` prompt, and
+`exit\n` was never echoed or processed after that, so the driver
+waited its full 3s exit deadline before the group kill. It does NOT
+prove why the completion displayed what it did, and the argv
+comparison was never reached. An early parse-abort theory — that
+bash 3.2 rejects `local -a vault_args=()` at parse time — is RETRACTED:
+it was an artifact of a locally built bash using
+`--enable-minimal-config`, which disables array variables entirely
+(even a top-level `x=(1 2)` fails to parse there). A full-featured
+bash 3.2.57 parses the initializer fine — confirmed independently by
+the product reviewer's PTY reproduction (the script sources,
+registers, and produces the same re-quoted, misplaced candidate before
+and after the mapfile change) and consistent with the transcript's own
+"source succeeded". The one genuine 3.2 incompatibility is `mapfile`
+(with readarray, new in bash 4.0 per bash-4.0's NEWS): the dynamic
+vault/keys paths previously failed every completion with an
+unredirected "mapfile: command not found", and while-read accumulators
+replace them — pinned by a canary test that drives both dynamic sites
+through a stub `nkp` and asserts the accumulated candidates. What
+remains version-bound, deliberately: the hostile-filename matrix pins
+`compopt -o noquote -o nospace` quoting, expressible only from bash
+4.0 on (compopt is new in 4.0 per the same NEWS) — on bash 3.2's
+readline 5.2, candidates get re-quoted and inserted into the post-`=`
+word slot (`payload\=space\\ name.bin`), so the matrix cannot pass
+there. The test therefore gates on the ambient bash major: below 4 it
+prints the reason and yields. That yield is quieter than it looks —
+libtest captures a passing test's output, so the notice is invisible in
+a default `cargo test` run unless the case fails or `--nocapture` is
+passed — which is why the macOS leg also exports
+`NKEEPASS_REQUIRE_COMPLETION_BASH`, the flag dedicated to this matrix
+(unlike `NKEEPASS_REQUIRE_COMPLETION_SHELLS`, which would also demand
+the unrelated zsh and PowerShell interpreters): a lost brew bash fails
+the matrix loudly instead of yielding silently. The leg installs
+Homebrew's bash (resolved through `brew --prefix`, with no hardcoded
+install path) and asserts both the prefix resolution and the major
+floor, so CI runs the matrix against a real bash >= 4; and because that
+PATH change displaces the legacy bash from PATH resolution for the
+whole leg, a canary step pins the generated-script parse, boundary, and
+dynamic-path tests to the native `/bin/bash` through
+`NKEEPASS_COMPLETION_BASH`, with its own version assert so a future
+Apple bash upgrade forces a canary revisit rather than silently
+testing bash 5 twice. The exit-wedge remains the one macOS behavior NOT
+reproduced or explained: it did not occur against bash 3.2.57 on Linux,
+so it is macOS-PTY-specific or timing-dependent and stays unverified
+without a native run; the bounded failure and transcript are the
+observation vehicle, and the brew-bash macOS leg now exercises the
+matrix for real there.
 
 **Windows failures of run 134548307275 (first matrix test results):**
 four unit-test failures, with two distinct proven causes and two left
