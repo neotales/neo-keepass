@@ -6,7 +6,7 @@ accepted compatibility aliases. Commands operate on one entry.
 ## Add an attachment
 
 ```sh
-nkeepass files add --key 'Services/Example' --field 'recovery.txt' \
+nkp files add --key 'Services/Example' --field 'recovery.txt' \
   --file ./recovery.txt
 ```
 
@@ -16,8 +16,8 @@ The command reads the file bytes and stores them in the entry. Use
 ## List and extract
 
 ```sh
-nkeepass files ls --key 'Services/Example'
-nkeepass files get --key 'Services/Example' --field 'recovery.txt' \
+nkp files ls --key 'Services/Example'
+nkp files get --key 'Services/Example' --field 'recovery.txt' \
   --output ./recovery-copy.txt
 ```
 
@@ -29,7 +29,7 @@ attachments are plaintext.
 The root `set` shortcut also accepts repeated `--bin`/`-b` attachments:
 
 ```sh
-nkeepass set --key 'Services/Example' \
+nkp set --key 'Services/Example' \
   --bin 'recovery.txt=./recovery.txt' \
   -b 'identity.txt=./identity.txt'
 ```
@@ -54,7 +54,7 @@ the path portion dynamically.
 ## Remove an attachment
 
 ```sh
-nkeepass files rm --key 'Services/Example' --field 'recovery.txt' --yes
+nkp files rm --key 'Services/Example' --field 'recovery.txt' --yes
 ```
 
 The command requires `--yes` and does not prompt. It removes the named

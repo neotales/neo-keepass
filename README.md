@@ -1,8 +1,9 @@
-# nkeepass
+# neo-keepass
 
-A Rust KeePass CLI/TUI application. Every Cargo package lives under `crates/`;
-the root manifest contains workspace configuration. KDBX parsing is delegated
-to `neotales-keepass`, never reimplemented here.
+A Rust KeePass CLI/TUI application. The executable is `nkp`. Every Cargo
+package lives under `crates/`; the root manifest contains workspace
+configuration. KDBX parsing is delegated to `neotales-keepass`, never
+reimplemented here.
 
 ## Current status
 
@@ -14,7 +15,7 @@ behavior. KDBX parsing and writing are delegated to the vendored
 files.
 
 This checkout does **not** yet include a GPUI desktop application
-(`nkeepassui`). Passkeys, HIBP checks, icons, SSH-agent integration, and
+(`nkpui`). Passkeys, HIBP checks, icons, SSH-agent integration, and
 automatic recipient discovery remain planned scope. Basic age encryption and
 decryption are wired into `get` and `set`; consult command help below for
 supported local key forms and current limitations. TOTP support is present too.
@@ -43,7 +44,7 @@ unsupported-operation diagnostic rather than claiming the file is private.
 The `get` command can encrypt a selected value to native age or SSH recipients:
 
 ```sh
-nkeepass secrets get --key service/account --age-encrypt \
+nkp secrets get --key service/account --age-encrypt \
   -r age1... --output account.age
 ```
 

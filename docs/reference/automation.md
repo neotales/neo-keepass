@@ -11,7 +11,7 @@ precede the command.
 ## `setx`
 
 ```text
-nkeepass automation setx --key PATH (--file PATH | --stdin) [--dry-run]
+nkp automation setx --key PATH (--file PATH | --stdin) [--dry-run]
 ```
 
 Reads bounded JSON and applies its field updates in one update.
@@ -54,7 +54,7 @@ only if it already exists; otherwise it is ignored. The example uses
 ## `import`
 
 ```text
-nkeepass automation import (--file PATH | --stdin) [--replace] [--dry-run]
+nkp automation import (--file PATH | --stdin) [--replace] [--dry-run]
 ```
 
 Reads a bounded interchange snapshot. Exactly one input source is required.
@@ -65,7 +65,7 @@ Age encryption and decryption options are unsupported and are rejected.
 ## `export`
 
 ```text
-nkeepass automation export --output PATH
+nkp automation export --output PATH
 ```
 
 Writes an interchange snapshot to a private, no-clobber output file.
@@ -76,7 +76,7 @@ rejected. `--name NAME` is accepted but has no effect.
 ## `sync`
 
 ```text
-nkeepass automation sync (--file PATH | --stdin)
+nkp automation sync (--file PATH | --stdin)
   [--strategy newest|source] [--dry-run]
 ```
 
@@ -86,6 +86,6 @@ Exactly one input source is required. `--strategy` chooses `newest` or
 `--dry-run` to report without saving. Age encryption and decryption options
 are unsupported and are rejected.
 
-The same commands are reachable as `nkeepass secrets setx/import/export/sync`
-and root `nkeepass setx/import/export/sync`. No extra aliases are defined for
+The same commands are reachable as `nkp secrets setx/import/export/sync`
+and root `nkp setx/import/export/sync`. No extra aliases are defined for
 these four command names.

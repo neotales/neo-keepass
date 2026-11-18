@@ -7,7 +7,7 @@ the command. Password flags are available only on credential routes. See
 ## `tui`
 
 ```text
-nkeepass tui PATH
+nkp tui PATH
 ```
 
 Opens the interactive terminal browser for the supplied vault path. This
@@ -21,7 +21,7 @@ path.
 ### `config ls`
 
 ```text
-nkeepass config ls [GLOB] [--json]
+nkp config ls [GLOB] [--json]
 ```
 
 Lists supported configuration keys and values. `--json` emits one JSON
@@ -45,7 +45,7 @@ alias. Use `alias ls`, `alias set`, or `alias rm` to manage entries.
 ### `config get`
 
 ```text
-nkeepass config get KEY
+nkp config get KEY
 ```
 
 Prints a configured value. `current` and `default_vault` return scalars;
@@ -55,7 +55,7 @@ Prints a configured value. `current` and `default_vault` return scalars;
 ### `config set`
 
 ```text
-nkeepass config set KEY VALUE
+nkp config set KEY VALUE
 ```
 
 Sets one supported configuration value. Unknown or invalid keys fail rather
@@ -66,7 +66,7 @@ vault alias. Use `context` or `alias` commands for alias management.
 ### `config rm`
 
 ```text
-nkeepass config rm KEY
+nkp config rm KEY
 ```
 
 Clears a set `current` or `default_vault` value. It fails when the scalar is
@@ -75,7 +75,7 @@ unset. `aliases` is managed with `alias` commands. `remove` aliases `rm`.
 ## `exec`
 
 ```text
-nkeepass exec [--key PATH [--field FIELD] --env NAME]...
+nkp exec [--key PATH [--field FIELD] --env NAME]...
   [CREDENTIAL OPTIONS] -- COMMAND [ARG ...]
 ```
 
@@ -105,7 +105,7 @@ for the vault password without placing it in the command. Run it in Bash:
   printf '\n'
   export DEMO_MASTER
   unset DEMO_USERNAME
-  nkeepass --vault ./tutorial.kdbx exec --key 'Demo/Example' --field UserName --env DEMO_USERNAME \
+  nkp --vault ./tutorial.kdbx exec --key 'Demo/Example' --field UserName --env DEMO_USERNAME \
     --password-env DEMO_MASTER -- \
     sh -c 'printf "%s\n" "$DEMO_USERNAME"'
 )
@@ -117,7 +117,7 @@ parent shell after the command exits. `x` aliases `exec`.
 ## `completion`
 
 ```text
-nkeepass completion SHELL
+nkp completion SHELL
 ```
 
 Prints static completion text for the requested shell. The output is printed
@@ -130,8 +130,8 @@ the command and option vocabulary but leave that path to manual entry.
 ## `version`
 
 ```text
-nkeepass version
-nkeepass --version
+nkp version
+nkp --version
 ```
 
 Prints version information. The root `--version` option is an alias for the

@@ -20,7 +20,7 @@ a different existing entry path, the CLI refuses it as ambiguous.
 ### `secrets ls`
 
 ```text
-nkeepass secrets ls [--] [GLOB]
+nkp secrets ls [--] [GLOB]
 ```
 
 Prints redacted entry metadata as JSON Lines. `list` is an alias. `GLOB` is
@@ -30,7 +30,7 @@ not reveal field values.
 ### `secrets search`
 
 ```text
-nkeepass secrets search [--] QUERY
+nkp secrets search [--] QUERY
 ```
 
 Searches bounded, allowlisted entry metadata. A leading-dash query can follow
@@ -39,7 +39,7 @@ Searches bounded, allowlisted entry metadata. A leading-dash query can follow
 ### `secrets show`
 
 ```text
-nkeepass secrets show --key PATH
+nkp secrets show --key PATH
 ```
 
 Prints redacted descriptors for one entry. Required option: `--key`. It does
@@ -48,7 +48,7 @@ not reveal field values.
 ### `secrets env`
 
 ```text
-nkeepass secrets env --key PATH [--field FIELD] --name NAME
+nkp secrets env --key PATH [--field FIELD] --name NAME
   [--key PATH [--field FIELD] --name NAME]...
   [--format FORMAT] [--is-output]
 ```
@@ -79,7 +79,7 @@ byte. `null` means NUL-delimited output, not suppressed output.
 ### `secrets get`
 
 ```text
-nkeepass secrets get --key PATH [--field FIELD] [--format FORMAT]
+nkp secrets get --key PATH [--field FIELD] [--format FORMAT]
   [--name NAME] [--is-output] [--age-encrypt] [-r KEY]... [--output PATH]
   [--clipboard]
 ```
@@ -113,7 +113,7 @@ remain. No selected value is written to stdout or included in errors.
 ### `secrets getx`
 
 ```text
-nkeepass secrets getx --key PATH [--field FIELD] [--format json]
+nkp secrets getx --key PATH [--field FIELD] [--format json]
 ```
 
 Reveals the selected field as a JSON object of the form
@@ -127,7 +127,7 @@ suppress output.
 ### `secrets otp`
 
 ```text
-nkeepass secrets otp --key PATH [--format FORMAT] [--name NAME] [--is-output]
+nkp secrets otp --key PATH [--format FORMAT] [--name NAME] [--is-output]
 ```
 
 Generates and prints a TOTP code. It does not reveal the seed and refuses
@@ -140,7 +140,7 @@ HOTP entries. `--format` defaults to `text`; the other formats are `json`,
 ### `secrets set`
 
 ```text
-nkeepass secrets set --key PATH [--field FIELD] [--file PATH | --stdin]
+nkp secrets set --key PATH [--field FIELD] [--file PATH | --stdin]
   [--age-decrypt -i PATH] [--username VALUE] [--url VALUE] [--notes VALUE]
   [--bin NAME=FILE_PATH]...
 ```
@@ -164,7 +164,7 @@ vault; malformed input or credential failures prevent the update.
 ### `secrets ensure`
 
 ```text
-nkeepass secrets ensure --key PATH [--size N] [--dry-run]
+nkp secrets ensure --key PATH [--size N] [--dry-run]
 ```
 
 Creates a missing entry and its parent groups, but keeps an existing entry
@@ -174,7 +174,7 @@ entry. `--dry-run` validates and reports without saving.
 ### `secrets rm`
 
 ```text
-nkeepass secrets rm --key PATH --yes
+nkp secrets rm --key PATH --yes
 ```
 
 Removes an entry. This command refuses `--field`; it does not delete a field.
@@ -189,7 +189,7 @@ subcommands. The shared credential flags also apply.
 ### `secrets setx`
 
 ```text
-nkeepass secrets setx --key PATH (--file PATH | --stdin) [--dry-run]
+nkp secrets setx --key PATH (--file PATH | --stdin) [--dry-run]
 ```
 
 Reads bounded JSON for one existing entry and applies its fields as one
@@ -203,7 +203,7 @@ encrypt or decrypt the JSON input.
 ### `secrets import`
 
 ```text
-nkeepass secrets import (--file PATH | --stdin) [--replace] [--dry-run]
+nkp secrets import (--file PATH | --stdin) [--replace] [--dry-run]
 ```
 
 Reads an interchange snapshot. Exactly one input source is required.
@@ -215,7 +215,7 @@ reports without saving. **Warning:** `secrets import` and root `import` accept
 ### `secrets export`
 
 ```text
-nkeepass secrets export --output PATH
+nkp secrets export --output PATH
 ```
 
 Writes an interchange snapshot to a private, no-clobber file. `--output` is
@@ -228,7 +228,7 @@ remains plaintext JSON; these options do not encrypt it.
 ### `secrets sync`
 
 ```text
-nkeepass secrets sync (--file PATH | --stdin)
+nkp secrets sync (--file PATH | --stdin)
   [--strategy newest|source] [--dry-run]
 ```
 
@@ -253,6 +253,6 @@ and the `--password-stdin` versus `--stdin` conflict.
 ## Aliases
 
 `list` aliases `ls`; `remove` aliases `rm`. Root shortcuts such as
-`nkeepass get` call the matching `secrets get` operation. The complete
+`nkp get` call the matching `secrets get` operation. The complete
 root-shortcut and option alias list is in the [alias index](../commands.md).
 Age encryption and decryption steps are in [the age how-to](../how-to/age.md).

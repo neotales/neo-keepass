@@ -9,7 +9,7 @@ Use a new directory so `init` cannot affect an existing vault:
 ```sh
 mkdir "$HOME/nkeepass-demo"
 chmod 700 "$HOME/nkeepass-demo"
-nkeepass init "$HOME/nkeepass-demo/demo.kdbx"
+nkp init "$HOME/nkeepass-demo/demo.kdbx"
 ```
 
 If that directory already exists, choose another new name.
@@ -23,7 +23,7 @@ Now select this vault explicitly and create the entry. `ensure` creates
 missing parent groups and the entry, while leaving an existing entry alone:
 
 ```sh
-nkeepass --vault "$HOME/nkeepass-demo/demo.kdbx" \
+nkp --vault "$HOME/nkeepass-demo/demo.kdbx" \
   secrets ensure --key 'Demo/Example'
 ```
 
@@ -35,7 +35,7 @@ for the hidden master-password prompt:
 
 ```sh
 printf '%s' 'demo-user' > "$HOME/nkeepass-demo/username.txt"
-nkeepass --vault "$HOME/nkeepass-demo/demo.kdbx" \
+nkp --vault "$HOME/nkeepass-demo/demo.kdbx" \
   secrets set --key 'Demo/Example' --field UserName \
   --file "$HOME/nkeepass-demo/username.txt"
 ```
@@ -47,7 +47,7 @@ sets `NKEEPASS_PASSWORD`, the CLI uses it instead of prompting.
 Read it back:
 
 ```sh
-nkeepass --vault "$HOME/nkeepass-demo/demo.kdbx" \
+nkp --vault "$HOME/nkeepass-demo/demo.kdbx" \
   secrets get --key 'Demo/Example' --field UserName
 ```
 
@@ -57,7 +57,7 @@ Treat real output as sensitive: terminals, logs, and pipes can retain it.
 List redacted entry metadata without revealing the field:
 
 ```sh
-nkeepass --vault "$HOME/nkeepass-demo/demo.kdbx" secrets ls
+nkp --vault "$HOME/nkeepass-demo/demo.kdbx" secrets ls
 ```
 
 The output is JSON Lines with entry metadata. `get` is an explicit disclosure;

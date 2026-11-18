@@ -1,6 +1,6 @@
 # Choose the active vault
 
-`nkeepass` chooses a vault using the first available source in this order:
+`nkp` chooses a vault using the first available source in this order:
 
 1. Explicit `-V PATH` or `--vault PATH`.
 2. `NKEEPASS_VAULT`.
@@ -12,8 +12,8 @@
 For ordinary vault commands, an explicit absolute path selects that vault.
 A relative `--vault` value is treated as a vault alias, not resolved against
 the current directory. Create an alias with
-`nkeepass context set work "$HOME/vaults/work.kdbx"`, then select it with
-`nkeepass --vault work secrets ls`.
+`nkp context set work "$HOME/vaults/work.kdbx"`, then select it with
+`nkp --vault work secrets ls`.
 
 `init` is the exception because it creates a file. Its positional `PATH` and
 `--vault PATH` target may be relative; the CLI resolves either from the
@@ -22,8 +22,8 @@ current working directory. Do not pass both to `init`.
 To persist a context selection, run:
 
 ```sh
-nkeepass context use work
-nkeepass context show
+nkp context use work
+nkp context show
 ```
 
 `context show` reports the selected vault and its source. `context ls` lists
@@ -33,7 +33,7 @@ To use an environment selection for one shell:
 
 ```sh
 export NKEEPASS_VAULT="$HOME/vaults/work.kdbx"
-nkeepass secrets ls
+nkp secrets ls
 ```
 
 An explicit `--vault` overrides both vault environment variables. A nonempty

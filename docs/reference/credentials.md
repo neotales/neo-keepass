@@ -9,7 +9,7 @@ Every public command accepts `-h` or `--help`. The global
 `-V PATH` or `--vault PATH` option must come before the command:
 
 ```text
-nkeepass --vault PATH COMMAND
+nkp --vault PATH COMMAND
 ```
 
 An absolute path selects a vault. A relative value selects a configured vault
@@ -67,7 +67,7 @@ rejects the combination with
 For example, this invocation is invalid:
 
 ```sh
-nkeepass secrets set --key 'Services/Example' --stdin --password-stdin
+nkp secrets set --key 'Services/Example' --stdin --password-stdin
 ```
 
 Pass the password through an environment variable or a file when the command

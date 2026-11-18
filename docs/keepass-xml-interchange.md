@@ -4,8 +4,8 @@ The existing `import` and `export` commands keep their versioned JSON snapshot
 format by default. `--format keepass-xml` explicitly selects KeePass XML:
 
 ```sh
-nkeepass secrets import --file input.xml --format keepass-xml
-nkeepass secrets export --output output.xml --format keepass-xml --allow-plaintext
+nkp secrets import --file input.xml --format keepass-xml
+nkp secrets export --output output.xml --format keepass-xml --allow-plaintext
 ```
 
 The import path accepts unprotected KeePass XML and retains the existing

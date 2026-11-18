@@ -13,7 +13,7 @@ compatibility aliases.
 ### `files ls`
 
 ```text
-nkeepass files ls --key PATH
+nkp files ls --key PATH
 ```
 
 Lists attachment names and sizes for the selected entry. `--key` is required.
@@ -22,7 +22,7 @@ Lists attachment names and sizes for the selected entry. `--key` is required.
 ### `files add`
 
 ```text
-nkeepass files add --key PATH --field NAME (--file PATH | --stdin)
+nkp files add --key PATH --field NAME (--file PATH | --stdin)
 ```
 
 Reads bytes from exactly one source and adds them as an attachment named by
@@ -31,7 +31,7 @@ Reads bytes from exactly one source and adds them as an attachment named by
 ### `files get`
 
 ```text
-nkeepass files get --key PATH --field NAME --output PATH
+nkp files get --key PATH --field NAME --output PATH
 ```
 
 Writes the attachment bytes to a private, no-clobber file. All three options
@@ -41,7 +41,7 @@ are required. The file contains plaintext attachment data. `export` aliases
 ### `files rm`
 
 ```text
-nkeepass files rm --key PATH --field NAME --yes
+nkp files rm --key PATH --field NAME --yes
 ```
 
 Removes the selected attachment. `--yes` is required and the command does not
@@ -54,7 +54,7 @@ The group name is `group`. `groups` is an alias.
 ### `group ls`
 
 ```text
-nkeepass group ls
+nkp group ls
 ```
 
 Lists group paths. `list` aliases `ls`.
@@ -62,7 +62,7 @@ Lists group paths. `list` aliases `ls`.
 ### `group add`
 
 ```text
-nkeepass group add --key PATH [--dry-run]
+nkp group add --key PATH [--dry-run]
 ```
 
 Creates missing groups in the selected path and leaves existing groups
@@ -72,7 +72,7 @@ unchanged. `--dry-run` reports without saving. `create` and `ensure` alias
 ### `group rm`
 
 ```text
-nkeepass group rm --key PATH --yes [--dry-run]
+nkp group rm --key PATH --yes [--dry-run]
 ```
 
 Removes the group and its contents. The root group cannot be removed.
@@ -86,7 +86,7 @@ The group name is `field`. `custom-field` is an alias.
 ### `field ls`
 
 ```text
-nkeepass field ls --key PATH
+nkp field ls --key PATH
 ```
 
 Lists all fields present on one entry, including built-in fields such as
@@ -95,7 +95,7 @@ Lists all fields present on one entry, including built-in fields such as
 ### `field get`
 
 ```text
-nkeepass field get --key PATH --field FIELD [--format FORMAT] [--name NAME]
+nkp field get --key PATH --field FIELD [--format FORMAT] [--name NAME]
   [--is-output]
 ```
 
@@ -107,13 +107,13 @@ them. `reveal` aliases `get`.
 `field get` does not accept `--age-encrypt`, `-r` or `--age-recipient`, or
 `--output`. Its generated help lists those inherited `get` flags, but the
 command rejects them. Use
-`nkeepass secrets get --key PATH --field FIELD --age-encrypt ...` when you
+`nkp secrets get --key PATH --field FIELD --age-encrypt ...` when you
 need encrypted output.
 
 ### `field set`
 
 ```text
-nkeepass field set --key PATH --field FIELD (--file PATH | --stdin)
+nkp field set --key PATH --field FIELD (--file PATH | --stdin)
 ```
 
 Reads one value and sets the custom field. Exactly one input source is
@@ -122,13 +122,13 @@ required. `edit` aliases `set`.
 `field set` does not accept `--age-decrypt`, `-i`, or `--age-identity`. Its
 generated help lists those inherited `set` flags, but the command rejects
 them. To decrypt input before updating a custom field, use
-`nkeepass secrets set --key PATH --field FIELD --age-decrypt
+`nkp secrets set --key PATH --field FIELD --age-decrypt
 --age-identity PATH --file CIPHERTEXT`.
 
 ### `field rm`
 
 ```text
-nkeepass field rm --key PATH --field FIELD --yes
+nkp field rm --key PATH --field FIELD --yes
 ```
 
 Removes the selected custom field. `--yes` is required and the command does

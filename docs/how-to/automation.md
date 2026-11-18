@@ -29,7 +29,7 @@ sample data:
 Apply the document:
 
 ```sh
-nkeepass secrets setx --key 'Demo/Example' --file entry.json
+nkp secrets setx --key 'Demo/Example' --file entry.json
 ```
 
 The CLI validates the bounded JSON input and applies the selected fields as
@@ -41,7 +41,7 @@ fields are ignored. The complete schema and size limits are in the
 ## Export a snapshot
 
 ```sh
-nkeepass secrets export --output snapshot.json
+nkp secrets export --output snapshot.json
 ```
 
 The CLI prompts for the master password and writes a private, no-clobber
@@ -50,8 +50,8 @@ snapshot. It refuses to overwrite an existing destination.
 ## Import or synchronize
 
 ```sh
-nkeepass secrets import --file snapshot.json --dry-run
-nkeepass secrets sync --file snapshot.json --strategy newest --dry-run
+nkp secrets import --file snapshot.json --dry-run
+nkp secrets sync --file snapshot.json --strategy newest --dry-run
 ```
 
 Review the dry-run report before repeating the operation without
@@ -59,6 +59,6 @@ Review the dry-run report before repeating the operation without
 `--replace`. Sync accepts `--strategy newest` or `--strategy source`.
 Both operations read from exactly one of `--file PATH` and `--stdin`.
 
-The same four operations are available under `nkeepass automation`. See
+The same four operations are available under `nkp automation`. See
 [automation command reference](../reference/automation.md) for each option and
 its constraints.

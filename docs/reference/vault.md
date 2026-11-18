@@ -11,7 +11,7 @@ the command. Credential flags apply to `init` as listed in
 Create a KDBX 4.1 vault.
 
 ```text
-nkeepass [--vault PATH] init [PATH] [--size N] [--kdf aes|argon2d|argon2id]
+nkp [--vault PATH] init [PATH] [--size N] [--kdf aes|argon2d|argon2id]
               [--memory KIB] [--iterations N] [--parallelism N]
 ```
 
@@ -55,13 +55,13 @@ encrypt or decrypt the vault.
 ## `context`
 
 ```text
-nkeepass context ls
-nkeepass context list
-nkeepass context show
-nkeepass context use ALIAS
-nkeepass context set ALIAS ABSOLUTE_PATH
-nkeepass context rm ALIAS
-nkeepass context remove ALIAS
+nkp context ls
+nkp context list
+nkp context show
+nkp context use ALIAS
+nkp context set ALIAS ABSOLUTE_PATH
+nkp context rm ALIAS
+nkp context remove ALIAS
 ```
 
 `ls` (also `list`) lists configured vault aliases and paths. `show` reports the selected
@@ -72,10 +72,10 @@ Subcommands have no command-specific options.
 ## `alias`
 
 ```text
-nkeepass alias ls
-nkeepass alias set NAME TARGET [--kind vault|entry] [--field FIELD]
-nkeepass alias resolve NAME
-nkeepass alias rm NAME
+nkp alias ls
+nkp alias set NAME TARGET [--kind vault|entry] [--field FIELD]
+nkp alias resolve NAME
+nkp alias rm NAME
 ```
 
 `ls` lists aliases. `set` creates or replaces one. If `--kind` is omitted,

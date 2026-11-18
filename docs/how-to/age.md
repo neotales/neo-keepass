@@ -10,7 +10,7 @@ Put one or more public age or SSH recipient keys in a local text file, one key
 per line. Do not put private identities in that file. Then run:
 
 ```sh
-nkeepass secrets get --key 'Services/Example' --field Password \
+nkp secrets get --key 'Services/Example' --field Password \
   --age-encrypt --age-recipient @recipients.txt --output password.age
 ```
 
@@ -30,7 +30,7 @@ seconds. The CLI validates returned keys before encrypting.
 Choose a native age identity or an unencrypted SSH private key file:
 
 ```sh
-nkeepass secrets set --key 'Services/Example' --field Password \
+nkp secrets set --key 'Services/Example' --field Password \
   --age-decrypt --age-identity identity.txt --file password.age
 ```
 
