@@ -126,11 +126,12 @@ fn mixed_case_environment_aliases_follow_precedence_and_cli_vault_wins() {
 fn mixed_case_password_alias_unlocks_and_exec_reserves_aliases() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
+    let vault = root.join("vault.kdbx");
     let initialized = run(
         root,
         &[
             "init",
-            "vault.kdbx",
+            vault.to_str().unwrap(),
             "--password-env",
             "NKEEPASS_WINDOWS_TEST_PASSWORD",
             "--iterations",
@@ -139,7 +140,7 @@ fn mixed_case_password_alias_unlocks_and_exec_reserves_aliases() {
     );
     succeeded(&initialized);
 
-    let listed = command(root, &["--vault", "vault.kdbx", "secrets", "ls"])
+    let listed = command(root, &["--vault", vault.to_str().unwrap(), "secrets", "ls"])
         .env("nEo_KeEpAsS_pAsSwOrD", "synthetic-windows-password")
         .env("NKP_PASSWORD", "incorrect-lower-priority")
         .env("NKEEPASS_PASSWORD", "incorrect-legacy")
@@ -151,7 +152,7 @@ fn mixed_case_password_alias_unlocks_and_exec_reserves_aliases() {
         root,
         &[
             "--vault",
-            "vault.kdbx",
+            vault.to_str().unwrap(),
             "secrets",
             "ls",
             "--password-env",

@@ -420,13 +420,27 @@ fn closed_output_recovers_from_multiple_private_candidate_records() {
     assert_eq!(records.len(), 2);
     for name in ["first.kdbx", "second.kdbx"] {
         let target = root.path().join(name);
+        // macOS tempdirs may be spelled through /var while current_dir()
+        // resolves the same directory through /private/var. Compare the
+        // recorded absolute path using filesystem identity, not spelling.
+        let target = std::fs::canonicalize(target).unwrap();
         let record = records
             .iter()
-            .find(|record| record["vault"] == target.to_str().unwrap())
+            .find(|record| {
+                record["vault"]
+                    .as_str()
+                    .and_then(|vault| std::fs::canonicalize(vault).ok())
+                    .as_deref()
+                    == Some(target.as_path())
+            })
             .unwrap();
         assert_eq!(record["status"], "candidate");
         let password = decrypt_candidate(record);
-        assert!(opens_with(root.path(), target.to_str().unwrap(), &password));
+        assert!(opens_with(
+            root.path(),
+            target.to_str().unwrap(),
+            &password
+        ));
         let association = format!("{}.json", record["password_backup"].as_str().unwrap());
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
