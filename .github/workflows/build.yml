@@ -84,18 +84,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Preflight aarch64 C toolchain
         if: matrix.cross
-        run: |
-          set -euo pipefail
-          compiler="${CC_aarch64_unknown_linux_gnu}"
-          echo "compiler=$("$compiler" --version | head -n 1)"
-          echo "target=$("$compiler" -dumpmachine)"
-          echo "search-dirs:"
-          "$compiler" -print-search-dirs
-          # This exercises the actual include search path used by C builds,
-          # and proves the required glibc header is found before cargo starts.
-          headers=$(printf '#include <stdint.h>\n' | "$compiler" -E -H -x c - 2>&1 >/dev/null)
-          printf '%s\n' "$headers"
-          grep -F 'bits/libc-header-start.h' <<<"$headers" >/dev/null
+        run: scripts/preflight-aarch64-toolchain.sh
       - name: Build release
         run: cargo build --release -p nkeepass --target ${{ matrix.target }}
       - name: Strip binary

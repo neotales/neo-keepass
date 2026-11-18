@@ -549,9 +549,12 @@ failing because `bits/libc-header-start.h` was absent. The runner installed
 recommendation, so it was not installed with `--no-install-recommends`.
 The workflow now requests the development package explicitly, sets the
 target-specific `CC_aarch64_unknown_linux_gnu` used by `cc`-based crates, and
-preflights the compiler's target/search paths and actual stdint header
-inclusion before Cargo runs. This is a targeted fix; a successful native CI
-run remains the confirmation that the toolchain is complete.
+preflights the exact `aarch64-linux-gnu` target, compiler search paths and
+actual stdint header trace, requiring that trace to resolve under the
+sysroot's `/usr/aarch64-linux-gnu/include` tree before Cargo runs. Synthetic
+tests reject both a wrong-target compiler and a host libc header trace. This
+is a targeted fix; a successful native CI run remains the confirmation that
+the toolchain is complete.
 
 Windows smoke containment pins `PROC_THREAD_ATTRIBUTE_JOB_LIST` to
 `0x0002000D` (attribute number 13 is decimal); the portable packaging tests
