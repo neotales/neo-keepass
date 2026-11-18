@@ -80,7 +80,7 @@ fn run_with_input(fixture: &Fixture, args: &[&str], input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.take_stdin().unwrap().write_all(input).unwrap();
     child.wait_with_output().unwrap()
 }
 

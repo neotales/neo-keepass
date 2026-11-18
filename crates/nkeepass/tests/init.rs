@@ -1102,8 +1102,7 @@ fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
         .unwrap();
     use std::io::Write as _;
     child
-        .stdin
-        .as_mut()
+        .take_stdin()
         .unwrap()
         .write_all(format!("{PASSWORD}\n").as_bytes())
         .unwrap();

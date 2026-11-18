@@ -2,9 +2,8 @@
 
 use std::ffi::OsStr;
 use std::io::{self, Read};
-use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::thread;
 
 /// Owns a child command and its disposable home directory until the command
@@ -217,6 +216,22 @@ impl IsolatedChild {
         self._home.path()
     }
 
+    /// Returns the child's process identifier.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.child.as_ref().expect("child is present").id()
+    }
+
+    /// Takes the child's piped standard input, if present.
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.as_mut().expect("child is present").stdin.take()
+    }
+
+    /// Takes the child's piped standard output, if present.
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.as_mut().expect("child is present").stdout.take()
+    }
+
     /// Waits for the child, retaining its home until this guard is dropped.
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         let status = self.child.as_mut().expect("child is present").wait()?;
@@ -232,9 +247,16 @@ impl IsolatedChild {
         drop(child.stdin.take());
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
-        let status = self.wait()?;
-        let stdout = collect(stdout)?;
-        let stderr = collect(stderr)?;
+        let status = match self.wait() {
+            Ok(status) => status,
+            Err(error) => {
+                self.kill_and_reap();
+                let _ = collect(stdout);
+                let _ = collect(stderr);
+                return Err(error);
+            }
+        };
+        let (stdout, stderr) = collect_output(stdout, stderr)?;
         Ok(Output {
             status,
             stdout,
@@ -243,28 +265,20 @@ impl IsolatedChild {
     }
 }
 
-impl Deref for IsolatedChild {
-    type Target = Child;
-
-    fn deref(&self) -> &Self::Target {
-        self.child.as_ref().expect("child is present")
-    }
-}
-
-impl DerefMut for IsolatedChild {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.child.as_mut().expect("child is present")
+impl IsolatedChild {
+    fn kill_and_reap(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.reaped = true;
     }
 }
 
 impl Drop for IsolatedChild {
     fn drop(&mut self) {
         if !self.reaped {
-            if let Some(child) = self.child.as_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            self.reaped = true;
+            self.kill_and_reap();
         }
     }
 }
@@ -290,6 +304,44 @@ fn collect(reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>) -> io::Resul
         })
         .transpose()
         .map(Option::unwrap_or_default)
+}
+
+fn collect_output(
+    stdout: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    // Join both readers before propagating either error, so no reader is
+    // detached if one stream fails.
+    let stdout = collect(stdout);
+    let stderr = collect(stderr);
+    Ok((stdout?, stderr?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_output;
+    use std::io;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::thread;
+
+    #[test]
+    fn reader_failure_still_joins_the_other_stream() {
+        let stderr_joined = Arc::new(AtomicBool::new(false));
+        let stderr_joined_by_thread = Arc::clone(&stderr_joined);
+        let stdout = Some(thread::spawn(|| {
+            Err(io::Error::other("injected reader failure"))
+        }));
+        let stderr = Some(thread::spawn(move || {
+            stderr_joined_by_thread.store(true, Ordering::SeqCst);
+            Ok(vec![b'e'])
+        }));
+
+        assert!(collect_output(stdout, stderr).is_err());
+        assert!(stderr_joined.load(Ordering::SeqCst));
+    }
 }
 
 /// Wraps a command with an owned, sanitized home/XDG environment.

@@ -197,8 +197,7 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
             .spawn()
             .unwrap();
         child
-            .stdin
-            .take()
+            .take_stdin()
             .unwrap()
             .write_all(b"vault-password\n")
             .unwrap();
@@ -470,8 +469,7 @@ fn exec_preserves_child_options_and_removes_default_and_explicit_password_variab
             cli.stdin(Stdio::piped());
             let mut child = cli.spawn().unwrap();
             child
-                .stdin
-                .take()
+                .take_stdin()
                 .unwrap()
                 .write_all(b"vault-password\n")
                 .unwrap();

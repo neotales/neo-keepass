@@ -295,6 +295,22 @@ fn isolated_child_kills_and_reaps_on_unwind_before_removing_home() {
     );
 }
 
+#[test]
+fn isolated_child_drains_large_stdout_and_stderr_concurrently() {
+    let mut raw = Command::new("sh");
+    raw.args([
+        "-c",
+        "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2",
+    ]);
+    let mut command = raw.isolate_application_environment();
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 131072);
+    assert_eq!(output.stderr.len(), 131072);
+}
+
 fn process_is_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -1618,8 +1634,7 @@ fn shortcuts_fields_attachments_and_exec() {
         .spawn()
         .unwrap();
     isolated_stdin
-        .stdin
-        .take()
+        .take_stdin()
         .unwrap()
         .write_all(b"test-password\nchild-input-SENTINEL\n")
         .unwrap();
@@ -3000,7 +3015,7 @@ fn ls_propagates_a_closed_stdout_pipe() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    drop(child.stdout.take());
+    drop(child.take_stdout());
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(output.stderr, b"nkp: cannot write output\n");
@@ -3683,8 +3698,7 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
             .stderr(Stdio::piped());
         let mut child = isolated_command.spawn().expect("nkp should start");
         child
-            .stdin
-            .take()
+            .take_stdin()
             .expect("stdin was piped")
             .write_all(b"pw-for-this-test\n")
             .expect("the password should reach the child");
