@@ -2314,40 +2314,75 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
     /// whoever owns the number now. This pins, in the driver's own
     /// source, the contract the behavior regressions above exercise: no
     /// direct pid kill exists anywhere in this file, and within the
-    /// driver's own script no direct-kill spelling survives at all —
-    /// `os.kill(` and `.kill(` are both forbidden there while `killpg`
-    /// alone is sanctioned — the driver kills through the group on every
-    /// exit path, a cleanup failure is composed with the primary
-    /// diagnostic instead of masking it, and an argv mismatch reports the
-    /// PTY transcript. Like the gating check it reads the source as text
-    /// and runs wherever the unit tests run — a Linux-side edit that
-    /// loses one of these fails here before it ships.
+    /// driver's own raw-string script — the search is bounded by the
+    /// script's `r#"` opening and its `"#;` terminator, so tests after
+    /// the driver keep their legitimate Rust kills — no direct-kill
+    /// spelling survives at all: `os.kill(` and `.kill(` are both
+    /// forbidden there while `killpg` alone is sanctioned. The driver
+    /// kills through the group on every exit path, a cleanup failure is
+    /// composed with the primary diagnostic instead of masking it, and
+    /// an argv mismatch reports the PTY transcript. Like the gating check
+    /// it reads the source as text and runs wherever the unit tests run
+    /// — a Linux-side edit that loses one of these fails here before it
+    /// ships.
     #[test]
     fn pty_driver_cleanup_owns_the_group_and_composes_failures() {
         let source =
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
                 .expect("completion.rs source should be readable");
         // Everything asserted below must live in the hostile-filename
-        // driver itself, past its pty.fork of bash — not only in a copy of
-        // its protocol kept elsewhere in this file.
-        let driver_start = source
+        // driver's own raw-string script — bounded exactly by its `r#"`
+        // opening and its `"#;` terminator — not in a copy of its protocol
+        // kept elsewhere in this file, and not in the Rust code before or
+        // after the driver, where an un-reaped-child Rust kill stays
+        // legitimate.
+        let execvp_at = source
             .find("os.execvp(\"bash\", [\"bash\", \"--noprofile\", \"--norc\", \"-i\"])")
             .expect("the PTY driver should fork interactive bash");
-        let driver = &source[driver_start..];
-        // Assembled from pieces so this test's own source — which must
-        // name the pattern to forbid it — can never satisfy the search.
+        let script_open = source[..execvp_at]
+            .rfind("r#\"")
+            .expect("the driver should be a raw string literal");
+        let script_close = source[execvp_at..]
+            .find("\"#;")
+            .map(|at| execvp_at + at)
+            .expect("the driver raw string should terminate");
+        let driver = &source[script_open..script_close];
+        // The boundary must be non-vacuous: the slice opens on the
+        // driver's own first line and stops at its raw-string terminator,
+        // swallowing neither the Rust before it nor the Rust after it — a
+        // future test after the driver may legitimately keep an
+        // un-reaped-child Rust kill.
+        assert!(
+            driver.starts_with("r#\"\nimport os, pty, select, sys, time, signal"),
+            "the driver slice should open on the driver's own first line"
+        );
+        assert!(
+            !driver.contains("serde_json"),
+            "the driver slice must stop at the raw-string terminator — it \
+             must not leak into the Rust code after the driver"
+        );
+        assert!(
+            !driver.contains(
+                "fn bash_filename_completion_does_not_cross_command_or_option_value_boundaries"
+            ),
+            "the driver slice must not swallow the tests that follow the driver"
+        );
+        // Retained from the first guard: the file-wide exact-spelling
+        // check, assembled from pieces so this test's own source — which
+        // must name the pattern to forbid it — can never satisfy the
+        // search.
         let direct_kill_call = ["os.kill(", "pid,"].concat();
         assert!(
             !source.contains(&direct_kill_call),
             "the PTY driver must never kill by pid: a reaped pid can be \
              recycled into an unrelated process"
         );
-        // Broadened beyond one spelling: within the driver slice, ANY
+        // Broadened beyond one spelling: within the driver's script, ANY
         // direct-kill form is forbidden — os.kill(...) calls and .kill()
         // methods alike, since both signal by number and a reaped number
-        // can be recycled — while os.killpg(...) stays sanctioned. The
-        // harness cluster lives before this slice and may keep its own
-        // un-reaped-child kills.
+        // can be recycled — while os.killpg(...) stays sanctioned. Rust
+        // code before and after this slice may keep its own
+        // un-reaped-child kills; this guards only the driver's script.
         let os_kill_call = ["os.", "kill("].concat();
         let method_kill_call = [".", "kill("].concat();
         for forbidden in [os_kill_call.as_str(), method_kill_call.as_str()] {
@@ -2359,6 +2394,7 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             );
         }
         for marker in [
+            "import os, pty, select, sys, time, signal",
             "def stop_child():",
             "os.killpg(pid, signal.SIGKILL)",
             "; cleanup: ",
