@@ -1913,10 +1913,12 @@ mod tests {
         );
     }
 
-    /// A driver whose descendant holds the inherited stdout pipe cannot pin
-    /// the harness: the drain overflows bounded, the group is killed, and
-    /// the escapee is asserted dead BY PID — the same pattern as the
-    /// packaging smoke harness's orphan fixture. This also covers the
+    /// A driver with an exited leader and a surviving group descendant
+    /// cleans up the escapee by group, then reaps the leader and observes
+    /// group absence. The descendant deliberately does not inherit a
+    /// captured pipe: some systems retain killed children as zombies until
+    /// reparented-process collection, which can keep a pipe open without a
+    /// live process capable of holding it. This also covers the
     /// post-reap cleanup path: the driver exits and is reaped BEFORE the
     /// drain overflows, so the kill must come from `kill_driver_group`
     /// alone, without touching the reaped child.
@@ -2084,20 +2086,15 @@ raise SystemExit(failures)
     #[cfg(unix)]
     fn bounded_driver_owned_group_cleanup_kills_descendant_before_reap() {
         let script = r#"
-import errno, os, signal, subprocess, time
+import errno, os, signal, subprocess, sys, time
 
 transcript = b""
 
 def stop_child(pid):
     events = []
-    try:
-        actual_group = os.getpgid(pid)
-    except OSError as error:
-        return "ownership-query-errno-%s" % error.errno
-    if actual_group != pid:
-        return "leader-left-group"
     # The leader has been observed exited via waitid(WNOWAIT) and remains
-    # unreaped, so its process identity still pins the PGID.
+    # unreaped. Its PID was also its session/process-group ID at creation;
+    # do not call getpgid on a zombie, which can return ESRCH on macOS.
     os.killpg(pid, signal.SIGCONT)
     events.append("continue")
     os.killpg(pid, signal.SIGKILL)
@@ -2120,11 +2117,27 @@ def stop_child(pid):
 # pty.fork() gives the real driver's child its own session and group;
 # this replicates that shape so the group semantics are the real ones.
 child = subprocess.Popen(
-    ["bash", "--noprofile", "--norc", "-c", "sleep 600 & echo $!"],
+    [
+        "bash", "--noprofile", "--norc", "-c",
+        "sleep 600 & echo $! > \"$1\"",
+        "bash", sys.argv[1],
+    ],
     start_new_session=True,
-    stdout=subprocess.PIPE,
+    stdout=subprocess.DEVNULL,
 )
-straggler = int(child.stdout.readline().decode())
+# The fixture's pipe is not inherited by the sleeping descendant: it has no
+# reason to keep the harness's captured stdout open after the leader exits.
+pid_path = sys.argv[1]
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    try:
+        with open(pid_path, encoding="ascii") as stream:
+            straggler = int(stream.read())
+        break
+    except (OSError, ValueError):
+        time.sleep(0.02)
+else:
+    raise RuntimeError("bash did not publish the descendant pid")
 # Observe leader exit without reaping it. It must stay waitable while the
 # descendant remains in the same process group.
 deadline = time.monotonic() + 3
@@ -2146,7 +2159,12 @@ victim = subprocess.Popen(
 events = stop_child(child.pid)
 print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), flush=True)
 "#;
-        let run = run_python_bounded(script, &[], Duration::from_secs(15));
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let run = run_python_bounded(
+            script,
+            &[pid_file.path().as_os_str()],
+            Duration::from_secs(15),
+        );
         assert!(
             run.success(),
             "the owned-group cleanup scenario should complete: {}",
@@ -2154,8 +2172,7 @@ print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), 
         );
         assert!(
             !run.drain_overflow,
-            "the straggler holds bash's stdout; it must be dead before the \
-             driver exits: {}",
+            "cleanup must complete without a pipe-holding straggler: {}",
             run.failure_summary()
         );
         let stdout = String::from_utf8_lossy(&run.stdout);
@@ -3066,6 +3083,31 @@ else:
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         )
+    }
+
+    /// Run a shell script through stdin rather than `-c <script>`. Windows
+    /// process argument quoting can reinterpret backticks in a long `-c`
+    /// argument before Git Bash receives it; stdin preserves the script bytes.
+    fn run_shell_script(
+        program: &str,
+        script: &str,
+        path: Option<&std::ffi::OsStr>,
+    ) -> std::io::Result<std::process::Output> {
+        use std::io::Write;
+
+        let mut child = std::process::Command::new(program)
+            .arg("-s")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .envs(path.map(|path| [("PATH", path)]).into_iter().flatten())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("shell stdin is piped")
+            .write_all(script.as_bytes())?;
+        child.wait_with_output()
     }
 
     /// The interpreter identity for failure diagnostics: how the
@@ -4627,20 +4669,14 @@ def stop_child():
             % (error.errno, error.strerror, identity_before)
             + repr(transcript)
         )
-    try:
-        actual_group = os.getpgid(pid)
-    except OSError as error:
+    # pty.fork() makes the child a session and process-group leader. The
+    # startup handshake verified group_id == pid while the child was live;
+    # waitid(WNOWAIT) keeps that exact PID unreaped until after signaling.
+    if group_id != pid:
         return (
-            "cannot confirm PTY group ownership before cleanup; "
-            "query errno-%s:%s; before: %s; PTY transcript: "
-            % (error.errno, error.strerror, identity_before)
-            + repr(transcript)
-        )
-    if actual_group != group_id:
-        return (
-            "PTY leader no longer owns the recorded process group; "
-            "recorded=%d actual=%d; before: %s; PTY transcript: "
-            % (group_id, actual_group, identity_before)
+            "PTY leader PID does not anchor the recorded process group; "
+            "pid=%d recorded=%d; before: %s; PTY transcript: "
+            % (pid, group_id, identity_before)
             + repr(transcript)
         )
     try:
@@ -4731,6 +4767,11 @@ try:
             actual_group = None
             startup_state = "query-errno-%s:%s" % (error.errno, error.strerror)
         if actual_group is not None and actual_group == foreground_group:
+            if actual_group != pid:
+                fail(
+                    "interactive bash PTY leader is not its process-group "
+                    "leader; pid=%d group=%d" % (pid, actual_group)
+                )
             group_id = actual_group
             break
         drain(0.05)
@@ -4989,10 +5030,7 @@ _nkp_complete
         // the macOS canary pins this boundary contract to the native
         // /bin/bash too, not just to the modern bash the PATH prefers.
         let bash_program = completion_bash_program();
-        let output = std::process::Command::new(&bash_program)
-            .args(["-c", &script])
-            .output()
-            .expect("bash should run");
+        let output = run_shell_script(&bash_program, &script, None).expect("bash should run");
         // The script's exit codes name the crossed boundary; the
         // detail carries the streams because a bare `exit N` prints
         // nothing (the silent Windows failure of run 134548307275
@@ -5002,13 +5040,17 @@ _nkp_complete
             output.status.success(),
             "Bash option ownership failed: {} [crossed boundary: {}] [interpreter: {}]",
             subprocess_failure_detail(&output),
-            match output.status.code() {
-                Some(1) =>
+            match (output.status.code(), output.stderr.is_empty()) {
+                (Some(1), true) =>
                     "nkp exec -- set --bin payload = candidate completed a candidate".to_owned(),
-                Some(2) => "nkp set -- --bin payload = candidate completed a candidate".to_owned(),
-                Some(3) =>
+                (Some(2), true) =>
+                    "nkp set -- --bin payload = candidate completed a candidate".to_owned(),
+                (Some(3), true) =>
                     "nkp set --notes --bin payload = candidate completed a candidate".to_owned(),
-                other => format!("unexpected exit status {other:?}"),
+                (Some(1..=3), false) =>
+                    "shell reported an execution or syntax error before a boundary assertion"
+                        .to_owned(),
+                (other, _) => format!("unexpected exit status {other:?}"),
             },
             shell_interpreter_identity(&bash_program),
         );
@@ -5075,11 +5117,8 @@ _nkp_complete
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))
         .expect("child PATH with the stub directory");
-        let output = std::process::Command::new(&program)
-            .args(["-c", &script])
-            .env("PATH", &child_path)
-            .output()
-            .expect("bash should run");
+        let output =
+            run_shell_script(&program, &script, Some(&child_path)).expect("bash should run");
         assert!(
             output.status.success(),
             "dynamic vault/keys completion failed: {} [failed check: {}] [interpreter: {}]",
