@@ -7,6 +7,34 @@
 
 use std::path::Path;
 
+/// Whether an ACL-capability query failed without determining support.
+#[must_use]
+pub fn capability_query_failed(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        windows_private_file::capability_query_failed(error)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Returns the OS error code of a failed capability query, if available.
+#[must_use]
+pub fn capability_query_os_code(error: &std::io::Error) -> Option<i32> {
+    #[cfg(windows)]
+    {
+        windows_private_file::capability_query_os_code(error)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        None
+    }
+}
+
 /// Restricts a still-empty Unix file or a Windows directory to its owner.
 ///
 /// On Windows this operation is only supported for directories; private files
@@ -64,7 +92,9 @@ fn write_private_noclobber_with(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let mut staging = new_private_temp(parent).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::Unsupported {
+        if capability_query_failed(&error) {
+            "cannot query filesystem ACL capability"
+        } else if error.kind() == std::io::ErrorKind::Unsupported {
             "filesystem cannot verify persistent owner-only ACL support"
         } else if error.kind() == std::io::ErrorKind::PermissionDenied {
             "cannot restrict output permissions"
@@ -109,7 +139,9 @@ fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'sta
 #[cfg(windows)]
 fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'static str> {
     windows_private_file::secure_directory(path).map_err(|cause| {
-        if cause.kind() == std::io::ErrorKind::Unsupported {
+        if capability_query_failed(&cause) {
+            "cannot query filesystem ACL capability"
+        } else if cause.kind() == std::io::ErrorKind::Unsupported {
             "filesystem cannot verify persistent owner-only ACL support"
         } else {
             error

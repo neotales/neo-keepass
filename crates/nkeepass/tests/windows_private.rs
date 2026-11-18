@@ -29,6 +29,35 @@ if ($r.IsInherited -or $r.AccessControlType -ne 'Allow' -or
     );
 }
 
+fn acl_sddl(path: &Path) -> Vec<u8> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-Acl -LiteralPath $env:NKEEPASS_TEST_ACL_PATH).Sddl",
+        ])
+        .env("NKEEPASS_TEST_ACL_PATH", path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    output.stdout
+}
+
+#[test]
+fn secure_directory_rejects_regular_file_without_changing_acl() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("ordinary");
+    std::fs::write(&file, b"synthetic").unwrap();
+    let before = acl_sddl(&file);
+    assert_eq!(
+        nkeepass::private_file::set_owner_only(&file, "not a private directory"),
+        Err("not a private directory")
+    );
+    assert_eq!(acl_sddl(&file), before);
+    assert_eq!(std::fs::read(&file).unwrap(), b"synthetic");
+}
+
 fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
         .current_dir(root)
@@ -159,7 +188,15 @@ fn backup_failure_reports_partial_success_without_disclosing_password() {
     );
     assert!(!output.status.success());
     assert!(temp.path().join("vault.kdbx").is_file());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("vault created"));
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("vault created"));
+    assert!(diagnostic.contains("cannot prepare password backup directory"));
+    assert!(temp.path().join("config/config.json").is_file());
+    assert!(!temp.path().join("config/init-password.agekey").exists());
+    assert_eq!(
+        std::fs::read(temp.path().join("data")).unwrap(),
+        b"not a directory"
+    );
     for bytes in [&output.stdout, &output.stderr] {
         assert!(
             !bytes
@@ -188,6 +225,7 @@ fn config_replacement_failure_preserves_existing_data() {
     permissions.set_readonly(false);
     std::fs::set_permissions(&config, permissions).unwrap();
     assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot save configuration"));
     assert_eq!(std::fs::read(&config).unwrap(), before);
     independently_assert_private(&config);
 }
@@ -212,6 +250,14 @@ fn existing_junction_target_is_not_replaced_or_followed() {
         "creating synthetic junction failed: {}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let before_link = acl_sddl(&link);
+    let before_target = acl_sddl(&target);
+    assert_eq!(
+        nkeepass::private_file::set_owner_only(&link, "not a private directory"),
+        Err("not a private directory")
+    );
+    assert_eq!(acl_sddl(&link), before_link);
+    assert_eq!(acl_sddl(&target), before_target);
     let output = run(
         temp.path(),
         &[
@@ -228,11 +274,53 @@ fn existing_junction_target_is_not_replaced_or_followed() {
         ],
     );
     assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("vault already exists or cannot be created")
+    );
     assert_eq!(std::fs::read(target.join("marker")).unwrap(), b"unchanged");
+    assert!(!temp.path().join("config").exists());
+    assert!(!temp.path().join("data").exists());
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     assert_ne!(
         std::fs::symlink_metadata(&link).unwrap().file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
         0
     );
+}
+
+#[test]
+fn concurrent_init_has_one_winner_without_clobber() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let args = [
+        "init",
+        "race.kdbx",
+        "--password-env",
+        "NKEEPASS_WINDOWS_TEST_PASSWORD",
+        "--kdf",
+        "argon2id",
+        "--memory",
+        "1024",
+        "--iterations",
+        "1",
+    ];
+    let (first, second) = std::thread::scope(|scope| {
+        let other = scope.spawn(|| run(root, &args));
+        (run(root, &args), other.join().unwrap())
+    });
+    assert_eq!(
+        usize::from(first.status.success()) + usize::from(second.status.success()),
+        1
+    );
+    let loser = if first.status.success() {
+        &second
+    } else {
+        &first
+    };
+    assert!(
+        String::from_utf8_lossy(&loser.stderr)
+            .contains("vault already exists or cannot be created")
+    );
+    independently_assert_private(&root.join("race.kdbx"));
 }

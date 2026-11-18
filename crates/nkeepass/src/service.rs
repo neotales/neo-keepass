@@ -127,6 +127,11 @@ pub enum ServiceError {
     CreateDurability,
     /// The current platform cannot establish owner-only permissions safely.
     SecureFilePermissionsUnsupported,
+    /// The filesystem ACL capability query failed, so support is unknown.
+    SecureFileCapabilityUnknown {
+        /// Platform error code, if the operating system provided one.
+        os_code: Option<i32>,
+    },
 }
 
 /// Fixed, non-sensitive failure from a whole-vault interchange operation.
@@ -318,12 +323,17 @@ impl ServiceError {
             Self::SecureFilePermissionsUnsupported => {
                 "filesystem cannot verify persistent owner-only ACL support"
             }
+            Self::SecureFileCapabilityUnknown { .. } => "cannot query filesystem ACL capability",
         }
     }
 }
 
 fn stage_error(error: &std::io::Error, fallback: ServiceError) -> ServiceError {
-    if error.kind() == std::io::ErrorKind::Unsupported {
+    if crate::private_file::capability_query_failed(error) {
+        ServiceError::SecureFileCapabilityUnknown {
+            os_code: crate::private_file::capability_query_os_code(error),
+        }
+    } else if error.kind() == std::io::ErrorKind::Unsupported {
         ServiceError::SecureFilePermissionsUnsupported
     } else if cfg!(windows)
         && error.kind() == std::io::ErrorKind::PermissionDenied

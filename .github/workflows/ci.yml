@@ -218,8 +218,11 @@ jobs:
           run_canary nkeepass windows_private backup_failure_reports_partial_success_without_disclosing_password
           run_canary nkeepass windows_private config_replacement_failure_preserves_existing_data
           run_canary nkeepass windows_private existing_junction_target_is_not_replaced_or_followed
+          run_canary nkeepass windows_private secure_directory_rejects_regular_file_without_changing_acl
+          run_canary nkeepass windows_private concurrent_init_has_one_winner_without_clobber
           run_canary windows-private-file lib tests::unsupported_capability_rejects_before_returning_a_writer
           run_canary windows-private-file lib tests::administrator_directory_owner_is_accepted_by_owner_policy
+          run_canary windows-private-file lib tests::failed_capability_query_keeps_os_error_without_exposing_it
           run_canary nkeepass lib private_file::tests::private_staging_rejects_inherited_everyone_access
           run_canary nkeepass lib private_file::tests::explicit_other_principal_grant_is_not_mistaken_for_owner_only
           echo "::notice::No real unsupported filesystem or elevated-owner fixture is provisioned; the capability and Administrators-owner policy are exercised synthetically."

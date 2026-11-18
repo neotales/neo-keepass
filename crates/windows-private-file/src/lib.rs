@@ -34,8 +34,10 @@ use windows_sys::Win32::Security::{
     WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileInformationByHandleEx,
     GetVolumeInformationByHandleW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
 };
 use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, FILE_PERSISTENT_ACLS};
@@ -57,6 +59,44 @@ impl Drop for Token {
             CloseHandle(self.0);
         }
     }
+}
+
+#[derive(Debug)]
+struct CapabilityQueryError(io::Error);
+
+impl std::fmt::Display for CapabilityQueryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("cannot query filesystem ACL capability")
+    }
+}
+
+impl std::error::Error for CapabilityQueryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// Returns whether a capability query failed rather than reporting absent ACLs.
+#[must_use]
+pub fn capability_query_failed(error: &io::Error) -> bool {
+    match error.get_ref() {
+        Some(cause) => cause.is::<CapabilityQueryError>(),
+        None => false,
+    }
+}
+
+/// Returns the OS error code from a failed ACL capability query, if available.
+#[must_use]
+pub fn capability_query_os_code(error: &io::Error) -> Option<i32> {
+    error
+        .get_ref()?
+        .downcast_ref::<CapabilityQueryError>()?
+        .0
+        .raw_os_error()
+}
+
+fn capability_query_error(cause: io::Error) -> io::Error {
+    io::Error::other(CapabilityQueryError(cause))
 }
 
 fn user_sid() -> io::Result<Vec<u8>> {
@@ -206,6 +246,29 @@ mod tests {
     }
 
     #[test]
+    fn failed_capability_query_keeps_os_error_without_exposing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("staged");
+        let error = create_new_checked(&path, |_| {
+            Err(capability_query_error(io::Error::from_raw_os_error(5)))
+        })
+        .unwrap_err();
+        assert!(capability_query_failed(&error));
+        assert_eq!(capability_query_os_code(&error), Some(5));
+        assert_ne!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(error.to_string(), "cannot query filesystem ACL capability");
+        let cause = error
+            .get_ref()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(cause.raw_os_error(), Some(5));
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn administrator_directory_owner_is_accepted_by_owner_policy() {
         let text: Vec<u16> = "O:BA".encode_utf16().chain([0]).collect();
         unsafe {
@@ -262,10 +325,7 @@ fn require_acl_capability(file: &File) -> io::Result<()> {
         )
     };
     if result == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "filesystem cannot establish persistent ACL capability",
-        ));
+        return Err(capability_query_error(io::Error::last_os_error()));
     }
     require_acl_flags(flags)
 }
@@ -384,7 +444,7 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
     unsafe {
         let handle = CreateFileW(
             path.as_ptr(),
-            READ_CONTROL | WRITE_DAC,
+            READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             null(),
             OPEN_EXISTING,
@@ -395,6 +455,25 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         let file = File::from_raw_handle(handle);
+        let mut attributes = FILE_ATTRIBUTE_TAG_INFO::default();
+        if GetFileInformationByHandleEx(
+            file.as_raw_handle().cast(),
+            FileAttributeTagInfo,
+            (&raw mut attributes).cast(),
+            u32::try_from(size_of::<FILE_ATTRIBUTE_TAG_INFO>())
+                .map_err(|_| io::Error::other("file attribute size overflow"))?,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected non-reparse directory",
+            ));
+        }
         require_acl_capability(&file)?;
         // Do not change the ACL on a directory owned by an unrelated user.
         let mut owner = null_mut();

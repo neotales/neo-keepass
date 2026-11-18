@@ -1278,7 +1278,9 @@ fn save_config(config: &Config) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(config).map_err(|_| err("cannot encode configuration"))?;
     let mut temp = nkeepass::private_file::new_private_temp(&dir).map_err(|error| {
-        if error.kind() == io::ErrorKind::Unsupported {
+        if nkeepass::private_file::capability_query_failed(&error) {
+            err("cannot query filesystem ACL capability")
+        } else if error.kind() == io::ErrorKind::Unsupported {
             err("filesystem cannot verify persistent owner-only ACL support")
         } else {
             err("cannot create private configuration temporary file")
@@ -2158,6 +2160,9 @@ fn backup_init_password_at(
             "filesystem cannot verify persistent owner-only ACL support" => {
                 err("filesystem cannot verify persistent owner-only ACL support")
             }
+            "cannot query filesystem ACL capability" => {
+                err("cannot query filesystem ACL capability")
+            }
             "cannot restrict output permissions" => {
                 err("cannot restrict password backup permissions")
             }
@@ -2213,6 +2218,9 @@ fn load_or_create_backup_identity(path: &Path) -> Result<AgeIdentity> {
         Err("filesystem cannot verify persistent owner-only ACL support") => Err(err(
             "filesystem cannot verify persistent owner-only ACL support",
         )),
+        Err("cannot query filesystem ACL capability") => {
+            Err(err("cannot query filesystem ACL capability"))
+        }
         Err("cannot restrict output permissions") => {
             Err(err("cannot restrict password backup identity permissions"))
         }
@@ -2242,7 +2250,9 @@ fn read_backup_identity(path: &Path) -> Result<AgeIdentity> {
         File::open(path).map_err(|_| err("cannot read password backup identity"))?;
     #[cfg(windows)]
     windows_private_file::verify(&identity_file).map_err(|error| {
-        if error.kind() == io::ErrorKind::Unsupported {
+        if nkeepass::private_file::capability_query_failed(&error) {
+            err("cannot query filesystem ACL capability")
+        } else if error.kind() == io::ErrorKind::Unsupported {
             err("filesystem cannot verify persistent owner-only ACL support")
         } else {
             err("password backup identity permissions are too broad")
@@ -2711,7 +2721,9 @@ impl StagedFile {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let file = nkeepass::private_file::new_private_temp(&parent).map_err(|error| {
-            if error.kind() == io::ErrorKind::Unsupported {
+            if nkeepass::private_file::capability_query_failed(&error) {
+                err("cannot query filesystem ACL capability")
+            } else if error.kind() == io::ErrorKind::Unsupported {
                 err("filesystem cannot verify persistent owner-only ACL support")
             } else if error.kind() == io::ErrorKind::NotFound {
                 err(diagnostics.staging)
@@ -4935,6 +4947,11 @@ fn adopt_after_init_create(
                 ))),
             }
         }
+        Err(nkeepass::ServiceError::SecureFileCapabilityUnknown {
+            os_code: Some(code),
+        }) => Err(err(format!(
+            "cannot query filesystem ACL capability (OS error {code})"
+        ))),
         Err(error) => Err(err(error.message())),
     }
 }
