@@ -542,14 +542,21 @@ Verification before anything is executed or uploaded:
 A binary that failed any check is never executed, and a mismatching
 artifact never reaches upload.
 
-The Linux arm64 cross-build installs both `gcc-aarch64-linux-gnu` and
-`libc6-dev-arm64-cross`. The latter supplies the target libc development
-headers (including `bits/libc-header-start.h`) needed when C dependencies
-such as `ring` compile; installing only the compiler is insufficient on a
-fresh runner. Windows smoke containment pins
-`PROC_THREAD_ATTRIBUTE_JOB_LIST` to `0x0002000D` (attribute number 13 is
-decimal); the portable packaging tests assert its numeric value, while only
-a native Windows runner can exercise the kernel API call.
+The arm64 CI failure (run 44265474262, job 134668801631) showed `ring`
+invoking `aarch64-linux-gnu-gcc`, including `/usr/include/stdint.h`, then
+failing because `bits/libc-header-start.h` was absent. The runner installed
+`libc6-arm64-cross`, but apt listed `libc6-dev-arm64-cross` only as a
+recommendation, so it was not installed with `--no-install-recommends`.
+The workflow now requests the development package explicitly, sets the
+target-specific `CC_aarch64_unknown_linux_gnu` used by `cc`-based crates, and
+preflights the compiler's target/search paths and actual stdint header
+inclusion before Cargo runs. This is a targeted fix; a successful native CI
+run remains the confirmation that the toolchain is complete.
+
+Windows smoke containment pins `PROC_THREAD_ATTRIBUTE_JOB_LIST` to
+`0x0002000D` (attribute number 13 is decimal); the portable packaging tests
+assert its numeric value, while only a native Windows runner can exercise
+the kernel API call.
 
 Produces the compatibility package artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
 days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (one named root:

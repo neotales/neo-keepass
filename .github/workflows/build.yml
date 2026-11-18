@@ -50,6 +50,9 @@ jobs:
     env:
       # Cross-linker only affects the aarch64 target; the native build ignores it.
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      # cc-rs uses this target-specific variable when compiling C dependencies
+      # such as ring; do not rely on Cargo's linker setting to select the C compiler.
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
     steps:
       # persist-credentials: false — pull-request builds compile PR-provided
       # code (including any build scripts it adds), so the checkout token
@@ -77,9 +80,22 @@ jobs:
         if: matrix.cross
         run: |
           sudo apt-get update
-          # The cross compiler alone does not guarantee target libc headers
-          # are present; libc's stdio headers include bits/libc-header-start.h.
+          # Explicit dev package: --no-install-recommends omits it otherwise.
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Preflight aarch64 C toolchain
+        if: matrix.cross
+        run: |
+          set -euo pipefail
+          compiler="${CC_aarch64_unknown_linux_gnu}"
+          echo "compiler=$("$compiler" --version | head -n 1)"
+          echo "target=$("$compiler" -dumpmachine)"
+          echo "search-dirs:"
+          "$compiler" -print-search-dirs
+          # This exercises the actual include search path used by C builds,
+          # and proves the required glibc header is found before cargo starts.
+          headers=$(printf '#include <stdint.h>\n' | "$compiler" -E -H -x c - 2>&1 >/dev/null)
+          printf '%s\n' "$headers"
+          grep -F 'bits/libc-header-start.h' <<<"$headers" >/dev/null
       - name: Build release
         run: cargo build --release -p nkeepass --target ${{ matrix.target }}
       - name: Strip binary
