@@ -552,9 +552,9 @@ target-specific `CC_aarch64_unknown_linux_gnu` used by `cc`-based crates, and
 preflights the exact `aarch64-linux-gnu` target, compiler search paths and
 actual stdint header trace, requiring that trace to resolve under the
 sysroot's `/usr/aarch64-linux-gnu/include` tree before Cargo runs. Synthetic
-tests reject both a wrong-target compiler and a host libc header trace. This
-is a targeted fix; a successful native CI run remains the confirmation that
-the toolchain is complete.
+tests run in the arm64 build job and reject both a wrong-target compiler and a
+host libc header trace. This is a targeted fix; a successful native CI run
+remains the confirmation that the toolchain is complete.
 
 Windows smoke containment pins `PROC_THREAD_ATTRIBUTE_JOB_LIST` to
 `0x0002000D` (attribute number 13 is decimal); the portable packaging tests

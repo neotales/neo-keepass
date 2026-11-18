@@ -82,6 +82,9 @@ jobs:
           sudo apt-get update
           # Explicit dev package: --no-install-recommends omits it otherwise.
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Test aarch64 toolchain preflight guards
+        if: matrix.cross
+        run: scripts/test-preflight-aarch64-toolchain.sh
       - name: Preflight aarch64 C toolchain
         if: matrix.cross
         run: scripts/preflight-aarch64-toolchain.sh
