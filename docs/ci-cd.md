@@ -191,9 +191,12 @@ bash to exit; cleanup: interactive bash survived SIGKILL`, and no
 orphans remained at job cleanup. Two corrections followed from the
 transcript, not from a repro. First, the exit wait is CLEANUP, not the
 behavior under test: the case's assertions now run first (with a
-bounded wait for the stub's `args.bin` instead of racing the drain),
-the polite `exit` attempt stays bounded and diagnostic-only — a
-non-exit is recorded on stderr and the group cleanup owns the
+bounded wait for the stub's `args.bin` to hold the EXPECTED literal
+argv content — mere existence raced the write, a review of 89485ad
+reproduced the creation-before-bytes window — and the failure carries
+the last observed content), the polite `exit` attempt stays bounded
+and diagnostic-only — a non-exit, an exit-by-signal, or a nonzero code
+is recorded on stderr, never hidden, and the group cleanup owns the
 shutdown — so the wedge can no longer fail an otherwise-passing case.
 Second, the cleanup message no longer claims survival:
 `survived SIGKILL` overclaimed what the reaping loop can know — an
@@ -249,15 +252,21 @@ behavior, and no PATH arrangement can change the resolution. The
 generated-script tests now resolve their interpreters instead of
 assuming them: `NKEEPASS_COMPLETION_BASH` still wins unchanged when
 set; without it, candidates (the ambient PATH `bash` on unix, only the
-standard Git for Windows install locations on Windows) must each pass
-a `--version` probe identifying as GNU bash, the first that does wins,
-and a failed resolution fails closed stating it is an
+Git for Windows install locations on Windows — system-wide Program
+Files plus the per-user `%LOCALAPPDATA%\Programs\Git` install) must
+each pass a `--version` probe identifying as GNU bash, the first that
+does wins, and a failed resolution fails closed stating it is an
 interpreter-availability problem, not a generated-script or
-completion-boundary failure. The Windows leg pins the resolved Git
-bash explicitly through the workflow (found in the standard install
-paths, validated, exported via `NKEEPASS_COMPLETION_BASH`), and the
-POSIX sh half resolves `sh.exe` from the same Git installation, since
-Windows has no `sh` on PATH at all.
+completion-boundary failure. The probe is bounded: a `--version` spawn
+that never exits is killed and reaped, never hung on, and reported as
+a non-exit; the captured output is capped and carries stderr
+alongside stdout, and UTF-16 (the stub's encoding for "no installed
+distributions") is decoded so the diagnostic reads as text. The
+Windows leg pins the resolved Git bash explicitly through the workflow
+(found in the standard install paths, validated, exported via
+`NKEEPASS_COMPLETION_BASH`), and the POSIX sh half resolves `sh.exe`
+from the same Git installation, since Windows has no `sh` on PATH at
+all.
 
 ## `build.yml` — Linux amd64/arm64 build + packaging
 

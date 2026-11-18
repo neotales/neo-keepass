@@ -2256,6 +2256,241 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         );
     }
 
+    /// The diagnostic-only exit handshake records what it observed
+    /// instead of hiding it: a clean exit 0 prints nothing, an
+    /// exit-by-signal names the signal, a nonzero exit names the code,
+    /// and a child that never exits reports the bounded non-exit — and
+    /// every branch still lets the case pass, because the handshake is
+    /// cleanup, not the behavior under test. The window is shortened to
+    /// milliseconds; the loop shape is the real driver's.
+    #[test]
+    #[cfg(unix)]
+    fn exit_handshake_records_status_without_failing_the_case() {
+        let script = r#"
+import os, signal, subprocess, sys, time
+
+def handshake(pid, window):
+    # The hostile-filename driver's exit handshake, verbatim in shape
+    # with a test-sized window: a bounded waitpid loop, then whatever
+    # was observed recorded on stderr without failing the case. The
+    # observed kind is returned, since a shape-level waitpid reap is
+    # invisible to subprocess.Popen.returncode.
+    deadline = time.monotonic() + window
+    exit_status = None
+    while time.monotonic() < deadline:
+        try:
+            waited, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if waited == pid:
+            exit_status = status
+            break
+        time.sleep(0.02)
+    if exit_status is None:
+        print(
+            "interactive bash did not exit within %ds after 'exit'; the case "
+            "itself passed and the group cleanup follows" % window,
+            file=sys.stderr,
+            flush=True,
+        )
+        return "not-exited"
+    if os.WIFSIGNALED(exit_status):
+        print(
+            "interactive bash exited to signal %d after 'exit'; the case "
+            "itself passed and the group cleanup follows"
+            % os.WTERMSIG(exit_status),
+            file=sys.stderr,
+            flush=True,
+        )
+        return "signal-%d" % os.WTERMSIG(exit_status)
+    if os.WEXITSTATUS(exit_status) != 0:
+        print(
+            "interactive bash exited %d after 'exit'; the case itself "
+            "passed and the group cleanup follows" % os.WEXITSTATUS(exit_status),
+            file=sys.stderr,
+            flush=True,
+        )
+        return "code-%d" % os.WEXITSTATUS(exit_status)
+    return "clean"
+
+# Clean exit 0: nothing is recorded.
+child = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True)
+print("finding clean", handshake(child.pid, 1.0), flush=True)
+
+# Exit by signal during the window: the signal is named, case passes.
+child = subprocess.Popen(["sleep", "600"], start_new_session=True)
+time.sleep(0.1)
+os.kill(child.pid, signal.SIGKILL)
+print("finding signaled", handshake(child.pid, 1.0), flush=True)
+
+# Never exits: the bounded non-exit is recorded, case passes, and the
+# shape's own group cleanup then reaps the straggler so nothing leaks.
+child = subprocess.Popen(["sleep", "600"], start_new_session=True)
+print("finding wedged", handshake(child.pid, 0.3), flush=True)
+try:
+    os.killpg(child.pid, signal.SIGKILL)
+except OSError:
+    pass
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    try:
+        waited, _ = os.waitpid(child.pid, os.WNOHANG)
+    except ChildProcessError:
+        break
+    if waited == child.pid:
+        break
+    time.sleep(0.02)
+else:
+    raise SystemExit("straggler survived the shape test's own cleanup")
+"#;
+        let run = run_python_bounded(script, &[], Duration::from_secs(15));
+        assert!(
+            run.success(),
+            "every handshake branch must let the case pass: {}",
+            run.failure_summary()
+        );
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(
+            stdout.contains("finding clean clean"),
+            "the clean-exit scenario must have run and recorded nothing: {}",
+            run.failure_summary()
+        );
+        assert!(
+            stdout.contains("finding signaled signal-9"),
+            "the signaled scenario must have observed the kill: {}",
+            run.failure_summary()
+        );
+        assert!(
+            stdout.contains("finding wedged not-exited"),
+            "the wedged scenario must have observed the non-exit: {}",
+            run.failure_summary()
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains("exited to signal 9"),
+            "an exit-by-signal during the window must name the signal: {}",
+            run.failure_summary()
+        );
+        assert!(
+            stderr.contains("did not exit within"),
+            "a child that never exits must record the bounded non-exit: {}",
+            run.failure_summary()
+        );
+        assert!(
+            !stderr.contains("exited 0"),
+            "a clean exit 0 must print nothing: {}",
+            run.failure_summary()
+        );
+    }
+
+    /// The args.bin wait waits for the EXPECTED literal argv content,
+    /// not mere file existence: a review of 89485ad reproduced the
+    /// creation-before-bytes race, where existence-then-read saw the
+    /// file while its write was still in flight. The shape below drives
+    /// the real loop's contract: a delayed write is waited out and the
+    /// expected content is read; content that stays wrong is waited out
+    /// too and then fails with the preserved mismatch spelling plus the
+    /// last observed content; a file that never appears reports None.
+    /// The slice-marker guard pins these spellings inside the real
+    /// driver.
+    #[test]
+    #[cfg(unix)]
+    fn args_bin_wait_reads_expected_content_and_reports_last_observed() {
+        let script = r#"
+import os, sys, threading, time
+
+def wait_for_expected_args(path, expected, window):
+    # The hostile-filename driver's args.bin wait, verbatim in shape
+    # with a test-sized window: bounded re-read until the content
+    # matches, then a single fail site that keeps the mismatch spelling
+    # and includes the last observed content.
+    deadline = time.monotonic() + window
+    while True:
+        try:
+            with open(path, "rb") as stream:
+                actual = stream.read().split(b"\0")[:-1]
+        except OSError:
+            actual = None
+        if actual == expected:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    if actual != expected:
+        raise SystemExit(
+            "completion produced unexpected literal argv: " + repr(actual)
+            + " (last observed after the bounded wait)"
+        )
+    return actual
+
+directory = sys.argv[1]
+expected = [b"set", b"--bin", b"payload=space name.bin"]
+joined = b"\0".join(expected) + b"\0"
+path = os.path.join(directory, "args.bin")
+
+# Delayed write: the file appears only after the wait has already been
+# re-reading an absent file; the loop waits it out and reads the
+# expected argv, and it demonstrably waited rather than racing.
+def delayed_writer():
+    with open(path, "wb") as stream:
+        stream.flush()  # file exists, but the command's argv is not written yet
+        time.sleep(0.4)
+        stream.write(joined)
+
+writer = threading.Thread(target=delayed_writer)
+writer.start()
+started = time.monotonic()
+actual = wait_for_expected_args(path, expected, 2.0)
+elapsed = time.monotonic() - started
+writer.join()
+if actual != expected:
+    raise SystemExit("the delayed write was not read as the expected argv")
+if elapsed < 0.3:
+    raise SystemExit(
+        "the wait did not wait out the delayed write: %.2fs" % elapsed
+    )
+
+# Content that stays wrong: waited out, then the preserved mismatch
+# spelling with the last observed content.
+with open(path, "wb") as stream:
+    stream.write(b"\0".join([b"set", b"--bin", b"wrong.bin"]) + b"\0")
+try:
+    wait_for_expected_args(path, expected, 0.3)
+except SystemExit as failure:
+    message = failure.args[0] if failure.args else ""
+    if "completion produced unexpected literal argv" not in message:
+        raise SystemExit("mismatch spelling lost: " + message)
+    if "wrong.bin" not in message:
+        raise SystemExit("last observed content lost: " + message)
+else:
+    raise SystemExit("wrong content passed the wait")
+
+# Never appears: the wait reports None as the last observed content.
+os.remove(path)
+try:
+    wait_for_expected_args(path, expected, 0.3)
+except SystemExit as failure:
+    message = failure.args[0] if failure.args else ""
+    if "None" not in message:
+        raise SystemExit(
+            "a missing file's last observed content was not None: " + message
+        )
+else:
+    raise SystemExit("a missing file passed the wait")
+"#;
+        let directory = tempfile::tempdir().expect("args wait tempdir");
+        let run = run_python_bounded(
+            script,
+            &[directory.path().as_os_str()],
+            Duration::from_secs(15),
+        );
+        assert!(
+            run.success(),
+            "the wait must read delayed content and report last observed: {}",
+            run.failure_summary()
+        );
+    }
+
     /// The kill helper is itself a python3 process, and the macOS incident
     /// was precisely a python3 that stopped responding: waiting on it
     /// unbounded would reintroduce the hang class this harness exists to
@@ -2464,12 +2699,16 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             "case ended with ",
             "raise primary",
             "fail(\"completion produced unexpected literal argv",
+            "last observed after the bounded wait",
+            "exited to signal",
         ] {
             assert!(
                 driver.contains(marker),
                 "the PTY driver must keep `{marker}` — its cleanup owns the \
                  group (SIGCONT first, so a stopped member cannot hold the \
-                 SIGKILL), composes failures, and reports the transcript"
+                 SIGKILL), composes failures, reports the transcript, waits \
+                 for the expected argv content with the last observation, and \
+                 records the exit handshake's actual status"
             );
         }
     }
@@ -2973,81 +3212,262 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             || std::env::var_os("NKEEPASS_REQUIRE_COMPLETION_SHELLS").is_some()
     }
 
+    /// How long a `--version` probe may run before it is killed and
+    /// reaped. Probes are millisecond-scale; the bound exists so a probe
+    /// that blocks — an interpreter that prompts, or the WSL launcher
+    /// waiting on something unexpected — cannot hang resolution.
+    /// Generous for a cold CI runner.
+    const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Drain allowance for a killed probe's captured streams.
+    const SHELL_PROBE_DRAIN_ALLOWANCE: Duration = Duration::from_secs(2);
+
+    /// How many bytes of probe output are captured before reading
+    /// stops. A hostile or broken interpreter that prints forever is
+    /// bounded instead of ballooning memory until the kill lands.
+    const SHELL_PROBE_CAPTURE_LIMIT: usize = 64 * 1024;
+
+    /// Decode a captured probe stream into text. Interpreters on
+    /// Windows can emit UTF-16 — the WSL launcher stub reports "no
+    /// installed distributions" as UTF-16, which lossy UTF-8 decoding
+    /// renders as interleaved NULs — so a UTF-16 BOM, or a NUL-dominated
+    /// even-length stream without one, is transcoded; everything else
+    /// falls back to lossy UTF-8 so no byte is silently dropped.
+    fn decode_console_output(bytes: &[u8]) -> String {
+        if bytes.len() < 4 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let decode_utf16 = |units: &[u16]| -> String {
+            let mut text = String::new();
+            let mut index = 0;
+            while index < units.len() {
+                let unit = units[index];
+                let decoded = if (0xD800..0xDC00).contains(&unit) {
+                    if index + 1 < units.len() && (0xDC00..0xE000).contains(&units[index + 1]) {
+                        let combined = 0x1_0000
+                            + ((u32::from(unit) - 0xD800) << 10)
+                            + (u32::from(units[index + 1]) - 0xDC00);
+                        index += 1;
+                        char::from_u32(combined)
+                    } else {
+                        None
+                    }
+                } else if (0xDC00..0xE000).contains(&unit) {
+                    None
+                } else {
+                    char::from_u32(u32::from(unit))
+                };
+                text.push(decoded.unwrap_or(char::REPLACEMENT_CHARACTER));
+                index += 1;
+            }
+            text
+        };
+        let units_of = |bytes: &[u8], little_endian: bool| -> Vec<u16> {
+            bytes
+                .chunks_exact(2)
+                .map(|pair| {
+                    if little_endian {
+                        u16::from_le_bytes([pair[0], pair[1]])
+                    } else {
+                        u16::from_be_bytes([pair[0], pair[1]])
+                    }
+                })
+                .collect()
+        };
+        if bytes.starts_with(&[0xFF, 0xFE]) {
+            return decode_utf16(&units_of(&bytes[2..], true));
+        }
+        if bytes.starts_with(&[0xFE, 0xFF]) {
+            return decode_utf16(&units_of(&bytes[2..], false));
+        }
+        let head = &bytes[..bytes.len().min(64)];
+        if bytes.len() % 2 == 0 && head.iter().filter(|byte| **byte == 0).count() * 2 >= head.len()
+        {
+            // No BOM but NUL-dominated: Windows console UTF-16LE. The
+            // even-length chunks_exact split silently drops an odd
+            // trailing byte, if any; nothing else to recover from a
+            // heuristic decode.
+            return decode_utf16(&units_of(bytes, true));
+        }
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    /// First non-decoded line of a probe stream, for compact details.
+    fn first_probe_line(text: &str) -> &str {
+        text.lines().next().unwrap_or_default()
+    }
+
     /// Probe whether `program` is a usable shell: a `--version` spawn
     /// that exits 0 with output, and — when `required_output` is set —
     /// stdout that contains it. `None` means usable; `Some` carries the
-    /// one-line detail of what actually happened, for the fail-closed
-    /// diagnostic. The WSL launcher stub in System32 (see
-    /// [`completion_bash_program`]) fails this probe with exit 1 and a
-    /// "no installed distributions" message, which is exactly the
-    /// distinction resolution needs: a missing interpreter is never
+    /// detail of what actually happened, for the fail-closed diagnostic.
+    /// The probe is BOUNDED: a spawn that never exits is killed, reaped
+    /// (so the fake cannot linger as a zombie), and reported as
+    /// "did not exit within", never as a script failure; captured
+    /// output is capped, includes stderr alongside stdout, and is
+    /// decoded so the WSL launcher stub's UTF-16 "no installed
+    /// distributions" reads as text (see
+    /// [`completion_bash_program`]). A missing interpreter is never
     /// mislabeled as a script or boundary failure.
     fn shell_probe_failure(program: &str, required_output: Option<&str>) -> Option<String> {
-        let report = std::process::Command::new(program)
+        shell_probe_failure_with_timeout(program, required_output, SHELL_PROBE_TIMEOUT)
+    }
+
+    /// Capture one probe stream on a thread, stopping at the capture
+    /// limit and sending whatever was gathered — EOF after the kill
+    /// ends the read; a child still writing past the limit blocks on the
+    /// full pipe until the kill resolves it.
+    fn spawn_probe_capturer<R: std::io::Read + Send + 'static>(
+        mut pipe: R,
+        sender: std::sync::mpsc::Sender<Vec<u8>>,
+    ) {
+        std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                if captured.len() >= SHELL_PROBE_CAPTURE_LIMIT {
+                    break;
+                }
+                match std::io::Read::read(&mut pipe, &mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => captured.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let _ = sender.send(captured);
+        });
+    }
+
+    /// [`shell_probe_failure`] with an explicit bound, so tests can
+    /// exercise the kill-and-reap path in milliseconds instead of
+    /// waiting out the production timeout.
+    fn shell_probe_failure_with_timeout(
+        program: &str,
+        required_output: Option<&str>,
+        timeout: Duration,
+    ) -> Option<String> {
+        let mut command = std::process::Command::new(program);
+        command
             .arg("--version")
-            .output();
-        let output = match report {
-            Ok(output) => output,
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
             Err(error) => return Some(format!("`{program}` did not start ({error})")),
         };
-        if !output.status.success() {
+        let stdout_pipe = child.stdout.take().expect("probe stdout is piped");
+        let stderr_pipe = child.stderr.take().expect("probe stderr is piped");
+        let (stdout_sender, stdout_receiver) = std::sync::mpsc::channel();
+        let (stderr_sender, stderr_receiver) = std::sync::mpsc::channel();
+        // Readers stop at the capture limit: if the child keeps writing
+        // past it, the pipe fills and the child blocks — which the kill
+        // below resolves. EOF after the kill ends a reader that is still
+        // waiting, and the channel carries whatever was captured.
+        spawn_probe_capturer(stdout_pipe, stdout_sender);
+        spawn_probe_capturer(stderr_pipe, stderr_sender);
+        let started = std::time::Instant::now();
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() >= timeout => {
+                    timed_out = true;
+                    #[cfg(unix)]
+                    kill_driver_group(child.id());
+                    let _ = child.kill();
+                    break child
+                        .wait()
+                        .expect("probe child should reap after the kill");
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(_) => break child.wait().expect("probe child should reap"),
+            }
+        };
+        let stdout = decode_console_output(
+            &stdout_receiver
+                .recv_timeout(SHELL_PROBE_DRAIN_ALLOWANCE)
+                .unwrap_or_default(),
+        );
+        let stderr = decode_console_output(
+            &stderr_receiver
+                .recv_timeout(SHELL_PROBE_DRAIN_ALLOWANCE)
+                .unwrap_or_default(),
+        );
+        if timed_out {
             return Some(format!(
-                "`{program}` --version exited {}: {}",
-                output
-                    .status
-                    .code()
-                    .map_or_else(|| "by-signal".to_owned(), |code| code.to_string()),
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or_default(),
+                "`{program}` --version did not exit within {timeout:?}; killed and \
+                 reaped [exit: {status:?}] [stdout: {:?}] [stderr: {:?}]",
+                first_probe_line(&stdout),
+                first_probe_line(&stderr),
             ));
         }
-        let first_line = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-        if first_line.is_empty() {
+        if !status.success() {
+            return Some(format!(
+                "`{program}` --version exited {}: [stdout: {:?}] [stderr: {:?}]",
+                status
+                    .code()
+                    .map_or_else(|| "by-signal".to_owned(), |code| code.to_string()),
+                first_probe_line(&stdout),
+                first_probe_line(&stderr),
+            ));
+        }
+        if first_probe_line(&stdout).is_empty() {
             return Some(format!(
                 "`{program}` --version exited 0 but printed nothing"
             ));
         }
         if let Some(required) = required_output
-            && !String::from_utf8_lossy(&output.stdout).contains(required)
+            && !stdout.contains(required)
         {
             return Some(format!(
-                "`{program}` --version is not the required interpreter: {first_line}"
+                "`{program}` --version is not the required interpreter: {} \
+                 [stderr: {:?}]",
+                first_probe_line(&stdout),
+                first_probe_line(&stderr),
             ));
         }
         None
     }
 
-    /// Root directories that carry a Git for Windows installation, most
-    /// likely first: the runner images and default installers use the
-    /// 64-bit Program Files, the x86 root is the legacy fallback.
+    /// Directories a Git for Windows installation may live in, most
+    /// likely first: the system-wide Program Files locations (runner
+    /// images and the per-machine installer), and the per-user install
+    /// under `%LOCALAPPDATA%\Programs\Git` (the "current user only"
+    /// installer's default). LOCALAPPDATA has no reconstructible
+    /// fallback — the path is user-specific — so it is probed only when
+    /// the environment provides it.
     #[cfg(windows)]
-    fn git_for_windows_roots() -> Vec<String> {
-        let mut roots = Vec::new();
+    fn git_for_windows_dirs() -> Vec<String> {
+        let mut dirs = Vec::new();
         for key in ["ProgramFiles", "ProgramFiles(x86)"] {
             if let Ok(value) = std::env::var(key) {
                 if !value.trim().is_empty() {
-                    roots.push(value);
+                    dirs.push(format!("{value}\\Git"));
                 }
             }
         }
-        for fallback in ["C:\\Program Files", "C:\\Program Files (x86)"] {
-            if !roots.iter().any(|root| root == fallback) {
-                roots.push(fallback.to_owned());
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            if !local.trim().is_empty() {
+                dirs.push(format!("{local}\\Programs\\Git"));
             }
         }
-        roots
+        for fallback in ["C:\\Program Files\\Git", "C:\\Program Files (x86)\\Git"] {
+            if !dirs.iter().any(|dir| dir == fallback) {
+                dirs.push(fallback.to_owned());
+            }
+        }
+        dirs
     }
 
     /// The bash candidates [`completion_bash_program`] probes, in
-    /// order. Unix: the ambient PATH `bash`. Windows: only the standard
-    /// Git for Windows install locations — a bare `bash` on Windows
-    /// always resolves to the WSL launcher stub in System32 (the
+    /// order. Unix: the ambient PATH `bash`. Windows: only the Git for
+    /// Windows install locations — a bare `bash` on Windows always
+    /// resolves to the WSL launcher stub in System32 (the
     /// `CreateProcess` search order checks System32 before any PATH
     /// entry, so no PATH arrangement can fix it), and it is never a
     /// candidate here: a missing WSL distro is an interpreter problem,
@@ -3060,9 +3480,9 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
     #[cfg(windows)]
     fn completion_bash_candidates() -> Vec<String> {
         let mut candidates = Vec::new();
-        for root in git_for_windows_roots() {
-            candidates.push(format!("{root}\\Git\\bin\\bash.exe"));
-            candidates.push(format!("{root}\\Git\\usr\\bin\\bash.exe"));
+        for dir in git_for_windows_dirs() {
+            candidates.push(format!("{dir}\\bin\\bash.exe"));
+            candidates.push(format!("{dir}\\usr\\bin\\bash.exe"));
         }
         candidates
     }
@@ -3131,8 +3551,8 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
             RESOLVED
                 .get_or_init(|| {
                     let mut candidates = Vec::new();
-                    for root in git_for_windows_roots() {
-                        candidates.push(format!("{root}\\Git\\usr\\bin\\sh.exe"));
+                    for dir in git_for_windows_dirs() {
+                        candidates.push(format!("{dir}\\usr\\bin\\sh.exe"));
                     }
                     let mut failures = Vec::new();
                     for candidate in &candidates {
@@ -3155,6 +3575,128 @@ print("straggler", straggler, "victim", victim.pid, "cleanup", repr(failure), fl
         {
             "sh".to_owned()
         }
+    }
+
+    /// The probe must be bounded: an interpreter that never answers
+    /// `--version` is killed, reaped, and reported — never hung on, and
+    /// never misreported as a script failure. The fake reports its pid
+    /// on stderr first, so the reap is verified externally: by the time
+    /// the bounded probe returns, the pid is gone.
+    #[test]
+    #[cfg(unix)]
+    fn shell_probe_bounds_a_hanging_interpreter_and_reaps_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("probe tempdir");
+        let program = directory.path().join("hanging-interpreter");
+        std::fs::write(&program, "#!/bin/sh\necho $$ >&2\nsleep 600\n")
+            .expect("write hanging fake");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("fake executable");
+        let started = std::time::Instant::now();
+        let failure = shell_probe_failure_with_timeout(
+            &program.to_string_lossy(),
+            None,
+            Duration::from_millis(300),
+        )
+        .expect("a hanging interpreter must fail the probe");
+        assert!(
+            failure.contains("did not exit within"),
+            "the bound must be reported as a non-exit, not a script failure: {failure}"
+        );
+        assert!(
+            failure.contains("killed and reaped"),
+            "the kill must be part of the diagnostic: {failure}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the probe must finish within the bound plus drain, not hang: {:?}",
+            started.elapsed()
+        );
+        // Reap verification: the fake printed its pid, and it must be
+        // gone by the time the probe returned.
+        let pid = failure
+            .split("[stderr: \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .and_then(|line| line.trim().parse::<u32>().ok())
+            .unwrap_or_else(|| panic!("the fake's stderr should carry its pid: {failure}"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut alive = true;
+        while std::time::Instant::now() < deadline {
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "pid="])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("ps should run");
+            if !probe.success() {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!alive, "hanging fake {pid} SURVIVED the probe's kill+reap");
+    }
+
+    /// The WSL launcher stub reports "no installed distributions" as
+    /// UTF-16, which lossy UTF-8 decoding renders as interleaved NULs;
+    /// the probe's failure detail must decode it so the diagnostic
+    /// names the actual problem. The fake emits the BOM'd UTF-16LE
+    /// message and exits 1 — the stub's shape — and the decode helper
+    /// is additionally driven directly for the BOM-less heuristic, the
+    /// big-endian BOM, and lossy garbage.
+    #[test]
+    #[cfg(unix)]
+    fn shell_probe_decodes_utf16_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let message = "no installed distributions";
+        let utf16le = |text: &str| -> Vec<u8> {
+            let mut bytes = vec![0xFF, 0xFE];
+            for unit in text.encode_utf16() {
+                bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+            bytes
+        };
+        let octal =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("\\{byte:03o}")).collect() };
+        let directory = tempfile::tempdir().expect("probe tempdir");
+        let program = directory.path().join("utf16-stub");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%b' '{}' >&2\nexit 1\n",
+                octal(&utf16le(message))
+            ),
+        )
+        .expect("write utf16 stub");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("stub executable");
+        let failure =
+            shell_probe_failure_with_timeout(&program.to_string_lossy(), None, SHELL_PROBE_TIMEOUT)
+                .expect("an exiting-1 stub must fail the probe");
+        assert!(
+            failure.contains(message),
+            "the UTF-16 stderr must decode into the diagnostic: {failure}"
+        );
+        assert!(
+            !failure.contains('\u{0}'),
+            "interleaved NULs must not reach the diagnostic: {failure}"
+        );
+
+        // Decode helper, driven directly: BOM'd LE, BOM-less
+        // NUL-dominated LE, big-endian BOM, and lossy garbage never
+        // panic and never drop the message.
+        let bytes = utf16le(message);
+        assert_eq!(decode_console_output(&bytes), message);
+        assert_eq!(decode_console_output(&bytes[2..]), message);
+        let mut big_endian = vec![0xFE, 0xFF];
+        for unit in message.encode_utf16() {
+            big_endian.extend_from_slice(&unit.to_be_bytes());
+        }
+        assert_eq!(decode_console_output(&big_endian), message);
+        assert_eq!(decode_console_output(&[0xFF, 0x41]), "\u{FFFD}A");
     }
 
     #[test]
@@ -3534,17 +4076,32 @@ try:
     if not no_match:
         # The stub writes args.bin synchronously before the prompt
         # returns, but the drain above can return early on a slow
-        # machine; wait bounded for the file instead of racing it.
+        # machine, and mere existence is not enough — a review of
+        # 89485ad reproduced the creation-before-bytes race: the file
+        # can exist while its write is still in flight, so an
+        # existence-then-read can see it empty. Wait bounded for the
+        # EXPECTED literal argv content instead, keep the mismatch
+        # spelling (a stable wrong content is still a completion
+        # failure, not a wait artifact), and include the last observed
+        # content — the file never appearing reads as None — when the
+        # window closes.
         args_path = os.path.join(directory, "args.bin")
+        expected = [arg.encode() for arg in expected_args]
         deadline = time.monotonic() + 2
-        while not os.path.exists(args_path):
+        while True:
+            try:
+                with open(args_path, "rb") as stream:
+                    actual = stream.read().split(b"\0")[:-1]
+            except OSError:
+                actual = None
+            if actual == expected:
+                break
             if time.monotonic() >= deadline:
-                fail("args.bin never appeared; the completed command did not run")
+                break
             time.sleep(0.02)
-        with open(args_path, "rb") as stream:
-            actual = stream.read().split(b"\0")[:-1]
-        if actual != [arg.encode() for arg in expected_args]:
-            fail("completion produced unexpected literal argv: " + repr(actual))
+        if actual != expected:
+            fail("completion produced unexpected literal argv: " + repr(actual)
+                 + " (last observed after the bounded wait)")
     # The case's own behavior is now asserted; bash's exit is CLEANUP,
     # not the behavior under test. macOS job 134579897677 completed the
     # case exactly to here — the completed command executed and the
@@ -3555,19 +4112,44 @@ try:
     # failure, and the finally's group cleanup owns the shutdown.
     write_bounded(b"exit\n")
     deadline = time.monotonic() + 3
+    exit_status = None
     while time.monotonic() < deadline:
         try:
-            waited, _ = os.waitpid(pid, os.WNOHANG)
+            waited, status = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             # Already reaped: nothing left to wait for.
             break
         if waited == pid:
+            exit_status = status
             break
         time.sleep(0.02)
-    else:
+    # Diagnostic-only on every branch: the case itself already passed,
+    # and the finally's group cleanup owns the shutdown. A clean exit 0
+    # prints nothing; the other observations are recorded, not hidden —
+    # an exit-by-signal or a nonzero code after `exit` is exactly the
+    # kind of interpreter behavior the wedge investigation needs.
+    if exit_status is None:
         print(
             "interactive bash did not exit within 3s after 'exit'; the case "
             "itself passed and the group cleanup follows; PTY transcript: "
+            + repr(transcript),
+            file=sys.stderr,
+            flush=True,
+        )
+    elif os.WIFSIGNALED(exit_status):
+        print(
+            "interactive bash exited to signal %d after 'exit'; the case "
+            "itself passed and the group cleanup follows; PTY transcript: "
+            % os.WTERMSIG(exit_status)
+            + repr(transcript),
+            file=sys.stderr,
+            flush=True,
+        )
+    elif os.WEXITSTATUS(exit_status) != 0:
+        print(
+            "interactive bash exited %d after 'exit'; the case itself "
+            "passed and the group cleanup follows; PTY transcript: "
+            % os.WEXITSTATUS(exit_status)
             + repr(transcript),
             file=sys.stderr,
             flush=True,
