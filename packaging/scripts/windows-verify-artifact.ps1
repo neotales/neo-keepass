@@ -45,22 +45,25 @@
 #      that was checked (same resolved path, not just the same name), so
 #      the verified artifact is the one whose hash was published.
 #   8. with -Smoke: the EXTRACTED exe is executed with --version and
-#      --help under ONE deadline that encompasses execution, stream
-#      completion and cleanup. Nothing waits indefinitely: process wait,
-#      stdout/stderr drains and cleanup are all bounded by the deadline;
-#      on expiry the whole process tree is killed. On Windows the child
-#      is born INTO a kill-on-close job object (create-time assignment
-#      via PROC_THREAD_ATTRIBUTE_JOB_LIST) — no window exists in which
-#      the child or any descendant can be outside the job, so a
-#      descendant that outlives the parent while holding the redirected
-#      pipes is terminated when the job handle closes; stdin is a real
-#      handle to NUL. If the host refuses job membership, the run
-#      DEGRADES honestly: a warning is printed, containment is reported
-#      as none, and uncontained undrained pipe handles are deliberately
-#      leaked rather than closed against a possible block. Every native
-#      handle is closed on every other error path. On non-Windows hosts
-#      tree kill is best-effort but every wait stays bounded, so the
-#      harness itself can never hang.
+#      --help under ONE deadline covering execution and stream
+#      completion; cleanup is a separate, fixed, bounded allowance after
+#      the deadline (terminate+join the child <=5s, join the pipe drains
+#      after the job close <=2s each, <=9s worst case), so the harness
+#      can never hang but may return up to that allowance past the
+#      deadline. On expiry the whole process tree is killed. On Windows
+#      job containment is REQUIRED, not claimed: the child is born INTO
+#      a kill-on-close job object (create-time assignment via
+#      PROC_THREAD_ATTRIBUTE_JOB_LIST) — if the job cannot be created or
+#      the child cannot be born into it, the run FAILS CLOSED with the
+#      exact Win32 error instead of proceeding without containment;
+#      there is no window in which the child or any descendant can be
+#      outside the job, so a descendant that outlives the parent while
+#      holding the redirected pipes is terminated when the job handle
+#      closes (the smoke-ok line reports the containment it actually
+#      got). stdin is a real handle to NUL. Every native handle is
+#      closed on every error path. On non-Windows hosts the smoke run
+#      is a test seam: bounded waits, best-effort tree kill, containment
+#      reported as n/a.
 #
 # Usage:
 #   windows-verify-artifact.ps1 -Zip <zip> -BuiltExe <exe> -Version <v> `
@@ -357,14 +360,17 @@ public static class JobOps {
     // STARTUPINFOEXW on x64: STARTUPINFOW (104 bytes) + lpAttributeList (8).
     const int STARTUPINFOEXW_SIZE = 112;
 
-    public struct RunResult {
+    // CLASS, not struct: the result object is returned by reference and
+    // the finally may still touch it; a struct would be COPIED at the
+    // return statement and every later mutation would be lost to the
+    // caller.
+    public class RunResult {
         public int ExitCode;
         public string StdOut;
         public string StdErr;
         public string ErrorKind;
         public string ErrorDetail;
         public bool Contained;
-        public string Warning;
     }
 
     static Exception Win32Error(string what) {
@@ -437,24 +443,19 @@ public static class JobOps {
     public static RunResult RunBounded(string filePath, string[] arguments, int timeoutMs) {
         var r = new RunResult();
         r.ErrorKind = "";
-        r.Warning = "";
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         IntPtr job = IntPtr.Zero, attrList = IntPtr.Zero, siMem = IntPtr.Zero;
         IntPtr outR = IntPtr.Zero, outW = IntPtr.Zero, errR = IntPtr.Zero, errW = IntPtr.Zero;
         IntPtr stdinH = IntPtr.Zero, thread = IntPtr.Zero, process = IntPtr.Zero;
         Task<string> outTask = null, errTask = null;
-        bool started = false, childInJob = false, outDrained = false, errDrained = false;
+        bool started = false, outDrained = false, errDrained = false;
         try {
-            // Kill-on-close job FIRST. If the environment forbids job
-            // objects, run DEGRADED — bounded and tree-killed, reported as
-            // not contained — never claiming containment the OS did not
-            // grant.
-            try {
-                job = CreateKillOnCloseJob();
-            } catch (Exception e) {
-                r.Warning = "job creation failed (" + e.Message + ")";
-                job = IntPtr.Zero;
-            }
+            // Kill-on-close job FIRST — REQUIRED, not best-effort: if it
+            // cannot be created, or the child cannot be born into it, the
+            // run FAILS CLOSED with the exact Win32 error. A smoke run
+            // that cannot guarantee containment is never executed, and
+            // tree kill is never claimed without it.
+            job = CreateKillOnCloseJob();
 
             var sa = new SECURITY_ATTRIBUTES();
             sa.nLength = (uint)Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
@@ -483,47 +484,34 @@ public static class JobOps {
             Marshal.WriteIntPtr(siMem, 88, outW);
             Marshal.WriteIntPtr(siMem, 96, errW);
 
-            uint flags = CREATE_NO_WINDOW;
-            if (job != IntPtr.Zero) {
-                // Create-time job assignment (PROC_THREAD_ATTRIBUTE_JOB_LIST):
-                // the process is born into the job — no assignment race, no
-                // AssignProcessToJobObject compatibility call.
-                IntPtr size = IntPtr.Zero;
-                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
-                attrList = Marshal.AllocHGlobal((int)size);
-                if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref size)) throw Win32Error("InitializeProcThreadAttributeList");
-                if (!UpdateProcThreadAttribute(attrList, 0, (IntPtr)PROC_THREAD_ATTRIBUTE_JOB_LIST, ref job,
-                        (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero)) throw Win32Error("UpdateProcThreadAttribute");
-                Marshal.WriteIntPtr(siMem, 104, attrList);
-                Marshal.WriteInt32(siMem, 0, STARTUPINFOEXW_SIZE);
-                flags |= EXTENDED_STARTUPINFO_PRESENT;
-            } else {
-                Marshal.WriteInt32(siMem, 0, 104);
-            }
+            uint flags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+            // Create-time job assignment (PROC_THREAD_ATTRIBUTE_JOB_LIST):
+            // the process is born into the job — no assignment race, no
+            // AssignProcessToJobObject compatibility call. Required: a
+            // failure here fails the run closed with the exact error.
+            IntPtr size = IntPtr.Zero;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+            attrList = Marshal.AllocHGlobal((int)size);
+            if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref size)) throw Win32Error("InitializeProcThreadAttributeList");
+            if (!UpdateProcThreadAttribute(attrList, 0, (IntPtr)PROC_THREAD_ATTRIBUTE_JOB_LIST, ref job,
+                    (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero)) throw Win32Error("UpdateProcThreadAttribute");
+            Marshal.WriteIntPtr(siMem, 104, attrList);
+            Marshal.WriteInt32(siMem, 0, STARTUPINFOEXW_SIZE);
 
             var cmd = new StringBuilder(Quote(filePath));
             for (int i = 0; i < arguments.Length; i++) { cmd.Append(' '); cmd.Append(Quote(arguments[i])); }
 
             PROCESS_INFORMATION pi;
             if (!CreateProcessW(filePath, cmd.ToString(), IntPtr.Zero, IntPtr.Zero, true,
-                    flags, IntPtr.Zero, null, siMem, out pi)) {
-                int err = Marshal.GetLastWin32Error();
-                if (job != IntPtr.Zero && err == 5 /* ERROR_ACCESS_DENIED */) {
-                    // The environment refused job membership. Retry DEGRADED
-                    // (plain STARTUPINFOW, no job): the run stays bounded
-                    // and is reported as not contained.
-                    r.Warning = "job assignment refused (Win32 error " + err + "): running WITHOUT job containment";
-                    Marshal.WriteInt32(siMem, 0, 104);
-                    Marshal.WriteIntPtr(siMem, 104, IntPtr.Zero);
-                    if (!CreateProcessW(filePath, cmd.ToString(), IntPtr.Zero, IntPtr.Zero, true,
-                            CREATE_NO_WINDOW, IntPtr.Zero, null, siMem, out pi)) throw Win32Error("CreateProcessW");
-                } else {
-                    throw Win32Error("CreateProcessW (with job attribute " + (job != IntPtr.Zero ? "set" : "unset") + ", flags 0x" + flags.ToString("X") + ")");
-                }
-            }
+                    flags, IntPtr.Zero, null, siMem, out pi))
+                throw Win32Error("CreateProcessW (job attribute set, EXTENDED_STARTUPINFO_PRESENT)");
             process = pi.hProcess;
             thread = pi.hThread;
-            childInJob = job != IntPtr.Zero && r.Warning.Length == 0;
+            // Finalize the containment state BEFORE any return: the class
+            // result is shared with the caller, but ordering it here keeps
+            // the invariant explicit — a returned run either ran inside the
+            // kill-on-close job or failed.
+            r.Contained = true;
             started = true;
 
             // The parent must drop its own copies of the write ends, or
@@ -589,9 +577,10 @@ public static class JobOps {
             if (errTask != null && errTask.IsCompleted) errDrained = true;
             // 4. Every remaining native handle, on every path. The read
             // ends are closed only when nothing can still be blocked
-            // reading them: uncontained and undrained, they are leaked
-            // deliberately (reclaimed at process exit) rather than risk a
-            // CloseHandle that blocks on the escapee's open handles.
+            // reading them (drains completed, or no drains were ever
+            // started): a still-blocked reader would make CloseHandle
+            // itself block, so the handle is leaked and reclaimed at
+            // process exit instead — the run has already failed by then.
             if (attrList != IntPtr.Zero) DeleteProcThreadAttributeList(attrList);
             if (attrList != IntPtr.Zero) Marshal.FreeHGlobal(attrList);
             if (siMem != IntPtr.Zero) Marshal.FreeHGlobal(siMem);
@@ -599,16 +588,11 @@ public static class JobOps {
             if (thread != IntPtr.Zero) CloseHandle(thread);
             if (outW != IntPtr.Zero) CloseHandle(outW);
             if (errW != IntPtr.Zero) CloseHandle(errW);
-            bool closeReads = childInJob || (outDrained && errDrained);
-            if (closeReads) {
+            if ((outDrained && errDrained) || (outTask == null && errTask == null)) {
                 if (outR != IntPtr.Zero) CloseHandle(outR);
                 if (errR != IntPtr.Zero) CloseHandle(errR);
-            } else if (outR != IntPtr.Zero || errR != IntPtr.Zero) {
-                r.Warning = (r.Warning.Length > 0 ? r.Warning + "; " : r.Warning)
-                    + "uncontained and undrained: read handles leaked deliberately (reclaimed at process exit)";
             }
             if (process != IntPtr.Zero) CloseHandle(process);
-            r.Contained = started && childInJob;
         }
     }
 }
@@ -630,10 +614,14 @@ public static class JobOps {
         $null = $Process.WaitForExit(5000)
     }
 
-    # Runs a program under ONE deadline that covers execution, stream
-    # completion and cleanup. No wait in this function is unbounded: a
-    # hung child, or a descendant orphan holding the redirected pipes,
-    # surfaces as a throw (plus whole-tree kill), never a deadlock.
+    # Runs a program under ONE deadline covering execution and stream
+    # completion. CLEANUP is a separate, fixed, bounded allowance after
+    # the deadline: terminating and joining the direct child (<=5s) and
+    # joining the pipe drains after the job close (<=2s each, <=9s worst
+    # case), so the harness can never hang but may return up to that
+    # allowance past the deadline. A hung child, or a descendant orphan
+    # holding the redirected pipes, surfaces as a throw (plus
+    # whole-tree kill), never a deadlock.
     function Invoke-Bounded {
         param(
             [Parameter(Mandatory)][string] $FilePath,
@@ -642,9 +630,6 @@ public static class JobOps {
         )
         if ($isWindowsHost) {
             $r = [JobOps]::RunBounded($FilePath, $Arguments, $TimeoutSeconds * 1000)
-            if ($r.Warning) {
-                Write-Host "windows-verify: WARNING smoke containment degraded: $($r.Warning)"
-            }
             if ($r.ErrorKind -eq 'timeout') {
                 throw ("windows-verify: smoke run exceeded {0}s and was killed (whole tree): {1} {2}" -f
                     $TimeoutSeconds, $FilePath, ($Arguments -join ' '))
@@ -1030,8 +1015,8 @@ try {
                 throw ("windows-verify: smoke --help exited {0}" -f $helpRun.ExitCode)
             }
         }
-        Write-Host ("windows-verify: smoke ok (bounded {0}s, tree-kill, containment: {1}): {2}" -f
-            $SmokeTimeoutSeconds, $(if ($contained) { 'job' } else { 'none (degraded, warned above)' }), $runTarget)
+        Write-Host ("windows-verify: smoke ok (bounded {0}s, containment: {1}): {2}" -f
+            $SmokeTimeoutSeconds, $(if ($contained) { 'job' } else { 'n/a (non-Windows test seam)' }), $runTarget)
     }
 
     Write-Host "windows-verify: ok  artifact verified: $Zip"

@@ -36,11 +36,25 @@ $scripts = $PSScriptRoot
 $script:failures = 0
 
 function Assert-True {
-    param([bool] $Condition, [Parameter(Mandatory)][string] $Message)
+    param(
+        [bool] $Condition,
+        [Parameter(Mandatory)][string] $Message,
+        [string] $Diag
+    )
     if ($Condition) {
         Write-Host "ok   $Message"
     } else {
         Write-Host "FAIL $Message"
+        if ($Diag) {
+            # The first native Windows run failed all three smoke tests and
+            # its log carried ONLY the FAIL lines — the captured child
+            # output was never printed. On failure, surface it: the next
+            # native run must carry the actual diagnostic (Win32 error,
+            # fixture error) in the log, not just the assertion name.
+            Write-Host '----- captured output (first 30 lines) -----'
+            $Diag -split "`r?`n" | Select-Object -First 30 | ForEach-Object { Write-Host $_ }
+            Write-Host '----- end captured output -----'
+        }
         $script:failures += 1
     }
 }
@@ -947,7 +961,16 @@ try {
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $zip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple,
         '-Smoke', '-SmokeExeOverride', $selfPwsh)
-    Assert-True ($r.ExitCode -eq 0) 'verify: bounded smoke run passes on pwsh (--version/--help)'
+    $smokeDiag = "stdout:`n$($r.StdOut)`nstderr:`n$($r.StdErr)"
+    Assert-True ($r.ExitCode -eq 0) 'verify: bounded smoke run passes on pwsh (--version/--help)' $smokeDiag
+    if ($isWinHost) {
+        # NATIVE assertion: containment is required on Windows — a passing
+        # smoke run must report the kill-on-close job it actually got, not
+        # a best-effort claim (a containment failure throws before this
+        # line is ever printed).
+        Assert-True ($r.StdOut -match 'containment: job') `
+            'verify: Windows smoke run reports kill-on-close job containment' $smokeDiag
+    }
 
     # Hang: child itself hangs; the deadline must expire, kill the whole
     # tree, and return — never wait indefinitely. Invoked via -CommandString
@@ -958,7 +981,8 @@ try {
         "-SmokeArguments @('-NoProfile','-Command','Start-Sleep -Seconds 60') -SmokeTimeoutSeconds 3"
     $r = Invoke-Isolated -CommandString $cmd
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'exceeded 3s and was killed')) `
-        'verify: hung smoke run killed at the deadline with diagnostic'
+        'verify: hung smoke run killed at the deadline with diagnostic' `
+        "stdout:`n$($r.StdOut)`nstderr:`n$($r.StdErr)"
 
     # Orphan: the child exits immediately after spawning a descendant that
     # inherits the redirected pipes and outlives it. The harness must fail
@@ -966,12 +990,18 @@ try {
     # Windows — remove the escapee via the kill-on-close job. The fixture
     # ALWAYS writes the pid file (the failure reason when it could not
     # spawn) so a Windows-native failure diagnoses itself instead of
-    # crashing the suite on a missing file.
+    # crashing the suite on a missing file. -NoNewWindow makes the
+    # descendant ATTACH to the fixture's console instead of creating a new
+    # one, so on Windows it inherits the redirected std handles (the pipe
+    # write ends) rather than getting fresh console handles — without it
+    # the drain completes instantly and the orphan case never happens;
+    # -ErrorAction Stop makes the spawn failure catchable so it reaches
+    # the pid file instead of dying mid-assignment.
     $orphanFixture = Join-Path $work 'orphan-child.ps1'
     $orphanPidFile = Join-Path $work 'orphan-grandchild.pid'
     [IO.File]::WriteAllText($orphanFixture, "param(`$Pwsh, `$PidFile)`n" +
         "try {`n" +
-        "  `$g = Start-Process -FilePath `$Pwsh -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 15') -PassThru`n" +
+        "  `$g = Start-Process -FilePath `$Pwsh -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 15') -NoNewWindow -PassThru -ErrorAction Stop`n" +
         "  [IO.File]::WriteAllText(`$PidFile, `$g.Id)`n" +
         "} catch {`n" +
         "  [IO.File]::WriteAllText(`$PidFile, 'ERROR: ' + `$_.Exception.Message)`n" +
@@ -984,8 +1014,9 @@ try {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $r = Invoke-Isolated -CommandString $cmd
     $sw.Stop()
+    $orphanDiag = "orphan pid file: $(if (Test-Path -LiteralPath $orphanPidFile) { [IO.File]::ReadAllText($orphanPidFile).Trim() } else { '<absent>' })`nstdout:`n$($r.StdOut)`nstderr:`n$($r.StdErr)"
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'did not drain')) `
-        'verify: orphaned pipe-holding descendant detected and failed bounded'
+        'verify: orphaned pipe-holding descendant detected and failed bounded' $orphanDiag
     Assert-True ($sw.Elapsed.TotalSeconds -lt 30) 'verify: orphan case returned well within the deadline (no indefinite wait)'
     if ($isWinHost) {
         $pidFileText = if (Test-Path -LiteralPath $orphanPidFile -PathType Leaf) {
@@ -993,20 +1024,15 @@ try {
         } else {
             '<missing - fixture child never ran to the write>'
         }
-        $degraded = $r.StdOut -match 'containment degraded'
         if ($pidFileText -match '^ERROR') {
-            Assert-True $false "verify: orphan fixture could not spawn the escapee on Windows: $pidFileText"
+            Assert-True $false "verify: orphan fixture could not spawn the escapee on Windows: $pidFileText" $orphanDiag
         } elseif ($pidFileText -match '<missing') {
-            Assert-True $false "verify: orphan fixture never wrote the escapee PID (smoke child did not run); verify stderr: $($r.StdErr)"
-        } elseif ($degraded) {
-            # The host refused job containment (warned): the escapee CANNOT
-            # be asserted dead. Honest skip, never a false pass.
-            Write-Host 'skip verify: escapee survival not assertable - job containment degraded on this host'
+            Assert-True $false "verify: orphan fixture never wrote the escapee PID (smoke child did not run)" $orphanDiag
         } else {
             Start-Sleep -Milliseconds 500
             $survivor = Get-Process -Id $pidFileText -ErrorAction SilentlyContinue
             if ($null -ne $survivor) {
-                Assert-True $false 'verify: pipe-holding escapee SURVIVED the harness on Windows (kill-on-close job did not remove it)'
+                Assert-True $false 'verify: pipe-holding escapee SURVIVED the harness on Windows (kill-on-close job did not remove it)' $orphanDiag
             } else {
                 Write-Host 'ok   verify: Windows kill-on-close job removed the pipe-holding escapee (no survivor)'
             }
