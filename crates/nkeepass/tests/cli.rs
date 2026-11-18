@@ -252,6 +252,26 @@ fn subprocess_fixture_clears_home_for_default_data_resolution() {
 }
 
 #[test]
+fn isolated_command_home_lives_through_spawn_and_wait_then_is_removed() {
+    let mut raw = Command::new("sh");
+    raw.args(["-c", "test -d \"$HOME\" && sleep 0.05 && test -d \"$HOME\""]);
+    let mut command = raw.isolate_application_environment();
+    let home = command.home().to_path_buf();
+
+    let mut child = command.spawn().unwrap();
+    assert!(
+        home.is_dir(),
+        "owned home disappeared immediately after spawn"
+    );
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    assert!(home.is_dir(), "owned home disappeared before fixture drop");
+
+    drop(command);
+    assert!(!home.exists(), "owned home leaked after fixture drop");
+}
+
+#[test]
 fn context_alias_persistence_and_precedence() {
     let tmp = tempfile::tempdir().unwrap();
     // Use the platform's temporary directory so the target is absolute on every OS.
@@ -3615,8 +3635,9 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
     // work; stdin is the one a caller reaches for when the password must not sit
     // in the process environment, and it is a path worth having a test on.
     let run = |args: &[&str]| -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
-        child
+        let mut isolated_command =
+            Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+        isolated_command
             .args(args)
             .env("HOME", tmp.path())
             .env_remove("NKEEPASS_CONFIG_DIR")
@@ -3628,7 +3649,7 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = child.spawn().expect("nkp should start");
+        let mut child = isolated_command.spawn().expect("nkp should start");
         child
             .stdin
             .take()

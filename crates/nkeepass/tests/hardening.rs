@@ -66,14 +66,15 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
 }
 
 fn run_with_input(fixture: &Fixture, args: &[&str], input: &[u8]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .isolate_application_environment()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    command
         .args(["--vault", fixture.vault.to_str().unwrap()])
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
         .env_remove("NKEEPASS_TEST_PASSWORD")
         .env_remove("NKEEPASS_VAULT")
-        .env_remove("NKEEPASS_VAULT_PATH")
+        .env_remove("NKEEPASS_VAULT_PATH");
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

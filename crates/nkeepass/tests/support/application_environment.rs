@@ -80,6 +80,7 @@ impl DerefMut for IsolatedCommand {
 
 /// Wraps a command with an owned, sanitized home/XDG environment.
 pub trait IsolatedApplicationEnvironment {
+    /// Returns a command fixture that owns its sanitized home directory.
     fn isolate_application_environment(self) -> IsolatedCommand;
 }
 

@@ -188,8 +188,9 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
         vec!["--password-stdin", "secrets", "get", "--key", "login"],
         vec!["secrets", "get", "--password-stdin", "--key", "login"],
     ] {
-        let mut child = command(temp.path(), &vault, &args)
-            .env("NKEEPASS_PASSWORD", "wrong-password")
+        let mut command = command(temp.path(), &vault, &args);
+        command.env("NKEEPASS_PASSWORD", "wrong-password");
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

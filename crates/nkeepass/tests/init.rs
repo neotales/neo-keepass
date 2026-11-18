@@ -1084,7 +1084,8 @@ fn relative_init_path_is_resolved_from_the_invocation_directory() {
 fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
     let fixture = Fixture::new();
     let vault = fixture.vault("stdin.kdbx");
-    let mut child = command(&fixture, PASSWORD)
+    let mut command = command(&fixture, PASSWORD);
+    command
         .args([
             "init",
             vault.to_str().unwrap(),
@@ -1092,7 +1093,8 @@ fn the_password_stdin_source_creates_a_usable_vault_without_echoing() {
             "--iterations",
             "64",
         ])
-        .env_remove(PASSWORD_ENV)
+        .env_remove(PASSWORD_ENV);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
