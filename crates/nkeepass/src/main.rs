@@ -114,7 +114,7 @@ const CREDENTIAL_OPTIONS: &[HelpOption] = &[
 ];
 const KEY_OPTION: HelpOption = HelpOption {
     label: "-k, --key PATH",
-    summary: "Select an entry by path or entry alias.",
+    summary: "Select an entry by path or entry alias; get, set, and rm also accept it positionally.",
 };
 const FIELD_OPTION: HelpOption = HelpOption {
     label: "-F, --field FIELD",
@@ -426,7 +426,7 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "get",
-        "get --key PATH [OPTIONS]",
+        "get [PATH] [OPTIONS]",
         "Reveal one explicitly selected value.",
         GET_OPTIONS,
         NO_COMMANDS,
@@ -440,14 +440,14 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "set",
-        "set --key PATH [OPTIONS]",
+        "set [PATH] [OPTIONS]",
         "Set an entry field from explicit input.",
         SET_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "rm|remove",
-        "rm --key PATH [OPTIONS]",
+        "rm [PATH] [OPTIONS]",
         "Remove an entry or selected field.",
         RM_OPTIONS,
         NO_COMMANDS,
@@ -1800,11 +1800,16 @@ enum Positional {
     Glob,
     /// One bare target path, as `init PATH` takes.
     Path,
+    /// One entry selector for get, set, or remove.
+    Key,
 }
 
 impl Positional {
-    /// Only the two walk commands take a bare word, and only behind `--`.
+    /// Selects the deliberately narrow positional syntax for each command.
     fn for_action(action: &str) -> Self {
+        if matches!(action, "get" | "set" | "rm") {
+            return Self::Key;
+        }
         if matches!(action, "ls" | "search") {
             Self::Glob
         } else {
@@ -1856,13 +1861,21 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        if matches!(positional, Positional::Glob) && arg == "--" {
+        if matches!(positional, Positional::Glob | Positional::Key) && arg == "--" {
             i += 1;
             if i < args.len() {
-                if opts.glob.is_some() {
+                if matches!(positional, Positional::Glob) && opts.glob.is_some() {
                     return Err(err("invalid or duplicate option"));
                 }
-                opts.glob = Some(args[i].as_str());
+                if matches!(positional, Positional::Glob) {
+                    opts.glob = Some(args[i].as_str());
+                } else if opts.key.is_none() {
+                    opts.key = Some(args[i].as_str());
+                } else {
+                    return Err(err(
+                        "entry key specified more than once; use either a positional key or --key",
+                    ));
+                }
                 i += 1;
                 if i < args.len() {
                     return Err(err("invalid or duplicate option"));
@@ -1905,6 +1918,11 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
         };
         match arg {
             "--key" if opts.key.is_none() => opts.key = value,
+            "--key" => {
+                return Err(err(
+                    "entry key specified more than once; use either a positional key or --key",
+                ));
+            }
             "--field" if opts.field.is_none() => opts.field = value,
             "--username" if opts.username.is_none() => opts.username = value,
             "--url" if opts.url.is_none() => opts.url = value,
@@ -1949,6 +1967,12 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             word if !word.starts_with('-') => match positional {
                 Positional::Glob if opts.glob.is_none() => opts.glob = Some(word),
                 Positional::Path if opts.path.is_none() => opts.path = Some(word),
+                Positional::Key if opts.key.is_none() => opts.key = Some(word),
+                Positional::Key => {
+                    return Err(err(
+                        "entry key specified more than once; use either a positional key or --key",
+                    ));
+                }
                 _ => return Err(err("invalid or duplicate option")),
             },
             _ => return Err(err("invalid or duplicate option")),
@@ -6416,6 +6440,73 @@ mod tests {
         assert_eq!(normalize_cli_aliases(&command_aliases), command_aliases);
         let args = ["exec", "--", "child", "-k", "-f", "-F"].map(str::to_owned);
         assert_eq!(normalize_cli_aliases(&args), args);
+    }
+
+    #[test]
+    fn entry_key_can_be_positional_before_or_after_options_and_preserves_paths() {
+        for action in ["get", "set", "rm"] {
+            for args in [
+                vec![action, "Root/Mail Account"],
+                vec![action, "--field", "Notes", "Root/Mail Account"],
+                vec![action, "Root\\Mail Account", "--field", "Notes"],
+                vec![
+                    action,
+                    "--field",
+                    "Notes",
+                    "--",
+                    "C:\\Users\\name\\Vault\\Mail",
+                ],
+                vec![action, "--key", "Root/Mail Account"],
+            ] {
+                let values = args
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>();
+                let parsed =
+                    options(&values[1..], Positional::for_action(action)).expect("valid selector");
+                assert!(parsed.key.is_some(), "{args:?}");
+            }
+        }
+        let short = ["get", "-k", "Root/Mail Account"].map(str::to_owned);
+        let normalized = normalize_cli_aliases(&short);
+        assert!(
+            options(&normalized[1..], Positional::for_action("get"))
+                .expect("normalized short selector")
+                .key
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn entry_key_rejects_multiple_selectors_and_non_key_positionals() {
+        for args in [
+            vec!["get", "LOGIN", "--key", "LOGIN"],
+            vec!["set", "--key", "LOGIN", "OTHER"],
+            vec!["rm", "LOGIN", "OTHER"],
+            vec!["get", "--key", "LOGIN", "--key", "OTHER"],
+        ] {
+            let action = args[0];
+            let values = args
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>();
+            let error = match options(&values[1..], Positional::for_action(action)) {
+                Err(error) => error,
+                Ok(_) => panic!("duplicate selector unexpectedly succeeded: {args:?}"),
+            };
+            assert!(
+                error.0.contains("entry key specified more than once"),
+                "{args:?}: {:?}",
+                error
+            );
+        }
+        assert!(
+            options(
+                &["show".to_owned(), "LOGIN".to_owned()],
+                Positional::Forbidden
+            )
+            .is_err()
+        );
     }
 
     #[test]

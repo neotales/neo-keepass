@@ -1,7 +1,9 @@
 # Secrets and entry commands
 
-Every command below operates on the selected vault. Use `--key PATH` to
-select an entry. A key can be a slash-separated entry path or an entry alias.
+Every command below operates on the selected vault. Use `--key PATH` (or
+`-k PATH`) to select an entry. `get`, `set`, and `rm`/`remove` also accept
+the entry path or alias as their first positional argument. Do not provide
+both forms. A key can be a slash-separated entry path or an entry alias.
 Use `--field FIELD` where a command reads or changes one field.
 Field selection uses `--field FIELD` first. Without it, an entry alias's
 bound field is used; if the alias has no field binding, the command uses
@@ -79,7 +81,7 @@ byte. `null` means NUL-delimited output, not suppressed output.
 ### `secrets get`
 
 ```text
-nkp secrets get --key PATH [--field FIELD] [--format FORMAT]
+nkp secrets get [PATH] [--key PATH] [--field FIELD] [--format FORMAT]
   [--name NAME] [--is-output] [--age-encrypt] [-r KEY]... [--output PATH]
   [--clipboard]
 ```
@@ -140,7 +142,7 @@ HOTP entries. `--format` defaults to `text`; the other formats are `json`,
 ### `secrets set`
 
 ```text
-nkp secrets set --key PATH [--field FIELD] [--file PATH | --stdin]
+nkp secrets set [PATH] [--key PATH] [--field FIELD] [--file PATH | --stdin]
   [--age-decrypt -i PATH] [--username VALUE] [--url VALUE] [--notes VALUE]
   [--bin NAME=FILE_PATH]...
 ```
@@ -155,6 +157,23 @@ all requested mutations succeed, with an aggregate 16 MiB attachment input
 limit, a 256-file count limit, and no replacement of existing attachment names. `--username`, `--url`,
 and `--notes` accept direct values; those arguments can be visible in process
 listings and shell history, so use `--file` or `--stdin` for sensitive values.
+In PowerShell, for example:
+
+```powershell
+# Prompt for the value without echoing it, then pass it through stdin.
+$value = Read-Host 'New entry password' -AsSecureString
+$plain = [System.Net.NetworkCredential]::new('', $value).Password
+$plain | nkp set 'Services/Mail Account' --stdin
+
+# Or read the value from a file protected for your user.
+nkp set 'Services/Mail Account' --file "$HOME\entry-password.txt"
+```
+
+For real vault unlock passwords, prefer the hidden terminal prompt, a protected
+password file, or `--password-stdin`; do not put a literal password in a
+command. `--password VALUE` is explicitly unsafe: it can appear in shell
+history and process listings. When `--stdin` supplies the new entry value,
+unlock the vault through the interactive prompt or a separate safe source.
 With
 `--age-decrypt`, the input must be age ciphertext and `-i` or
 `--age-identity PATH` is required. The CLI supports native age identities and
@@ -174,7 +193,7 @@ entry. `--dry-run` validates and reports without saving.
 ### `secrets rm`
 
 ```text
-nkp secrets rm --key PATH --yes
+nkp secrets rm [PATH] [--key PATH] --yes
 ```
 
 Removes an entry. This command refuses `--field`; it does not delete a field.

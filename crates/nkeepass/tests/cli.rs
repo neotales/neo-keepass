@@ -965,6 +965,10 @@ fn shortcuts_fields_attachments_and_exec() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("hidden-sentinel"));
     let out = run(&["get", "--key", "LOGIN", auth[0], auth[1]]);
     assert_eq!(out.stdout, b"hidden-sentinel");
+    let out = run(&["get", "LOGIN", auth[0], auth[1]]);
+    assert_eq!(out.stdout, b"hidden-sentinel");
+    let out = run(&["get", "-k", "LOGIN", auth[0], auth[1]]);
+    assert_eq!(out.stdout, b"hidden-sentinel");
     let age_key = neotales_age::AgeKey::generate().unwrap();
     let encrypted_path = tmp.path().join("encrypted.age");
     let out = run(&[
@@ -1027,7 +1031,6 @@ fn shortcuts_fields_attachments_and_exec() {
     );
     let out = run(&[
         "set",
-        "--key",
         "LOGIN",
         "--field",
         "Notes",
@@ -1072,6 +1075,8 @@ fn shortcuts_fields_attachments_and_exec() {
     assert_eq!(json["value"], "hidden-sentinel");
     let out = run(&["rm", "--key", "LOGIN", auth[0], auth[1]]);
     assert!(!out.status.success());
+    let out = run(&["remove", "LOGIN", auth[0], auth[1]]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("removal requires --yes"));
     std::fs::write(&value_file, "field-sentinel").unwrap();
     let out = run(&[
         "field",
