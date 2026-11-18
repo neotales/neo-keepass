@@ -160,12 +160,23 @@ listings and shell history, so use `--file` or `--stdin` for sensitive values.
 In PowerShell, for example:
 
 ```powershell
-# Prompt for the value without echoing it, then pass it through stdin.
-$value = Read-Host 'New entry password' -AsSecureString
-$plain = [System.Net.NetworkCredential]::new('', $value).Password
-$plain | nkp set 'Services/Mail Account' --stdin
+# Prompt without echoing, then write exact UTF-8 bytes (no BOM or newline).
+$secure = Read-Host 'New entry password' -AsSecureString
+$plain = [System.Net.NetworkCredential]::new('', $secure).Password
+$tempFile = [System.IO.Path]::GetTempFileName()
+try {
+    [System.IO.File]::WriteAllText(
+        $tempFile, $plain, [System.Text.UTF8Encoding]::new($false)
+    )
+    nkp set 'Services/Mail Account' --file $tempFile
+}
+finally {
+    Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+    $plain = $null
+    $secure = $null
+}
 
-# Or read the value from a file protected for your user.
+# Or use an existing UTF-8 (no BOM) file whose ACL is restricted to you.
 nkp set 'Services/Mail Account' --file "$HOME\entry-password.txt"
 ```
 
@@ -174,6 +185,15 @@ password file, or `--password-stdin`; do not put a literal password in a
 command. `--password VALUE` is explicitly unsafe: it can appear in shell
 history and process listings. When `--stdin` supplies the new entry value,
 unlock the vault through the interactive prompt or a separate safe source.
+The temporary-file example works in Windows PowerShell 5.1 and PowerShell 7:
+`WriteAllText` writes UTF-8 without a BOM and does not append a line ending.
+PowerShell's ordinary string pipeline adds a line ending, so piping a string
+to `nkp set --stdin` changes the stored value; do not use that form.
+PowerShell must briefly materialize the value as a .NET string to write it,
+and deleting the temporary file is not a guarantee of secure erasure on SSDs
+or journaled filesystems.
+To select a key beginning with `-`, put `--` after the options and immediately
+before the selector, for example `nkp get --field Password -- -DashEntry`.
 With
 `--age-decrypt`, the input must be age ciphertext and `-i` or
 `--age-identity PATH` is required. The CLI supports native age identities and

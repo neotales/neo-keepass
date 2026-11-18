@@ -607,8 +607,63 @@ _nkp_complete() {
     previous="${COMP_WORDS[COMP_CWORD - 1]}"
     kind=''
     position=$((COMP_CWORD - index))
+    local positional_key_command=false selector_seen=false separator_seen=false
+    local waiting_for_value=false waiting_for_key=false invalid_option=false
+    case "$command:$action" in
+        get:*|set:*|rm:*|remove:*|secrets:get|secrets:set|secrets:rm|secrets:remove)
+            positional_key_command=true
+            ;;
+    esac
+    if [[ "$positional_key_command" == true ]]; then
+        if [[ "$command" == secrets ]]; then
+            scan=$((index + 2))
+        else
+            scan=$((index + 1))
+        fi
+        while (( scan < COMP_CWORD )); do
+            element="${COMP_WORDS[scan]}"
+            if [[ "$waiting_for_value" == true ]]; then
+                [[ "$waiting_for_key" == true ]] && selector_seen=true
+                waiting_for_value=false
+                waiting_for_key=false
+                ((scan++))
+                continue
+            fi
+            if [[ "$element" == -- ]]; then
+                separator_seen=true
+                ((scan++))
+                if (( scan < COMP_CWORD )); then
+                    selector_seen=true
+                fi
+                break
+            fi
+            case "$element" in
+                --key|-k)
+                    waiting_for_value=true
+                    waiting_for_key=true
+                    ;;
+                --field|-F|--username|--url|--notes|--bin|-b|--name|--file|-f|--output|--password|--password-env|--password-file|--key-file|--size|--format|--strategy|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
+                    waiting_for_value=true
+                    ;;
+                --yes|--dry-run|--replace|--allow-plaintext|--password-stdin|--stdin|--is-output|--clipboard|--age-encrypt|--age-decrypt)
+                    ;;
+                -*)
+                    invalid_option=true
+                    ;;
+                *)
+                    selector_seen=true
+                    ;;
+            esac
+            ((scan++))
+        done
+        if [[ "$selector_seen" == false && "$waiting_for_value" == false \
+            && "$invalid_option" == false \
+            && ( "$current" != -* || "$separator_seen" == true ) ]]; then
+            kind=keys
+        fi
+    fi
     case "$previous" in
-        --key) if [[ "$command" == group || "$command" == groups ]]; then kind='groups'; else kind='keys'; fi ;;
+        --key|-k) if [[ "$command" == group || "$command" == groups ]]; then kind='groups'; else kind='keys'; fi ;;
         --vault|-V) kind='vaults' ;;
     esac
     if [[ "$command" == context && ( "$action" == use || "$action" == rm ) && $position -eq 2 ]]; then
@@ -634,7 +689,7 @@ _nkp_complete() {
             < <(command nkp "${vault_args[@]}" __complete "$kind" "$current" 2>/dev/null)
         return
     fi
-    if [[ "$previous" == "--" ]]; then
+    if [[ "$previous" == "--" && -z "$kind" ]]; then
         return
     fi
     case "$previous:$command:$action" in
@@ -5540,6 +5595,103 @@ _nkp_complete
                 other => format!("unexpected exit status {other:?}"),
             },
             shell_interpreter_identity(&program),
+        );
+    }
+
+    #[test]
+    fn bash_positional_key_completion_stops_at_selector_and_preserves_hostile_candidates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("completion tempdir");
+        let stub = directory.path().join("nkp");
+        let log = directory.path().join("argv.bin");
+        let marker = directory.path().join("executed");
+        let hostile = format!("Root/Meta; touch {}", marker.display());
+        let shell_quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let hostile_bash = shell_quote(&hostile);
+        let stub_source = format!(
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" >> {}\nif [ \"$1\" = __complete ] && [ \"$2\" = keys ]; then printf '%s\\n' '{}'; fi\n",
+            shell_quote(&log.display().to_string()),
+            hostile.replace('\'', "'\\''")
+        );
+        std::fs::write(&stub, stub_source).expect("write completion stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700))
+            .expect("make completion stub executable");
+
+        let bash = generate("bash").expect("generate bash completion");
+        let script = format!(
+            r#"{bash}
+COMP_WORDS=(nkp get Root/Meta)
+COMP_CWORD=2
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || {{ printf 'first=[%s] count=%s\\n' "${{COMPREPLY[0]-}}" "${{#COMPREPLY[@]}}" >&2; exit 11; }}
+
+COMP_WORDS=(nkp set Root/Meta)
+COMP_CWORD=2
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || exit 17
+
+COMP_WORDS=(nkp rm Root/Meta)
+COMP_CWORD=2
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || exit 18
+
+COMP_WORDS=(nkp secrets get Root/Meta)
+COMP_CWORD=3
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || exit 19
+
+COMP_WORDS=(nkp secrets set --field Password Root/Meta)
+COMP_CWORD=5
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || exit 12
+
+COMP_WORDS=(nkp secrets remove Root/Meta)
+COMP_CWORD=3
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || exit 20
+
+COMP_WORDS=(nkp remove LOGIN '')
+COMP_CWORD=3
+_nkp_complete
+[[ "${{COMPREPLY[0]-}}" != {hostile_bash} ]] || exit 13
+
+COMP_WORDS=(nkp get --field P)
+COMP_CWORD=3
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == Password ]] || exit 14
+
+COMP_WORDS=(nkp get --field '')
+COMP_CWORD=3
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 5 && "${{COMPREPLY[0]}}" == Password ]] || exit 15
+
+COMP_WORDS=(nkp secrets rm -- '')
+COMP_CWORD=4
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || exit 16
+"#
+        );
+        let program = completion_bash_program();
+        let child_path = std::env::join_paths(std::iter::once(directory.path().to_owned()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .expect("child PATH with completion stub");
+        let output = run_shell_script(&program, &script, Some(&child_path))
+            .expect("bash completion scenario");
+        assert!(
+            output.status.success(),
+            "bash positional key completion failed: {} [interpreter: {}]",
+            subprocess_failure_detail(&output),
+            shell_interpreter_identity(&program)
+        );
+        assert!(!marker.exists(), "completion evaluated a hostile candidate");
+
+        let args = std::fs::read(log).expect("record completion protocol arguments");
+        assert!(
+            args.windows(b"__complete\0keys\0".len())
+                .any(|window| window == b"__complete\0keys\0"),
+            "completion did not use the metadata-only key protocol"
         );
     }
 

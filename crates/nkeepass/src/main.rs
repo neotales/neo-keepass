@@ -6456,6 +6456,7 @@ mod tests {
                     "--",
                     "C:\\Users\\name\\Vault\\Mail",
                 ],
+                vec![action, "--field", "Password", "--", "-DashEntry"],
                 vec![action, "--key", "Root/Mail Account"],
             ] {
                 let values = args

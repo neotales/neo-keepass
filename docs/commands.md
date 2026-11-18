@@ -53,6 +53,8 @@ public command.
 Entry selection accepts `--key PATH` or `-k PATH`; `get`, `set`, and `rm` /
 `remove` also accept the path or alias as their first positional argument.
 Do not supply both. `PATH` may be an entry path or configured entry alias.
+For a selector beginning with `-`, place `--` after options immediately
+before the selector, such as `nkp get --field Password -- -DashEntry`.
 `--field` also accepts `-F`; `--file` accepts `-f`.
 `--bin NAME=FILE_PATH` accepts `-b` and may be repeated. These short options
 are not rewritten after an `exec --` child separator. The global vault option
