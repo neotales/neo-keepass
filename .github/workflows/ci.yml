@@ -25,6 +25,8 @@ jobs:
   completion-interpreters:
     name: completion interpreters (Ubuntu 24.04)
     runs-on: ubuntu-24.04
+    # Normal run ~5-8 min (one test binary + interpreter runs); 20 ≈ 3x.
+    timeout-minutes: 20
     env:
       NKEEPASS_REQUIRE_COMPLETION_SHELLS: "1"
     steps:
@@ -45,11 +47,17 @@ jobs:
         with:
           toolchain: "1.98.1"
       - name: Run generated shell syntax tests
+        # Executes a test binary that spawns zsh/pwsh interpreters; a missing
+        # prompt can block forever, so the step is bounded tighter than the job.
+        timeout-minutes: 15
         run: cargo test -p nkeepass --bin nkeepass generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed
 
   rsa-slow-lane:
     name: RSA 16,384-bit slow lane
     runs-on: ubuntu-24.04
+    # 16,384-bit RSA keygen has high, random variance (prime search); 40
+    # covers a slow draw several times over without hiding a real hang.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,11 +67,17 @@ jobs:
           toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run the ignored 16,384-bit RSA SSH round trip
+        timeout-minutes: 30
         run: cargo test -p neotales-age --test rsa_16384 -- --ignored
 
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Cold build+test on the slowest runner is well under 30 min; 60 ≈ 2x
+    # plus headroom. Without this, GitHub's default 360 applies — run
+    # 134478538047 (macos-15) hung >75m in a Bash completion PTY test under
+    # exactly that default.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -105,11 +119,18 @@ jobs:
         run: cargo test --workspace --no-run
       - name: Test
         shell: bash
+        # Integration tests include PTY-style password prompts (#![cfg(unix)]);
+        # a prompt that never returns blocks forever, as run 134478538047 did.
+        # Bounded tighter than the job so a hang fails fast with a clear
+        # timeout instead of consuming the whole job budget.
+        timeout-minutes: 30
         run: cargo test --workspace
 
   lint:
     name: fmt and clippy
     runs-on: ubuntu-24.04
+    # fmt is seconds; clippy cold dominates (~10-15 min); 30 ≈ 2x.
+    timeout-minutes: 30
     steps:
       # Untrusted pull-request code is compiled and run by this job; the
       # checkout token must not persist into those steps.
@@ -132,6 +153,8 @@ jobs:
   packaging-tests:
     name: packaging self-tests
     runs-on: ubuntu-24.04
+    # Release build (cached ~5 min, cold ~15) + self-tests; 40 ≈ 2.5x cold.
+    timeout-minutes: 40
     steps:
       # Untrusted pull-request code is compiled and run by this job; the
       # checkout token must not persist into those steps.
@@ -148,11 +171,18 @@ jobs:
       # real builder and its metadata checked by dpkg-deb. The pacman builder
       # is skipped there (no makepkg) and exercised on Arch hosts instead.
       - name: Packaging self-tests
+        # Runs the built binary many times; bounded against a binary that
+        # blocks on input. The Build release step stays job-bounded only —
+        # no premature compile-step timeout.
+        timeout-minutes: 20
         run: packaging/test.sh target/release/nkeepass
 
   audit:
     name: cargo audit
     runs-on: ubuntu-24.04
+    # Prebuilt cargo-audit install + advisory DB fetch/scan, ~5 min; 20 ≈ 4x
+    # to absorb slow DB clones.
+    timeout-minutes: 20
     steps:
       # Untrusted pull-request code is compiled and run by this job; the
       # checkout token must not persist into those steps.

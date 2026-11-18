@@ -22,6 +22,10 @@ jobs:
   bench:
     name: criterion (ubuntu-24.04)
     runs-on: ubuntu-24.04
+    # Cold bench compile ~10-15 min plus criterion sampling; 60 ≈ 2x. The
+    # step bound (45) is the operative one for a wedged bench process; the
+    # remainder covers checkout/toolchain/cache setup.
+    timeout-minutes: 60
     steps:
       # Dispatch-only today, but the same rule: never persist the token past
       # checkout.
@@ -34,6 +38,7 @@ jobs:
           toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run benchmarks
+        timeout-minutes: 45
         env:
           # Expression-parsing fixtures for scripts/check-workflows.sh:
           # '}}' inside a single-quoted string must not end the token, and ''

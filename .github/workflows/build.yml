@@ -29,6 +29,11 @@ jobs:
   linux:
     name: linux (${{ matrix.target }})
     runs-on: ubuntu-24.04
+    # Cold cross release build is the slow leg (~20-25 min incl. toolchain
+    # install); 60 ≈ 2.5x. Job-level only: the build/package/validate steps
+    # get no step timeout (validate.sh already bounds its binary smoke run
+    # with `timeout`), so a slow cold build can never trip a premature bound.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
