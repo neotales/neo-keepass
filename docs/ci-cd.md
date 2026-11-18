@@ -262,7 +262,16 @@ that never exits is killed and reaped, never hung on, and reported as
 a non-exit; the captured output is capped and carries stderr
 alongside stdout, and UTF-16 (the stub's encoding for "no installed
 distributions") is decoded so the diagnostic reads as text. The
-Windows leg pins the resolved Git bash explicitly through the workflow
+(And an exiting parent is not enough: probes also bound stream draining;
+if a descendant inherits stdout/stderr, Unix kills the owned process
+group and returns a stream-cleanup failure. Windows has no process-tree
+containment in this probe: if a descendant keeps an inherited pipe open
+after its parent exits, the probe returns a fail-closed
+interpreter-availability diagnostic after at most the initial drain
+window plus one final cleanup window, but cannot promise that descendant
+or its detached reader thread was terminated.
+That platform limit is deliberate and explicit; this probe does not
+claim Windows tree containment.) The Windows leg pins the resolved Git bash explicitly through the workflow
 (found in the standard install paths, validated, exported via
 `NKEEPASS_COMPLETION_BASH`), and the POSIX sh half resolves `sh.exe`
 from the same Git installation, since Windows has no `sh` on PATH at

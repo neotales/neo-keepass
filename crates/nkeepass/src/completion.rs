@@ -3356,9 +3356,27 @@ else:
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => return Some(format!("`{program}` did not start ({error})")),
+        let mut child = {
+            let mut attempts = 0;
+            loop {
+                match command.spawn() {
+                    Ok(child) => break child,
+                    Err(error)
+                        if cfg!(unix) && error.raw_os_error() == Some(26) && attempts < 10 =>
+                    {
+                        // Some filesystems can briefly report ETXTBSY
+                        // immediately after a test creates an executable
+                        // script. Retry only that transient error, with a
+                        // strict small bound; all other spawn failures are
+                        // reported unchanged.
+                        attempts += 1;
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => {
+                        return Some(format!("`{program}` did not start ({error})"));
+                    }
+                }
+            }
         };
         let stdout_pipe = child.stdout.take().expect("probe stdout is piped");
         let stderr_pipe = child.stderr.take().expect("probe stderr is piped");
@@ -3388,16 +3406,68 @@ else:
                 Err(_) => break child.wait().expect("probe child should reap"),
             }
         };
-        let stdout = decode_console_output(
-            &stdout_receiver
-                .recv_timeout(SHELL_PROBE_DRAIN_ALLOWANCE)
-                .unwrap_or_default(),
-        );
-        let stderr = decode_console_output(
-            &stderr_receiver
-                .recv_timeout(SHELL_PROBE_DRAIN_ALLOWANCE)
-                .unwrap_or_default(),
-        );
+        // A successful parent exit does not imply its descendants closed
+        // the inherited pipes. Drain both streams against one deadline;
+        // if either remains open, terminate the owned Unix process group
+        // (whose id remains reserved while descendants are members), then
+        // give both readers a final bounded chance to reach EOF.
+        let drain_deadline = std::time::Instant::now() + timeout.min(SHELL_PROBE_DRAIN_ALLOWANCE);
+        let mut stdout_bytes = None;
+        let mut stderr_bytes = None;
+        while std::time::Instant::now() < drain_deadline
+            && (stdout_bytes.is_none() || stderr_bytes.is_none())
+        {
+            if stdout_bytes.is_none() {
+                stdout_bytes = stdout_receiver.try_recv().ok();
+            }
+            if stderr_bytes.is_none() {
+                stderr_bytes = stderr_receiver.try_recv().ok();
+            }
+            if stdout_bytes.is_none() || stderr_bytes.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let drain_timed_out = stdout_bytes.is_none() || stderr_bytes.is_none();
+        if drain_timed_out {
+            #[cfg(unix)]
+            kill_driver_group(child.id());
+            // On Windows std::process::Child has no process-tree kill
+            // primitive here. The direct child is already reaped; do not
+            // claim descendant containment. Fail closed below, while
+            // returning within the drain bound. A reader thread may remain
+            // blocked if a descendant holds its pipe; see docs/ci-cd.md.
+            let final_deadline = std::time::Instant::now() + SHELL_PROBE_DRAIN_ALLOWANCE;
+            while std::time::Instant::now() < final_deadline
+                && (stdout_bytes.is_none() || stderr_bytes.is_none())
+            {
+                if stdout_bytes.is_none() {
+                    stdout_bytes = stdout_receiver.try_recv().ok();
+                }
+                if stderr_bytes.is_none() {
+                    stderr_bytes = stderr_receiver.try_recv().ok();
+                }
+                if stdout_bytes.is_none() || stderr_bytes.is_none() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        let stdout = decode_console_output(&stdout_bytes.unwrap_or_default());
+        let stderr = decode_console_output(&stderr_bytes.unwrap_or_default());
+        if drain_timed_out {
+            return Some(format!(
+                "`{program}` --version exited {status:?}, but captured streams did not close \
+                 within {:?}; {} [stdout: {:?}] [stderr: {:?}]",
+                timeout.min(SHELL_PROBE_DRAIN_ALLOWANCE),
+                if cfg!(unix) {
+                    "owned Unix process group killed; stream cleanup bounded"
+                } else {
+                    "process-tree containment unavailable on this platform; \
+                     resolution failed closed"
+                },
+                first_probe_line(&stdout),
+                first_probe_line(&stderr),
+            ));
+        }
         if timed_out {
             return Some(format!(
                 "`{program}` --version did not exit within {timeout:?}; killed and \
@@ -3637,6 +3707,78 @@ else:
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(!alive, "hanging fake {pid} SURVIVED the probe's kill+reap");
+    }
+
+    /// A successful probe parent is not enough: a descendant can inherit
+    /// stdout/stderr, keep the drain threads blocked, and otherwise outlive
+    /// the probe's bound. On Unix the probe owns a process group; when the
+    /// bounded drain detects the inherited pipes, it kills that group and
+    /// returns a fail-closed stream-cleanup diagnostic. The test verifies
+    /// the descendant pid is gone when the probe returns.
+    #[test]
+    #[cfg(unix)]
+    fn shell_probe_kills_descendant_holding_streams_after_parent_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("probe tempdir");
+        let program = directory.path().join("parent-exits-interpreter");
+        let pid_file = directory.path().join("descendant.pid");
+        let quoted_pid_file = format!("'{}'", pid_file.to_string_lossy().replace('\'', "'\\''"));
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nsleep 600 &\nprintf '%s\\n' \"$!\" > {quoted_pid_file}\nprintf 'GNU bash, version 9.9.9\\n'\nexit 0\n"
+            ),
+        )
+        .expect("write parent-exits fake");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("fake executable");
+
+        let started = std::time::Instant::now();
+        let failure = shell_probe_failure_with_timeout(
+            &program.to_string_lossy(),
+            Some("GNU bash, version"),
+            Duration::from_millis(300),
+        )
+        .expect("inherited streams must fail closed even when the parent exits 0");
+        assert!(
+            failure.contains("captured streams did not close"),
+            "the failure must identify the bounded stream drain: {failure}"
+        );
+        assert!(
+            failure.contains("owned Unix process group killed"),
+            "the Unix process-group cleanup must be explicit: {failure}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "probe drain must return within its bounded cleanup allowance: {:?}",
+            started.elapsed()
+        );
+
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("fake writes descendant pid before exiting")
+            .trim()
+            .parse()
+            .expect("descendant pid is numeric");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut alive = true;
+        while std::time::Instant::now() < deadline {
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "pid="])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("ps should run");
+            if !probe.success() {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !alive,
+            "stream-holding descendant {pid} SURVIVED the owned-group cleanup"
+        );
     }
 
     /// The WSL launcher stub reports "no installed distributions" as
