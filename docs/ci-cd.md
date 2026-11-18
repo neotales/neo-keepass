@@ -198,19 +198,32 @@ Verification before anything is executed or uploaded:
      describes exactly the artifact that passed the checks (all
      regression-tested);
    - only then is the EXTRACTED exe smoke-run with `--version` and
-     `--help` under ONE deadline that encompasses execution, stream
-     completion and cleanup: process wait, pipe drains and cleanup are
-     all bounded, and on expiry the whole process tree is killed. On
-     Windows the child is created SUSPENDED, assigned to a kill-on-close
-     job object BEFORE its first instruction runs, and only then resumed —
-     a suspended process cannot spawn descendants, so there is no window
-     in which anything can be outside the job; the job handle is closed
-     in a finally that also terminates the child and closes every native
-     handle, so a descendant that outlives the parent while holding the
-     redirected pipes cannot survive the harness (the escapee's death is
-     asserted natively on Windows via a PID recorded by the fixture).
-     Non-Windows smoke runs are a test seam: bounded waits, best-effort
-     tree kill.
+     `--help` under ONE deadline covering execution and stream
+     completion; cleanup is a separate, fixed, bounded allowance after
+     the deadline (terminate+join the child ≤5s, join the pipe drains
+     after the job close ≤2s each — ≤9s worst case), so the harness can
+     never hang but may return up to that allowance past the deadline.
+     On Windows job containment is REQUIRED, not claimed: the child is
+     born INTO a kill-on-close job object (create-time assignment via
+     `PROC_THREAD_ATTRIBUTE_JOB_LIST` — no assignment race and no
+     assign-after-create call), stdin is a real handle to NUL, and if
+     the job cannot be created or the child cannot be born into it the
+     run FAILS CLOSED with the exact Win32 error — it never proceeds
+     with only direct-child termination dressed up as a tree kill. The
+     job handle is closed in a finally that also terminates the child
+     and closes the native handles, so a descendant that outlives the
+     parent while holding the redirected pipes cannot survive the
+     harness; the one exception is stated where it occurs: after a
+     failed drain the undrained pipe read handles are leaked until
+     process exit rather than risk a CloseHandle that blocks on the
+     escapee's open handles. The smoke-ok line reports the containment
+     actually established, asserted natively on Windows, and the orphan
+     fixture (spawned with `-NoNewWindow -ErrorAction Stop` so the
+     descendant inherits the redirected handles and spawn failures are
+     recorded) asserts the escapee's death by PID. Non-Windows smoke
+     runs are a test seam: bounded waits, best-effort tree kill,
+     containment reported as n/a; failed assertions print the captured
+     child output, so a native failure carries its own diagnostic.
 
 A binary that failed any check is never executed, and a mismatching
 artifact never reaches upload.
@@ -332,14 +345,28 @@ on every host with the exact source the Windows runner compiles, so C#
 syntax errors there fail on the Linux dev host too (the CS1529 class:
 a using clause after a type declaration broke only the Windows
 concatenation and was invisible locally until the first runner run).
-What a Linux host still cannot do is EXECUTE the Windows-only runner:
-`JobOps.RunBounded` (CreateProcessW with CREATE_SUSPENDED, assignment to
-the kill-on-close job before the first instruction, ResumeThread, raw
-pipe drains) is compile-checked locally and exercised only by the pwsh
-fixtures' logic on non-Windows hosts; its native behavior — STARTUPINFO
-marshaling, job semantics, and the console's propagation of redirected
-std handles to grandchildren, which the orphan fixture relies on to
-build the pipe-holding escapee — is first observed on the
-`windows-2025` runner. The same holds for the negative test that needs
+The first native Windows execution of the smoke harness (run
+44201279798, commit fd61b0f) failed every `-Smoke` test while every
+byte-level zip/SHA256SUMS test passed: the smoke harness's process
+machinery — not the archive checks — was broken on Windows. Even the
+authenticated step log carried only the FAIL assertion names and the
+missing pid file — no underlying error text, because the suite never
+printed the captured child output; failed assertions now do. The
+machinery was rebuilt against the known Windows-only failure classes
+and the follow-up review: create-time job assignment
+(PROC_THREAD_ATTRIBUTE_JOB_LIST) instead of assign-after-start, a real
+NUL stdin handle, manually marshaled STARTUPINFOEXW, exact Win32 error
+codes on every path, containment REQUIRED and fail-closed (no degraded
+uncontained smoke runs and no tree-kill claims without the job), the
+run result carried by reference (a struct would be copied at the
+return statement and the finally's state would be lost), the orphan
+fixture spawned with `-NoNewWindow -ErrorAction Stop` so the descendant
+inherits the redirected handles and spawn failures self-record, and the
+timeout documented as one deadline for execution/drain plus a separate
+bounded cleanup allowance. What a Linux host still cannot do is EXECUTE
+any of this: the rebuilt machinery is compile-checked locally and its
+first native observation is the next windows-2025 run — if a smoke test
+fails again, the log now carries the exact Win32 error and the fixture's
+recorded failure. The same holds for the negative test that needs
 symlink creation where unavailable. The suite reports these skips by
 name instead of passing silently.
