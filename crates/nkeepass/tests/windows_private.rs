@@ -63,8 +63,9 @@ fn secure_directory_rejects_regular_file_without_changing_acl() {
 }
 
 fn command(root: &Path, args: &[&str]) -> Command {
-    Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .isolate_application_environment()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    command.isolate_application_environment();
+    command
         .current_dir(root)
         .env("NKEEPASS_CONFIG_DIR", root.join("config"))
         .env("NKEEPASS_DATA_DIR", root.join("data"))
@@ -75,7 +76,8 @@ fn command(root: &Path, args: &[&str]) -> Command {
         .env_remove("NKEEPASS_VAULT")
         .env_remove("NKEEPASS_VAULT_PATH")
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    command
 }
 
 fn run(root: &Path, args: &[&str]) -> Output {

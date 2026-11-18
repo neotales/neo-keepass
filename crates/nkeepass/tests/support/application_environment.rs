@@ -5,11 +5,11 @@ use std::process::Command;
 /// Removes all supported application configuration names from a child
 /// process before a test adds the variables it intends to exercise.
 pub trait IsolatedApplicationEnvironment {
-    fn isolate_application_environment(self) -> Command;
+    fn isolate_application_environment(&mut self) -> &mut Command;
 }
 
 impl IsolatedApplicationEnvironment for Command {
-    fn isolate_application_environment(mut self) -> Command {
+    fn isolate_application_environment(&mut self) -> &mut Command {
         for name in [
             "NEO_KEEPASS_PASSWORD",
             "NKP_PASSWORD",
@@ -29,6 +29,8 @@ impl IsolatedApplicationEnvironment for Command {
             "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
             "NKP_COMPLETE_PASSWORD_ENV",
             "NKEEPASS_COMPLETE_PASSWORD_ENV",
+            "XDG_CONFIG_DIR",
+            "XDG_DATA_DIR",
         ] {
             self.env_remove(name);
         }

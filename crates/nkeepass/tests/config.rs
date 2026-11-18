@@ -185,7 +185,8 @@ impl ConfigHome {
 /// `HOME` is removed rather than pointed somewhere plausible: if any command in
 /// this group consulted it, the test would touch a real file instead of failing.
 fn run(home: &ConfigHome, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    command.isolate_application_environment();
     command
         .args(args)
         .env("XDG_CONFIG_HOME", home.home())

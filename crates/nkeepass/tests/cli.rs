@@ -153,6 +153,35 @@ fn vault_environment_aliases_are_ordered_and_empty_values_fail_closed() {
 }
 
 #[test]
+fn subprocess_fixture_isolates_xdg_directory_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let expected_home = temp.path().join("expected");
+    let canary_home = temp.path().join("must-not-be-used");
+    let vault = temp.path().join("synthetic.kdbx");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    command
+        .env("XDG_CONFIG_DIR", &canary_home)
+        .env("XDG_DATA_DIR", &canary_home);
+    let output = command
+        .isolate_application_environment()
+        .args(["context", "set", "canary", vault.to_str().unwrap()])
+        .env("XDG_CONFIG_HOME", &expected_home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(expected_home.join("nkeepass/config.json").is_file());
+    assert!(
+        !canary_home.exists(),
+        "inherited XDG override escaped fixture"
+    );
+}
+
+#[test]
 fn context_alias_persistence_and_precedence() {
     let tmp = tempfile::tempdir().unwrap();
     // Use the platform's temporary directory so the target is absolute on every OS.
@@ -3380,7 +3409,8 @@ fn help_uses_the_argv0_basename_including_executable_extension() {
         (OsString::from("/opt/tools/工具"), "工具"),
         (OsString::from_vec(b"/opt/tools/nkp-\xff".to_vec()), "nkp-�"),
     ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+        command.isolate_application_environment();
         command
             .arg0(argv0)
             .arg("secrets")
@@ -3513,7 +3543,8 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
     // work; stdin is the one a caller reaches for when the password must not sit
     // in the process environment, and it is a path worth having a test on.
     let run = |args: &[&str]| -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
+        child.isolate_application_environment();
         child
             .args(args)
             .env("HOME", tmp.path())
