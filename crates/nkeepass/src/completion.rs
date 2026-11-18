@@ -1608,8 +1608,8 @@ mod tests {
 
     /// Outcome of [`run_python_bounded`] — everything a failure diagnostic
     /// needs, including what was captured before a kill.
-    #[cfg(unix)]
     #[derive(Debug)]
+    #[cfg(unix)]
     struct BoundedDriverRun {
         /// Exit status of the direct child, including the post-kill reap
         /// when the deadline fired.
@@ -1626,6 +1626,7 @@ mod tests {
         stderr: Vec<u8>,
     }
 
+    #[cfg(unix)]
     impl BoundedDriverRun {
         fn success(&self) -> bool {
             !self.timed_out && self.status.success()
@@ -1908,6 +1909,58 @@ print("descendant", descendant.pid, flush=True)
             !alive,
             "pipe-holding escapee {descendant} SURVIVED the bounded tree kill"
         );
+    }
+
+    /// Every PTY-harness item stays `#[cfg(unix)]`-gated, item by item. The
+    /// harness needs a pty and process-group kills, and an ungated
+    /// `impl BoundedDriverRun` of a gated struct fails to compile the
+    /// Windows unit-test job even though nothing here runs on Windows.
+    /// This check is deliberately NOT `#[cfg(unix)]`: it reads the source
+    /// as text, so it runs wherever the unit tests run and catches a lost
+    /// gate on Linux before Windows CI does. It does not replace a real
+    /// cross-target check — `cargo check --target x86_64-pc-windows-msvc`
+    /// needs that target's std installed, which this machine does not have —
+    /// it guards the one structural rule this file must keep.
+    #[test]
+    fn pty_harness_items_stay_unix_gated() {
+        let source =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/completion.rs"))
+                .expect("completion.rs source should be readable");
+        let lines: Vec<&str> = source.lines().collect();
+        let gated_items = [
+            "use std::ffi::OsStr;",
+            "use std::time::Duration;",
+            "const PYTHON_DRIVER_DEADLINE",
+            "const PYTHON_DRIVER_DRAIN_ALLOWANCE",
+            "struct BoundedDriverRun",
+            "impl BoundedDriverRun",
+            "fn run_python_bounded",
+            "fn drain_capture",
+            "fn signal_driver_group",
+            "fn kill_driver_tree",
+            "fn kill_driver_group",
+            "fn bash_binary_completion_uses_readline_quoting_for_hostile_filenames",
+            "fn bounded_driver_kills_wedged_python_within_deadline",
+            "fn bounded_driver_removes_pipe_holding_descendant_no_orphan_survives",
+        ];
+        for item in gated_items {
+            let position = lines
+                .iter()
+                .position(|line| line.trim_start().starts_with(item))
+                .unwrap_or_else(|| panic!("unix-gated item not found: {item}"));
+            let previous = lines[..position]
+                .iter()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .copied()
+                .unwrap_or("");
+            assert_eq!(
+                previous.trim(),
+                "#[cfg(unix)]",
+                "unix-gated item `{item}` lost its #[cfg(unix)] attribute — \
+                 the Windows unit-test job would fail to compile"
+            );
+        }
     }
 
     fn fixture_vault_argument(pattern: &str, context: &str) -> Option<String> {
