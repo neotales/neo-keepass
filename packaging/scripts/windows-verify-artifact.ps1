@@ -289,22 +289,27 @@ public static class ZipRaw {
 // would make CloseHandle itself block, so they are leaked and reclaimed
 // at process exit — the run has already failed by then.
 public static class JobOps {
+    // x64 layout per winnt.h: LARGE_INTEGER(8)+LARGE_INTEGER(8)+DWORD(4)+pad(4)
+    // +SIZE_T(8)+SIZE_T(8)+DWORD(4)+pad(4)+ULONG_PTR(8)+DWORD(4)+DWORD(4) = 64.
+    // ActiveProcessLimit is a DWORD (the interop marshaler inserts the same
+    // padding the C compiler does, so Affinity still lands at offset 48).
     [StructLayout(LayoutKind.Sequential)]
-    struct IO_COUNTERS { public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; }
-    [StructLayout(LayoutKind.Sequential)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
         public long PerProcessUserTimeLimit;
         public long PerJobUserTimeLimit;
         public uint LimitFlags;
         public UIntPtr MinimumWorkingSetSize;
         public UIntPtr MaximumWorkingSetSize;
-        public UIntPtr ActiveProcessLimit;
+        public uint ActiveProcessLimit;
         public UIntPtr Affinity;
         public uint PriorityClass;
         public uint SchedulingClass;
     }
     [StructLayout(LayoutKind.Sequential)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    public struct IO_COUNTERS { public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; }
+    // x64 layout per winnt.h: BASIC(64)+IO_COUNTERS(48)+4xSIZE_T(32) = 144.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
         public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
         public IO_COUNTERS IoInfo;
         public UIntPtr ProcessMemoryLimit;
@@ -357,7 +362,14 @@ public static class JobOps {
     const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     const uint STARTF_USESTDHANDLES = 0x00000100;
     const uint HANDLE_FLAG_INHERIT = 0x00000001;
-    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00000200;
+    // Per winnt.h / the Microsoft docs for JOBOBJECT_BASIC_LIMIT_INFORMATION:
+    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE is 0x00002000. 0x00000200 is
+    // JOB_OBJECT_LIMIT_JOB_MEMORY — setting THAT with a zero
+    // JobMemoryLimit is exactly the combination the kernel rejects with
+    // ERROR_INVALID_PARAMETER (Win32 87), which is what native run
+    // 44206164232 logged at this call (the value had been 0x200 here,
+    // mislabeled, since the first version of this script).
+    public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
     const uint WAIT_OBJECT_0 = 0x00000000;
     const uint WAIT_TIMEOUT = 0x00000102;
     const uint GENERIC_READ = 0x80000000;
@@ -395,7 +407,17 @@ public static class JobOps {
         IntPtr ptr = Marshal.AllocHGlobal(len);
         try {
             Marshal.StructureToPtr(info, ptr, false);
-            if (!SetInformationJobObject(job, 9, ptr, len)) throw Win32Error("SetInformationJobObject");
+            // Native run 44206164232 failed HERE with Win32 error 87
+            // (ERROR_INVALID_PARAMETER): the flag value was wrong, not the
+            // layout — so the failure diagnostic now names every parameter
+            // the kernel judged, making the next native failure
+            // self-describing.
+            if (!SetInformationJobObject(job, 9, ptr, len)) {
+                throw new InvalidOperationException(
+                    "SetInformationJobObject(JobObjectExtendedLimitInformation=9) failed (Win32 error " +
+                    Marshal.GetLastWin32Error() + "): struct size " + len +
+                    ", LimitFlags 0x" + info.BasicLimitInformation.LimitFlags.ToString("X8"));
+            }
         } finally { Marshal.FreeHGlobal(ptr); }
         return job;
     }

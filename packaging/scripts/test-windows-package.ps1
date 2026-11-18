@@ -545,6 +545,38 @@ try {
         }
     }
 
+    # ---- windows-verify-artifact.ps1: job-object interop layout -------------
+    # Native run 44206164232 failed at SetInformationJobObject with Win32
+    # error 87: LimitFlags carried 0x200 (JOB_OBJECT_LIMIT_JOB_MEMORY)
+    # under the name KILL_ON_JOB_CLOSE (0x2000) — a wrong VALUE, not a
+    # wrong layout. These assertions run on any 64-bit host (the interop
+    # layout is explicit, not observed) so the sizes, the field offsets
+    # and every constant are pinned to the documented winnt.h x64 layout.
+    $verifyRaw = Get-Content -LiteralPath $verify -Raw
+    # Single-quoted so $helperSource is a regex literal, not interpolation
+    # (PowerShell does not backslash-escape $ inside double quotes).
+    $helperMatch = [regex]::Match($verifyRaw, '(?s)\$helperSource = @''\r?\n(.*?)\r?\n''@')
+    if (-not $helperMatch.Success) { throw 'test bug: helper C# source not found in verify script' }
+    Add-Type -TypeDefinition $helperMatch.Groups[1].Value
+    $basicType = [JobOps+JOBOBJECT_BASIC_LIMIT_INFORMATION]
+    $extType = [JobOps+JOBOBJECT_EXTENDED_LIMIT_INFORMATION]
+    Assert-True (([System.Runtime.InteropServices.Marshal]::SizeOf([type]$basicType) -eq 64) -and
+        ([System.Runtime.InteropServices.Marshal]::SizeOf([type][JobOps+IO_COUNTERS]) -eq 48) -and
+        ([System.Runtime.InteropServices.Marshal]::SizeOf([type]$extType) -eq 144)) `
+        'verify: job struct sizes match the documented x64 layout (64/48/144)'
+    Assert-True (([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$basicType, 'LimitFlags') -eq 16) -and
+        ([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$basicType, 'ActiveProcessLimit') -eq 40) -and
+        ([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$basicType, 'Affinity') -eq 48) -and
+        ([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$basicType, 'PriorityClass') -eq 56) -and
+        ([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$basicType, 'SchedulingClass') -eq 60)) `
+        'verify: JOBOBJECT_BASIC_LIMIT_INFORMATION field offsets match winnt.h x64'
+    Assert-True (([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$extType, 'IoInfo') -eq 64) -and
+        ([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$extType, 'ProcessMemoryLimit') -eq 112) -and
+        ([int][System.Runtime.InteropServices.Marshal]::OffsetOf([type]$extType, 'PeakJobMemoryUsed') -eq 136)) `
+        'verify: JOBOBJECT_EXTENDED_LIMIT_INFORMATION field offsets match winnt.h x64'
+    Assert-True ([JobOps]::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE -eq 0x2000) `
+        'verify: KILL_ON_JOB_CLOSE flag is 0x2000 per winnt.h (0x200 is JOB_MEMORY — the run 44206164232 root cause)'
+
     # ---- windows-verify-artifact.ps1: happy path --------------------------------
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $zip, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)

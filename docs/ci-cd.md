@@ -346,27 +346,27 @@ syntax errors there fail on the Linux dev host too (the CS1529 class:
 a using clause after a type declaration broke only the Windows
 concatenation and was invisible locally until the first runner run).
 The first native Windows execution of the smoke harness (run
-44201279798, commit fd61b0f) failed every `-Smoke` test while every
-byte-level zip/SHA256SUMS test passed: the smoke harness's process
-machinery — not the archive checks — was broken on Windows. Even the
-authenticated step log carried only the FAIL assertion names and the
-missing pid file — no underlying error text, because the suite never
-printed the captured child output; failed assertions now do. The
-machinery was rebuilt against the known Windows-only failure classes
-and the follow-up review: create-time job assignment
-(PROC_THREAD_ATTRIBUTE_JOB_LIST) instead of assign-after-start, a real
-NUL stdin handle, manually marshaled STARTUPINFOEXW, exact Win32 error
-codes on every path, containment REQUIRED and fail-closed (no degraded
-uncontained smoke runs and no tree-kill claims without the job), the
-run result carried by reference (a struct would be copied at the
-return statement and the finally's state would be lost), the orphan
-fixture spawned with `-NoNewWindow -ErrorAction Stop` so the descendant
-inherits the redirected handles and spawn failures self-record, and the
-timeout documented as one deadline for execution/drain plus a separate
-bounded cleanup allowance. What a Linux host still cannot do is EXECUTE
-any of this: the rebuilt machinery is compile-checked locally and its
-first native observation is the next windows-2025 run — if a smoke test
-fails again, the log now carries the exact Win32 error and the fixture's
-recorded failure. The same holds for the negative test that needs
-symlink creation where unavailable. The suite reports these skips by
-name instead of passing silently.
+44201279798) failed every `-Smoke` test while every byte-level
+zip/SHA256SUMS test passed; the redacted log of the second native run
+(44206164232, integrated commit 58d6395) carried the exact failure the
+diagnostics were built for: every smoke call failed before child start
+at `SetInformationJobObject` with Win32 error 87
+(ERROR_INVALID_PARAMETER). Root cause, confirmed against the Microsoft
+docs for `JOBOBJECT_BASIC_LIMIT_INFORMATION`: the constant named
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` carried the value 0x00000200 —
+which is `JOB_OBJECT_LIMIT_JOB_MEMORY` — so the call set a
+job-committed-memory limit of zero, which the kernel rejects; the real
+KILL_ON_JOB_CLOSE value is 0x00002000. The wrong value had been present
+since the first version of the script, and it explains both failed
+native runs. The fix is that one value (fail-closed behavior
+unchanged); the job structs are now public and the suite asserts the
+documented x64 layout portably (sizes 64/48/144, field offsets at
+16/40/48/56/60 and 64/112/136, flag == 0x2000), and the
+SetInformationJobObject failure diagnostic names the struct size, the
+information class and the flags value, so a future native failure of
+this call is self-describing. What a Linux host still cannot do is
+EXECUTE the Windows process machinery: the fix is compile- and
+layout-verified locally, and the next windows-2025 run is the
+behavioral confirmation. The same holds for the negative test that
+needs symlink creation where unavailable. The suite reports these skips
+by name instead of passing silently.
