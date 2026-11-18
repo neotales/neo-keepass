@@ -576,6 +576,8 @@ try {
         'verify: JOBOBJECT_EXTENDED_LIMIT_INFORMATION field offsets match winnt.h x64'
     Assert-True ([JobOps]::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE -eq 0x2000) `
         'verify: KILL_ON_JOB_CLOSE flag is 0x2000 per winnt.h (0x200 is JOB_MEMORY — the run 44206164232 root cause)'
+    Assert-True ([JobOps]::PROC_THREAD_ATTRIBUTE_JOB_LIST -eq 131085) `
+        'verify: PROC_THREAD_ATTRIBUTE_JOB_LIST is 131085 = 0x0002000D (decimal attribute number 13)'
 
     # ---- windows-verify-artifact.ps1: happy path --------------------------------
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(

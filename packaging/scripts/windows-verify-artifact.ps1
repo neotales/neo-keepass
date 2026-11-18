@@ -377,7 +377,10 @@ public static class JobOps {
     const uint FILE_SHARE_READ = 0x00000001;
     const uint FILE_SHARE_WRITE = 0x00000002;
     const uint OPEN_EXISTING = 3;
-    const long PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x00020013;
+    // PROC_THREAD_ATTRIBUTE_VALUE(NUMBER=13, THREAD=0, INPUT=1, ADDITIVE=0):
+    // NUMBER is decimal, so 13 is 0x0D (not 0x13). The latter caused
+    // ERROR_BAD_LENGTH (Win32 24) on native run 44265478904.
+    public const long PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D;
     // STARTUPINFOEXW on x64: STARTUPINFOW (104 bytes) + lpAttributeList (8).
     const int STARTUPINFOEXW_SIZE = 112;
 

@@ -542,6 +542,15 @@ Verification before anything is executed or uploaded:
 A binary that failed any check is never executed, and a mismatching
 artifact never reaches upload.
 
+The Linux arm64 cross-build installs both `gcc-aarch64-linux-gnu` and
+`libc6-dev-arm64-cross`. The latter supplies the target libc development
+headers (including `bits/libc-header-start.h`) needed when C dependencies
+such as `ring` compile; installing only the compiler is insufficient on a
+fresh runner. Windows smoke containment pins
+`PROC_THREAD_ATTRIBUTE_JOB_LIST` to `0x0002000D` (attribute number 13 is
+decimal); the portable packaging tests assert its numeric value, while only
+a native Windows runner can exercise the kernel API call.
+
 Produces the compatibility package artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
 days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (one named root:
 binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkp.exe`,

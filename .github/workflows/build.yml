@@ -77,7 +77,9 @@ jobs:
         if: matrix.cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          # The cross compiler alone does not guarantee target libc headers
+          # are present; libc's stdio headers include bits/libc-header-start.h.
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Build release
         run: cargo build --release -p nkeepass --target ${{ matrix.target }}
       - name: Strip binary
