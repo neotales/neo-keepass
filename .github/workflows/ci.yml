@@ -25,7 +25,8 @@ jobs:
   completion-interpreters:
     name: completion interpreters (Ubuntu 24.04)
     runs-on: ubuntu-24.04
-    # Normal run ~5-8 min (one test binary + interpreter runs); 20 ≈ 3x.
+    # One debug test binary plus zsh/pwsh interpreter runs; 20 is a
+    # conservative cap over a cold compile, not a measured multiple.
     timeout-minutes: 20
     env:
       NKEEPASS_REQUIRE_COMPLETION_SHELLS: "1"
@@ -55,8 +56,11 @@ jobs:
   rsa-slow-lane:
     name: RSA 16,384-bit slow lane
     runs-on: ubuntu-24.04
-    # 16,384-bit RSA keygen has high, random variance (prime search); 40
-    # covers a slow draw several times over without hiding a real hang.
+    # Round trip against a committed 16,384-bit test vector; no key
+    # generation happens at test time (see the fixture header in
+    # crates/neotales-age/tests/rsa_16384.rs). The cost is deterministic,
+    # slow-by-design RSA crypto — not a random prime-search draw. 40 is a
+    # conservative cap, not a measured multiple.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,8 +77,8 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Cold build+test on the slowest runner is well under 30 min; 60 ≈ 2x
-    # plus headroom. Without this, GitHub's default 360 applies — run
+    # Generous cap for a cold build+test on the slowest runner in the
+    # matrix. Without this, GitHub's default 360 applies — run
     # 134478538047 (macos-15) hung >75m in a Bash completion PTY test under
     # exactly that default.
     timeout-minutes: 60
@@ -129,7 +133,8 @@ jobs:
   lint:
     name: fmt and clippy
     runs-on: ubuntu-24.04
-    # fmt is seconds; clippy cold dominates (~10-15 min); 30 ≈ 2x.
+    # fmt is seconds; a cold clippy dominates the job. 30 is a conservative
+    # cap, not a measured multiple.
     timeout-minutes: 30
     steps:
       # Untrusted pull-request code is compiled and run by this job; the
@@ -153,7 +158,8 @@ jobs:
   packaging-tests:
     name: packaging self-tests
     runs-on: ubuntu-24.04
-    # Release build (cached ~5 min, cold ~15) + self-tests; 40 ≈ 2.5x cold.
+    # Cold release build plus the self-tests that run its binary. 40 is a
+    # conservative cap, not a measured multiple.
     timeout-minutes: 40
     steps:
       # Untrusted pull-request code is compiled and run by this job; the
@@ -180,8 +186,9 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-24.04
-    # Prebuilt cargo-audit install + advisory DB fetch/scan, ~5 min; 20 ≈ 4x
-    # to absorb slow DB clones.
+    # cargo-audit installs as a prebuilt binary; scan time rides on the
+    # advisory-DB fetch, which is unpinned and network-dependent. 20 is a
+    # conservative cap, not a measured multiple.
     timeout-minutes: 20
     steps:
       # Untrusted pull-request code is compiled and run by this job; the

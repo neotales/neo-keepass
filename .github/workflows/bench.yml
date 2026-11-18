@@ -22,9 +22,10 @@ jobs:
   bench:
     name: criterion (ubuntu-24.04)
     runs-on: ubuntu-24.04
-    # Cold bench compile ~10-15 min plus criterion sampling; 60 ≈ 2x. The
-    # step bound (45) is the operative one for a wedged bench process; the
-    # remainder covers checkout/toolchain/cache setup.
+    # Cold bench compile plus criterion sampling. The step bound (45) is the
+    # operative one for a wedged bench process; the remainder covers
+    # checkout/toolchain/cache setup. 60 is a conservative cap, not a
+    # measured multiple.
     timeout-minutes: 60
     steps:
       # Dispatch-only today, but the same rule: never persist the token past

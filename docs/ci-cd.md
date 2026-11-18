@@ -8,17 +8,22 @@ Nothing publishes, pushes, or opens credentials. Artifacts become workflow
 artifacts only; there is no release channel yet.
 
 **Timeouts:** every job carries an explicit `timeout-minutes` (otherwise
-GitHub's default 360 applies). Values are ~2-3x the slowest normal run of
-that job: 20-40 for the fast `ci.yml` lanes, 60 for the test matrix, build
-matrix, bench, and the Windows build. Steps that *execute* compiled
-test/binary code also carry a tighter step bound (test step 30, completion
-test 15, packaging self-tests 20, RSA lane 30, bench 45) because that is the
-class that can block forever on an unread prompt — run 134478538047
-(macos-15) hung >75m in a Bash completion PTY test under the 360 default.
-Compile, build, and package steps get no step-level timeout on purpose: the
-job bound covers them, and a slow cold build must never trip a premature
-step bound. Windows packaging steps additionally enforce their own internal
-deadlines. Bounds are generous by intent — they cap a hang, they do not
+GitHub's default 360 applies). The values — 20-40 for the fast `ci.yml`
+lanes, 60 for the test matrix, build matrix, bench, and the Windows build —
+are conservative caps chosen relative to each job's cost drivers (cold
+compiles, interpreter runs, advisory-DB fetches); they are not multiples of
+measured CI runs, and no CI timing baseline was used. Steps that *execute*
+compiled test/binary code also carry a tighter step bound (test step 30,
+completion test 15, packaging self-tests 20, RSA lane 30, bench 45) because
+that is the class that can block forever on an unread prompt — run
+134478538047 (macos-15) hung >75m in a Bash completion PTY test under the
+360 default. The RSA lane round-trips against a committed 16,384-bit test
+vector — no key generation happens at test time (see the fixture header in
+`crates/neotales-age/tests/rsa_16384.rs`) — so its cost is deterministic,
+slow-by-design crypto. Compile, build, and package steps get no step-level
+timeout on purpose: the job bound covers them, and a slow cold build must
+never trip a premature step bound. Windows packaging steps additionally
+enforce their own internal deadlines. Bounds cap a hang; they do not
 measure performance.
 
 ## `ci.yml` — test matrix, lint, audit
