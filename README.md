@@ -50,8 +50,10 @@ the password alone cannot unlock that vault. `init --size N` creates a separate
 random entry password; it does not generate or store the master password.
 If backup installation fails, init reports the sanitized cause but leaves the
 already-created vault in place. On Windows, private files are created with a
-protected current-user-only DACL and verified before writing. Filesystems that
-cannot provide that protection are rejected. Like the Unix implementation,
+protected current-user-only DACL and verified before writing. Volumes must
+advertise persistent ACL enforcement; unsupported or unqueryable volumes are
+rejected. Private directories may be owned by the built-in Administrators
+group when their DACL grants only the current user. Like the Unix implementation,
 path-based staging assumes the containing directory is not controlled by an
 adversary; it does not defend against administrators or the same user.
 

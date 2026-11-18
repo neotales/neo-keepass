@@ -316,9 +316,22 @@ impl ServiceError {
             Self::CreateExists => "vault already exists or cannot be created",
             Self::CreateDurability => "vault created but directory durability is unconfirmed",
             Self::SecureFilePermissionsUnsupported => {
-                "secure owner-only file writes are unsupported on this platform"
+                "filesystem cannot verify persistent owner-only ACL support"
             }
         }
+    }
+}
+
+fn stage_error(error: &std::io::Error, fallback: ServiceError) -> ServiceError {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        ServiceError::SecureFilePermissionsUnsupported
+    } else if cfg!(windows)
+        && error.kind() == std::io::ErrorKind::PermissionDenied
+        && fallback == ServiceError::CreateStage
+    {
+        ServiceError::CreatePermissions
+    } else {
+        fallback
     }
 }
 
@@ -1878,8 +1891,8 @@ impl VaultService {
         validate_save_model(&live.database)?;
         prepare_standard_fields_for_save(&mut live.database);
         let parent = save_parent(path);
-        let mut temp =
-            crate::private_file::new_private_temp(parent).map_err(|_| ServiceError::SaveStage)?;
+        let mut temp = crate::private_file::new_private_temp(parent)
+            .map_err(|error| stage_error(&error, ServiceError::SaveStage))?;
         KdbxFile::save(
             &live.database,
             &mut temp,
@@ -3180,8 +3193,8 @@ fn install_new_vault_with_durability(
             .map_err(|_| ServiceError::CreateDirectory)?;
     }
 
-    let mut staged =
-        crate::private_file::new_private_temp(parent).map_err(|_| ServiceError::CreateStage)?;
+    let mut staged = crate::private_file::new_private_temp(parent)
+        .map_err(|error| stage_error(&error, ServiceError::CreateStage))?;
     write(&mut staged)?;
     staged
         .as_file()
@@ -4898,6 +4911,17 @@ fn safe_metadata(value: &str) -> bool {
 mod tests {
     use super::*;
     use neotales_keepass::{Entry, Field, KdbxKdf, KdbxWriteOptions};
+
+    // Critical security branch: capability failures must not be confused with
+    // ordinary staging failures at the user-facing service boundary.
+    #[test]
+    fn capability_failure_has_a_distinct_sanitized_diagnostic() {
+        let error = std::io::Error::new(std::io::ErrorKind::Unsupported, "sensitive path");
+        let result = stage_error(&error, ServiceError::CreateStage);
+        assert_eq!(result, ServiceError::SecureFilePermissionsUnsupported);
+        assert!(!result.message().contains("sensitive path"));
+        assert!(result.message().contains("persistent owner-only ACL"));
+    }
 
     #[test]
     fn create_installs_generated_entry_with_custom_reader_bounded_kdf() {

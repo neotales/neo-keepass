@@ -63,7 +63,15 @@ fn write_private_noclobber_with(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let mut staging = new_private_temp(parent).map_err(|_| "cannot stage output")?;
+    let mut staging = new_private_temp(parent).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Unsupported {
+            "filesystem cannot verify persistent owner-only ACL support"
+        } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+            "cannot restrict output permissions"
+        } else {
+            "cannot stage output"
+        }
+    })?;
     staging
         .write_all(bytes)
         .map_err(|_| "cannot write output")?;
@@ -100,7 +108,13 @@ fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'sta
 
 #[cfg(windows)]
 fn set_owner_only_platform(path: &Path, error: &'static str) -> Result<(), &'static str> {
-    windows_private_file::secure_directory(path).map_err(|_| error)
+    windows_private_file::secure_directory(path).map_err(|cause| {
+        if cause.kind() == std::io::ErrorKind::Unsupported {
+            "filesystem cannot verify persistent owner-only ACL support"
+        } else {
+            error
+        }
+    })
 }
 
 #[cfg(any(windows, test))]

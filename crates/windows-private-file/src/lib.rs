@@ -28,16 +28,17 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation,
+    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation, IsWellKnownSid,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    GetVolumeInformationByHandleW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
 };
-use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, FILE_PERSISTENT_ACLS};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 struct Local(*mut c_void);
@@ -146,6 +147,13 @@ fn wide(path: &Path) -> io::Result<Vec<u16>> {
 ///
 /// Returns an error if creation or descriptor verification fails.
 pub fn create_new(path: &Path) -> io::Result<File> {
+    create_new_checked(path, verify)
+}
+
+fn create_new_checked(
+    path: &Path,
+    check: impl FnOnce(&File) -> io::Result<()>,
+) -> io::Result<File> {
     let sd = descriptor()?;
     let path_wide = wide(path)?;
     unsafe {
@@ -168,7 +176,7 @@ pub fn create_new(path: &Path) -> io::Result<File> {
             return Err(io::Error::last_os_error());
         }
         let file = File::from_raw_handle(handle);
-        if let Err(error) = verify(&file) {
+        if let Err(error) = check(&file) {
             drop(file);
             let _ = std::fs::remove_file(path);
             return Err(error);
@@ -177,12 +185,121 @@ pub fn create_new(path: &Path) -> io::Result<File> {
     }
 }
 
+#[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    clippy::unwrap_used,
+    reason = "security branch fixtures are kept beside the staging seam and failures must stop the test"
+)]
+mod tests {
+    use super::*;
+
+    // Critical security branch: no writable file escapes when the capability
+    // query reports that ACL enforcement is unavailable.
+    #[test]
+    fn unsupported_capability_rejects_before_returning_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("staged");
+        let error = create_new_checked(&path, |_| require_acl_flags(0)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn administrator_directory_owner_is_accepted_by_owner_policy() {
+        let text: Vec<u16> = "O:BA".encode_utf16().chain([0]).collect();
+        unsafe {
+            let mut raw = null_mut();
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    text.as_ptr(),
+                    1,
+                    &raw mut raw,
+                    null_mut()
+                ),
+                0
+            );
+            let admin_sd = Local(raw);
+            let user_sd = descriptor().unwrap();
+            let mut admin = null_mut();
+            let mut user = null_mut();
+            let mut defaulted = 0;
+            assert_ne!(
+                windows_sys::Win32::Security::GetSecurityDescriptorOwner(
+                    admin_sd.0,
+                    &raw mut admin,
+                    &raw mut defaulted
+                ),
+                0
+            );
+            assert_ne!(
+                windows_sys::Win32::Security::GetSecurityDescriptorOwner(
+                    user_sd.0,
+                    &raw mut user,
+                    &raw mut defaulted
+                ),
+                0
+            );
+            assert!(trusted_directory_owner(admin, user));
+            assert!(trusted_directory_owner(user, user));
+            assert!(!trusted_directory_owner(null_mut(), user));
+        }
+    }
+}
+
+fn require_acl_capability(file: &File) -> io::Result<()> {
+    let mut flags = 0;
+    let result = unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle().cast(),
+            null_mut(),
+            0,
+            null_mut(),
+            null_mut(),
+            &raw mut flags,
+            null_mut(),
+            0,
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem cannot establish persistent ACL capability",
+        ));
+    }
+    require_acl_flags(flags)
+}
+
+fn require_acl_flags(flags: u32) -> io::Result<()> {
+    if flags & FILE_PERSISTENT_ACLS == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem cannot establish persistent ACL capability",
+        ));
+    }
+    Ok(())
+}
+
+unsafe fn trusted_directory_owner(owner: PSID, current_user: PSID) -> bool {
+    !owner.is_null()
+        && !current_user.is_null()
+        && unsafe {
+            EqualSid(owner, current_user) != 0
+                || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0
+        }
+}
+
 /// Checks that the file has a protected DACL granting only the current user.
 ///
 /// # Errors
 ///
 /// Returns an error if the descriptor cannot be read or is not private.
 pub fn verify(file: &File) -> io::Result<()> {
+    verify_inner(file, false)
+}
+
+fn verify_inner(file: &File, allow_administrators_owner: bool) -> io::Result<()> {
+    require_acl_capability(file)?;
     unsafe {
         let expected = descriptor()?;
         let mut present = 0;
@@ -242,7 +359,9 @@ pub fn verify(file: &File) -> io::Result<()> {
                     .cast(),
                 (&raw const desired_entry.SidStart).cast_mut().cast(),
             ) != 0
-            && EqualSid(owner, (&raw const desired_entry.SidStart).cast_mut().cast()) != 0;
+            && (EqualSid(owner, (&raw const desired_entry.SidStart).cast_mut().cast()) != 0
+                || (allow_administrators_owner
+                    && IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0));
         if !valid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -276,6 +395,39 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         let file = File::from_raw_handle(handle);
+        require_acl_capability(&file)?;
+        // Do not change the ACL on a directory owned by an unrelated user.
+        let mut owner = null_mut();
+        let mut owner_sd = null_mut();
+        let code = GetSecurityInfo(
+            file.as_raw_handle().cast(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &raw mut owner_sd,
+        );
+        if code != 0 {
+            return Err(io::Error::from_raw_os_error(code.cast_signed()));
+        }
+        let owner_descriptor = Local(owner_sd);
+        let mut expected_owner = null_mut();
+        let mut defaulted_owner = 0;
+        if windows_sys::Win32::Security::GetSecurityDescriptorOwner(
+            sd.0,
+            &raw mut expected_owner,
+            &raw mut defaulted_owner,
+        ) == 0
+            || !trusted_directory_owner(owner, expected_owner)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "directory owner is not trusted",
+            ));
+        }
+        drop(owner_descriptor);
         let mut acl = null_mut();
         let mut present = 0;
         let mut defaulted = 0;
@@ -299,6 +451,6 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
         if code != 0 {
             return Err(io::Error::from_raw_os_error(code.cast_signed()));
         }
-        verify(&file)
+        verify_inner(&file, true)
     }
 }
