@@ -156,6 +156,140 @@ fn vault_environment_aliases_are_ordered_and_empty_values_fail_closed() {
 }
 
 #[test]
+fn legacy_vault_environment_variable_is_ignored_when_set_alone() {
+    use nkp_cli::{CliFixture, command};
+
+    let fixture = CliFixture::new(false);
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
+    let vault = fixture.vault().to_str().unwrap();
+    let output = command(binary, &fixture)
+        .env("HOME", fixture.directory())
+        .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory().join("data"))
+        .env("NKEEPASS_VAULT", vault)
+        .args(["context", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_ne!(
+        context["path"], vault,
+        "legacy vault variable alone unexpectedly selected its path"
+    );
+    assert_ne!(context["source"], "environment");
+}
+
+#[test]
+fn legacy_vault_path_environment_variable_is_ignored_when_set_alone() {
+    use nkp_cli::{CliFixture, command};
+
+    let fixture = CliFixture::new(false);
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
+    let vault = fixture.vault().to_str().unwrap();
+    let output = command(binary, &fixture)
+        .env("HOME", fixture.directory())
+        .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
+        .env("XDG_DATA_HOME", fixture.directory().join("data"))
+        .env("NKEEPASS_VAULT_PATH", vault)
+        .args(["context", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_ne!(
+        context["path"], vault,
+        "legacy vault-path variable alone unexpectedly selected its path"
+    );
+    assert_ne!(context["source"], "environment");
+}
+
+#[test]
+fn legacy_config_directory_environment_variable_is_ignored_when_set_alone() {
+    use nkp_cli::{CliFixture, command};
+
+    let fixture = CliFixture::new(false);
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
+    let root = fixture.directory();
+    let legacy_config = root.join("legacy-config");
+    let xdg_config = root.join("xdg-config");
+    let context_vault = root.join("context-only.kdbx");
+    let output = command(binary, &fixture)
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", root.join("xdg-data"))
+        .env("NKEEPASS_CONFIG_DIR", &legacy_config)
+        .args([
+            "context",
+            "set",
+            "legacy-check",
+            context_vault.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "context setup failed");
+    assert!(xdg_config.join("nkeepass/config.json").is_file());
+    assert!(!legacy_config.exists());
+}
+
+#[test]
+fn legacy_data_directory_environment_variable_is_ignored_when_set_alone() {
+    use nkp_cli::{CliFixture, command};
+
+    let fixture = CliFixture::new(false);
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
+    let root = fixture.directory();
+    let legacy_data = root.join("legacy-data");
+    std::fs::create_dir_all(legacy_data.join("nkeepass")).unwrap();
+    std::fs::copy(fixture.vault(), legacy_data.join("nkeepass/default.kdbx")).unwrap();
+    let xdg_data = root.join("empty-xdg-data");
+    let output = command(binary, &fixture)
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("data-test-config"))
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("NKEEPASS_DATA_DIR", &legacy_data)
+        .args(["context", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        context["path"],
+        xdg_data
+            .join("nkeepass/default.kdbx")
+            .to_string_lossy()
+            .as_ref(),
+        "legacy data setting unexpectedly redirected the default vault"
+    );
+}
+
+#[test]
+fn legacy_completion_selector_is_ignored_when_set_alone() {
+    use nkp_cli::{CliFixture, command};
+
+    let fixture = CliFixture::new(false);
+    let binary = Path::new(env!("CARGO_BIN_EXE_nkp"));
+    let vault = fixture.vault().to_str().unwrap();
+    let output = command(binary, &fixture)
+        .env(
+            "NKEEPASS_COMPLETE_PASSWORD_ENV",
+            "LEGACY_COMPLETION_TEST_PASSWORD",
+        )
+        .env("LEGACY_COMPLETION_TEST_PASSWORD", nkp_cli::MASTER_PASSWORD)
+        .args(["--vault", vault, "__complete", "entries", "Root/fixture"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "legacy completion selector changed unauthenticated completion"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "legacy completion selector enabled authenticated suggestions"
+    );
+    nkp_cli::assert_no_secrets(&output);
+}
+
+#[test]
 fn subprocess_fixture_clears_xdg_config_dir() {
     let temp = tempfile::tempdir().unwrap();
     let canary = temp.path().join("config-dir-canary");

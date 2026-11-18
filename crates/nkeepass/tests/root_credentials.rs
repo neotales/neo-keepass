@@ -125,6 +125,32 @@ fn default_password_environment_names_follow_documented_precedence() {
     }
 }
 
+#[test]
+fn legacy_password_environment_name_is_ignored_when_set_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = vault(temp.path());
+    let output = command(temp.path(), &vault, &["get", "--key", "login"])
+        .env("NKEEPASS_PASSWORD", "vault-password")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "legacy password variable alone unlocked the vault"
+    );
+    assert!(
+        !output
+            .stdout
+            .windows(b"vault-password".len())
+            .any(|window| window == b"vault-password")
+    );
+    assert!(
+        !output
+            .stderr
+            .windows(b"vault-password".len())
+            .any(|window| window == b"vault-password")
+    );
+}
+
 fn success(output: &Output) {
     assert!(
         output.status.success(),
