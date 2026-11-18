@@ -134,7 +134,9 @@ jobs:
           python_prefix="$(brew --prefix python@3.13)"
           python_bin="$python_prefix/bin/python3.13"
           "$python_bin" -c 'import os, sys; assert sys.version_info >= (3, 13), sys.version; assert callable(getattr(os, "waitid", None)) and hasattr(os, "WNOWAIT"), "os.waitid/WNOWAIT is required"; print(sys.version)'
-          printf '%s\n' "$python_prefix/bin" >> "$GITHUB_PATH"
+          # Homebrew installs the versioned executable in bin/ but puts
+          # the unversioned python3 shim in libexec/bin/ (see brew info).
+          printf '%s\n' "$python_prefix/libexec/bin" >> "$GITHUB_PATH"
       # macOS still ships bash 3.2.57 as /bin/bash, which predates
       # `compopt` (new in bash 4.0 per bash-4.0's NEWS): the
       # hostile-filename readline matrix in
@@ -158,8 +160,8 @@ jobs:
         run: |
           python_prefix="$(brew --prefix python@3.13)"
           resolved_python="$(command -v python3)"
-          if [ "$resolved_python" != "$python_prefix/bin/python3" ]; then
-            echo "::error::PATH resolves python3 to $resolved_python, not the checked Python 3.13 install at $python_prefix/bin/python3"
+          if [ "$resolved_python" != "$python_prefix/libexec/bin/python3" ]; then
+            echo "::error::PATH resolves python3 to $resolved_python, not the checked Python 3.13 shim at $python_prefix/libexec/bin/python3"
             exit 1
           fi
           "$resolved_python" -c 'import os, sys; assert sys.version_info >= (3, 13), sys.version; assert callable(getattr(os, "waitid", None)) and hasattr(os, "WNOWAIT"), "os.waitid/WNOWAIT is required"; print("PTY Python:", sys.version)'

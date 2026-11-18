@@ -226,9 +226,11 @@ absence protocol on that runner.
 The ownership protocol uses CPython `os.waitid(..., WNOWAIT)`. CPython's
 official [Python 3.13 `os.waitid` documentation](https://docs.python.org/3.13/library/os.html#os.waitid)
 states that `os.waitid` became available on macOS in 3.13. The macOS CI
-leg therefore installs Homebrew `python@3.13`, asserts the PATH-selected
-`python3` exposes both `os.waitid` and `os.WNOWAIT` before building/running
-tests, and the embedded PTY driver independently checks those APIs before
+leg therefore installs Homebrew `python@3.13`, adds its documented
+`libexec/bin` directory (which contains the unversioned `python3` shim) to
+`PATH`, and verifies that the resolved shim is from that formula and exposes
+both `os.waitid` and `os.WNOWAIT` before building/running tests. The embedded
+PTY driver independently checks those APIs before
 `pty.fork()`. Older/missing APIs fail explicitly before a child is created;
 there is no unsafe fallback signal and thus no cleanup exception can mask
 the primary failure or strand a PTY child.
