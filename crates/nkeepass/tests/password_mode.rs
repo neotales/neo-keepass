@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::process::{Command, Stdio};
 
 use neotales_keepass::{
@@ -9,6 +13,7 @@ use neotales_keepass::{
 #[test]
 fn password_value_compatibility_is_documented_and_stdin_conflicts_fail_closed() {
     let help = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .arg("--help")
         .output()
         .unwrap();
@@ -23,6 +28,7 @@ fn password_value_compatibility_is_documented_and_stdin_conflicts_fail_closed() 
     // The command must reject the ambiguous input before it tries to open a
     // vault, so this disposable path need not contain a valid database.
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             vault.to_str().unwrap(),
@@ -54,6 +60,7 @@ fn password_value_compatibility_is_documented_and_stdin_conflicts_fail_closed() 
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             vault.to_str().unwrap(),

@@ -1,0 +1,37 @@
+//! Test-only isolation for the application's environment configuration.
+
+use std::process::Command;
+
+/// Removes all supported application configuration names from a child
+/// process before a test adds the variables it intends to exercise.
+pub trait IsolatedApplicationEnvironment {
+    fn isolate_application_environment(self) -> Command;
+}
+
+impl IsolatedApplicationEnvironment for Command {
+    fn isolate_application_environment(mut self) -> Command {
+        for name in [
+            "NEO_KEEPASS_PASSWORD",
+            "NKP_PASSWORD",
+            "NKEEPASS_PASSWORD",
+            "NEO_KEEPASS_VAULT",
+            "NKP_VAULT",
+            "NKEEPASS_VAULT",
+            "NEO_KEEPASS_VAULT_PATH",
+            "NKP_VAULT_PATH",
+            "NKEEPASS_VAULT_PATH",
+            "NEO_KEEPASS_CONFIG_DIR",
+            "NKP_CONFIG_DIR",
+            "NKEEPASS_CONFIG_DIR",
+            "NEO_KEEPASS_DATA_DIR",
+            "NKP_DATA_DIR",
+            "NKEEPASS_DATA_DIR",
+            "NEO_KEEPASS_COMPLETE_PASSWORD_ENV",
+            "NKP_COMPLETE_PASSWORD_ENV",
+            "NKEEPASS_COMPLETE_PASSWORD_ENV",
+        ] {
+            self.env_remove(name);
+        }
+        self
+    }
+}

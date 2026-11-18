@@ -8,6 +8,10 @@
 #[path = "support/cli_support.rs"]
 mod nkp_cli;
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -26,6 +30,7 @@ fn expected_help(text: &str) -> String {
 
 fn cli(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(args)
         .env("XDG_CONFIG_HOME", home)
         .env_remove("NEO_KEEPASS_VAULT")
@@ -206,6 +211,7 @@ fn context_alias_persistence_and_precedence() {
     assert_eq!(show["source"], "argument");
     assert!(show["alias"].is_null());
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(["context", "show"])
         .env("XDG_CONFIG_HOME", tmp.path())
         .env("NKEEPASS_VAULT", vault)
@@ -296,6 +302,7 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
 
     let tmp = tempfile::tempdir().unwrap();
     let relative = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .current_dir(tmp.path())
         .args(["alias", "list"])
         .env("XDG_CONFIG_HOME", "relative-config")
@@ -329,6 +336,7 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
     let env_home = tmp.path().join("env-home");
     let invalid_env = OsString::from_vec(vec![0xff]);
     let environment = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(["context", "show"])
         .env("XDG_CONFIG_HOME", &env_home)
         .env("NKEEPASS_VAULT", invalid_env)
@@ -340,6 +348,7 @@ fn configuration_and_non_utf8_inputs_fail_closed() {
 
     let invalid_arg = OsString::from_vec(vec![0xfe]);
     let argument = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .arg(invalid_arg)
         .env("XDG_CONFIG_HOME", env_home)
         .output()
@@ -372,6 +381,7 @@ fn metadata_listing_never_prints_password_or_values() {
     let fixture = CliFixture::new(false);
     let vault = fixture.vault();
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             vault.to_str().unwrap(),
@@ -633,6 +643,7 @@ fn completion_scripts_are_static_for_every_advertised_shell() {
     let mut scripts = std::collections::BTreeMap::new();
     for shell in ["bash", "sh", "zsh", "fish", "powershell", "pwsh", "nushell"] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .current_dir(tmp.path())
             .env_clear()
             .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "COMPLETION_PASSWORD")
@@ -703,6 +714,7 @@ fn completion_scripts_are_static_for_every_advertised_shell() {
 fn completion_rejects_unsupported_shells_without_echoing_input() {
     let marker = "unsupported-shell-SENTINEL-827d1a";
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .env_clear()
         .args(["completion", "csh", marker])
         .output()
@@ -960,6 +972,7 @@ fn completion_protocol_omits_ambiguous_entry_and_group_paths() {
         ("groups", "Root/Foo"),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
             .env("NKEEPASS_VAULT", &vault)
             .env("NKEEPASS_COMPLETE_PASSWORD_ENV", "COMPLETION_TEST_PASSWORD")
@@ -1097,6 +1110,7 @@ fn shortcuts_fields_attachments_and_exec() {
     let vault = vault.to_str().unwrap();
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(["--vault", vault])
             .args(args)
             .env("XDG_CONFIG_HOME", tmp.path())
@@ -1426,6 +1440,7 @@ fn shortcuts_fields_attachments_and_exec() {
         assert!(out.stdout.is_empty());
     }
     let mut isolated_stdin = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "--vault",
             vault,
@@ -1579,6 +1594,7 @@ fn hostile_metadata_vault(dir: &Path) -> PathBuf {
 /// command" error rather than a global flag.
 fn run_against(vault: &Path, config: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .env("XDG_CONFIG_HOME", config)
         .env("NKEEPASS_VAULT", vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -1879,6 +1895,7 @@ fn root_prefixed_selectors_survive_unaddressable_siblings() {
     assert_eq!(selected.stdout, b"actual-child-entry");
 
     let candidates = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .env("XDG_CONFIG_HOME", &config)
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -1890,6 +1907,7 @@ fn root_prefixed_selectors_survive_unaddressable_siblings() {
     assert!(candidates.status.success());
     assert_eq!(candidates.stdout, b"Root/Valid/bad/entry\n");
     let hidden = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .env("XDG_CONFIG_HOME", &config)
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -2551,6 +2569,7 @@ fn show_and_field_ls_resolve_through_service_without_changing_json_schemas() {
 
     let run_alias = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .env("XDG_CONFIG_HOME", &config)
             .args(args)
             .stdin(Stdio::null())
@@ -2678,6 +2697,7 @@ fn ls_glob_withholds_only_matching_hostile_rows() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -2816,6 +2836,7 @@ fn ls_propagates_a_closed_stdout_pipe() {
     .unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
         .env("NKEEPASS_VAULT", &vault)
         .env("HOSTILE_TEST_PASSWORD", "hostile-test-password")
@@ -3359,7 +3380,7 @@ fn help_uses_the_argv0_basename_including_executable_extension() {
         (OsString::from("/opt/tools/工具"), "工具"),
         (OsString::from_vec(b"/opt/tools/nkp-\xff".to_vec()), "nkp-�"),
     ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
         command
             .arg0(argv0)
             .arg("secrets")
@@ -3443,6 +3464,7 @@ fn exec_passes_help_through_to_the_child_rather_than_answering_it() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args([
             "exec",
             "--key",
@@ -3491,7 +3513,7 @@ fn an_unresolvable_entry_path_says_which_of_the_reasons_it_is() {
     // work; stdin is the one a caller reaches for when the password must not sit
     // in the process environment, and it is a path worth having a test on.
     let run = |args: &[&str]| -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
         child
             .args(args)
             .env("HOME", tmp.path())

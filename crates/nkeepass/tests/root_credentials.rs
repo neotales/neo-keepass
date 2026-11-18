@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -29,7 +33,7 @@ fn vault(home: &Path) -> PathBuf {
 }
 
 fn command(home: &Path, vault: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
     command
         .args(["--vault", vault.to_str().unwrap()])
         .args(args)
@@ -209,6 +213,7 @@ fn stdin_password_works_at_root_or_command_and_overrides_the_default() {
 #[test]
 fn global_credential_help_and_static_completions_show_both_sources() {
     let help = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .arg("--help")
         .output()
         .unwrap();
@@ -220,6 +225,7 @@ fn global_credential_help_and_static_completions_show_both_sources() {
     assert!(help.contains("NKEEPASS_PASSWORD"));
     for shell in ["bash", "sh", "zsh", "fish", "powershell", "nushell"] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(["completion", shell])
             .output()
             .unwrap();

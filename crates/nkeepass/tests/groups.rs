@@ -1,10 +1,15 @@
 #![cfg(unix)]
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::Path;
 use std::process::{Command, Output};
 
 fn cli(home: &Path, vault: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .args(["--vault", vault.to_str().unwrap()])
         .args(args)
         .args(["--password-env", "GROUP_TEST_PASSWORD"])
@@ -158,6 +163,7 @@ fn cli_dry_runs_invalid_paths_and_delete_guards_keep_vault_bytes() {
 fn group_help_and_all_static_completions_include_subcommands() {
     for group in ["group", "groups"] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args([group, "add", "--help"])
             .output()
             .unwrap();
@@ -169,6 +175,7 @@ fn group_help_and_all_static_completions_include_subcommands() {
     }
     for shell in ["bash", "sh", "zsh", "fish", "powershell", "nushell"] {
         let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
             .args(["completion", shell])
             .output()
             .unwrap();

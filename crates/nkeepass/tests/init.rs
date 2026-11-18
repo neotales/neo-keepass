@@ -7,6 +7,10 @@
 //! worse than a missing feature, because the user has no way to tell it
 //! happened.
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -69,7 +73,7 @@ impl Fixture {
 }
 
 fn command(fixture: &Fixture, password: &str) -> Command {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
     child
         .current_dir(fixture.root.path())
         .env("HOME", fixture.root.path())
@@ -164,27 +168,44 @@ fn password_backup_uses_app_specific_directory_overrides() {
 }
 
 #[test]
-fn app_directory_aliases_do_not_fall_through_on_empty_and_accept_os_paths() {
-    use std::os::unix::ffi::OsStringExt;
-
+fn empty_config_alias_does_not_fall_through_to_lower_priority_directory() {
     let fixture = Fixture::new();
     let selected_config = fixture.root.path().join("empty-fallback-config");
-    let selected_data = fixture.root.path().join("empty-fallback-data");
     let empty_output = command(&fixture, PASSWORD)
         .env("NEO_KEEPASS_CONFIG_DIR", "")
         .env("NKP_CONFIG_DIR", &selected_config)
-        .env("NEO_KEEPASS_DATA_DIR", "")
-        .env("NKP_DATA_DIR", &selected_data)
         .args(with_password(&[
             "init",
-            fixture.vault("empty-dir.kdbx").to_str().unwrap(),
+            fixture.vault("empty-config-dir.kdbx").to_str().unwrap(),
         ]))
         .output()
         .unwrap();
     assert!(!empty_output.status.success());
     assert!(!selected_config.exists());
-    assert!(!selected_data.exists());
+}
 
+#[test]
+fn empty_data_alias_does_not_fall_through_to_lower_priority_directory() {
+    let fixture = Fixture::new();
+    let selected_data = fixture.root.path().join("empty-fallback-data");
+    let empty_output = command(&fixture, PASSWORD)
+        .env("NEO_KEEPASS_DATA_DIR", "")
+        .env("NKP_DATA_DIR", &selected_data)
+        .args(with_password(&[
+            "init",
+            fixture.vault("empty-data-dir.kdbx").to_str().unwrap(),
+        ]))
+        .output()
+        .unwrap();
+    assert!(!empty_output.status.success());
+    assert!(!selected_data.exists());
+}
+
+#[test]
+fn app_directory_aliases_accept_os_native_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
     let config = PathBuf::from(std::ffi::OsString::from_vec(
         fixture
             .root

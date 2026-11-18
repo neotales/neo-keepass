@@ -88,13 +88,19 @@ command and its arguments.
 
 See [vault credentials](credentials.md) for accepted password sources and
 their precedence. The child receives a fixed allowlist of environment
-variables, not the full parent environment. `NKEEPASS_*` variables are not
-passed through. The selected secret is visible to the child and to processes
+variables, not the full parent environment. `NEO_KEEPASS_*`, `NKP_*`, and
+`NKEEPASS_*` application variables are not passed through. The selected secret
+is visible to the child and to processes
 it starts, so run only trusted programs. The CLI refuses an output variable
 that already exists in the parent environment. Names must be unique and use
 ASCII letters, digits, and underscores; the first character must be a letter
-or underscore. `NKEEPASS_PASSWORD` and the environment variable selected by
-`--password-env` are reserved.
+or underscore. All three default master-password names are reserved as child
+binding names: `NEO_KEEPASS_PASSWORD`, `NKP_PASSWORD`, and
+`NKEEPASS_PASSWORD`. On Windows, reservation follows the operating system's
+case-insensitive environment-name semantics. The environment variable selected
+by `--password-env` is also reserved. None of these default password variables
+is inherited by the child; only the fixed allowlist and explicitly requested
+binding values are passed.
 
 This example uses the public `demo-user` value from the tutorial. It prompts
 for the vault password without placing it in the command. Run it in Bash:

@@ -1,6 +1,10 @@
 #![cfg(windows)]
 //! Native Windows end-to-end private write coverage with synthetic data.
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::fs::File;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -58,8 +62,9 @@ fn secure_directory_rejects_regular_file_without_changing_acl() {
     assert_eq!(std::fs::read(&file).unwrap(), b"synthetic");
 }
 
-fn run(root: &Path, args: &[&str]) -> Output {
+fn command(root: &Path, args: &[&str]) -> Command {
     Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
         .current_dir(root)
         .env("NKEEPASS_CONFIG_DIR", root.join("config"))
         .env("NKEEPASS_DATA_DIR", root.join("data"))
@@ -71,8 +76,146 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .env_remove("NKEEPASS_VAULT_PATH")
         .args(args)
         .stdin(Stdio::null())
+}
+
+fn run(root: &Path, args: &[&str]) -> Output {
+    command(root, args).output().unwrap()
+}
+
+#[test]
+fn mixed_case_environment_aliases_follow_precedence_and_cli_vault_wins() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let selected = root.join("selected.kdbx");
+    let lower = root.join("lower.kdbx");
+    let output = command(root, &["context", "show"])
+        .env("nEo_KeEpAsS_vAuLt", &selected)
+        .env("NKP_VAULT", &lower)
+        .env("NKEEPASS_VAULT", &lower)
         .output()
-        .unwrap()
+        .unwrap();
+    succeeded(&output);
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(context["path"], selected.to_string_lossy().as_ref());
+    assert_eq!(context["source"], "environment");
+
+    let explicit = root.join("explicit.kdbx");
+    let output = command(
+        root,
+        &["--vault", explicit.to_str().unwrap(), "context", "show"],
+    )
+    .env("nEo_KeEpAsS_vAuLt", "")
+    .env("NKP_VAULT", &lower)
+    .output()
+    .unwrap();
+    succeeded(&output);
+    let context: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(context["path"], explicit.to_string_lossy().as_ref());
+    assert_eq!(context["source"], "argument");
+}
+
+#[test]
+fn mixed_case_password_alias_unlocks_and_exec_reserves_aliases() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let initialized = run(
+        root,
+        &[
+            "init",
+            "vault.kdbx",
+            "--password-env",
+            "NKEEPASS_WINDOWS_TEST_PASSWORD",
+            "--iterations",
+            "64",
+        ],
+    );
+    succeeded(&initialized);
+
+    let listed = command(root, &["--vault", "vault.kdbx", "secrets", "ls"])
+        .env("nEo_KeEpAsS_pAsSwOrD", "synthetic-windows-password")
+        .env("NKP_PASSWORD", "incorrect-lower-priority")
+        .env("NKEEPASS_PASSWORD", "incorrect-legacy")
+        .output()
+        .unwrap();
+    succeeded(&listed);
+
+    let explicitly_selected = command(
+        root,
+        &[
+            "--vault",
+            "vault.kdbx",
+            "secrets",
+            "ls",
+            "--password-env",
+            "NKEEPASS_WINDOWS_TEST_PASSWORD",
+        ],
+    )
+    .env("nEo_KeEpAsS_pAsSwOrD", "incorrect-default")
+    .output()
+    .unwrap();
+    succeeded(&explicitly_selected);
+
+    for name in [
+        "NEO_KEEPASS_PASSWORD",
+        "NKP_PASSWORD",
+        "NKEEPASS_PASSWORD",
+        "nEo_KeEpAsS_pAsSwOrD",
+    ] {
+        let output = command(
+            root,
+            &[
+                "exec",
+                "--key",
+                "generated",
+                "--env",
+                name,
+                "--",
+                "cmd.exe",
+                "/c",
+                "exit 0",
+            ],
+        )
+        .output()
+        .unwrap();
+        assert!(!output.status.success(), "exec accepted reserved {name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("reserved for the master password")
+        );
+    }
+}
+
+#[test]
+fn mixed_case_config_and_data_aliases_beat_short_and_legacy_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let selected_config = root.join("selected-config");
+    let selected_data = root.join("selected-data");
+    let ignored_config = root.join("ignored-config");
+    let ignored_data = root.join("ignored-data");
+    let output = command(
+        root,
+        &[
+            "init",
+            "vault.kdbx",
+            "--password-env",
+            "NKEEPASS_WINDOWS_TEST_PASSWORD",
+            "--iterations",
+            "64",
+        ],
+    )
+    .env("nEo_KeEpAsS_cOnFiG_dIr", &selected_config)
+    .env("NEO_KEEPASS_DATA_DIR", &selected_data)
+    .env("NKP_CONFIG_DIR", &ignored_config)
+    .env("NKP_DATA_DIR", &ignored_data)
+    .output()
+    .unwrap();
+    succeeded(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let backup = Path::new(report["password_backup"].as_str().unwrap());
+    assert_eq!(backup.parent(), Some(selected_data.as_path()));
+    assert!(selected_config.join("init-password.agekey").is_file());
+    assert!(!ignored_config.exists());
+    assert!(!ignored_data.exists());
 }
 
 fn succeeded(output: &Output) {

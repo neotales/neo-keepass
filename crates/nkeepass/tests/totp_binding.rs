@@ -8,6 +8,10 @@
 //! produce. A code is safe to hand to a child process; the seed is not, and it is
 //! the thing this suite asserts is absent from every output.
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -97,6 +101,7 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
         command.extend_from_slice(&auth());
     }
     Command::new(nkp())
+        .isolate_application_environment()
         .current_dir(fixture.directory.path())
         .env("NKEEPASS_VAULT", &fixture.vault)
         .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD)
@@ -300,6 +305,7 @@ fn exec_rejects_a_repeated_field_for_one_key() {
 fn exec_refuses_an_existing_binding_name_before_starting_the_child() {
     let fixture = Fixture::new(TOTP_URI);
     let output = Command::new(nkp())
+        .isolate_application_environment()
         .current_dir(fixture.directory.path())
         .env("NKEEPASS_VAULT", &fixture.vault)
         .env("NKEEPASS_TOTP_TEST_PASSWORD", PASSWORD)

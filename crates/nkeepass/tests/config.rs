@@ -16,6 +16,10 @@
 //! these tests are what keeps that true: a parallel writer would pass every
 //! behavioural test above and fail the ones below.
 
+#[path = "support/application_environment.rs"]
+mod application_environment;
+use application_environment::IsolatedApplicationEnvironment;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -181,7 +185,7 @@ impl ConfigHome {
 /// `HOME` is removed rather than pointed somewhere plausible: if any command in
 /// this group consulted it, the test would touch a real file instead of failing.
 fn run(home: &ConfigHome, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
     command
         .args(args)
         .env("XDG_CONFIG_HOME", home.home())
