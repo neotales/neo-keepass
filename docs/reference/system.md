@@ -127,6 +127,17 @@ and `nushell`. Filesystem path completion after `set --bin NAME=` is provided
 by the Bash completion script; other generated shell scripts currently complete
 the command and option vocabulary but leave that path to manual entry.
 
+The tested quoting of that `--bin NAME=` filename completion — candidates
+inserted so hostile filenames travel to the command as one literal argument —
+requires Bash 4.0 or newer: the script asks readline for `compopt` no-quoting
+behavior, and `compopt` first appeared in Bash 4.0. Stock Bash 3.2 — still the
+default `/bin/bash` on macOS — predates it and may misquote those filename
+candidates or insert them at the wrong position. That is the extent of the
+difference on 3.2: the script itself loads, command and option completion
+work, and the dynamic vault/keys completion paths work; CI keeps exactly
+those paths exercised against a native Bash 3.2 canary, so a regression
+there fails the build rather than surfacing on user machines.
+
 ## `version`
 
 ```text
