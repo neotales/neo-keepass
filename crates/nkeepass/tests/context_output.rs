@@ -230,6 +230,14 @@ fn generated_master_is_recoverable_without_output_disclosure() {
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(report["master_password_generated"], true);
     assert_eq!(report["age_identity_created"], true);
+    assert_eq!(
+        report["directory_sync_policy"],
+        if cfg!(unix) {
+            "required"
+        } else {
+            "unconfirmed"
+        }
+    );
     let key = std::fs::read_to_string(report["age_identity"].as_str().unwrap()).unwrap();
     let identity = neotales_age::AgeIdentity::from_private_key(key.trim()).unwrap();
     let ciphertext = std::fs::read_to_string(report["password_backup"].as_str().unwrap()).unwrap();
@@ -266,7 +274,6 @@ fn generated_master_is_recoverable_without_output_disclosure() {
     drop(child.stdin.take());
     assert!(child.wait_with_output().unwrap().status.success());
 
-    #[cfg(unix)]
     {
         let second = run(
             root.path(),
@@ -389,7 +396,6 @@ fn closed_output_recovers_from_multiple_private_candidate_records() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn concurrent_generated_init_keeps_winner_and_unused_backup_distinct() {
     let root = tempfile::tempdir().unwrap();
@@ -489,7 +495,6 @@ fn generated_init_refuses_invalid_existing_identity_without_clobber() {
     assert_eq!(std::fs::read(identity).unwrap(), b"synthetic-invalid-key");
 }
 
-#[cfg(unix)]
 #[test]
 fn init_text_reports_backup_identity_creation_and_reuse() {
     let root = tempfile::tempdir().unwrap();

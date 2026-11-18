@@ -137,35 +137,178 @@ fn generated_master_backup_and_default_context_are_private() {
 }
 
 #[test]
-fn generated_master_reuse_fails_closed_when_directory_sync_is_unavailable() {
+fn sequential_initializers_reuse_identity_and_recover_after_closed_output() {
+    use std::io::Write;
     let temp = tempfile::tempdir().unwrap();
-    let first = run(
-        temp.path(),
-        &[
+    let root = temp.path();
+    for (name, generated) in [
+        ("first.kdbx", true),
+        ("second.kdbx", true),
+        ("supplied.kdbx", false),
+    ] {
+        let mut args = vec!["init", name, "--json", "--iterations", "64"];
+        if generated {
+            args.push("--generate-master-password");
+        } else {
+            args.extend(["--password-env", "NKEEPASS_WINDOWS_TEST_PASSWORD"]);
+        }
+        let output = run(root, &args);
+        succeeded(&output);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["directory_sync_policy"], "unconfirmed");
+        assert_eq!(report["age_identity_created"], name == "first.kdbx");
+        let key = zeroize::Zeroizing::new(
+            std::fs::read_to_string(report["age_identity"].as_str().unwrap()).unwrap(),
+        );
+        let identity = neotales_age::AgeIdentity::from_private_key(key.trim()).unwrap();
+        let ciphertext =
+            std::fs::read_to_string(report["password_backup"].as_str().unwrap()).unwrap();
+        let password = zeroize::Zeroizing::new(
+            neotales_age::AgeFile::decrypt_armored(&ciphertext, &[identity]).unwrap(),
+        );
+        for channel in [&output.stdout, &output.stderr] {
+            assert!(
+                !channel
+                    .windows(password.len())
+                    .any(|bytes| bytes == password.as_slice())
+            );
+            assert!(
+                !channel
+                    .windows(key.trim().len())
+                    .any(|bytes| bytes == key.trim().as_bytes())
+            );
+        }
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .current_dir(root)
+            .env("NKEEPASS_CONFIG_DIR", root.join("config"))
+            .env("NKEEPASS_DATA_DIR", root.join("data"))
+            .env_remove("NKEEPASS_VAULT")
+            .env_remove("NKEEPASS_VAULT_PATH")
+            .args([
+                "--vault",
+                report["path"].as_str().unwrap(),
+                "secrets",
+                "ls",
+                "--password-stdin",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(&password).unwrap();
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .current_dir(root)
+        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NKEEPASS_DATA_DIR", root.join("data"))
+        .env_remove("NKEEPASS_VAULT")
+        .env_remove("NKEEPASS_VAULT_PATH")
+        .args([
             "init",
-            "first.kdbx",
+            "closed.kdbx",
             "--generate-master-password",
             "--iterations",
             "64",
-        ],
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+    let _status = child.wait().unwrap();
+    let target = root.join("closed.kdbx");
+    assert!(target.is_file());
+    let candidate = std::fs::read_dir(root.join("data"))
+        .unwrap()
+        .map(|item| item.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|path| {
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).ok()
+        })
+        .find(|value| {
+            value["vault"]
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(target.to_str().unwrap()))
+        })
+        .unwrap();
+    assert_eq!(candidate["directory_sync_policy"], "unconfirmed");
+    let identity = neotales_age::AgeIdentity::from_private_key(
+        std::fs::read_to_string(candidate["age_identity"].as_str().unwrap())
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let password = zeroize::Zeroizing::new(
+        neotales_age::AgeFile::decrypt_armored(
+            &std::fs::read_to_string(candidate["password_backup"].as_str().unwrap()).unwrap(),
+            &[identity],
+        )
+        .unwrap(),
     );
-    succeeded(&first);
-    let second = run(
-        temp.path(),
-        &[
+    let mut opened = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .current_dir(root)
+        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NKEEPASS_DATA_DIR", root.join("data"))
+        .env_remove("NKEEPASS_VAULT")
+        .env_remove("NKEEPASS_VAULT_PATH")
+        .args([
+            "--vault",
+            target.to_str().unwrap(),
+            "secrets",
+            "ls",
+            "--password-stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    opened.stdin.as_mut().unwrap().write_all(&password).unwrap();
+    drop(opened.stdin.take());
+    assert!(opened.wait().unwrap().success());
+    let mut supplied = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .current_dir(root)
+        .env("NKEEPASS_CONFIG_DIR", root.join("config"))
+        .env("NKEEPASS_DATA_DIR", root.join("data"))
+        .env(
+            "NKEEPASS_WINDOWS_TEST_PASSWORD",
+            "synthetic-windows-password",
+        )
+        .env_remove("NKEEPASS_VAULT")
+        .env_remove("NKEEPASS_VAULT_PATH")
+        .args([
             "init",
-            "second.kdbx",
-            "--generate-master-password",
+            "supplied-closed.kdbx",
             "--iterations",
             "64",
+            "--password-env",
+            "NKEEPASS_WINDOWS_TEST_PASSWORD",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(supplied.stdout.take());
+    drop(supplied.stderr.take());
+    let _status = supplied.wait().unwrap();
+    let reopened = run(
+        root,
+        &[
+            "--vault",
+            root.join("supplied-closed.kdbx").to_str().unwrap(),
+            "secrets",
+            "ls",
+            "--password-env",
+            "NKEEPASS_WINDOWS_TEST_PASSWORD",
         ],
     );
-    assert!(!second.status.success());
-    assert!(
-        String::from_utf8_lossy(&second.stderr)
-            .contains("cannot confirm reused password backup identity durability")
-    );
-    assert!(!temp.path().join("second.kdbx").exists());
+    succeeded(&reopened);
 }
 
 #[test]

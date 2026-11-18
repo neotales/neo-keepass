@@ -77,9 +77,11 @@ On Unix, reuse independently syncs the identity and its directory ancestry
 before making a new backup, including when another initializer has published
 the identity but not yet synced its parent. The existing Windows policy syncs
 the staged identity file but cannot confirm parent-directory durability after
-a crash. Consequently Windows currently refuses to reuse an existing backup
-identity: generated-password init stops before vault creation, while init with
-a supplied password can report backup failure after creating the vault.
+a crash. Windows reuses a validated private identity under that policy; after
+power loss, directory entries for the identity or recovery files may not
+survive. Make protected independent backups of both the identity and encrypted
+password backup. Init reports `"directory_sync_policy":"unconfirmed"` in JSON
+and a text warning on Windows; candidate records retain the same policy marker.
 The generated master password is not printed. An ambient `NKEEPASS_PASSWORD`
 is ignored for this opt-in mode.
 

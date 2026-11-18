@@ -2269,6 +2269,7 @@ fn associate_init_backup_with(
         "password_backup": backup.path.to_string_lossy(),
         "age_identity": backup.identity_path.to_string_lossy(),
         "status": "candidate",
+        "directory_sync_policy": backup_directory_sync_policy(),
     });
     let bytes = serde_json::to_vec(&record).map_err(|_| AssociationError {
         message: "cannot encode recovery association",
@@ -2437,7 +2438,7 @@ fn read_backup_identity(
     Ok(identity)
 }
 
-/// Independently confirms a reused identity after publication by another writer.
+/// Applies the platform's existing durability policy to a reused identity.
 fn confirm_backup_identity_durability(file: &File, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -2454,16 +2455,21 @@ fn confirm_backup_identity_durability(file: &File, path: &Path) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        // The existing private-file layer cannot confirm parent-directory
-        // durability here. Reusing a concurrently published identity without
-        // that barrier could strand a generated-password vault.
+        // The identity file is synced before publication. The Windows private
+        // file policy cannot confirm directory sync; report that limitation
+        // rather than claiming a power-loss guarantee or rejecting reuse.
         let _ = (file, path);
-        return Err(err(
-            "cannot confirm reused password backup identity durability on this platform",
-        ));
     }
-    #[cfg(unix)]
     Ok(())
+}
+
+/// Describes the directory-sync policy, not an assertion of actual durability.
+fn backup_directory_sync_policy() -> &'static str {
+    if cfg!(unix) {
+        "required"
+    } else {
+        "unconfirmed"
+    }
 }
 
 fn bounded_file(path: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
@@ -5227,6 +5233,7 @@ fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Re
         "age_identity": backup.map(|value| value.identity_path.to_string_lossy().into_owned()),
         "age_identity_created": backup.map(|value| value.identity_created),
         "recovery_association": backup.and_then(|value| value.association_path.as_ref()).map(|path| path.to_string_lossy().into_owned()),
+        "directory_sync_policy": backup.map(|_| backup_directory_sync_policy()),
     });
     if as_json {
         json(&result)
@@ -5291,6 +5298,7 @@ fn association_failure_record(
         "password_backup": backup.path.to_string_lossy(),
         "age_identity": backup.identity_path.to_string_lossy(),
         "reason": error.message,
+        "directory_sync_policy": backup_directory_sync_policy(),
     })
 }
 
@@ -5310,6 +5318,7 @@ fn write_init_recovery(
             "age_identity": backup.identity_path.to_string_lossy(),
             "age_identity_created": backup.identity_created,
             "recovery_association": backup.association_path.as_ref().map(|path| path.to_string_lossy().into_owned()),
+            "directory_sync_policy": backup_directory_sync_policy(),
         }))
     } else {
         let mut output = io::stdout().lock();
@@ -5340,6 +5349,13 @@ fn write_init_recovery(
         if let Some(path) = &backup.association_path {
             writeln!(output, "Recovery candidate record: {}", path.display())
                 .map_err(|_| err("cannot write output"))?;
+        }
+        if !cfg!(unix) {
+            writeln!(
+                output,
+                "Directory durability: unconfirmed on this platform."
+            )
+            .map_err(|_| err("cannot write output"))?;
         }
         if installed != Some(false) {
             writeln!(output, "Recovery: decrypt the backup with this identity in a private environment; see nkp init --help.")
