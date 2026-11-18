@@ -1915,10 +1915,9 @@ mod tests {
 
     /// A driver with an exited leader and a surviving group descendant
     /// cleans up the escapee by group, then reaps the leader and observes
-    /// group absence. The descendant deliberately does not inherit a
-    /// captured pipe: some systems retain killed children as zombies until
-    /// reparented-process collection, which can keep a pipe open without a
-    /// live process capable of holding it. This also covers the
+    /// group absence. The descendant inherits a captured stdout pipe, so
+    /// successful cleanup must close the writer and let the harness drain
+    /// to EOF. This also covers the
     /// post-reap cleanup path: the driver exits and is reaped BEFORE the
     /// drain overflows, so the kill must come from `kill_driver_group`
     /// alone, without touching the reaped child.
@@ -2086,7 +2085,7 @@ raise SystemExit(failures)
     #[cfg(unix)]
     fn bounded_driver_owned_group_cleanup_kills_descendant_before_reap() {
         let script = r#"
-import errno, os, signal, subprocess, sys, time
+import errno, os, signal, subprocess, time
 
 transcript = b""
 
@@ -2117,27 +2116,11 @@ def stop_child(pid):
 # pty.fork() gives the real driver's child its own session and group;
 # this replicates that shape so the group semantics are the real ones.
 child = subprocess.Popen(
-    [
-        "bash", "--noprofile", "--norc", "-c",
-        "sleep 600 & echo $! > \"$1\"",
-        "bash", sys.argv[1],
-    ],
+    ["bash", "--noprofile", "--norc", "-c", "sleep 600 & echo $!"],
     start_new_session=True,
-    stdout=subprocess.DEVNULL,
+    stdout=subprocess.PIPE,
 )
-# The fixture's pipe is not inherited by the sleeping descendant: it has no
-# reason to keep the harness's captured stdout open after the leader exits.
-pid_path = sys.argv[1]
-deadline = time.monotonic() + 3
-while time.monotonic() < deadline:
-    try:
-        with open(pid_path, encoding="ascii") as stream:
-            straggler = int(stream.read())
-        break
-    except (OSError, ValueError):
-        time.sleep(0.02)
-else:
-    raise RuntimeError("bash did not publish the descendant pid")
+straggler = int(child.stdout.readline().decode())
 # Observe leader exit without reaping it. It must stay waitable while the
 # descendant remains in the same process group.
 deadline = time.monotonic() + 3
@@ -2159,12 +2142,7 @@ victim = subprocess.Popen(
 events = stop_child(child.pid)
 print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), flush=True)
 "#;
-        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
-        let run = run_python_bounded(
-            script,
-            &[pid_file.path().as_os_str()],
-            Duration::from_secs(15),
-        );
+        let run = run_python_bounded(script, &[], Duration::from_secs(15));
         assert!(
             run.success(),
             "the owned-group cleanup scenario should complete: {}",
@@ -2172,7 +2150,8 @@ print("straggler", straggler, "victim", victim.pid, "events", ",".join(events), 
         );
         assert!(
             !run.drain_overflow,
-            "cleanup must complete without a pipe-holding straggler: {}",
+            "group cleanup must kill the pipe-holder so the bounded drain \
+             reaches EOF: {}",
             run.failure_summary()
         );
         let stdout = String::from_utf8_lossy(&run.stdout);
