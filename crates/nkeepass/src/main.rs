@@ -5614,6 +5614,10 @@ fn aliases(names: &str) -> impl Iterator<Item = &str> {
     names.split('|')
 }
 
+fn display_aliases(names: &str) -> String {
+    names.replace('|', ", ")
+}
+
 fn find_help_command<'a>(commands: &'a [HelpCommand], name: &str) -> Option<&'a HelpCommand> {
     commands
         .iter()
@@ -5780,6 +5784,7 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
     let command = command_path(ROOT_COMMANDS, route);
     if route.is_empty() {
         let _ = writeln!(output, "{program} - {HELP_TITLE}");
+        output.push('\n');
         write_paragraph(
             &mut output,
             &format!("Usage: {program} [GLOBAL OPTIONS] COMMAND"),
@@ -5804,6 +5809,7 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
             format!("{} {usage_tail}", route.join(" "))
         };
         let _ = writeln!(output, "{program} {}", route.join(" "));
+        output.push('\n');
         write_paragraph(&mut output, &format!("Usage: {program} {usage}"), width, "");
         output.push('\n');
         write_paragraph(&mut output, command.summary, width, "");
@@ -5813,53 +5819,72 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
     let children = command.map_or(ROOT_COMMANDS, |node| node.children);
     if !children.is_empty() {
         output.push_str("COMMANDS:\n");
-        let col = aligned_column(children.iter().map(|item| item.names), width);
-        for item in children {
-            write_help_row(&mut output, item.names, item.summary, col, width);
+        let labels = children
+            .iter()
+            .map(|item| display_aliases(item.names))
+            .collect::<Vec<_>>();
+        let col = aligned_column(labels.iter().map(String::as_str), width);
+        for (item, label) in children.iter().zip(&labels) {
+            let summary = if route.is_empty() {
+                shortcut_summary(item).unwrap_or(item.summary)
+            } else {
+                item.summary
+            };
+            write_help_row(&mut output, label, summary, col, width);
         }
         output.push('\n');
     }
 
     write_help_options(&mut output, command, route, width);
     if route.is_empty() || uses_credentials(route) {
+        output.push_str("CREDENTIALS:\n");
         write_paragraph(
             &mut output,
             "Without an explicit credential source, use NKEEPASS_PASSWORD when set. Explicit sources override it; NKEEPASS_SECRET is not an alias.",
             width,
-            "",
+            "  ",
         );
+        output.push('\n');
     }
+    output.push_str("SAFETY:\n");
     write_paragraph(
         &mut output,
-        "Safety: credentials are prompted without echo; init never overwrites or prints a password.",
+        "Credentials are prompted without echo; init never overwrites or prints a password.",
         width,
-        "",
+        "  ",
     );
     write_paragraph(
         &mut output,
         "WARNING: --password VALUE is exposed in process listings and shell history.",
         width,
-        "",
+        "  ",
     );
     write_paragraph(
         &mut output,
         "Selected values are explicit disclosures; stdout may be captured in logs or files.",
         width,
-        "",
+        "  ",
     );
+    output.push('\n');
+    output.push_str("MORE HELP:\n");
     write_paragraph(
         &mut output,
         "Use -h/--help for command-specific usage and options.",
         width,
-        "",
+        "  ",
     );
     write_paragraph(
         &mut output,
         "See the README: “Creating a vault”, “Explicit value output”, “Glob syntax”, and “Automation and interchange”.",
         width,
-        "",
+        "  ",
     );
     output
+}
+
+fn shortcut_summary(command: &HelpCommand) -> Option<&'static str> {
+    let name = aliases(command.names).next()?;
+    find_help_command(SECRETS_COMMANDS, name).map(|source| source.summary)
 }
 
 fn write_help_options(

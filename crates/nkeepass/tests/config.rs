@@ -599,7 +599,7 @@ fn the_group_is_advertised_and_its_subcommand_help_is_reachable() {
     assert!(group.status.success());
     let group = stdout(&group);
     assert!(group.contains("COMMANDS:"));
-    assert!(group.contains("ls|list"));
+    assert!(group.contains("ls, list"));
     assert!(!group.contains("aliases, current, default_vault"));
 
     let listing = stdout(&run(&home, &["config", "ls", "--help"]));

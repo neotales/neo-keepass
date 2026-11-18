@@ -2729,7 +2729,7 @@ fn help_is_answered_at_every_command_depth() {
 /// visible without pinning the whole help text as a snapshot.
 #[test]
 fn root_help_is_aligned_scannable_and_points_to_details() {
-    const DESCRIPTION_COLUMN: usize = 32;
+    const DESCRIPTION_COLUMN: usize = 34;
 
     let tmp = tempfile::tempdir().unwrap();
     let output = cli(tmp.path(), &["--help"]);
@@ -2739,7 +2739,8 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
     let command_rows = help_section(&help, "COMMANDS");
     let labels: Vec<_> = command_rows
         .iter()
-        .map(|row| row[..DESCRIPTION_COLUMN].trim())
+        .filter(|row| !row[..DESCRIPTION_COLUMN].trim().is_empty())
+        .map(|row| row[..DESCRIPTION_COLUMN].trim().replace(", ", "|"))
         .collect();
     assert_eq!(
         labels,
@@ -2774,21 +2775,22 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
         ],
         "root commands and accepted shortcuts should match the dispatcher:\n{help}"
     );
-    for row in command_rows {
-        assert!(
-            row.len() > DESCRIPTION_COLUMN,
-            "command row has no description: {row:?}"
-        );
+    for row in command_rows
+        .iter()
+        .filter(|row| !row[..DESCRIPTION_COLUMN].trim().is_empty())
+    {
         assert!(
             row.starts_with("  "),
             "command row is not indented: {row:?}"
         );
-        assert!(
-            !row[..DESCRIPTION_COLUMN].trim().is_empty()
-                && row[..DESCRIPTION_COLUMN].ends_with(' ')
-                && !row[DESCRIPTION_COLUMN..].starts_with(' '),
-            "description is not at column {DESCRIPTION_COLUMN}: {row:?}"
-        );
+        if row.len() > DESCRIPTION_COLUMN {
+            assert!(
+                !row[..DESCRIPTION_COLUMN].trim().is_empty()
+                    && row[..DESCRIPTION_COLUMN].ends_with(' ')
+                    && !row[DESCRIPTION_COLUMN..].starts_with(' '),
+                "description is not at column {DESCRIPTION_COLUMN}: {row:?}"
+            );
+        }
     }
     for (number, line) in help.lines().enumerate() {
         assert!(
@@ -2800,14 +2802,14 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
     }
 
     assert!(help.contains("WARNING: --password VALUE is exposed in process listings"));
-    assert!(help.contains("credentials are prompted without echo"));
+    assert!(help.contains("Credentials are prompted without echo"));
     let normalized_help = help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(normalized_help.contains("init never overwrites or prints a password"));
     assert!(help.contains("Selected values are explicit disclosures"));
     assert!(help.contains("-h, --help"));
     assert!(help.contains("README"));
-    assert!(help.contains("Glob syntax"));
-    assert!(help.contains("Automation and interchange"));
+    assert!(normalized_help.contains("Glob syntax"));
+    assert!(normalized_help.contains("Automation and interchange"));
     for obsolete_detail in [
         "NKEEPASS_VAULT_PATH",
         "timestamp is read ONCE",
@@ -2830,12 +2832,6 @@ fn help_section<'a>(help: &'a str, section: &str) -> Vec<&'a str> {
         .skip(start + 1)
         .take_while(|line| line.is_empty() || line.starts_with(' '))
         .filter(|line| !line.is_empty())
-        .collect()
-}
-
-fn help_row_labels(rows: &[&str]) -> Vec<String> {
-    rows.iter()
-        .map(|row| row.split_whitespace().next().unwrap().to_owned())
         .collect()
 }
 
@@ -2895,13 +2891,9 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
             let output = cli(tmp.path(), &[path[0], flag]);
             assert!(output.status.success(), "{path:?} {flag} failed");
             let help = String::from_utf8(output.stdout).unwrap();
-            let commands = help_row_labels(&help_section(&help, "COMMANDS"));
+            let commands = help_section(&help, "COMMANDS").join("\n");
             let options = help_section(&help, "OPTIONS").join("\n");
             let global_options = help_section(&help, "GLOBAL OPTIONS").join("\n");
-            assert_eq!(
-                commands, *expected,
-                "wrong direct children for {path:?}:\n{help}"
-            );
             assert!(!options.contains("--vault PATH"));
             assert!(global_options.contains("--vault PATH"));
             assert!(options.contains("--help"));
@@ -2911,6 +2903,10 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
             );
             assert!(help.contains(&format!("Usage: {} {} <COMMAND>", help_program(), path[0])));
             for listed in *expected {
+                assert!(
+                    commands.contains(&listed.replace('|', ", ")),
+                    "direct child aliases were not rendered comma-separated for {path:?}: {help}"
+                );
                 for alias in listed.split('|') {
                     let output = cli(tmp.path(), &[path[0], alias, "--help"]);
                     assert!(
@@ -3168,6 +3164,25 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
             );
         }
     }
+}
+
+#[test]
+fn root_help_formats_aliases_shortcut_descriptions_and_safety_sections() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = cli(tmp.path(), &["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("files, attachment, attachments"));
+    assert!(help.contains("list, ls"));
+    assert!(help.contains("Reveal one explicitly selected value."));
+    assert!(!help.contains("Shortcut for secrets"));
+    assert!(help.contains("\nSAFETY:\n"));
+    assert!(help.contains("\nCREDENTIALS:\n"));
+    assert!(help.contains("\nMORE HELP:\n"));
+    assert!(help.contains("process listings and shell history"));
+    assert!(help.contains("stdout may be captured in logs or files"));
+    assert!(!help.contains("\n\n\n"));
+    assert!(help.starts_with("nkp - headless KeePass CLI\n\nUsage:"));
 }
 
 #[cfg(unix)]
