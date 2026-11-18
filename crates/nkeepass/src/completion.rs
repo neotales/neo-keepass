@@ -609,6 +609,7 @@ _nkp_complete() {
     position=$((COMP_CWORD - index))
     local positional_key_command=false selector_seen=false separator_seen=false
     local waiting_for_value=false waiting_for_key=false invalid_option=false
+    local waiting_owner='' last_value_owner=''
     case "$command:$action" in
         get:*|set:*|rm:*|remove:*|secrets:get|secrets:set|secrets:rm|secrets:remove)
             positional_key_command=true
@@ -624,11 +625,14 @@ _nkp_complete() {
             element="${COMP_WORDS[scan]}"
             if [[ "$waiting_for_value" == true ]]; then
                 [[ "$waiting_for_key" == true ]] && selector_seen=true
+                last_value_owner="$waiting_owner"
                 waiting_for_value=false
                 waiting_for_key=false
+                waiting_owner=''
                 ((scan++))
                 continue
             fi
+            last_value_owner=''
             if [[ "$element" == -- ]]; then
                 separator_seen=true
                 ((scan++))
@@ -641,9 +645,15 @@ _nkp_complete() {
                 --key|-k)
                     waiting_for_value=true
                     waiting_for_key=true
+                    waiting_owner=key
                     ;;
-                --field|-F|--username|--url|--notes|--bin|-b|--name|--file|-f|--output|--password|--password-env|--password-file|--key-file|--size|--format|--strategy|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
+                --field|-F)
                     waiting_for_value=true
+                    waiting_owner=field
+                    ;;
+                --username|--url|--notes|--bin|-b|--name|--file|-f|--output|--password|--password-env|--password-file|--key-file|--size|--format|--strategy|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
+                    waiting_for_value=true
+                    waiting_owner=other
                     ;;
                 --yes|--dry-run|--replace|--allow-plaintext|--password-stdin|--stdin|--is-output|--clipboard|--age-encrypt|--age-decrypt)
                     ;;
@@ -656,14 +666,34 @@ _nkp_complete() {
             esac
             ((scan++))
         done
+        if [[ "${COMP_WORDS[COMP_CWORD - 1]-}" == -* \
+            && ( "$last_value_owner" == field || "$last_value_owner" == key ) ]]; then
+            previous="--$last_value_owner"
+        fi
         if [[ "$selector_seen" == false && "$waiting_for_value" == false \
             && "$invalid_option" == false \
+            && ! ( "$last_value_owner" == field \
+                && "${COMP_WORDS[COMP_CWORD - 1]-}" == -* ) \
             && ( "$current" != -* || "$separator_seen" == true ) ]]; then
             kind=keys
         fi
     fi
     case "$previous" in
-        --key|-k) if [[ "$command" == group || "$command" == groups ]]; then kind='groups'; else kind='keys'; fi ;;
+        --key|-k)
+            if [[ "$positional_key_command" == true ]]; then
+                if [[ "$waiting_for_key" == true && "$selector_seen" == false \
+                    && "$separator_seen" == false ]]; then
+                    kind=keys
+                elif [[ "$waiting_for_key" == true || "$selector_seen" == true ]]; then
+                    COMPREPLY=()
+                    return
+                fi
+            elif [[ "$command" == group || "$command" == groups ]]; then
+                kind='groups'
+            else
+                kind='keys'
+            fi
+            ;;
         --vault|-V) kind='vaults' ;;
     esac
     if [[ "$command" == context && ( "$action" == use || "$action" == rm ) && $position -eq 2 ]]; then
@@ -5599,6 +5629,7 @@ _nkp_complete
     }
 
     #[test]
+    #[cfg(unix)]
     fn bash_positional_key_completion_stops_at_selector_and_preserves_hostile_candidates() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -5625,6 +5656,11 @@ COMP_WORDS=(nkp get Root/Meta)
 COMP_CWORD=2
 _nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || {{ printf 'first=[%s] count=%s\\n' "${{COMPREPLY[0]-}}" "${{#COMPREPLY[@]}}" >&2; exit 11; }}
+
+COMP_WORDS=(nkp get --key Root/Meta)
+COMP_CWORD=3
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 1 && "${{COMPREPLY[0]}}" == {hostile_bash} ]] || exit 21
 
 COMP_WORDS=(nkp set Root/Meta)
 COMP_CWORD=2
@@ -5666,6 +5702,26 @@ COMP_CWORD=3
 _nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 5 && "${{COMPREPLY[0]}}" == Password ]] || exit 15
 
+COMP_WORDS=(nkp get LOGIN --key '')
+COMP_CWORD=4
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 22
+
+COMP_WORDS=(nkp secrets set --key LOGIN -k '')
+COMP_CWORD=6
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 23
+
+COMP_WORDS=(nkp get --field --key '')
+COMP_CWORD=4
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 5 && "${{COMPREPLY[0]}}" == Password ]] || exit 24
+
+COMP_WORDS=(nkp get -- -k '')
+COMP_CWORD=4
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 25
+
 COMP_WORDS=(nkp secrets rm -- '')
 COMP_CWORD=4
 _nkp_complete
@@ -5688,9 +5744,12 @@ _nkp_complete
         assert!(!marker.exists(), "completion evaluated a hostile candidate");
 
         let args = std::fs::read(log).expect("record completion protocol arguments");
-        assert!(
-            args.windows(b"__complete\0keys\0".len())
-                .any(|window| window == b"__complete\0keys\0"),
+        let key_requests = args
+            .windows(b"__complete\0keys\0".len())
+            .filter(|window| *window == b"__complete\0keys\0")
+            .count();
+        assert_eq!(
+            key_requests, 8,
             "completion did not use the metadata-only key protocol"
         );
     }

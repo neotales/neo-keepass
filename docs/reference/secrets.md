@@ -160,38 +160,76 @@ listings and shell history, so use `--file` or `--stdin` for sensitive values.
 In PowerShell, for example:
 
 ```powershell
-# Prompt without echoing, then write exact UTF-8 bytes (no BOM or newline).
-$secure = Read-Host 'New entry password' -AsSecureString
-$plain = [System.Net.NetworkCredential]::new('', $secure).Password
-$tempFile = [System.IO.Path]::GetTempFileName()
+# Read the new entry value and vault password without echoing them.
+$secureValue = Read-Host 'New entry password' -AsSecureString
+$valueText = [System.Net.NetworkCredential]::new('', $secureValue).Password
+$secureVault = Read-Host 'Vault master password' -AsSecureString
+$priorVaultPassword =
+    [System.Environment]::GetEnvironmentVariable('NKEEPASS_PASSWORD', 'Process')
+$env:NKEEPASS_PASSWORD =
+    [System.Net.NetworkCredential]::new('', $secureVault).Password
+
+$startInfo = New-Object System.Diagnostics.ProcessStartInfo
+$startInfo.FileName = (Get-Command nkp -CommandType Application).Source
+$startInfo.Arguments =
+    'set "Services/Mail Account" --stdin --password-env NKEEPASS_PASSWORD'
+$startInfo.UseShellExecute = $false
+$startInfo.RedirectStandardInput = $true
+$process = New-Object System.Diagnostics.Process
+$process.StartInfo = $startInfo
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($valueText)
+$started = $false
 try {
-    [System.IO.File]::WriteAllText(
-        $tempFile, $plain, [System.Text.UTF8Encoding]::new($false)
-    )
-    nkp set 'Services/Mail Account' --file $tempFile
+    if (-not $process.Start()) { throw 'Could not start nkp.' }
+    $started = $true
+    $stream = $process.StandardInput.BaseStream
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+    $process.StandardInput.Close() # EOF; no line ending is added.
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { throw 'nkp set failed.' }
 }
 finally {
-    Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
-    $plain = $null
-    $secure = $null
+    if ($started -and -not $process.HasExited) {
+        $process.StandardInput.Close()
+        $process.WaitForExit()
+    }
+    if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+    $process.Dispose()
+    if ($null -eq $priorVaultPassword) {
+        Remove-Item Env:NKEEPASS_PASSWORD -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:NKEEPASS_PASSWORD = $priorVaultPassword
+    }
+    $valueText = $null
+    if ($secureValue) { $secureValue.Dispose() }
+    $secureValue = $null
+    if ($secureVault) { $secureVault.Dispose() }
+    $secureVault = $null
+    $priorVaultPassword = $null
 }
 
-# Or use an existing UTF-8 (no BOM) file whose ACL is restricted to you.
-nkp set 'Services/Mail Account' --file "$HOME\entry-password.txt"
+# Alternatively, use pre-existing UTF-8 files with owner-only ACLs.
+nkp set 'Services/Mail Account' --file $privateValueFile `
+    --password-file $privateVaultPasswordFile
 ```
 
 For real vault unlock passwords, prefer the hidden terminal prompt, a protected
 password file, or `--password-stdin`; do not put a literal password in a
 command. `--password VALUE` is explicitly unsafe: it can appear in shell
 history and process listings. When `--stdin` supplies the new entry value,
-unlock the vault through the interactive prompt or a separate safe source.
-The temporary-file example works in Windows PowerShell 5.1 and PowerShell 7:
-`WriteAllText` writes UTF-8 without a BOM and does not append a line ending.
-PowerShell's ordinary string pipeline adds a line ending, so piping a string
-to `nkp set --stdin` changes the stored value; do not use that form.
-PowerShell must briefly materialize the value as a .NET string to write it,
-and deleting the temporary file is not a guarantee of secure erasure on SSDs
-or journaled filesystems.
+the vault must use a separate unlock source, such as the environment variable
+shown or a key file. This approach sends the new value as exact UTF-8 bytes
+through a redirected process stdin stream: unlike PowerShell's ordinary
+string pipeline, it adds neither a BOM nor a line ending. It creates no
+plaintext value file, but the value necessarily exists briefly as a
+PowerShell/.NET string and byte array; clearing the array and dropping string
+references is best-effort, not guaranteed zeroization. The unlock environment
+variable is inherited by the child process and is not a private secret store.
+The APIs used are available in Windows PowerShell 5.1/.NET Framework and
+PowerShell 7; the exact flow was exercised only with portable PowerShell 7 on
+Linux, not native Windows or PowerShell 5.1.
 To select a key beginning with `-`, put `--` after the options and immediately
 before the selector, for example `nkp get --field Password -- -DashEntry`.
 With
