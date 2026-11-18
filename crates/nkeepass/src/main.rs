@@ -149,19 +149,23 @@ const YES_OPTION: HelpOption = HelpOption {
     summary: "Confirm a destructive operation without prompting.",
 };
 
+const CONTEXT_OUTPUT_OPTIONS: &[HelpOption] = &[HelpOption {
+    label: "--json",
+    summary: "Print machine-readable JSON instead of text.",
+}];
 const CONTEXT_COMMANDS: &[HelpCommand] = &[
     help_command(
         "ls|list",
         "ls",
         "List configured vault aliases and paths.",
-        NO_OPTIONS,
+        CONTEXT_OUTPUT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "show",
         "show",
         "Show the selected vault and its source.",
-        NO_OPTIONS,
+        CONTEXT_OUTPUT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
@@ -6148,17 +6152,34 @@ fn run(args: &[String], program: &str) -> Result<()> {
     match command {
         "init" => init_command(rest, vault, &mut config),
         "context" => match rest.first().map(String::as_str) {
-            Some("ls" | "list") if rest.len() == 1 => {
+            Some("ls" | "list") if rest.len() == 1 || (rest.len() == 2 && rest[1] == "--json") => {
+                let as_json = rest.len() == 2;
                 for (name, alias) in &config.aliases {
                     if alias.kind == Kind::Vault {
                         check_alias_metadata(name, alias)?;
                         let path = normalized_vault_text(&vault_path(&alias.target)?);
-                        json(&serde_json::json!({"alias": name, "path": path}))?;
+                        if as_json {
+                            json(&serde_json::json!({"alias": name, "path": path}))?;
+                        } else {
+                            writeln!(io::stdout(), "{name}\t{path}")
+                                .map_err(|_| err("cannot write output"))?;
+                        }
+                    }
+                }
+                if let Some(current) = &config.current
+                    && !config.aliases.contains_key(current)
+                {
+                    let path = normalized_vault_text(&vault_path(current)?);
+                    if as_json {
+                        json(&serde_json::json!({"alias": null, "path": path}))?;
+                    } else {
+                        writeln!(io::stdout(), "(current)\t{path}")
+                            .map_err(|_| err("cannot write output"))?;
                     }
                 }
                 Ok(())
             }
-            Some("show") if rest.len() == 1 => {
+            Some("show") if rest.len() == 1 || (rest.len() == 2 && rest[1] == "--json") => {
                 let (path, source) = active_vault(vault, &config)?;
                 let path = normalized_vault_text(&path);
                 let alias = (source == "context")
@@ -6171,7 +6192,16 @@ fn run(args: &[String], program: &str) -> Result<()> {
                             .filter(|alias| alias.kind == Kind::Vault)
                             .map(|_| current)
                     });
-                json(&serde_json::json!({"path": path, "source": source, "alias": alias}))
+                if rest.len() == 2 {
+                    json(&serde_json::json!({"path": path, "source": source, "alias": alias}))
+                } else {
+                    writeln!(
+                        io::stdout(),
+                        "Name: {}\nPath: {path}\nSource: {source}",
+                        alias.unwrap_or("(unnamed)")
+                    )
+                    .map_err(|_| err("cannot write output"))
+                }
             }
             Some("use") if rest.len() == 2 => {
                 use_context_alias(&mut config, &rest[1])?;

@@ -55,19 +55,22 @@ encrypt or decrypt the vault.
 ## `context`
 
 ```text
-nkp context ls
-nkp context list
-nkp context show
+nkp context ls [--json]
+nkp context list [--json]
+nkp context show [--json]
 nkp context use ALIAS
 nkp context set ALIAS ABSOLUTE_PATH
 nkp context rm ALIAS
 nkp context remove ALIAS
 ```
 
-`ls` (also `list`) lists configured vault aliases and paths. `show` reports the selected
-vault and source. `use` selects a configured vault alias. `set` creates or
+`ls` (also `list`) lists configured vault aliases and paths, as well as a
+directly selected path as `(current)`. `show` reports the selected vault,
+its alias (or `(unnamed)`), and source. These commands print human-readable
+text by default; `--json` selects machine-readable records (`ls` emits one JSON
+object per line). `use` selects a configured vault alias. `set` creates or
 updates an alias. `rm` (also `remove`) removes an alias and clears it as current if needed.
-Subcommands have no command-specific options.
+Other subcommands have no command-specific options.
 
 ## `alias`
 

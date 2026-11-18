@@ -365,13 +365,13 @@ fn a_set_context_is_the_context_the_existing_precedence_reports() {
     // The point of the group: the value it wrote is read back by the resolution
     // every other command already uses, with no hand-edited file involved.
     let shown: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["context", "show"]).stdout).unwrap();
+        serde_json::from_slice(&run(&home, &["context", "show", "--json"]).stdout).unwrap();
     assert_eq!(shown["path"], vault());
     assert_eq!(shown["source"], "context");
 
     assert!(run(&home, &["config", "rm", "current"]).status.success());
     let shown: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["context", "show"]).stdout).unwrap();
+        serde_json::from_slice(&run(&home, &["context", "show", "--json"]).stdout).unwrap();
     assert_ne!(shown["source"], "context");
 }
 
@@ -384,7 +384,7 @@ fn a_set_default_vault_is_used_when_no_context_is_set() {
             .success()
     );
     let shown: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["context", "show"]).stdout).unwrap();
+        serde_json::from_slice(&run(&home, &["context", "show", "--json"]).stdout).unwrap();
     assert_eq!(shown["path"], other_vault());
     assert_eq!(shown["source"], "default");
 
@@ -395,12 +395,12 @@ fn a_set_default_vault_is_used_when_no_context_is_set() {
             .success()
     );
     let shown: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["context", "show"]).stdout).unwrap();
+        serde_json::from_slice(&run(&home, &["context", "show", "--json"]).stdout).unwrap();
     assert_eq!(shown["source"], "context");
 
     assert!(run(&home, &["config", "rm", "current"]).status.success());
     let shown: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["context", "show"]).stdout).unwrap();
+        serde_json::from_slice(&run(&home, &["context", "show", "--json"]).stdout).unwrap();
     assert_eq!(shown["source"], "default");
 }
 
