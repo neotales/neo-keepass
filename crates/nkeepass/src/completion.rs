@@ -1598,7 +1598,6 @@ mod tests {
     use crate::CONFIG_KEYS;
     #[cfg(unix)]
     use std::ffi::OsStr;
-    #[cfg(unix)]
     use std::time::Duration;
 
     /// Deadline for the driver PROCESS to exit, per case. Streams are
@@ -1998,7 +1997,7 @@ def stop_child():
     # test can force. What is under test is the finally that composes
     # the two diagnostics.
     return (
-        "interactive bash was still unreaped 3s after group SIGKILL+SIGCONT"
+        "interactive bash state unresolved after bounded group cleanup"
         "; PTY transcript: " + repr(transcript)
     )
 
@@ -2069,7 +2068,7 @@ raise SystemExit(failures)
             run.failure_summary()
         );
         assert!(
-            stderr.contains("still unreaped 3s after group SIGKILL+SIGCONT"),
+            stderr.contains("state unresolved after bounded group cleanup"),
             "the cleanup detail must be part of the composed diagnostic: {}",
             run.failure_summary()
         );
@@ -2126,7 +2125,7 @@ def stop_child(pid):
             )
         time.sleep(0.02)
     return (
-        "interactive bash was still unreaped 3s after group SIGKILL+SIGCONT"
+        "interactive bash state unresolved after bounded group cleanup"
         "; PTY transcript: " + repr(transcript)
     )
 
@@ -2538,7 +2537,6 @@ else:
         let lines: Vec<&str> = source.lines().collect();
         let gated_items = [
             "use std::ffi::OsStr;",
-            "use std::time::Duration;",
             "const PYTHON_DRIVER_DEADLINE",
             "const PYTHON_DRIVER_DRAIN_ALLOWANCE",
             "const PYTHON_HELPER_DEADLINE",
@@ -2692,9 +2690,11 @@ else:
         for marker in [
             "import os, pty, select, sys, time, signal",
             "def stop_child():",
-            "os.killpg(pid, signal.SIGCONT)",
-            "os.killpg(pid, signal.SIGKILL)",
-            "still unreaped 3s after group SIGKILL+SIGCONT",
+            "os.killpg(group_id, signal.SIGCONT)",
+            "os.killpg(group_id, signal.SIGKILL)",
+            "os.getpgid(pid)",
+            "os.tcgetpgrp(fd)",
+            "state unresolved after bounded group cleanup",
             "; cleanup also failed: ",
             "case ended with ",
             "raise primary",
@@ -3825,6 +3825,15 @@ else:
         }
     }
 
+    /// The interpreter-probe helpers are compiled on Windows too, even
+    /// though PTY/process-group tests are Unix-only. Keep `Duration`
+    /// available unconditionally in this test module: the Windows
+    /// matrix previously found the missing import only at Check time.
+    #[test]
+    fn probe_duration_type_is_available_on_every_target() {
+        let _probe_timeout = Duration::from_secs(1);
+    }
+
     /// The probe must be bounded: an interpreter that never answers
     /// `--version` is killed, reaped, and reported — never hung on, and
     /// never misreported as a script failure. The fake reports its pid
@@ -4473,6 +4482,16 @@ if pid == 0:
 # that no longer holds, and os.write can wedge when bash stops consuming
 # input. Keep the master non-blocking and bound every write instead.
 os.set_blocking(fd, False)
+group_id = pid
+
+def pty_job_control_state():
+    try:
+        return (
+            "pid=%d pgrp=%d session=%d foreground=%d"
+            % (pid, os.getpgid(pid), os.getsid(pid), os.tcgetpgrp(fd))
+        )
+    except OSError as error:
+        return "pid=%d query-errno=%s:%s" % (pid, error.errno, error.strerror)
 
 def drain(timeout=0.15):
     global transcript
@@ -4532,29 +4551,57 @@ def stop_child():
     # action is to continue — a no-op. The reap loop below observes with
     # WUNTRACED, so a member still stopped despite the SIGCONT names its
     # stop signal in the diagnostic instead of the cleanup guessing.
+    identity_before = pty_job_control_state()
+    signal_results = []
     try:
-        os.killpg(pid, signal.SIGCONT)
-    except OSError:
-        return None
+        os.killpg(group_id, signal.SIGCONT)
+        signal_results.append("SIGCONT=sent")
+    except OSError as error:
+        signal_results.append("SIGCONT=errno-%s:%s" % (error.errno, error.strerror))
     try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
+        os.killpg(group_id, signal.SIGKILL)
+        signal_results.append("SIGKILL=sent")
+    except OSError as error:
+        signal_results.append("SIGKILL=errno-%s:%s" % (error.errno, error.strerror))
+    if any(result.startswith("SIGKILL=errno-3:") for result in signal_results):
+        # ESRCH proves the process group is absent. There is nothing left
+        # to clean up; do not signal the numeric group id again.
         return None
     deadline = time.monotonic() + 3
+    last_wait = "not-attempted"
     while time.monotonic() < deadline:
         try:
             waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
         except ChildProcessError:
-            # Already reaped (by the exit wait above, or an earlier
-            # cleanup): nothing left to signal or reap, and killpg has
-            # already covered the descendants.
-            return None
+            # Already reaped. If SIGKILL got ESRCH, the process group
+            # is gone too; that is the normal post-exit state.
+            if "SIGKILL=sent" in signal_results:
+                return None
+            if any(result.startswith("SIGKILL=errno-3:") for result in signal_results):
+                return None
+            last_wait = "ECHILD"
+            break
+        except OSError as error:
+            last_wait = "errno-%s:%s" % (error.errno, error.strerror)
+            break
         if waited == pid:
-            return None
+            last_wait = "reaped-status=0x%x" % status
+            if os.WIFSIGNALED(status):
+                last_wait += "-signal-%d" % os.WTERMSIG(status)
+            elif os.WIFEXITED(status):
+                last_wait += "-exit-%d" % os.WEXITSTATUS(status)
+            if "SIGKILL=sent" in signal_results:
+                return None
+            break
+        last_wait = "no-status"
         if os.WIFSTOPPED(status):
             return (
                 "interactive bash is stopped by signal %d and did not "
-                "continue after SIGCONT; PTY transcript: " % os.WSTOPSIG(status)
+                "continue after SIGCONT; cleanup: %s; PTY transcript: "
+                % (
+                    os.WSTOPSIG(status),
+                    ", ".join(signal_results),
+                )
                 + repr(transcript)
             )
         time.sleep(0.02)
@@ -4571,14 +4618,55 @@ def stop_child():
     # SIGKILL held by a stopped member and an uninterruptible kernel
     # wait both fit; "the shell survived" does not follow. The wording
     # below states exactly what was observed.
+    if last_wait == "ECHILD" and any(
+        result.startswith("SIGKILL=errno-3:") for result in signal_results
+    ):
+        return None
+    try:
+        os.killpg(group_id, 0)
+        group_probe = "exists"
+    except OSError as error:
+        group_probe = "errno-%s:%s" % (error.errno, error.strerror)
     return (
-        "interactive bash was still unreaped 3s after group SIGKILL+SIGCONT"
-        "; PTY transcript: " + repr(transcript)
+        "interactive bash state unresolved after bounded group cleanup; "
+        "cleanup: %s; before: %s; after: %s; last waitpid: %s; "
+        "group probe: %s; PTY transcript: "
+        % (
+            ", ".join(signal_results),
+            identity_before,
+            pty_job_control_state(),
+            last_wait,
+            group_probe,
+        )
+        + repr(transcript)
     )
 
 primary = None
 try:
     drain()
+    # Interactive Bash may adjust job control after pty.fork() returns.
+    # Wait boundedly for the controlling tty foreground group and Bash's
+    # actual process group to agree before sending test input. Cleanup
+    # targets that observed foreground group, not an assumed numeric PID.
+    startup_deadline = time.monotonic() + 2
+    startup_state = pty_job_control_state()
+    while time.monotonic() < startup_deadline:
+        try:
+            actual_group = os.getpgid(pid)
+            foreground_group = os.tcgetpgrp(fd)
+        except OSError as error:
+            actual_group = None
+            startup_state = "query-errno-%s:%s" % (error.errno, error.strerror)
+        if actual_group is not None and actual_group == foreground_group:
+            group_id = actual_group
+            break
+        drain(0.05)
+        startup_state = pty_job_control_state()
+    else:
+        fail(
+            "interactive bash PTY job-control setup did not reach the "
+            "foreground group within 2s; observed: " + startup_state
+        )
     if wordbreaks == "exclude_equals":
         write_bounded(b'COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"\n')
         drain()

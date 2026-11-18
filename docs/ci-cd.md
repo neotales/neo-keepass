@@ -213,6 +213,21 @@ reports `still unreaped 3s after group SIGKILL+SIGCONT` when the
 window closes. Why bash never consumed `exit` after the prompt
 returned remains unexplained.
 
+**Repeat at 6f8391d (native run 44249069901, macOS):** canary still
+passed 3/3 under stock Bash 3.2; the brew-Bash PTY matrix again completed
+the filename command and returned to the prompt, but did not consume
+`exit`. The case passed; cleanup reported only the old generic
+`still unreaped 3s after group SIGKILL+SIGCONT` after 7.38s, so that
+run does not establish whether signaling failed, the bash PGID differed
+from the `pty.fork()` PID, the process was stopped, or waitpid failed.
+The driver now waits boundedly for Bash's observed process group to
+match the controlling tty's foreground group before sending test input.
+If cleanup remains unresolved, it records the SIGCONT/SIGKILL results
+and errno, the before/after PID/PGID/session/foreground snapshot, the
+last waitpid status/error, and a non-signaling process-group existence
+probe. This is diagnostic instrumentation, not a causal conclusion;
+the next native macOS run is needed to identify the actual state.
+
 **Windows failures of run 134548307275 (first matrix test results):**
 four unit-test failures, with two distinct proven causes and two left
 to diagnostics. (1) `recipient_fetch_disables_curl_globbing...` —
