@@ -677,6 +677,10 @@ _nkp_complete() {
             && ( "$current" != -* || "$separator_seen" == true ) ]]; then
             kind=keys
         fi
+        if [[ "$separator_seen" == true && "$selector_seen" == true ]]; then
+            COMPREPLY=()
+            return
+        fi
     fi
     case "$previous" in
         --key|-k)
@@ -5721,6 +5725,16 @@ COMP_WORDS=(nkp get -- -k '')
 COMP_CWORD=4
 _nkp_complete
 [[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 25
+
+COMP_WORDS=(nkp set -- --field '')
+COMP_CWORD=4
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 26
+
+COMP_WORDS=(nkp secrets get -- --field '')
+COMP_CWORD=5
+_nkp_complete
+[[ "${{#COMPREPLY[@]}}" == 0 ]] || exit 27
 
 COMP_WORDS=(nkp secrets rm -- '')
 COMP_CWORD=4

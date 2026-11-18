@@ -160,28 +160,35 @@ listings and shell history, so use `--file` or `--stdin` for sensitive values.
 In PowerShell, for example:
 
 ```powershell
-# Read the new entry value and vault password without echoing them.
-$secureValue = Read-Host 'New entry password' -AsSecureString
-$valueText = [System.Net.NetworkCredential]::new('', $secureValue).Password
-$secureVault = Read-Host 'Vault master password' -AsSecureString
-$priorVaultPassword =
-    [System.Environment]::GetEnvironmentVariable('NKEEPASS_PASSWORD', 'Process')
-$env:NKEEPASS_PASSWORD =
-    [System.Net.NetworkCredential]::new('', $secureVault).Password
-
-$startInfo = New-Object System.Diagnostics.ProcessStartInfo
-$startInfo.FileName = (Get-Command nkp -CommandType Application).Source
-$startInfo.Arguments =
-    'set "Services/Mail Account" --stdin --password-env NKEEPASS_PASSWORD'
-$startInfo.UseShellExecute = $false
-$startInfo.RedirectStandardInput = $true
-$process = New-Object System.Diagnostics.Process
-$process.StartInfo = $startInfo
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($valueText)
+$secureValue = $null
+$secureVault = $null
+$valueText = $null
+$vaultPassword = $null
+$bytes = $null
+$startInfo = $null
+$process = $null
 $started = $false
 try {
+    # Read both secrets without echoing. Neither is placed in command history.
+    $secureValue = Read-Host 'New entry password' -AsSecureString
+    $valueText = [System.Net.NetworkCredential]::new('', $secureValue).Password
+    $secureVault = Read-Host 'Vault master password' -AsSecureString
+    $vaultPassword = [System.Net.NetworkCredential]::new('', $secureVault).Password
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = (Get-Command nkp -CommandType Application -ErrorAction Stop).Source
+    $startInfo.Arguments =
+        'set "Services/Mail Account" --stdin --password-env NKEEPASS_PASSWORD'
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    # Set the unlock credential only in the child environment; don't mutate the shell.
+    $startInfo.EnvironmentVariables['NKEEPASS_PASSWORD'] = $vaultPassword
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($valueText)
     if (-not $process.Start()) { throw 'Could not start nkp.' }
     $started = $true
+    $startInfo.EnvironmentVariables.Remove('NKEEPASS_PASSWORD')
     $stream = $process.StandardInput.BaseStream
     $stream.Write($bytes, 0, $bytes.Length)
     $stream.Flush()
@@ -195,19 +202,14 @@ finally {
         $process.WaitForExit()
     }
     if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
-    $process.Dispose()
-    if ($null -eq $priorVaultPassword) {
-        Remove-Item Env:NKEEPASS_PASSWORD -ErrorAction SilentlyContinue
-    }
-    else {
-        $env:NKEEPASS_PASSWORD = $priorVaultPassword
-    }
+    if ($startInfo) { $startInfo.EnvironmentVariables.Remove('NKEEPASS_PASSWORD') }
+    if ($process) { $process.Dispose() }
     $valueText = $null
+    $vaultPassword = $null
     if ($secureValue) { $secureValue.Dispose() }
     $secureValue = $null
     if ($secureVault) { $secureVault.Dispose() }
     $secureVault = $null
-    $priorVaultPassword = $null
 }
 
 # Alternatively, use pre-existing UTF-8 files with owner-only ACLs.
@@ -228,8 +230,11 @@ PowerShell/.NET string and byte array; clearing the array and dropping string
 references is best-effort, not guaranteed zeroization. The unlock environment
 variable is inherited by the child process and is not a private secret store.
 The APIs used are available in Windows PowerShell 5.1/.NET Framework and
-PowerShell 7; the exact flow was exercised only with portable PowerShell 7 on
-Linux, not native Windows or PowerShell 5.1.
+PowerShell 7. The unlock value is assigned only to `ProcessStartInfo`'s child
+environment, so it does not overwrite or need restoration of the parent
+environment. Setup, including executable lookup, is inside `try/finally`.
+The exact flow was exercised only with portable PowerShell 7 on Linux, not
+native Windows or PowerShell 5.1.
 To select a key beginning with `-`, put `--` after the options and immediately
 before the selector, for example `nkp get --field Password -- -DashEntry`.
 With
