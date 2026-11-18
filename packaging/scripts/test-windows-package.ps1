@@ -355,6 +355,19 @@ function Update-SumsZipLine {
     [IO.File]::WriteAllText($SumsPath, ($out -join "`n"))
 }
 
+function Update-SumsLine {
+    param(
+        [Parameter(Mandatory)][string] $SumsPath,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][string] $NewHash
+    )
+    $lines = [IO.File]::ReadAllText($SumsPath) -split "`n"
+    $out = foreach ($line in $lines) {
+        if ($line -match ('  ' + [regex]::Escape($Name) + '$')) { "$NewHash  $Name" } else { $line }
+    }
+    [IO.File]::WriteAllText($SumsPath, ($out -join "`n"))
+}
+
 $work = Join-Path $WorkDir ("nkeepass-pkgtest-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
@@ -433,21 +446,21 @@ try {
         $reader = New-Object IO.StreamReader($limitEntry.Open())
         $limitText = $reader.ReadToEnd()
         $reader.Close()
+        $normalizedLimitText = [regex]::Replace($limitText, '\s+', ' ').Trim()
         $requiredLimitations = @(
-            'PRIVATE FILE WRITES ARE SUPPORTED WHEN WINDOWS SECURITY CHECKS SUCCEED',
-            'fails closed',
-            'persistent ACL enforcement',
-            'path-based staging',
-            'does not defend against administrators or the same user',
-            'every filesystem',
-            'elevated execution',
-            'account/configuration'
+            'Private file writes are supported only when a protected current-user-only DACL is created and the resulting security descriptor verifies before writing.',
+            'The volume must advertise persistent ACL enforcement.',
+            'Unsupported or unqueryable volumes, and failed security verification, fail closed before file contents are written.',
+            'The implementation uses path-based staging and assumes the containing directory is trusted and not controlled by an adversary.',
+            'These guarantees are not established for every filesystem, elevated execution, or every Windows account/configuration.'
         )
         $limitationsComplete = $true
         foreach ($marker in $requiredLimitations) {
-            if ($limitText -notmatch [regex]::Escape($marker)) { $limitationsComplete = $false }
+            if ($normalizedLimitText.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                $limitationsComplete = $false
+            }
         }
-        Assert-True $limitationsComplete 'zip: limitations readme states supported protected writes, fail-closed conditions, and scope'
+        Assert-True $limitationsComplete 'zip: limitations readme states exact protected-write, fail-closed, trusted-parent, and scope contract'
     } finally {
         $archive.Dispose()
     }
@@ -940,6 +953,67 @@ try {
         '-Zip', (Join-Path $c "$name.zip"), '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'WINDOWS-LIMITATIONS')) `
         'verify: tampered top-level limitations readme rejected'
+
+    # Contract-negative tests: remove each critical full statement from BOTH
+    # published copies, keep them byte-identical, and refresh both manifest
+    # hashes. The verifier must reject for that specific missing statement,
+    # not because of parity or stale checksums.
+    $contractStatements = @(
+        'Private file writes are supported only when a protected current-user-only DACL is created and the resulting security descriptor verifies before writing.',
+        'The volume must advertise persistent ACL enforcement.',
+        'Unsupported or unqueryable volumes, and failed security verification, fail closed before file contents are written.',
+        'The implementation uses path-based staging and assumes the containing directory is trusted and not controlled by an adversary.',
+        'These guarantees are not established for every filesystem, elevated execution, or every Windows account/configuration.'
+    )
+    $contractNames = @(
+        'protected current-user-only DACL and verified descriptor',
+        'persistent ACL enforcement',
+        'fail-closed unsupported-volume and verification conditions',
+        'trusted containing-directory assumption',
+        'unverified filesystem, elevation, and account boundaries'
+    )
+    for ($contractIndex = 0; $contractIndex -lt $contractStatements.Count; $contractIndex++) {
+        $statement = $contractStatements[$contractIndex]
+        $c = New-DistCopy "contract-$contractIndex"
+        $rawLimPath = Join-Path $c 'WINDOWS-LIMITATIONS.txt'
+        $normalizedNotice = [regex]::Replace([IO.File]::ReadAllText($rawLimPath), '\s+', ' ').Trim()
+        $editedText = $normalizedNotice.Replace($statement, '[required statement removed]')
+        [IO.File]::WriteAllText($rawLimPath, $editedText)
+
+        $contractArchive = [IO.Compression.ZipFile]::Open(
+            (Join-Path $c "$name.zip"), [IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $entryName = "$name/WINDOWS-LIMITATIONS.txt"
+            $entry = $contractArchive.GetEntry($entryName)
+            $entry.Delete()
+            $replacement = $contractArchive.CreateEntry($entryName)
+            $stream = $replacement.Open()
+            try {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($editedText)
+                $stream.Write($bytes, 0, $bytes.Length)
+            } finally {
+                $stream.Dispose()
+            }
+        } finally {
+            $contractArchive.Dispose()
+        }
+
+        $sumsFile = Join-Path $c 'SHA256SUMS'
+        $limHash = (Get-FileHash -LiteralPath $rawLimPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $zipHash = (Get-FileHash -LiteralPath (Join-Path $c "$name.zip") -Algorithm SHA256).Hash.ToLowerInvariant()
+        Update-SumsLine -SumsPath $sumsFile -Name 'WINDOWS-LIMITATIONS.txt' -NewHash $limHash
+        Update-SumsLine -SumsPath $sumsFile -Name "$name.zip" -NewHash $zipHash
+
+        $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
+            '-Zip', (Join-Path $c "$name.zip"), '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
+        $diagnostic = [regex]::Replace(($r.StdErr + ' ' + $r.StdOut), '[|\s]+', ' ').Trim()
+        $reasonPresent = ($diagnostic.IndexOf('missing the required statement', [StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+            ($diagnostic.IndexOf($contractNames[$contractIndex], [StringComparison]::OrdinalIgnoreCase) -ge 0)
+        Assert-True (($r.ExitCode -ne 0) -and
+            $reasonPresent) `
+            "verify: missing Windows contract statement $contractIndex rejected for the exact omission" `
+            -Diag $diagnostic
+    }
 
     # ---- SHA256SUMS validation: whitelist before read, reparse, zip identity ----
 

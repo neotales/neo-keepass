@@ -1006,19 +1006,18 @@ try {
     # Mandated private-write contract — checked on BOTH copies (the
     # byte-compare above already implies it; assert it directly on each).
     foreach ($limPath in @($rawLimitations, $zipLimPath)) {
-        $limText = [IO.File]::ReadAllText($limPath)
-        foreach ($marker in @(
-            'PRIVATE FILE WRITES ARE SUPPORTED WHEN WINDOWS SECURITY CHECKS SUCCEED',
-            'fails closed',
-            'persistent ACL enforcement',
-            'path-based staging',
-            'does not defend against administrators or the same user',
-            'every filesystem',
-            'elevated execution',
-            'account/configuration'
+        # Normalize whitespace so the exact contract statements can wrap
+        # across lines without weakening them into isolated word fragments.
+        $limText = [regex]::Replace([IO.File]::ReadAllText($limPath), '\s+', ' ').Trim()
+        foreach ($required in @(
+            @{ Name = 'protected current-user-only DACL and verified descriptor'; Text = 'Private file writes are supported only when a protected current-user-only DACL is created and the resulting security descriptor verifies before writing.' },
+            @{ Name = 'persistent ACL enforcement'; Text = 'The volume must advertise persistent ACL enforcement.' },
+            @{ Name = 'fail-closed unsupported-volume and verification conditions'; Text = 'Unsupported or unqueryable volumes, and failed security verification, fail closed before file contents are written.' },
+            @{ Name = 'trusted containing-directory assumption'; Text = 'The implementation uses path-based staging and assumes the containing directory is trusted and not controlled by an adversary.' },
+            @{ Name = 'unverified filesystem, elevation, and account boundaries'; Text = 'These guarantees are not established for every filesystem, elevated execution, or every Windows account/configuration.' }
         )) {
-            if ($limText -notmatch $marker) {
-                throw "windows-verify: WINDOWS-LIMITATIONS.txt is missing the mandated text: $marker ($limPath)"
+            if ($limText.IndexOf($required.Text, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                throw "windows-verify: WINDOWS-LIMITATIONS.txt is missing the required statement ($($required.Name)) ($limPath)"
             }
         }
     }
