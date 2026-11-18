@@ -264,8 +264,14 @@ alongside stdout, and UTF-16 (the stub's encoding for "no installed
 distributions") is decoded so the diagnostic reads as text. The
 (And an exiting parent is not enough: probes also bound stream draining;
 if a descendant inherits stdout/stderr, Unix kills the owned process
-group and returns a stream-cleanup failure. Windows has no process-tree
-containment in this probe: if a descendant keeps an inherited pipe open
+group and returns a stream-cleanup failure; an owned live sentinel stays
+in that group through the signal, so the PGID cannot be recycled after
+the probed parent exits. A descendant that calls `setsid` (or otherwise
+escapes that group) is outside the cleanup boundary: the probe still
+returns boundedly and explicitly reports the open streams, but cannot
+promise the escaped process or its reader thread was terminated. Windows
+has no process-tree containment in this probe: if a descendant keeps an
+inherited pipe open
 after its parent exits, the probe returns a fail-closed
 interpreter-availability diagnostic after at most the initial drain
 window plus one final cleanup window, but cannot promise that descendant

@@ -3227,6 +3227,58 @@ else:
     /// bounded instead of ballooning memory until the kill lands.
     const SHELL_PROBE_CAPTURE_LIMIT: usize = 64 * 1024;
 
+    /// Unix probe-group sentinel. It is the process-group leader and stays
+    /// alive and unreaped until cleanup, so its numeric PGID cannot be
+    /// recycled between reaping the probed parent and the group signal.
+    #[cfg(unix)]
+    struct ProbeGroup {
+        sentinel: Option<std::process::Child>,
+        pgid: i32,
+    }
+
+    #[cfg(unix)]
+    impl ProbeGroup {
+        /// Kill the owned process group while its sentinel is still a
+        /// live, unreaped child; then reap the sentinel. If it exited
+        /// unexpectedly, do not signal its possibly recycled PGID.
+        fn terminate(&mut self) -> bool {
+            let Some(sentinel) = self.sentinel.as_mut() else {
+                return true;
+            };
+            match sentinel.try_wait() {
+                Ok(None) => {
+                    let pgid = self.pgid.to_string();
+                    let result = run_python_helper_bounded(
+                        "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
+                        &[&pgid],
+                        PYTHON_HELPER_DEADLINE,
+                    );
+                    let killed = result.success();
+                    // Direct-child kill remains safe: the sentinel is
+                    // still owned and unreaped if the group helper failed.
+                    let _ = sentinel.kill();
+                    let _ = sentinel.wait();
+                    self.sentinel = None;
+                    killed
+                }
+                Ok(Some(_)) | Err(_) => {
+                    // It is no longer safe to signal this numeric group
+                    // id: the sentinel's group may already have vanished.
+                    let _ = sentinel.wait();
+                    self.sentinel = None;
+                    false
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ProbeGroup {
+        fn drop(&mut self) {
+            let _ = self.terminate();
+        }
+    }
+
     /// Decode a captured probe stream into text. Interpreters on
     /// Windows can emit UTF-16 — the WSL launcher stub reports "no
     /// installed distributions" as UTF-16, which lossy UTF-8 decoding
@@ -3352,10 +3404,29 @@ else:
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         #[cfg(unix)]
-        {
+        let mut probe_group = {
             use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
+            let mut sentinel = std::process::Command::new("sleep");
+            sentinel.arg("3600").process_group(0);
+            let sentinel = match sentinel.spawn() {
+                Ok(sentinel) => sentinel,
+                Err(error) => {
+                    return Some(format!(
+                        "cannot establish an owned Unix process group for `{program}`: {error}"
+                    ));
+                }
+            };
+            let Ok(pgid) = i32::try_from(sentinel.id()) else {
+                return Some(format!(
+                    "cannot establish an owned Unix process group for `{program}`: invalid group id"
+                ));
+            };
+            command.process_group(pgid);
+            ProbeGroup {
+                sentinel: Some(sentinel),
+                pgid,
+            }
+        };
         let mut child = {
             let mut attempts = 0;
             loop {
@@ -3396,7 +3467,7 @@ else:
                 Ok(None) if started.elapsed() >= timeout => {
                     timed_out = true;
                     #[cfg(unix)]
-                    kill_driver_group(child.id());
+                    let _ = probe_group.terminate();
                     let _ = child.kill();
                     break child
                         .wait()
@@ -3428,9 +3499,13 @@ else:
             }
         }
         let drain_timed_out = stdout_bytes.is_none() || stderr_bytes.is_none();
+        #[cfg(unix)]
+        let group_killed = if drain_timed_out {
+            probe_group.terminate()
+        } else {
+            false
+        };
         if drain_timed_out {
-            #[cfg(unix)]
-            kill_driver_group(child.id());
             // On Windows std::process::Child has no process-tree kill
             // primitive here. The direct child is already reaped; do not
             // claim descendant containment. Fail closed below, while
@@ -3454,18 +3529,28 @@ else:
         let stdout = decode_console_output(&stdout_bytes.unwrap_or_default());
         let stderr = decode_console_output(&stderr_bytes.unwrap_or_default());
         if drain_timed_out {
+            #[cfg(unix)]
+            let cleanup_detail = if group_killed {
+                "sentinel-owned Unix process group killed; stream cleanup bounded"
+            } else {
+                "owned Unix process-group cleanup failed; resolution failed closed"
+            };
+            #[cfg(not(unix))]
+            let cleanup_detail =
+                "process-tree containment unavailable on this platform; resolution failed closed";
             return Some(format!(
                 "`{program}` --version exited {status:?}, but captured streams did not close \
                  within {:?}; {} [stdout: {:?}] [stderr: {:?}]",
                 timeout.min(SHELL_PROBE_DRAIN_ALLOWANCE),
-                if cfg!(unix) {
-                    "owned Unix process group killed; stream cleanup bounded"
-                } else {
-                    "process-tree containment unavailable on this platform; \
-                     resolution failed closed"
-                },
+                cleanup_detail,
                 first_probe_line(&stdout),
                 first_probe_line(&stderr),
+            ));
+        }
+        #[cfg(unix)]
+        if !probe_group.terminate() {
+            return Some(format!(
+                "`{program}` --version completed, but owned Unix process-group cleanup failed"
             ));
         }
         if timed_out {
@@ -3746,7 +3831,7 @@ else:
             "the failure must identify the bounded stream drain: {failure}"
         );
         assert!(
-            failure.contains("owned Unix process group killed"),
+            failure.contains("sentinel-owned Unix process group killed"),
             "the Unix process-group cleanup must be explicit: {failure}"
         );
         assert!(
@@ -3778,6 +3863,101 @@ else:
         assert!(
             !alive,
             "stream-holding descendant {pid} SURVIVED the owned-group cleanup"
+        );
+    }
+
+    /// A descendant can call setsid and escape the probe's group. The
+    /// sentinel prevents the old PGID from being recycled while cleanup
+    /// signals the owned group, but cannot contain this escapee. Verify
+    /// bounded fail-closed return, that the detached child remains alive
+    /// until its fixture's own short timer expires, and that an unrelated
+    /// bystander is not signaled. The fixture cleans itself naturally;
+    /// only the directly owned bystander child is explicitly killed.
+    #[test]
+    #[cfg(unix)]
+    fn shell_probe_does_not_signal_recycled_group_for_detached_descendant() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("probe tempdir");
+        let program = directory.path().join("detaching-interpreter");
+        let pid_file = directory.path().join("detached.pid");
+        let quoted_pid_file = format!("'{}'", pid_file.to_string_lossy().replace('\'', "'\\''"));
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nsetsid sh -c 'echo $$ > {quoted_pid_file}; sleep 4' &\nprintf 'GNU bash, version 9.9.9\\n'\nexit 0\n"
+            ),
+        )
+        .expect("write detaching fake");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("fake executable");
+
+        let bystander = std::process::Command::new("sleep")
+            .arg("4")
+            .spawn()
+            .expect("bystander should start");
+        let started = std::time::Instant::now();
+        let failure = shell_probe_failure_with_timeout(
+            &program.to_string_lossy(),
+            Some("GNU bash, version"),
+            Duration::from_millis(300),
+        )
+        .expect("detached inherited streams must fail closed");
+        assert!(
+            failure.contains("captured streams did not close"),
+            "the detached stream must be diagnosed: {failure}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "detached pipe must not make the probe unbounded: {:?}",
+            started.elapsed()
+        );
+
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("detached fake writes its pid")
+            .trim()
+            .parse()
+            .expect("detached pid is numeric");
+        let detached_probe = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ps should run");
+        assert!(
+            detached_probe.success(),
+            "the documented escaped descendant should survive group cleanup"
+        );
+        let bystander_probe = std::process::Command::new("ps")
+            .args(["-p", &bystander.id().to_string(), "-o", "pid="])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ps should run");
+        assert!(
+            bystander_probe.success(),
+            "the unrelated bystander must not be signaled by probe cleanup"
+        );
+        // The escaped fixture has its own four-second lifetime. Wait it
+        // out, then clean only our directly-owned bystander.
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let mut detached_alive = true;
+        while std::time::Instant::now() < deadline {
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "pid="])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("ps should run");
+            if !probe.success() {
+                detached_alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !detached_alive,
+            "detached fixture {pid} did not exit on its own"
         );
     }
 
