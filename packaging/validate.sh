@@ -8,12 +8,11 @@
 # With arguments, every listed target triple must have a complete set
 # (tar.gz, zip, .deb) named nkeepass-<version>-<triple> /
 # nkeepass-<version>-<deb-arch>.deb — the archive/package names keep the
-# historical `nkeepass` identifier for compatibility. The shipped executable
-# inside every container is the real `nkp` binary name. For every container
-# the shipped binary is
-# extracted and checked: regular file, not a symlink, ELF architecture
-# matching the triple, and a sha256 equal across all containers and, when
-# --binary is given, equal to the expected built binary. Deb metadata
+# historical `nkeepass` identifier for compatibility. The executable shipped
+# inside every container is the real `nkp` binary name; that binary is
+# extracted and checked in each container: regular file, not a symlink, ELF
+# architecture matching the triple, and a sha256 equal across all containers
+# and, when --binary is given, equal to the expected built binary. Deb metadata
 # (package/version/architecture) and pacman metadata and payload (regular
 # file, ELF architecture, sha256 identical to the tarball binary; the builder
 # disables makepkg's strip/debug transforms) are checked. dpkg-deb is used
@@ -120,22 +119,35 @@ check_manifests() {
         record fail "choco nuspec does not mention crate version $version"
     fi
 
-    # nuspec: XML well-formed.
-    if python3 -c "import xml.etree.ElementTree as ET; ET.parse('$manifest_root/choco/nkeepass.nuspec')" 2>/dev/null; then
-        record ok "choco nuspec is well-formed XML"
-    else
-        record fail "choco nuspec is not well-formed XML"
-    fi
-
-    # winget manifest: YAML if a parser is available, else skipped.
+    # winget manifest: YAML if a parser is available, else skipped. The
+    # human-facing PackageName is the product name; the PackageIdentifier
+    # stays Neotales.nkeepass (package IDs are deliberately not renamed).
     if python3 -c "import yaml" 2>/dev/null; then
         if python3 -c "import yaml; yaml.safe_load(open('$manifest_root/winget/Neotales.nkeepass.yaml'))" 2>/dev/null; then
             record ok "winget manifest is valid YAML"
         else
             record fail "winget manifest is not valid YAML"
         fi
+        if grep -q -- "^PackageName: neo-keepass" "$manifest_root/winget/Neotales.nkeepass.yaml" 2>/dev/null; then
+            record ok "winget PackageName is the product name neo-keepass"
+        else
+            record fail "winget PackageName should be neo-keepass (display name; PackageIdentifier stays Neotales.nkeepass)"
+        fi
     else
         echo "skip winget manifest YAML check (pyyaml not installed)"
+    fi
+
+    # nuspec: XML well-formed, and the human-facing <title> is the product
+    # name while the <id> keeps the nkeepass package identifier.
+    if python3 -c "import xml.etree.ElementTree as ET; ET.parse('$manifest_root/choco/nkeepass.nuspec')" 2>/dev/null; then
+        record ok "choco nuspec is well-formed XML"
+    else
+        record fail "choco nuspec is not well-formed XML"
+    fi
+    if grep -q -- "<title>neo-keepass" "$manifest_root/choco/nkeepass.nuspec" 2>/dev/null; then
+        record ok "choco nuspec title is the product name neo-keepass"
+    else
+        record fail "choco nuspec title should be neo-keepass (display name; <id> stays nkeepass)"
     fi
 }
 

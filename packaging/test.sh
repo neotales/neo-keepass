@@ -135,6 +135,8 @@ if command -v makepkg >/dev/null; then
     bash "$repo/packaging/pacman/build.sh" \
         "$pos/nkeepass-${version}-x86_64-unknown-linux-gnu.tar.gz" \
         x86_64-unknown-linux-gnu "$pos" >/dev/null
+else
+    echo "SKIP (makepkg not available): positive pacman package build"
 fi
 if command -v dpkg-deb >/dev/null; then
     echo "     (positive deb built by the real dpkg-deb builder)"
@@ -223,6 +225,8 @@ if command -v makepkg >/dev/null; then
         echo "ok   (no injection): $marker was not created anywhere under ${TMPDIR:-/tmp}"
         pass=$((pass + 1))
     fi
+else
+    echo "SKIP (makepkg not available): hostile pacman filename injection check"
 fi
 
 if command -v makepkg >/dev/null; then
@@ -247,6 +251,8 @@ if command -v makepkg >/dev/null; then
     expect_fail "pacman payload" \
         "missing pacman payload is rejected" \
         bash "$repo/packaging/validate.sh" --binary "$binary" "$neg" "$version" x86_64-unknown-linux-gnu
+else
+    echo "SKIP (makepkg not available): modified/missing pacman payload checks"
 fi
 
 echo "== regression: invalid manifest defers the smoke run even with perfect artifacts"

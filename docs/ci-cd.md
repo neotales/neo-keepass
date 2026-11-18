@@ -330,8 +330,10 @@ not built in CI (ubuntu runners have no makepkg). The builder rejects any
 tarball whose basename is not the canonical `nkeepass-<version>-<triple>`
 name, so nothing from the caller-supplied path can reach the generated
 PKGBUILD. The rpm spec is real metadata but requires `rpmbuild`, which
-neither CI nor this machine has, so it is wired but never built here; the
-winget manifest and choco nuspec are stubs with explicit placeholders and are
+neither CI nor this machine has, so it is wired but **never built and not
+build-verified** — the only automated check is the crate-version wiring in
+`validate.sh`; the winget manifest and choco nuspec are stubs with explicit
+placeholders and are
 not submittable or buildable packages.
 
 Naming compatibility: the product is neo-keepass and its executable is

@@ -9,7 +9,10 @@ PackageIdentifier: Neotales.nkeepass
 PackageVersion: 0.0.0.25
 PackageLocale: en-US
 Publisher: Neotales
-PackageName: nkeepass
+# Human-facing display name is the product name; the PackageIdentifier keeps
+# the historical nkeepass id (package identifiers are not renamed — see
+# packaging/README.md).
+PackageName: neo-keepass
 License: MIT
 ShortDescription: Headless KeePass automation CLI and TUI
 # PLACEHOLDER: installer URL and hash must come from a real published release.

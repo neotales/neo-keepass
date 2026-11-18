@@ -5,9 +5,11 @@
      only; do not `choco pack` or push it. -->
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
+    <!-- Display-only <title> is the product name; the <id> keeps the
+         historical nkeepass package identifier (see packaging/README.md). -->
     <id>nkeepass</id>
     <version>0.0.0-alpha.25</version>
-    <title>nkeepass (Staging)</title>
+    <title>neo-keepass (Staging)</title>
     <authors>Neotales</authors>
     <owners>Neotales</owners>
     <licenseUrl>https://github.com/neotales/neo-keepass/blob/main/LICENSE.md</licenseUrl>
