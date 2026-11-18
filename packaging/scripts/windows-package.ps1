@@ -3,8 +3,9 @@
 #
 #   <OutputDir>/nkeepass-<version>-<triple>.zip
 #       one entry root "nkeepass-<version>-<triple>/" containing
-#       nkeepass.exe, README.md, LICENSE.md, WINDOWS-LIMITATIONS.txt
-#   <OutputDir>/nkeepass.exe               (raw, for direct download)
+#       nkp.exe (the product's executable name), README.md, LICENSE.md,
+#       WINDOWS-LIMITATIONS.txt
+#   <OutputDir>/nkp.exe                    (raw, for direct download)
 #   <OutputDir>/WINDOWS-LIMITATIONS.txt    (readable without unzipping)
 #   <OutputDir>/SHA256SUMS                 (covers all three, sha256sum -c
 #                                           compatible: "<hex>  <name>",
@@ -28,7 +29,7 @@
 #
 # Re-running overwrites the outputs; it is safe to re-run. Usage:
 #
-#   windows-package.ps1 -Binary <nkeepass.exe> -Version <ver> `
+#   windows-package.ps1 -Binary <nkp.exe> -Version <ver> `
 #     -Triple x86_64-pc-windows-msvc -OutputDir <dir>
 [CmdletBinding()]
 param(
@@ -72,7 +73,7 @@ try {
     # nkeepass-<version>-<triple>/ root from the entry names.
     $pkgDir = Join-Path $stage $name
     New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
-    Copy-Item -LiteralPath $Binary -Destination (Join-Path $pkgDir 'nkeepass.exe')
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $pkgDir 'nkp.exe')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') $pkgDir
     Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE.md') $pkgDir
     Copy-Item -LiteralPath $limitations $pkgDir
@@ -82,7 +83,7 @@ try {
 
     # Top-level copies, hashed from the staging tree (identical bytes to
     # what gets published below).
-    $rawExe = Join-Path $stage 'nkeepass.exe'
+    $rawExe = Join-Path $stage 'nkp.exe'
     $rawLimitations = Join-Path $stage 'WINDOWS-LIMITATIONS.txt'
     Copy-Item -LiteralPath $Binary -Destination $rawExe
     Copy-Item -LiteralPath $limitations -Destination $rawLimitations
@@ -90,7 +91,7 @@ try {
     # sha256sum-compatible checksums: lowercase hex, two spaces, forward-slash
     # name, LF endings and a trailing newline, so `sha256sum -c SHA256SUMS`
     # works unchanged on Linux and macOS.
-    $files = @("$name.zip", 'nkeepass.exe', 'WINDOWS-LIMITATIONS.txt')
+    $files = @("$name.zip", 'nkp.exe', 'WINDOWS-LIMITATIONS.txt')
     $sources = @($zip, $rawExe, $rawLimitations)
     $lines = for ($i = 0; $i -lt $files.Count; $i++) {
         $hash = (Get-FileHash -LiteralPath $sources[$i] -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -121,7 +122,7 @@ try {
     }
     Copy-Item -LiteralPath $zip -Destination (Join-Path $outDir "$name.zip") -Force
     if ($env:NEOKEEPASS_PACKAGE_FAIL_AFTER -eq 'zip') { throw 'windows-package: injected test failure after zip publish' }
-    Copy-Item -LiteralPath $rawExe -Destination (Join-Path $outDir 'nkeepass.exe') -Force
+    Copy-Item -LiteralPath $rawExe -Destination (Join-Path $outDir 'nkp.exe') -Force
     if ($env:NEOKEEPASS_PACKAGE_FAIL_AFTER -eq 'exe') { throw 'windows-package: injected test failure after exe publish' }
     Copy-Item -LiteralPath $rawLimitations -Destination (Join-Path $outDir 'WINDOWS-LIMITATIONS.txt') -Force
     if ($env:NEOKEEPASS_PACKAGE_FAIL_AFTER -eq 'limitations') { throw 'windows-package: injected test failure after limitations publish' }
@@ -132,4 +133,4 @@ finally {
         Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
     }
 }
-Write-Host "windows-package: wrote $name.zip, nkeepass.exe, WINDOWS-LIMITATIONS.txt, SHA256SUMS to $OutputDir"
+Write-Host "windows-package: wrote $name.zip, nkp.exe, WINDOWS-LIMITATIONS.txt, SHA256SUMS to $OutputDir"

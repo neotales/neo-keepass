@@ -45,7 +45,7 @@ jobs:
         with:
           toolchain: "1.98.1"
       - name: Run generated shell syntax tests
-        run: cargo test -p nkeepass --bin nkeepass generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed
+        run: cargo test -p nkeepass --bin nkp generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed
 
   rsa-slow-lane:
     name: RSA 16,384-bit slow lane
@@ -148,7 +148,7 @@ jobs:
       # real builder and its metadata checked by dpkg-deb. The pacman builder
       # is skipped there (no makepkg) and exercised on Arch hosts instead.
       - name: Packaging self-tests
-        run: packaging/test.sh target/release/nkeepass
+        run: packaging/test.sh target/release/nkp
 
   audit:
     name: cargo audit

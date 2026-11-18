@@ -4,13 +4,28 @@ Status of each package target. Nothing here publishes to any repository,
 registry, or store; "functional" means the scripts build a real artifact
 locally and it is validated by `validate.sh`.
 
+## Naming: the executable is `nkp`; package identifiers stay `nkeepass`
+
+The product is **neo-keepass** and its executable is **`nkp`** (Windows:
+`nkp.exe`). The distribution containers deliberately keep the historical
+`nkeepass` name as their **package identifier** — archive basenames
+(`nkeepass-<version>-<triple>.tar.gz`/`.zip`), the zip's
+`nkeepass-<version>-<triple>/` root directory, the deb `Package: nkeepass`
+field and `.deb` file name, the rpm `Name:`, the pacman `pkgname`/provides/
+conflicts, and the winget/choco identifiers. Only the executable *inside*
+each container is the real `nkp` / `nkp.exe` binary name, installed as
+`/usr/bin/nkp` (deb: `/usr/bin/nkp`, docs under `/usr/share/doc/nkeepass/`).
+Renaming package identifiers would break existing consumers and package
+sources for no functional gain, so it is not done; anything that names the
+*executable* must say `nkp`, not `nkeepass`.
+
 | Target   | Status                  | Built by                        | Notes |
 |----------|-------------------------|---------------------------------|-------|
 | tar.gz   | functional, CI-built    | `scripts/archive.sh`            | `tar -czf`, portable, no deps. |
 | zip      | functional, CI-built    | `scripts/archive.sh`            | `zip -r` (Info-ZIP). |
-| deb      | functional, CI-built    | `deb/build.sh`                  | `dpkg-deb --build` on Debian/Ubuntu; installs binary to `/usr/bin/nkeepass`. Validated with dpkg-deb when present, structurally (ar+tar) otherwise. |
-| pacman   | functional, Arch-only   | `pacman/build.sh`               | Generates a PKGBUILD from the crate version + tarball sha256 and runs `makepkg -f`. Requires the tarball's canonical `nkeepass-<version>-<triple>` basename — nothing from the caller's path reaches the PKGBUILD. Tested on an Arch machine; not built in CI (ubuntu runners have no makepkg). Never installed here or anywhere. |
-| rpm      | spec only, never built  | `rpm/nkeepass.spec`             | Real spec wired to the crate version and the archive tarball name; build with `rpmbuild -bb` on a machine with rpm tooling. No such machine exists here or in CI, so it has never been built. |
+| deb      | functional, CI-built    | `deb/build.sh`                  | `dpkg-deb --build` on Debian/Ubuntu; installs the executable to `/usr/bin/nkp`. Validated with dpkg-deb when present, structurally (ar+tar) otherwise. |
+| pacman   | functional, Arch-only   | `pacman/build.sh`               | Generates a PKGBUILD from the crate version + tarball sha256 and runs `makepkg -f`. Requires the tarball's canonical `nkeepass-<version>-<triple>` basename — nothing from the caller's path reaches the PKGBUILD. Installs the executable to `/usr/bin/nkp`. Tested on an Arch machine; not built in CI (ubuntu runners have no makepkg). Never installed here or anywhere. |
+| rpm      | spec only, never built  | `rpm/nkeepass.spec`             | Real spec wired to the crate version and the archive tarball name; installs the executable to `/usr/bin/nkp`; build with `rpmbuild -bb` on a machine with rpm tooling. No such machine exists here or in CI, so it has never been built. |
 | winget   | manifest stub           | `winget/Neotales.nkeepass.yaml` | Skeleton with explicit placeholders. **Not** a submittable winget-pkgs manifest: it has no signed installer URL. |
 | choco    | nuspec stub             | `choco/nkeepass.nuspec`         | Skeleton; `choco/tools/` is intentionally absent. Not a buildable chocolatey package. |
 

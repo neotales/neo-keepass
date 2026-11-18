@@ -4,7 +4,12 @@
 #
 # Usage: archive.sh <binary-path> <version> <target-triple> <output-dir>
 #
-# Produces: nkeepass-<version>-<target-triple>.tar.gz and .zip in <output-dir>.
+# Produces: nkeepass-<version>-<target-triple>.tar.gz and .zip in <output-dir>,
+# each containing one top-level directory nkeepass-<version>-<target-triple>/
+# that holds the executable as `nkp` (the product's executable name) plus
+# README.md and LICENSE.md. The archive basename keeps the historical
+# `nkeepass` package identifier for compatibility; the executable inside is
+# the real `nkp` binary name.
 # <output-dir> may be relative; it is normalized here. Re-running overwrites
 # the archives; it is safe to re-run.
 set -euo pipefail
@@ -25,8 +30,8 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-archive.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 mkdir -p "$stage/$name"
-cp "$binary" "$stage/$name/nkeepass"
-chmod 755 "$stage/$name/nkeepass"
+cp "$binary" "$stage/$name/nkp"
+chmod 755 "$stage/$name/nkp"
 cp "$repo/README.md" "$repo/LICENSE.md" "$stage/$name/"
 
 tar -czf "$out_dir/$name.tar.gz" -C "$stage" "$name"

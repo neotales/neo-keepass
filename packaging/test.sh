@@ -9,9 +9,9 @@
 # real builder (deb/build.sh); negative debs are still fabricated to isolate
 # single properties. Without dpkg-deb the deb fixtures are fabricated with
 # ar(1)+tar(1) in real Debian structure: ar members debian-binary,
-# control.tar.*, data.tar.*, with ./control and ./usr/bin/nkeepass payloads.
+# control.tar.*, data.tar.*, with ./control and ./usr/bin/nkp payloads.
 #
-# Usage: packaging/test.sh <built-nkeepass-binary>
+# Usage: packaging/test.sh <built-nkp-binary>
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -98,7 +98,7 @@ expect_pass() { # expect_pass <label> <cmd...>
 
 # Fabricate a structurally valid deb in real Debian layout: ar members
 # debian-binary ("2.0"), control.tar.* containing ./control, data.tar.*
-# containing ./usr/bin/nkeepass. Compression matches dpkg-deb's xz default.
+# containing ./usr/bin/nkp. Compression matches dpkg-deb's xz default.
 make_fake_deb() { # make_fake_deb <out.deb> <version> <arch> [payload-binary]
     local out=$1 ver=$2 arch=$3 payload=${4:-$binary} stage
     stage=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-fakedeb.XXXXXX")
@@ -110,7 +110,7 @@ make_fake_deb() { # make_fake_deb <out.deb> <version> <arch> [payload-binary]
     # does; DEBIAN/ above is only the staging directory for dpkg-deb builds.
     (cd "$stage/control/DEBIAN" && tar -cJf "$stage/control.tar.xz" ./control)
     mkdir -p "$stage/data/usr/bin"
-    cp "$payload" "$stage/data/usr/bin/nkeepass"
+    cp "$payload" "$stage/data/usr/bin/nkp"
     (cd "$stage/data" && tar -cJf "$stage/data.tar.xz" ./usr)
     (cd "$stage" && ar r "$out" debian-binary control.tar.xz data.tar.xz)
     rm -rf "$stage"
@@ -176,7 +176,7 @@ bash "$repo/packaging/scripts/archive.sh" "$binary" "$version" x86_64-unknown-li
 build_positive_deb "$neg"
 link_stage="$neg/nkeepass-${version}-x86_64-unknown-linux-gnu"
 mkdir -p "$link_stage"
-ln -s "$binary" "$link_stage/nkeepass"
+ln -s "$binary" "$link_stage/nkp"
 cp "$repo/README.md" "$repo/LICENSE.md" "$link_stage/"
 tar -czf "$neg/nkeepass-${version}-x86_64-unknown-linux-gnu.tar.gz" -C "$neg" "nkeepass-${version}-x86_64-unknown-linux-gnu"
 expect_fail "is a symlink" "symlink tar member is rejected" \
@@ -234,7 +234,7 @@ if command -v makepkg >/dev/null; then
     extract="$neg/repack"
     mkdir -p "$extract"
     tar --zstd -xf "$neg/$pkg" -C "$extract"
-    cp /bin/true "$extract/usr/bin/nkeepass"
+    cp /bin/true "$extract/usr/bin/nkp"
     (cd "$extract" && tar --zstd -cf "$neg/$pkg" .PKGINFO .MTREE .BUILDINFO usr)
     expect_fail "pacman payload modified" \
         "modified pacman payload (harmless marker ELF) is rejected" \

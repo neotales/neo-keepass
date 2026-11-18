@@ -7,7 +7,10 @@
 # With no arguments, only manifest syntax and version consistency are checked.
 # With arguments, every listed target triple must have a complete set
 # (tar.gz, zip, .deb) named nkeepass-<version>-<triple> /
-# nkeepass-<version>-<deb-arch>.deb. For every container the shipped binary is
+# nkeepass-<version>-<deb-arch>.deb — the archive/package names keep the
+# historical `nkeepass` identifier for compatibility. The shipped executable
+# inside every container is the real `nkp` binary name. For every container
+# the shipped binary is
 # extracted and checked: regular file, not a symlink, ELF architecture
 # matching the triple, and a sha256 equal across all containers and, when
 # --binary is given, equal to the expected built binary. Deb metadata
@@ -171,7 +174,7 @@ extract_binary_from_deb() {
     [ -n "$dat" ] || return 1
     tflags=$(tar_flags_for_member "$dat")
     binmember=$(ar p "$deb" "$dat" | tar $tflags -tf - 2>/dev/null \
-        | grep -E '^\./?usr/bin/nkeepass$' | head -n1 || true)
+        | grep -E '^\./?usr/bin/nkp$' | head -n1 || true)
     [ -n "$binmember" ] || return 1
     ar p "$deb" "$dat" | tar $tflags -xOf - "$binmember" > "$dest"
 }
@@ -278,14 +281,14 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [triple=expe
         # Payload must be present and a regular file (tar type '-'), the
         # right ELF architecture, and byte-identical to the tarball binary
         # (the builder disables makepkg's strip/debug transforms for this).
-        member_line=$(echo "$listing" | grep -E 'usr/bin/nkeepass$' | head -n1 || true)
+        member_line=$(echo "$listing" | grep -E 'usr/bin/nkp$' | head -n1 || true)
         if [ -z "$member_line" ]; then
-            record fail "pacman payload: $(basename "$p") does not contain usr/bin/nkeepass"
+            record fail "pacman payload: $(basename "$p") does not contain usr/bin/nkp"
             continue
         fi
         type_char=$(echo "$member_line" | cut -c1)
         if [ "$type_char" != "-" ]; then
-            record fail "pacman payload: usr/bin/nkeepass is not a regular file (type '$type_char')"
+            record fail "pacman payload: usr/bin/nkp is not a regular file (type '$type_char')"
             continue
         fi
         # Extract into a fresh private directory. The payload path inside it
@@ -294,8 +297,8 @@ check_pacman_artifacts() { # check_pacman_artifacts <dir> <version> [triple=expe
         local payload_dir payload payload_hash
         payload_dir=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-pacman-payload.XXXXXX")
         payload="$payload_dir/payload"
-        if ! tar $flags -xOf "$p" usr/bin/nkeepass > "$payload" 2>/dev/null; then
-            record fail "pacman payload: could not extract usr/bin/nkeepass from $(basename "$p")"
+        if ! tar $flags -xOf "$p" usr/bin/nkp > "$payload" 2>/dev/null; then
+            record fail "pacman payload: could not extract usr/bin/nkp from $(basename "$p")"
             rm -rf "$payload_dir"
             continue
         fi
@@ -341,7 +344,7 @@ check_artifacts() {
         work=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-validate.XXXXXX")
         local bin_tar="$work/from-tar" bin_zip="$work/from-zip" bin_deb="$work/from-deb"
         local checks_ok=1 tar_hash zip_hash deb_hash tar_extracted=0 zip_extracted=0
-        local tar_member="$base/nkeepass"
+        local tar_member="$base/nkp"
 
         # Extract the binary from each container. Extraction is into a fresh
         # temp dir, members are named exactly, and nothing is executed here.
@@ -360,7 +363,7 @@ check_artifacts() {
             checks_ok=0
         fi
         if ! extract_binary_from_deb "$deb" "$bin_deb"; then
-            record fail "deb data archive does not contain usr/bin/nkeepass"
+            record fail "deb data archive does not contain usr/bin/nkp"
             checks_ok=0
         fi
 

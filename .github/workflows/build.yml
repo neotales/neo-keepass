@@ -72,21 +72,21 @@ jobs:
       - name: Build release
         run: cargo build --release -p nkeepass --target ${{ matrix.target }}
       - name: Strip binary
-        run: ${{ matrix.strip }} "target/${{ matrix.target }}/release/nkeepass"
+        run: ${{ matrix.strip }} "target/${{ matrix.target }}/release/nkp"
       - name: Package (tar.gz, zip, deb)
         run: |
           version=$(packaging/scripts/version.sh)
           dist="$PWD/dist"
           mkdir -p "$dist"
           packaging/scripts/archive.sh \
-            "target/${{ matrix.target }}/release/nkeepass" \
+            "target/${{ matrix.target }}/release/nkp" \
             "$version" "${{ matrix.target }}" "$dist"
           packaging/deb/build.sh \
-            "target/${{ matrix.target }}/release/nkeepass" \
+            "target/${{ matrix.target }}/release/nkp" \
             "$version" "${{ matrix.deb_arch }}" "$dist"
       - name: Validate artifacts
         run: |
-          packaging/validate.sh --binary "target/${{ matrix.target }}/release/nkeepass" \
+          packaging/validate.sh --binary "target/${{ matrix.target }}/release/nkp" \
             "$PWD/dist" "$(packaging/scripts/version.sh)" "${{ matrix.target }}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

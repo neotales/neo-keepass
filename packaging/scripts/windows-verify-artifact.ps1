@@ -28,9 +28,9 @@
 #   4. extraction is manual, from the validated set, into a fresh private
 #      temp dir (paths are built from the constant canonical names, never
 #      from entry strings).
-#   5. the EXTRACTED nkeepass.exe passes the PE machine check (x64), and
+#   5. the EXTRACTED nkp.exe passes the PE machine check (x64), and
 #      the extracted exe's sha256 equals the binary just built.
-#   6. the RAW top-level dist files are checked too: nkeepass.exe must
+#   6. the RAW top-level dist files are checked too: nkp.exe must
 #      equal the built binary's hash AND the archived (extracted) exe's
 #      hash and pass the PE check; WINDOWS-LIMITATIONS.txt must be
 #      byte-identical to the zip copy and both copies must carry the
@@ -734,7 +734,7 @@ try {
         "$name/README.md",
         "$name/LICENSE.md",
         "$name/WINDOWS-LIMITATIONS.txt",
-        "$name/nkeepass.exe"
+        "$name/nkp.exe"
     ) | Sort-Object
 
     # ---- 1. Parse and whitelist the manifest BEFORE opening any entry ----
@@ -891,7 +891,7 @@ try {
         $archive.Dispose()
     }
 
-    $extractedExe = Join-Path $extractedDir 'nkeepass.exe'
+    $extractedExe = Join-Path $extractedDir 'nkp.exe'
     foreach ($payload in @('README.md', 'LICENSE.md', 'WINDOWS-LIMITATIONS.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $extractedDir $payload) -PathType Leaf)) {
             throw "windows-verify: extracted payload missing or not a regular file: $payload"
@@ -910,9 +910,9 @@ try {
 
     # ---- 6. Raw top-level dist files: same binary as built AND as
     # archived, same warning text as the zip copy. ----
-    $rawExe = Join-Path $distDirResolved 'nkeepass.exe'
+    $rawExe = Join-Path $distDirResolved 'nkp.exe'
     if (-not (Test-Path -LiteralPath $rawExe -PathType Leaf)) {
-        throw "windows-verify: raw top-level nkeepass.exe missing in $distDirResolved"
+        throw "windows-verify: raw top-level nkp.exe missing in $distDirResolved"
     }
     $rawHash = (Get-FileHash -LiteralPath $rawExe -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($rawHash -ne $builtHash) {
@@ -952,7 +952,7 @@ try {
     if ($lines.Count -ne 3 -or -not $sumsText.EndsWith("`n")) {
         throw "windows-verify: SHA256SUMS must have exactly three entries and a trailing newline"
     }
-    $expectedNames = @("$name.zip", 'nkeepass.exe', 'WINDOWS-LIMITATIONS.txt') | Sort-Object
+    $expectedNames = @("$name.zip", 'nkp.exe', 'WINDOWS-LIMITATIONS.txt') | Sort-Object
     $actualNames = @()
     foreach ($line in $lines) {
         if ($line -notmatch '^[0-9a-f]{64}  \S+$') {

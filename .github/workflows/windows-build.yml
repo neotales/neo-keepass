@@ -1,15 +1,16 @@
 name: windows-build
 
-# Manual/pull-request Windows x64 release build of the nkeepass CLI.
+# Manual/pull-request Windows x64 release build of the neo-keepass CLI
+# (executable `nkp`).
 #
-# Produces nkeepass.exe, a zip archive, a sha256sum-compatible SHA256SUMS,
+# Produces nkp.exe, a zip archive, a sha256sum-compatible SHA256SUMS,
 # and the platform limitations readme, uploaded as a workflow artifact.
 # Nothing is published: no release, no tag, no secrets, no token beyond
 # read-only checkout.
 #
 # Platform limitation (also shipped inside the artifact as
 # WINDOWS-LIMITATIONS.txt): secure owner-only file writes are UNSUPPORTED on
-# Windows and nkeepass FAILS CLOSED — vault creation/mutation, config writes
+# Windows and nkp FAILS CLOSED — vault creation/mutation, config writes
 # and CLI output-to-file return an explicit unsupported-operation diagnostic
 # rather than writing a file it cannot make private. The build and packaging
 # here are unaffected; the limitation is packaged so it reaches the binary's
@@ -98,7 +99,7 @@ jobs:
 
       - name: Validate PE machine is x64
         shell: bash
-        run: pwsh -NoProfile -File packaging/scripts/windows-validate.ps1 -Binary "target/x86_64-pc-windows-msvc/release/nkeepass.exe" -Machine x64
+        run: pwsh -NoProfile -File packaging/scripts/windows-validate.ps1 -Binary "target/x86_64-pc-windows-msvc/release/nkp.exe" -Machine x64
 
       # Failure-path tests for the packaging scripts run in the real target
       # environment (the local dev host runs them under a portable pwsh; see
@@ -133,11 +134,11 @@ jobs:
           version=$(packaging/scripts/version.sh)
           triple=x86_64-pc-windows-msvc
           pwsh -NoProfile -File packaging/scripts/windows-package.ps1 \
-            -Binary "target/$triple/release/nkeepass.exe" \
+            -Binary "target/$triple/release/nkp.exe" \
             -Version "$version" -Triple "$triple" -OutputDir dist
           pwsh -NoProfile -File packaging/scripts/windows-verify-artifact.ps1 \
             -Zip "dist/nkeepass-$version-$triple.zip" \
-            -BuiltExe "target/$triple/release/nkeepass.exe" \
+            -BuiltExe "target/$triple/release/nkp.exe" \
             -Version "$version" -Triple "$triple" -Smoke
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

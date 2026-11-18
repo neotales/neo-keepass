@@ -96,8 +96,11 @@ and `aarch64-unknown-linux-gnu` (cross-compiled; installs
 `gcc-aarch64-linux-gnu`, needed by `ring`'s build script via `rcgen` →
 `neotales-x509`; strips with `aarch64-linux-gnu-strip`). Produces, per target:
 
-- `nkeepass-<version>-<target>.tar.gz` / `.zip` (`packaging/scripts/archive.sh`)
-- `nkeepass-<version>-<deb-arch>.deb` (`packaging/deb/build.sh`, amd64/arm64)
+- `nkeepass-<version>-<target>.tar.gz` / `.zip` (`packaging/scripts/archive.sh`) —
+  the archive basenames keep the historical `nkeepass` package identifier;
+  the executable inside is the real `nkp` binary name
+- `nkeepass-<version>-<deb-arch>.deb` (`packaging/deb/build.sh`, amd64/arm64) —
+  deb `Package:` stays `nkeepass`; the executable installs to `/usr/bin/nkp`
 - validated by `packaging/validate.sh --binary <built>` before upload: every
   target must have the complete set of formats with the expected names, the
   binary in EACH container (tar, zip, deb) is extracted and must be a regular
@@ -118,13 +121,13 @@ The binary is stripped before packaging. Artifacts are uploaded as
 
 ## `windows-build.yml` — Windows x64 build + packaging
 
-Triggered by manual dispatch and pull requests. Builds the `nkeepass` CLI
-for `x86_64-pc-windows-msvc` on `windows-2025` with the pinned toolchain
-(1.98.1) and `--locked`, so the produced `nkeepass.exe` links exactly the
-committed `Cargo.lock` dependency set. Locked dependencies pin what is
-built; they do not make the build reproducible (compiler, runner image and
-toolchain are not pinned bit-for-bit), and no byte-identical output is
-claimed.
+Triggered by manual dispatch and pull requests. Builds the neo-keepass CLI
+(executable `nkp`) for `x86_64-pc-windows-msvc` on `windows-2025` with the
+pinned toolchain (1.98.1) and `--locked`, so the produced `nkp.exe` links
+exactly the committed `Cargo.lock` dependency set. Locked dependencies pin
+what is built; they do not make the build reproducible (compiler, runner
+image and toolchain are not pinned bit-for-bit), and no byte-identical
+output is claimed.
 
 Event-to-checkout semantics are stricter than `build.yml`:
 
@@ -183,7 +186,7 @@ Verification before anything is executed or uploaded:
      temp dir (paths built from the constant canonical names, never from
      entry strings);
    - the EXTRACTED exe must be PE x64 and its sha256 equal the binary
-     just built; the RAW top-level `nkeepass.exe` must equal the built
+     just built; the RAW top-level `nkp.exe` must equal the built
      binary AND the archived (extracted) exe and pass the same PE check;
      the raw `WINDOWS-LIMITATIONS.txt` must be byte-identical to the zip
      copy and both copies must carry the mandated fail-closed warning;
@@ -230,7 +233,7 @@ artifact never reaches upload.
 
 Produces one artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
 days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (one named root:
-binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkeepass.exe`,
+binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkp.exe`,
 `WINDOWS-LIMITATIONS.txt`, and a sha256sum-compatible `SHA256SUMS`
 (`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS).
 Publication is NOT atomic and is not documented as one: the packager
@@ -250,7 +253,7 @@ Nothing is attached to a release; no secrets are used; permissions are
 `contents: read` and checkout persists no credentials.
 
 **Windows platform limitation (stated plainly):** secure owner-only file
-writes are UNSUPPORTED on Windows, and nkeepass FAILS CLOSED. The
+writes are UNSUPPORTED on Windows, and nkp FAILS CLOSED. The
 implementation cannot safely replace and verify a full ACL (icacls
 `/inheritance:r /grant:r` does not remove explicit grants to other
 principals), so on Windows it refuses to write any file it cannot make
@@ -268,7 +271,7 @@ Windows archives with its own `archive-windows.ps1`; this workflow uses
 `packaging/scripts/windows-package.ps1`. They are separate implementations
 and must not diverge in their user-visible contract: archive name
 `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (the `archive.sh`
-convention), payload `nkeepass.exe` + `README.md` + `LICENSE.md` +
+convention), payload `nkp.exe` + `README.md` + `LICENSE.md` +
 `WINDOWS-LIMITATIONS.txt` under one named root, and a sha256sum-compatible
 `SHA256SUMS` (`<hex>  <name>`, LF, forward slashes). Change both together
 or not at all — and before the release pipeline lands its Windows steps,
@@ -311,6 +314,14 @@ PKGBUILD. The rpm spec is real metadata but requires `rpmbuild`, which
 neither CI nor this machine has, so it is wired but never built here; the
 winget manifest and choco nuspec are stubs with explicit placeholders and are
 not submittable or buildable packages.
+
+Naming compatibility: the product is neo-keepass and its executable is
+`nkp` (`nkp.exe` on Windows). Package identifiers and archive names
+deliberately keep the historical `nkeepass` name — archive basenames and
+zip root `nkeepass-<version>-<triple>`, deb `Package:` and `.deb` file
+name, rpm `Name:`, pacman `pkgname`, winget/choco identifiers — while the
+executable inside every container is shipped as `nkp` / `nkp.exe` and
+installed as `/usr/bin/nkp`. See `packaging/README.md`.
 
 ## Verified locally vs. not
 

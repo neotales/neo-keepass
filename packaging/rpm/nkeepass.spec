@@ -1,4 +1,5 @@
-# RPM spec for nkeepass. Build on a machine with rpm tooling:
+# RPM spec for nkeepass (the neo-keepass package identifier; the executable
+# inside is `nkp`). Build on a machine with rpm tooling:
 #   rpmbuild -bb packaging/rpm/nkeepass.spec
 # with the tar.gz produced by packaging/scripts/archive.sh for
 # x86_64-unknown-linux-gnu placed in the rpmbuild SOURCES directory.
@@ -17,7 +18,7 @@ Version:        %{crate_version_dots}
 Release:        1%{?dist}
 Summary:        Headless KeePass automation CLI and TUI
 License:        MIT
-URL:            https://github.com/neotales/neokeepass
+URL:            https://github.com/neotales/neo-keepass
 Source0:        nkeepass-%{crate_version}-x86_64-unknown-linux-gnu.tar.gz
 BuildArch:      x86_64
 
@@ -29,12 +30,12 @@ delegated to the vendored neotales-keepass crate.
 %setup -q -n nkeepass-%{crate_version}-x86_64-unknown-linux-gnu
 
 %install
-install -D -m 755 nkeepass %{buildroot}%{_bindir}/nkeepass
+install -D -m 755 nkp %{buildroot}%{_bindir}/nkp
 install -D -m 644 README.md %{buildroot}%{_docdir}/nkeepass/README.md
 install -D -m 644 LICENSE.md %{buildroot}%{_docdir}/nkeepass/LICENSE.md
 
 %files
-%{_bindir}/nkeepass
+%{_bindir}/nkp
 %doc %{_docdir}/nkeepass/README.md
 %license %{_docdir}/nkeepass/LICENSE.md
 

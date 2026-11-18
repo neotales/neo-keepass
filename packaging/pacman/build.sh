@@ -54,7 +54,7 @@ pkgver=${pkgver}
 pkgrel=1
 pkgdesc='Headless KeePass automation CLI and TUI'
 arch=('${pkg_arch}')
-url='https://github.com/neotales/neokeepass'
+url='https://github.com/neotales/neo-keepass'
 license=('MIT')
 provides=('nkeepass')
 conflicts=('nkeepass')
@@ -64,11 +64,13 @@ source=('${canonical}')
 
 package() {
     # makepkg runs package() inside \$srcdir after extracting the tarball,
-    # which contains a single top-level directory named after the archive.
+    # which contains a single top-level directory named after the archive
+    # holding the executable as nkp (the product's executable name; the
+    # pacman package identifier itself stays nkeepass for compatibility).
     # !strip keeps the payload byte-identical to the tarball binary, which
     # validate.sh asserts by hash.
     local src="\$srcdir/nkeepass-${version}-${triple}"
-    install -D -m 755 "\$src/nkeepass" "\${pkgdir}/usr/bin/nkeepass"
+    install -D -m 755 "\$src/nkp" "\${pkgdir}/usr/bin/nkp"
     install -D -m 644 "\$src/README.md" "\${pkgdir}/usr/share/doc/nkeepass/README.md"
     install -D -m 644 "\$src/LICENSE.md" "\${pkgdir}/usr/share/licenses/nkeepass/LICENSE"
 }

@@ -10,8 +10,8 @@
     <title>nkeepass (Staging)</title>
     <authors>Neotales</authors>
     <owners>Neotales</owners>
-    <licenseUrl>https://github.com/neotales/neokeepass/blob/main/LICENSE.md</licenseUrl>
-    <projectUrl>https://github.com/neotales/neokeepass</projectUrl>
+    <licenseUrl>https://github.com/neotales/neo-keepass/blob/main/LICENSE.md</licenseUrl>
+    <projectUrl>https://github.com/neotales/neo-keepass</projectUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <description>Headless KeePass automation CLI and TUI. Staging nuspec: no install script is shipped, so this package cannot be built or installed yet.</description>
     <tags>nkeepass keepass password cli</tags>

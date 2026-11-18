@@ -248,7 +248,7 @@ function New-DescriptorZip {
         [byte[]] $ReadmeBytes
     )
     $specs = @(
-        @{ Name = "$Root/nkeepass.exe"; Bytes = [IO.File]::ReadAllBytes($ExeSource) },
+        @{ Name = "$Root/nkp.exe"; Bytes = [IO.File]::ReadAllBytes($ExeSource) },
         @{ Name = "$Root/README.md"; Bytes = $(if ($ReadmeBytes) { $ReadmeBytes } else { [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'README.md')) }) },
         @{ Name = "$Root/LICENSE.md"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'LICENSE.md')) },
         @{ Name = "$Root/WINDOWS-LIMITATIONS.txt"; Bytes = [IO.File]::ReadAllBytes((Join-Path $RepoRoot 'packaging/windows/WINDOWS-LIMITATIONS.txt')) }
@@ -405,7 +405,7 @@ try {
 
     $zip = Join-Path $out "$name.zip"
     Assert-True (Test-Path -LiteralPath $zip -PathType Leaf) "package: $name.zip exists"
-    Assert-True (Test-Path -LiteralPath (Join-Path $out 'nkeepass.exe') -PathType Leaf) 'package: raw nkeepass.exe shipped'
+    Assert-True (Test-Path -LiteralPath (Join-Path $out 'nkp.exe') -PathType Leaf) 'package: raw nkp.exe shipped'
     Assert-True (Test-Path -LiteralPath (Join-Path $out 'WINDOWS-LIMITATIONS.txt') -PathType Leaf) 'package: limitations readme shipped'
     $sumsPath = Join-Path $out 'SHA256SUMS'
     Assert-True (Test-Path -LiteralPath $sumsPath -PathType Leaf) 'package: SHA256SUMS shipped'
@@ -420,7 +420,7 @@ try {
             "$name/LICENSE.md",
             "$name/README.md",
             "$name/WINDOWS-LIMITATIONS.txt",
-            "$name/nkeepass.exe"
+            "$name/nkp.exe"
         ) | Sort-Object
         Assert-True (@(Compare-Object $entryNames $expect).Count -eq 0) `
             "zip: entries are exactly the four payloads under $name/"
@@ -485,7 +485,7 @@ try {
     Assert-True ($r.ExitCode -ne 0) 'publish: injected mid-publish failure fails the run'
     Assert-True (-not (Test-Path -LiteralPath $sumsPath)) `
         'publish: manifest invalidated during publish — no SHA256SUMS after mid-publish failure'
-    Assert-True (Test-Path -LiteralPath (Join-Path $out 'nkeepass.exe') -PathType Leaf) `
+    Assert-True (Test-Path -LiteralPath (Join-Path $out 'nkp.exe') -PathType Leaf) `
         'publish: partial payload set present after mid-publish failure (documented non-atomic state)'
     # Recovery: an uninterrupted rerun restores the full consistent set.
     $r = Invoke-Isolated -ScriptPath $package -ArgumentList @(
@@ -500,7 +500,7 @@ try {
     $isWinHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows)
     $c = New-DistCopy 'invalidation-fail'
-    $tracked = @("$name.zip", 'nkeepass.exe', 'WINDOWS-LIMITATIONS.txt', 'SHA256SUMS')
+    $tracked = @("$name.zip", 'nkp.exe', 'WINDOWS-LIMITATIONS.txt', 'SHA256SUMS')
     $before = @{}
     foreach ($f in $tracked) {
         $before[$f] = (Get-FileHash -LiteralPath (Join-Path $c $f) -Algorithm SHA256).Hash
@@ -598,7 +598,7 @@ try {
     # root directory from entry names.
     $staging = Join-Path $work 'flat-stage'
     New-Item -ItemType Directory -Path (Join-Path $staging $name) -Force | Out-Null
-    Copy-Item -Force (Join-Path $out 'nkeepass.exe'), (Join-Path $out 'WINDOWS-LIMITATIONS.txt') (Join-Path $staging $name)
+    Copy-Item -Force (Join-Path $out 'nkp.exe'), (Join-Path $out 'WINDOWS-LIMITATIONS.txt') (Join-Path $staging $name)
     $flatZip = Join-Path $work "$name.flat.zip"
     Compress-Archive -Path (Join-Path (Join-Path $staging $name) '*') -DestinationPath $flatZip -Force
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
@@ -611,7 +611,7 @@ try {
     $pad = @{ Bytes = [Text.Encoding]::UTF8.GetBytes('x'); Attrs = 0 }
     $canaryZip = Join-Path $work 'canary.zip'
     New-CraftedZip -TargetZip $canaryZip -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/nkp.exe"; Path = $peX64; Attrs = 0 },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = '../canary.txt'; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('CANARY') })
@@ -621,7 +621,7 @@ try {
         'verify: ../ traversal entry rejected at manifest stage'
     $canaryZip2 = Join-Path $work 'canary2.zip'
     New-CraftedZip -TargetZip $canaryZip2 -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/nkp.exe"; Path = $peX64; Attrs = 0 },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/../../canary_deep.txt"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('CANARY') })
@@ -643,7 +643,7 @@ try {
     # Negative: duplicate entry rejected.
     $dupZip = Join-Path $work 'dup.zip'
     New-CraftedZip -TargetZip $dupZip -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/nkp.exe"; Path = $peX64; Attrs = 0 },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('y') },
@@ -656,7 +656,7 @@ try {
     # one carrying S_IFLNK in the Unix mode bits).
     $linkZip = Join-Path $work 'symlink.zip'
     New-CraftedZip -TargetZip $linkZip -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/nkp.exe"; Path = $peX64; Attrs = 0 },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = ([int](0xA1FF -shl 16)); Bytes = [Text.Encoding]::UTF8.GetBytes('../../canary') },
         @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
@@ -681,7 +681,7 @@ try {
     # directory (an extraction-confusion classic).
     $c = New-DistCopy 'local-name'
     $lz = Join-Path $c "$name.zip"
-    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkp.exe" }
     $locBytes = [IO.File]::ReadAllBytes($lz)
     $locNameLen = $locBytes[$rec.LocalOffset + 26] -bor ($locBytes[$rec.LocalOffset + 27] -shl 8)
     $locBytes[$rec.LocalOffset + 30 + $locNameLen - 1] = $locBytes[$rec.LocalOffset + 30 + $locNameLen - 1] -bxor 0x01
@@ -697,7 +697,7 @@ try {
     # the decimal form is used for the [uint32] conversion.
     $c = New-DistCopy 'local-crc'
     $lz = Join-Path $c "$name.zip"
-    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkp.exe" }
     Patch-ZipBytes -ZipPath $lz -Offset ($rec.LocalOffset + 14) -Value ([BitConverter]::GetBytes([uint32]3735928559))
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
@@ -708,7 +708,7 @@ try {
     # descriptor flag clear.
     $c = New-DistCopy 'local-size'
     $lz = Join-Path $c "$name.zip"
-    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkp.exe" }
     Patch-ZipBytes -ZipPath $lz -Offset ($rec.LocalOffset + 18) -Value ([BitConverter]::GetBytes([uint32]0x7FFFFFFF))
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', $lz, '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
@@ -734,7 +734,7 @@ try {
     # CRC/size comparison off.
     $c = New-DistCopy 'local-flag'
     $lz = Join-Path $c "$name.zip"
-    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkp.exe" }
     $locBytes = [IO.File]::ReadAllBytes($lz)
     $locFlags = $locBytes[$rec.LocalOffset + 6] -bor ($locBytes[$rec.LocalOffset + 7] -shl 8)
     Patch-ZipBytes -ZipPath $lz -Offset ($rec.LocalOffset + 6) -Value ([BitConverter]::GetBytes([uint16]($locFlags -bor 8)))
@@ -751,7 +751,7 @@ try {
     # leaving the local header clear.
     $c = New-DistCopy 'central-flag'
     $lz = Join-Path $c "$name.zip"
-    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkeepass.exe" }
+    $rec = Get-ZipLayout -ZipPath $lz | Where-Object { $_.Name -eq "$name/nkp.exe" }
     $cenBytes = [IO.File]::ReadAllBytes($lz)
     $cenFlags = $cenBytes[$rec.CentralOffset + 8] -bor ($cenBytes[$rec.CentralOffset + 9] -shl 8)
     Patch-ZipBytes -ZipPath $lz -Offset ($rec.CentralOffset + 8) -Value ([BitConverter]::GetBytes([uint16]($cenFlags -bor 8)))
@@ -838,7 +838,7 @@ try {
     # Negative: DOS directory attribute bit on one entry.
     $dosDirZip = Join-Path $work 'dos-dir.zip'
     New-CraftedZip -TargetZip $dosDirZip -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/nkp.exe"; Path = $peX64; Attrs = 0 },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0x10; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
@@ -850,7 +850,7 @@ try {
     # Negative: DOS reparse-point attribute bit on one entry.
     $dosReparseZip = Join-Path $work 'dos-reparse.zip'
     New-CraftedZip -TargetZip $dosReparseZip -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/nkp.exe"; Path = $peX64; Attrs = 0 },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0x400; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
@@ -863,7 +863,7 @@ try {
     # is not S_IFREG is rejected.
     $fifoZip = Join-Path $work 'fifo.zip'
     New-CraftedZip -TargetZip $fifoZip -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $peX64; Attrs = 0 },
+        @{ Name = "$name/nkp.exe"; Path = $peX64; Attrs = 0 },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = ([int](0x11ED -shl 16)); Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
@@ -876,7 +876,7 @@ try {
     # rejected.
     $emptyZip = Join-Path $work 'empty-payload.zip'
     New-CraftedZip -TargetZip $emptyZip -ExeSource $peX64 -Entries @(
-        @{ Name = "$name/nkeepass.exe"; Path = $null; Attrs = 0; Bytes = @() },
+        @{ Name = "$name/nkp.exe"; Path = $null; Attrs = 0; Bytes = @() },
         @{ Name = "$name/LICENSE.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/README.md"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') },
         @{ Name = "$name/WINDOWS-LIMITATIONS.txt"; Path = $null; Attrs = 0; Bytes = [Text.Encoding]::UTF8.GetBytes('x') })
@@ -891,7 +891,7 @@ try {
     Copy-Item -Force $zip $mutZip
     $za = [IO.Compression.ZipFile]::Open($mutZip, 'Update')
     try {
-        $e = $za.Entries | Where-Object { ($_.FullName -replace '\\', '/') -eq "$name/nkeepass.exe" }
+        $e = $za.Entries | Where-Object { ($_.FullName -replace '\\', '/') -eq "$name/nkp.exe" }
         $data = New-Object byte[] ([int]$e.Length)
         $s = $e.Open()
         try { $null = $s.Read($data, 0, $data.Length) } finally { $s.Dispose() }
@@ -911,7 +911,7 @@ try {
 
     # Negative: raw top-level exe differs from the built binary.
     $c = New-DistCopy 'raw-exe'
-    New-FakePE -Machine 0x014c -Path (Join-Path $c 'nkeepass.exe')
+    New-FakePE -Machine 0x014c -Path (Join-Path $c 'nkp.exe')
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', (Join-Path $c "$name.zip"), '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)
     Assert-True (($r.ExitCode -ne 0) -and ($r.StdErr -match 'raw top-level exe')) `
@@ -935,11 +935,11 @@ try {
     # the published names with their real hashes, so the whitelist check
     # (not the entry-count check) is what must fire.
     $c = New-DistCopy 'sums-traversal'
-    $exeHash = (Get-FileHash -LiteralPath (Join-Path $c 'nkeepass.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $exeHash = (Get-FileHash -LiteralPath (Join-Path $c 'nkp.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     $limHash = (Get-FileHash -LiteralPath (Join-Path $c 'WINDOWS-LIMITATIONS.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $c 'SHA256SUMS'), (@(
         "$exeHash  ../outside.txt",
-        "$exeHash  nkeepass.exe",
+        "$exeHash  nkp.exe",
         "$limHash  WINDOWS-LIMITATIONS.txt") -join "`n") + "`n")
     $r = Invoke-Isolated -ScriptPath $verify -ArgumentList @(
         '-Zip', (Join-Path $c "$name.zip"), '-BuiltExe', $peX64, '-Version', $version, '-Triple', $triple)

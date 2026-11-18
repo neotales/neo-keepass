@@ -28,7 +28,11 @@ pkg_root="nkeepass-${version}-${deb_arch}-deb"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/nkeepass-deb.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
-install -D -m 755 "$binary" "$stage/$pkg_root/usr/bin/nkeepass"
+# Installs the executable as /usr/bin/nkp (the product's executable name).
+# The deb package identifier stays `nkeepass` (Package field, file name, doc
+# directory) for compatibility with the existing package name; see
+# packaging/README.md.
+install -D -m 755 "$binary" "$stage/$pkg_root/usr/bin/nkp"
 install -D -m 644 "$repo/README.md" "$stage/$pkg_root/usr/share/doc/nkeepass/README.md"
 install -D -m 644 "$repo/LICENSE.md" "$stage/$pkg_root/usr/share/doc/nkeepass/LICENSE.md"
 
