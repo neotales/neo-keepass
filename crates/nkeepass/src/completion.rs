@@ -3233,39 +3233,113 @@ else:
     #[cfg(unix)]
     struct ProbeGroup {
         sentinel: Option<std::process::Child>,
+        sentinel_stdin: Option<std::process::ChildStdin>,
         pgid: i32,
     }
 
     #[cfg(unix)]
     impl ProbeGroup {
+        /// Start a Python sentinel as a new process-group leader. It
+        /// remains alive until told to terminate the whole group itself,
+        /// so it can provide a safe fallback if the external group-kill
+        /// helper fails or times out.
+        fn start() -> Result<Self, String> {
+            use std::os::unix::process::CommandExt;
+            let mut sentinel_command = std::process::Command::new("python3");
+            sentinel_command
+                .args([
+                    "-c",
+                    "import os, signal, sys; sys.stdin.readline(); \
+                     os.killpg(os.getpgrp(), signal.SIGKILL)",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0);
+            let mut sentinel = sentinel_command
+                .spawn()
+                .map_err(|error| format!("cannot start process-group sentinel: {error}"))?;
+            let Ok(pgid) = i32::try_from(sentinel.id()) else {
+                let _ = sentinel.kill();
+                let _ = sentinel.wait();
+                return Err("process-group sentinel returned an invalid group id".to_owned());
+            };
+            let Some(sentinel_stdin) = sentinel.stdin.take() else {
+                let _ = sentinel.kill();
+                let _ = sentinel.wait();
+                return Err("process-group sentinel stdin was not piped".to_owned());
+            };
+            Ok(Self {
+                sentinel: Some(sentinel),
+                sentinel_stdin: Some(sentinel_stdin),
+                pgid,
+            })
+        }
+
         /// Kill the owned process group while its sentinel is still a
         /// live, unreaped child; then reap the sentinel. If it exited
         /// unexpectedly, do not signal its possibly recycled PGID.
         fn terminate(&mut self) -> bool {
+            self.terminate_with_helper_failure(false)
+        }
+
+        /// Testable variant for the failure path: when forced, skip the
+        /// external group-kill helper and exercise the sentinel's
+        /// self-termination fallback.
+        fn terminate_with_helper_failure(&mut self, force_failure: bool) -> bool {
             let Some(sentinel) = self.sentinel.as_mut() else {
                 return true;
             };
             match sentinel.try_wait() {
                 Ok(None) => {
                     let pgid = self.pgid.to_string();
-                    let result = run_python_helper_bounded(
-                        "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
-                        &[&pgid],
-                        PYTHON_HELPER_DEADLINE,
-                    );
-                    let killed = result.success();
-                    // Direct-child kill remains safe: the sentinel is
-                    // still owned and unreaped if the group helper failed.
+                    let helper_succeeded = !force_failure
+                        && run_python_helper_bounded(
+                            "import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGKILL)",
+                            &[&pgid],
+                            PYTHON_HELPER_DEADLINE,
+                        )
+                        .success();
+                    if !helper_succeeded {
+                        // Never release the sentinel after helper failure
+                        // without first asking the sentinel itself to kill
+                        // its own group. This does not use a parent-held
+                        // numeric PGID, and the sentinel remains unreaped
+                        // throughout the fallback.
+                        if let Some(mut input) = self.sentinel_stdin.take() {
+                            let _ = std::io::Write::write_all(&mut input, b"terminate\n");
+                            let _ = std::io::Write::flush(&mut input);
+                        }
+                    }
+                    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    loop {
+                        match sentinel.try_wait() {
+                            Ok(Some(_)) => {
+                                self.sentinel = None;
+                                return true;
+                            }
+                            Ok(None) if std::time::Instant::now() < deadline => {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
+                    // The group helper and the sentinel fallback both
+                    // failed. Directly kill only the still-owned,
+                    // unreaped sentinel; never issue another group signal
+                    // after it is reaped. Return failure, since same-group
+                    // descendants may remain.
                     let _ = sentinel.kill();
                     let _ = sentinel.wait();
                     self.sentinel = None;
-                    killed
+                    false
                 }
                 Ok(Some(_)) | Err(_) => {
                     // It is no longer safe to signal this numeric group
                     // id: the sentinel's group may already have vanished.
                     let _ = sentinel.wait();
                     self.sentinel = None;
+                    self.sentinel_stdin = None;
                     false
                 }
             }
@@ -3276,6 +3350,19 @@ else:
     impl Drop for ProbeGroup {
         fn drop(&mut self) {
             let _ = self.terminate();
+        }
+    }
+
+    /// A direct child fixture which is always terminated and reaped,
+    /// including if an assertion unwinds early.
+    #[cfg(unix)]
+    struct ProbeChildGuard(std::process::Child);
+
+    #[cfg(unix)]
+    impl Drop for ProbeChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 
@@ -3406,26 +3493,16 @@ else:
         #[cfg(unix)]
         let mut probe_group = {
             use std::os::unix::process::CommandExt;
-            let mut sentinel = std::process::Command::new("sleep");
-            sentinel.arg("3600").process_group(0);
-            let sentinel = match sentinel.spawn() {
-                Ok(sentinel) => sentinel,
+            let group = match ProbeGroup::start() {
+                Ok(group) => group,
                 Err(error) => {
                     return Some(format!(
                         "cannot establish an owned Unix process group for `{program}`: {error}"
                     ));
                 }
             };
-            let Ok(pgid) = i32::try_from(sentinel.id()) else {
-                return Some(format!(
-                    "cannot establish an owned Unix process group for `{program}`: invalid group id"
-                ));
-            };
-            command.process_group(pgid);
-            ProbeGroup {
-                sentinel: Some(sentinel),
-                pgid,
-            }
+            command.process_group(group.pgid);
+            group
         };
         let mut child = {
             let mut attempts = 0;
@@ -3866,6 +3943,48 @@ else:
         );
     }
 
+    /// If the external group-kill helper fails, the sentinel must remain
+    /// owned and unreaped while its in-group self-termination fallback
+    /// runs. The forced-failure hook exercises that path; the direct
+    /// sleeper joined to the group must be gone before cleanup reports
+    /// success.
+    #[test]
+    #[cfg(unix)]
+    fn probe_group_falls_back_safely_when_kill_helper_fails() {
+        use std::os::unix::process::CommandExt;
+
+        let mut group = ProbeGroup::start().expect("start owned probe group");
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .process_group(group.pgid)
+            .spawn()
+            .expect("same-group child should start");
+        let mut child = ProbeChildGuard(child);
+
+        assert!(
+            group.terminate_with_helper_failure(true),
+            "the sentinel self-kill fallback should clean the group"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut reaped = false;
+        while std::time::Instant::now() < deadline {
+            if child
+                .0
+                .try_wait()
+                .expect("child status should be readable")
+                .is_some()
+            {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            reaped,
+            "same-group child remained after the helper-failure fallback"
+        );
+    }
+
     /// A descendant can call setsid and escape the probe's group. The
     /// sentinel prevents the old PGID from being recycled while cleanup
     /// signals the owned group, but cannot contain this escapee. Verify
@@ -3881,21 +4000,28 @@ else:
         let directory = tempfile::tempdir().expect("probe tempdir");
         let program = directory.path().join("detaching-interpreter");
         let pid_file = directory.path().join("detached.pid");
-        let quoted_pid_file = format!("'{}'", pid_file.to_string_lossy().replace('\'', "'\\''"));
+        let python_code = format!(
+            "import os,time; os.setsid(); open({}, \"w\").write(str(os.getpid())); time.sleep(4)",
+            serde_json::to_string(&pid_file.to_string_lossy().as_ref())
+                .expect("pid path is JSON-serializable")
+        );
+        let quoted_python_code = format!("'{}'", python_code.replace('\'', "'\\''"));
         std::fs::write(
             &program,
             format!(
-                "#!/bin/sh\nsetsid sh -c 'echo $$ > {quoted_pid_file}; sleep 4' &\nprintf 'GNU bash, version 9.9.9\\n'\nexit 0\n"
+                "#!/bin/sh\npython3 -c {quoted_python_code} &\nprintf 'GNU bash, version 9.9.9\\n'\nexit 0\n"
             ),
         )
         .expect("write detaching fake");
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
             .expect("fake executable");
 
-        let bystander = std::process::Command::new("sleep")
-            .arg("4")
-            .spawn()
-            .expect("bystander should start");
+        let bystander = ProbeChildGuard(
+            std::process::Command::new("sleep")
+                .arg("4")
+                .spawn()
+                .expect("bystander should start"),
+        );
         let started = std::time::Instant::now();
         let failure = shell_probe_failure_with_timeout(
             &program.to_string_lossy(),
@@ -3929,7 +4055,7 @@ else:
             "the documented escaped descendant should survive group cleanup"
         );
         let bystander_probe = std::process::Command::new("ps")
-            .args(["-p", &bystander.id().to_string(), "-o", "pid="])
+            .args(["-p", &bystander.0.id().to_string(), "-o", "pid="])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -3939,7 +4065,8 @@ else:
             "the unrelated bystander must not be signaled by probe cleanup"
         );
         // The escaped fixture has its own four-second lifetime. Wait it
-        // out, then clean only our directly-owned bystander.
+        // out. ProbeChildGuard kills and reaps the directly-owned
+        // bystander on normal return and on every assertion unwind.
         let deadline = std::time::Instant::now() + Duration::from_secs(6);
         let mut detached_alive = true;
         while std::time::Instant::now() < deadline {
