@@ -70,6 +70,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
+      - name: Record checked-out revision
+        id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Install cross toolchain
         if: matrix.cross
         run: |
@@ -94,8 +97,55 @@ jobs:
         run: |
           packaging/validate.sh --binary "target/${{ matrix.target }}/release/nkp" \
             "$PWD/dist" "$(packaging/scripts/version.sh)" "${{ matrix.target }}"
+      - name: Prepare executable-only triage artifact
+        run: |
+          mkdir -p executable-artifact
+          install -m 0755 "target/${{ matrix.target }}/release/nkp" executable-artifact/nkp
+          (cd executable-artifact && sha256sum nkp > SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nkp-linux-${{ matrix.deb_arch }}-${{ steps.revision.outputs.sha }}
+          path: executable-artifact/*
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nkeepass-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS arm64 executable
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: aarch64-apple-darwin
+      - name: Record checked-out revision
+        id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build release
+        run: cargo build --release --locked -p nkeepass --target aarch64-apple-darwin
+      - name: Smoke-test executable
+        run: target/aarch64-apple-darwin/release/nkp --help
+      - name: Prepare executable-only triage artifact
+        run: |
+          mkdir -p executable-artifact
+          install -m 0755 target/aarch64-apple-darwin/release/nkp executable-artifact/nkp
+          (cd executable-artifact && shasum -a 256 nkp > SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nkp-macos-arm64-${{ steps.revision.outputs.sha }}
+          path: executable-artifact/*
+          if-no-files-found: error
+          retention-days: 14

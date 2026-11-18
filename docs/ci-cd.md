@@ -409,6 +409,27 @@ and `aarch64-unknown-linux-gnu` (cross-compiled; installs
 The binary is stripped before packaging. Artifacts are uploaded as
 `nkeepass-<target>`. Nothing is attached to a GitHub release.
 
+Each successful Linux target also uploads a small, executable-only triage
+artifact named `nkp-linux-<arch>-<commit-sha>` containing the actual validated
+`nkp` and `SHA256SUMS`. The macOS arm64 job builds the same CLI for
+`aarch64-apple-darwin` on `macos-15` and uploads
+`nkp-macos-arm64-<commit-sha>` with the executable and checksum. These and the
+Windows x64 `nkp-windows-x86_64-<commit-sha>` artifact are retained for 14
+days. Verify with `sha256sum -c SHA256SUMS` on Linux/Windows Git Bash, or
+`shasum -a 256 -c SHA256SUMS` on macOS. Names identify the OS, architecture,
+and the SHA read from the checked-out tree, including when a manual dispatch
+selects a different ref.
+
+The macOS job is an executable build and checksum, not a signed/notarized
+application. Artifacts are uploaded only after that target's build and staging
+steps succeed; a failed target produces no executable artifact, while another
+successful matrix target may still be downloadable. Build artifacts are not
+evidence that the separate `ci.yml` test matrix passed. No GUI (`nkpui`)
+executable is present in this revision, so CI does not produce or claim GUI
+artifacts. Windows artifacts remain subject to the documented fail-closed
+secure-write limitation; executable availability does not imply permission
+parity.
+
 ## `windows-build.yml` — Windows x64 build + packaging
 
 Triggered by manual dispatch and pull requests. Builds the neo-keepass CLI
@@ -521,7 +542,7 @@ Verification before anything is executed or uploaded:
 A binary that failed any check is never executed, and a mismatching
 artifact never reaches upload.
 
-Produces one artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
+Produces the compatibility package artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
 days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (one named root:
 binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkp.exe`,
 `WINDOWS-LIMITATIONS.txt`, and a sha256sum-compatible `SHA256SUMS`
@@ -539,7 +560,9 @@ injected failures: `NEOKEEPASS_PACKAGE_FAIL_AFTER` (test-only) fails
 after a payload publish, and the self-tests lock the manifest (Windows)
 or make the output directory unwritable (Unix) to prove the abort
 happens before any file update.
-Nothing is attached to a release; no secrets are used; permissions are
+It additionally produces the 14-day executable-only triage artifact
+`nkp-windows-x86_64-<commit-sha>` containing the verified raw `nkp.exe` and
+`SHA256SUMS`. Nothing is attached to a release; no secrets are used; permissions are
 `contents: read` and checkout persists no credentials.
 
 **Windows platform limitation (stated plainly):** secure owner-only file
