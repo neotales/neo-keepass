@@ -10,8 +10,10 @@ reader, waits against an absolute deadline, and restores the actual saved mode.
 It does not replace the CLI's unrelated vault-password or TUI input paths.
 
 - Unix: safe nix termios, poll and read calls; a restoration guard; temporary
-  signal-hook cancellation flags for SIGINT/SIGTERM/SIGHUP/SIGQUIT. No signal
-  thread. Input polling is capped at 100 ms to observe cancellation flags.
+  scoped sigaction cancellation handlers for SIGINT/SIGTERM/SIGHUP/SIGQUIT.
+  Complete prior signal actions (handlers, masks and flags) are restored after
+  the prompt; merely unregistering a signal-hook callback would not do that.
+  No signal thread. Input polling is capped at 100 ms to observe cancellation.
 - Windows: a narrowly isolated unsafe Win32 boundary. Save `GetConsoleMode`,
   disable echo/line/processed input, then `WaitForSingleObject` and
   `ReadConsoleInputW`. Restore the exact saved bitmask, not guessed cooked-mode
@@ -20,6 +22,7 @@ It does not replace the CLI's unrelated vault-password or TUI input paths.
   supported; input is bounded and held in zeroizing buffers.
 - A process-wide try-lock refuses concurrent calls. Callers must not run an
   independent input consumer at the same time.
+  Callers must also avoid concurrently replacing process-wide signal actions.
 - OS restoration failures are errors; drop retries restoration. Uncatchable
   process termination, including SIGKILL and forced Windows process termination,
   cannot run cleanup.

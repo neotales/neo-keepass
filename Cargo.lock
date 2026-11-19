@@ -2565,7 +2565,6 @@ name = "terminal-password"
 version = "0.1.0"
 dependencies = [
  "nix",
- "signal-hook",
  "windows-sys 0.60.2",
  "zeroize",
 ]

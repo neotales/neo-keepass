@@ -41,21 +41,39 @@ fn timed_out() -> io::Error {
 mod platform {
     use super::*;
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
     use nix::sys::termios::{
         LocalFlags, SetArg, SpecialCharacterIndices, Termios, tcgetattr, tcsetattr,
     };
     use std::os::fd::AsFd;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    struct Signals(Vec<signal_hook::SigId>);
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn interrupt(_: i32) {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+    }
+
+    // sigaction saves/restores complete dispositions, including masks/flags.
+    // Unregistering a signal-hook callback would leave its process-wide handler
+    // installed and can swallow subsequent default-terminating signals.
+    struct Signals(Vec<(Signal, SigAction)>);
+    impl Signals {
+        fn restore(&mut self) -> io::Result<()> {
+            while let Some((signal, previous)) = self.0.last() {
+                // SAFETY: previous was returned by sigaction for this signal.
+                // The installed handler only touches a static atomic. The
+                // public reader lock excludes concurrent readers in this crate.
+                unsafe {
+                    sigaction(*signal, previous)?;
+                }
+                self.0.pop();
+            }
+            Ok(())
+        }
+    }
     impl Drop for Signals {
         fn drop(&mut self) {
-            for id in self.0.drain(..) {
-                signal_hook::low_level::unregister(id);
-            }
+            let _ = self.restore();
         }
     }
 
@@ -68,18 +86,23 @@ mod platform {
 
     pub(super) fn read(deadline: Instant) -> io::Result<Zeroizing<String>> {
         let stdin = io::stdin();
-        let interrupted = Arc::new(AtomicBool::new(false));
+        INTERRUPTED.store(false, Ordering::Relaxed);
         let mut signals = Signals(Vec::new());
+        let handler = SigAction::new(
+            SigHandler::Handler(interrupt),
+            SaFlags::empty(),
+            SigSet::empty(),
+        );
         for signal in [
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGHUP,
-            signal_hook::consts::SIGQUIT,
+            Signal::SIGINT,
+            Signal::SIGTERM,
+            Signal::SIGHUP,
+            Signal::SIGQUIT,
         ] {
-            signals.0.push(signal_hook::flag::register(
-                signal,
-                Arc::clone(&interrupted),
-            )?);
+            // SAFETY: interrupt is an async-signal-safe static atomic store.
+            // Save the exact prior action before any terminal mutation.
+            let previous = unsafe { sigaction(signal, &handler)? };
+            signals.0.push((signal, previous));
         }
         let original = tcgetattr(&stdin)?;
         let mut mode = original.clone();
@@ -98,7 +121,7 @@ mod platform {
         let outcome = (|| {
             let mut bytes = Zeroizing::new(Vec::new());
             loop {
-                if interrupted.load(Ordering::Relaxed) {
+                if INTERRUPTED.load(Ordering::Relaxed) {
                     return Err(cancelled());
                 }
                 let remaining = deadline
@@ -139,6 +162,7 @@ mod platform {
         })();
         tcsetattr(&stdin, SetArg::TCSANOW, &restore.1)?;
         drop(restore);
+        signals.restore()?;
         outcome
     }
 }
