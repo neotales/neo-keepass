@@ -56,19 +56,6 @@ pub(crate) const VAULT_LIMITS: Limits = Limits {
     max_text_bytes: 1024 * 1024,
 };
 
-pub(crate) const SETX_LIMITS: Limits = Limits {
-    max_bytes: 1024 * 1024,
-    max_depth: 8,
-    max_groups: 0,
-    max_entries: 0,
-    max_history_entries: 0,
-    max_fields: 256,
-    max_binary_records: 0,
-    max_binary_bytes: 0,
-    max_secret_bytes: 1024 * 1024,
-    max_text_bytes: 16 * 1024,
-};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InterchangeError(&'static str);
 
@@ -144,60 +131,6 @@ impl<'de> Deserialize<'de> for SecretText {
 
         deserializer.deserialize_string(SecretVisitor)
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SetxDocument {
-    fields: Vec<SetxField>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SetxField {
-    key: String,
-    value: SecretText,
-    protected: Option<bool>,
-    protect_in_memory: Option<bool>,
-}
-
-pub(crate) struct SetxUpdate {
-    pub key: String,
-    pub value: Zeroizing<String>,
-    pub protected: Option<bool>,
-    pub protect_in_memory: Option<bool>,
-}
-
-pub(crate) fn decode_setx(input: &[u8]) -> std::result::Result<Vec<SetxUpdate>, InterchangeError> {
-    if input.len() > SETX_LIMITS.max_bytes {
-        return Err(too_large());
-    }
-    let document: SetxDocument =
-        serde_json::from_slice(input).map_err(|_| InterchangeError("invalid setx document"))?;
-    if document.fields.is_empty() || document.fields.len() > SETX_LIMITS.max_fields {
-        return Err(InterchangeError(
-            "setx field count is outside the allowed range",
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    let mut fields = Vec::with_capacity(document.fields.len());
-    for field in document.fields {
-        if !valid_text(&field.key, SETX_LIMITS.max_text_bytes)
-            || field.key.is_empty()
-            || field.key.chars().any(char::is_control)
-            || !seen.insert(field.key.clone())
-            || field.value.as_str().len() > SETX_LIMITS.max_secret_bytes as usize
-        {
-            return Err(InterchangeError("invalid setx field"));
-        }
-        fields.push(SetxUpdate {
-            key: field.key,
-            value: Zeroizing::new(field.value.0.to_string()),
-            protected: field.protected,
-            protect_in_memory: field.protect_in_memory,
-        });
-    }
-    Ok(fields)
 }
 
 #[derive(Serialize)]
@@ -2049,16 +1982,6 @@ mod tests {
     }
 
     #[test]
-    fn setx_rejects_duplicates_and_keeps_values_out_of_debug() {
-        let duplicate = br#"{"fields":[{"key":"A","value":"one"},{"key":"A","value":"two"}]}"#;
-        assert!(decode_setx(duplicate).is_err());
-        let input = br#"{"fields":[{"key":"Token","value":"not-logged"}]}"#;
-        let fields = decode_setx(input).unwrap();
-        assert_eq!(fields[0].key, "Token");
-        assert_eq!(fields[0].value.as_str(), "not-logged");
-    }
-
-    #[test]
     fn duplicate_ids_and_fields_fail_closed() {
         let mut database = fixture();
         let duplicate = database.root.entries[0].clone();
@@ -2100,7 +2023,7 @@ mod tests {
 /// whole group subtree was untested: `group_to_wire` and `group_from_wire` existed
 /// and were never exercised end to end. That matters more than usual here, because
 /// groups are the only way a nested entry path can exist at all -- `secrets set`,
-/// `ensure` and `setx` address entries in groups that are already there and do not
+/// Field updates address entries in groups that are already there and do not
 /// create them -- so "can a group be created by importing a document" is a
 /// question about the only route to a nested entry, and it had no answer in the
 /// test suite.

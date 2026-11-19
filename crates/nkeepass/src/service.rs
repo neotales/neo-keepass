@@ -461,7 +461,7 @@ impl TotpCode {
     }
 }
 
-/// Owned, typed update data for one exact field in a setx batch.
+/// Owned, typed update data for one exact field in a mutation batch.
 /// Secret text remains zeroizing until the service transfers ownership to the
 /// live `KeePass` model.
 pub struct FieldUpdate {
@@ -1147,7 +1147,7 @@ impl VaultService {
         self.mutate_field(reference, name, value, true)
     }
 
-    /// Applies one bounded setx batch after validating every field and the
+    /// Applies one bounded mutation batch after validating every field and the
     /// selected model before the first mutation. Keys are exact and
     /// case-sensitive; standard field projections are updated consistently.
     ///

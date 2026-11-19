@@ -43,7 +43,7 @@ invocation, options, output, and failures, open the linked reference page.
 | `-i PATH` | `--age-identity PATH` | [Secrets commands](reference/secrets.md#change-entries-and-fields) |
 | Shell completion name `powershell` | `pwsh` | [System commands](reference/system.md#completion) |
 
-Root `get`, `getx`, `search`, `show`, `set`, `ensure`, `otp`, `setx`,
+Root `get` (including `get many`), `search`, `show`, `set`, `ensure`, `otp`,
 `import`, `export`, `sync`, and `env` are shortcuts for the same `secrets`
 subcommand. The aliases `field-get`, `field-set`, and `attachment-add` are
 internal dispatch action names, not public command routes.

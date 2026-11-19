@@ -237,7 +237,7 @@ fn generic_dry_run_is_rejected_by_non_dry_run_commands() {
         vec!["secrets", "search", "query", "--dry-run"],
         vec!["secrets", "show", "--key", "LOGIN", "--dry-run"],
         vec!["secrets", "get", "--key", "LOGIN", "--dry-run"],
-        vec!["secrets", "getx", "--key", "LOGIN", "--dry-run"],
+        vec!["secrets", "get", "--key", "LOGIN", "--dry-run"],
         vec!["secrets", "set", "--key", "LOGIN", "--dry-run"],
         vec!["secrets", "rm", "--key", "LOGIN", "--yes", "--dry-run"],
         vec!["secrets", "otp", "--key", "LOGIN", "--dry-run"],

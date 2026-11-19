@@ -33,7 +33,7 @@ fn password_value_compatibility_is_documented_and_stdin_conflicts_fail_closed() 
             "--vault",
             vault.to_str().unwrap(),
             "secrets",
-            "setx",
+            "set",
             "--key",
             "LOGIN",
             "--stdin",

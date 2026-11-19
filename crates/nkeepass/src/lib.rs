@@ -1,9 +1,9 @@
 //! Shared application boundary for CLI and future frontends.
 
-#[allow(dead_code, reason = "shared with the CLI's setx and save paths")]
+#[allow(dead_code, reason = "shared with the CLI's mutation and save paths")]
 pub(crate) mod automation;
 pub mod glob;
-#[allow(dead_code, reason = "shared with the CLI's setx input parser")]
+#[allow(dead_code, reason = "shared interchange model boundary")]
 pub(crate) mod interchange;
 pub mod password_generator;
 pub mod private_file;

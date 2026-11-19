@@ -1525,7 +1525,9 @@ fn shortcuts_fields_attachments_and_exec() {
         !out.status.success(),
         "encrypted output clobbered existing file"
     );
-    let out = run(&["getx", "--key", "LOGIN", auth[0], auth[1]]);
+    let out = run(&[
+        "get", "--format", "json", "--key", "LOGIN", auth[0], auth[1],
+    ]);
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["value"], "hidden-sentinel");
     let out = run(&["rm", "--key", "LOGIN", auth[0], auth[1]]);
@@ -3153,7 +3155,6 @@ fn help_is_answered_at_every_command_depth() {
         "secrets",
         "automation",
         "get",
-        "getx",
         "list",
         "ls",
         "search",
@@ -3163,7 +3164,6 @@ fn help_is_answered_at_every_command_depth() {
         "remove",
         "ensure",
         "otp",
-        "setx",
         "import",
         "export",
         "sync",
@@ -3201,7 +3201,6 @@ fn shortcut_help_shows_the_full_secrets_summary() {
     let tmp = tempfile::tempdir().unwrap();
     for (shortcut, action) in [
         ("get", "get"),
-        ("getx", "getx"),
         ("list", "ls"),
         ("ls", "ls"),
         ("search", "search"),
@@ -3211,7 +3210,6 @@ fn shortcut_help_shows_the_full_secrets_summary() {
         ("remove", "rm"),
         ("ensure", "ensure"),
         ("otp", "otp"),
-        ("setx", "setx"),
         ("import", "import"),
         ("export", "export"),
         ("sync", "sync"),
@@ -3287,7 +3285,6 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
             "completion",
             "version",
             "get",
-            "getx",
             "list|ls",
             "search",
             "show",
@@ -3295,7 +3292,6 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
             "rm|remove",
             "ensure",
             "otp",
-            "setx",
             "import",
             "export",
             "sync",
@@ -3384,18 +3380,16 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
                 "env|environment",
                 "show",
                 "get",
-                "getx",
                 "set",
                 "rm|remove",
                 "ensure",
                 "otp",
-                "setx",
                 "import",
                 "export",
                 "sync",
             ],
         ),
-        (&["automation"], &["setx", "import", "export", "sync"]),
+        (&["automation"], &["import", "export", "sync"]),
         (
             &["files"],
             &["ls|list", "add|import", "get|export", "rm|remove"],
@@ -3470,17 +3464,15 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
         ),
         (&["secrets", "env"], "--name NAME"),
         (&["secrets", "show"], "Usage: nkp secrets show --key PATH"),
-        (&["secrets", "get"], "--format FORMAT"),
-        (&["secrets", "getx"], "--key PATH"),
+        (&["secrets", "get", "many"], "--format FORMAT"),
+        (&["get", "many"], "--field FIELD"),
         (&["secrets", "set"], "--stdin"),
         (&["secrets", "rm"], "--yes"),
         (&["secrets", "ensure"], "--size N"),
         (&["secrets", "otp"], "--is-output"),
-        (&["secrets", "setx"], "--dry-run"),
         (&["secrets", "import"], "--replace"),
         (&["secrets", "export"], "--output PATH"),
         (&["secrets", "sync"], "--strategy newest|source"),
-        (&["automation", "setx"], "--file PATH"),
         (&["automation", "import"], "--replace"),
         (&["automation", "export"], "--output PATH"),
         (&["automation", "sync"], "--strategy newest|source"),

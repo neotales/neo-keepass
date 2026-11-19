@@ -112,17 +112,54 @@ clipboard behavior. Clipboard failures and partial writes use static
 diagnostics; a failed timed clear explicitly warns that the copied secret may
 remain. No selected value is written to stdout or included in errors.
 
-### `secrets getx`
+### `secrets get many`
 
 ```text
-nkp secrets getx --key PATH [--field FIELD] [--format json]
+nkp get many PATH... [--field FIELD] [--format FORMAT]
+  [--age-encrypt -r RECIPIENT...] [--output PATH] [--is-output]
 ```
 
-Reveals the selected field as a JSON object of the form
-`{"value":"field text"}`. `--field` defaults to `Password`. Only JSON format
-is accepted. It does not accept `--name` or `--is-output`.
+Reveals **one complete bundle** in the supplied path order. The nested route
+`nkp secrets get many` is identical. Supply 1 to 256 explicit paths; omitting
+paths is an error, not a request to enumerate the vault. The field defaults
+to `Password`, including for aliases with a configured default field.
+`--field` selects one common field for the entire bundle.
 
-For `get`, `--format json` has the same `{"value":"field text"}` shape.
+| Format | Bundle |
+| --- | --- |
+| `text` (default) | Values separated by commas; no trailing comma or newline |
+| `null` | Values only, each followed by NUL, including the last |
+| `json` | One object mapping literal supplied paths to values, in supplied order |
+| `dotenv`, `shell`, `pwsh` / `powershell`, `github-actions`, `azure-devops` | One binding per supplied path, using the existing format's quoting and validation |
+
+Named formats use the supplied path as the binding name, **without**
+normalization. They require identifier-style paths or aliases (such as
+`DB_PASSWORD`); a path containing `/`, `-`, whitespace or other invalid name
+characters is refused. Use JSON for arbitrary paths. This avoids hidden
+collisions and shell/workflow injection. `--name`, `--key` and `--clipboard`
+are not accepted. `--is-output` applies only to `azure-devops`.
+
+Duplicate literal paths are refused in every format; different aliases to
+the same entry are distinct supplied keys. An alias that collides with a
+different real entry is refused, as for single `get`. Missing or ambiguous
+entries, missing fields, invalid names, and format-validation errors fail
+the whole request without printing earlier values. Diagnostics do not include
+selected values. Raw text commas/newlines are not escaped; use JSON for
+lossless general text. NUL format refuses embedded NUL values.
+
+All values and the rendered plaintext bundle remain in zeroizing buffers.
+Input paths are limited to 64 KiB in aggregate, selected values to 16 MiB,
+and rendered output to 64 MiB. With `--age-encrypt`, the **complete rendered
+bundle** is encrypted once, preserving the requested format inside one age
+message. `-r` and `--output` have the same recipient and private no-clobber
+behavior as single `get`; plaintext is never printed first.
+
+`many` is reserved only immediately after `get`. To read an entry named
+`many` with single-value semantics, use `nkp get -- many` or
+`nkp get --key many`. `nkp get many many` includes it in a bundle.
+Put options before `--` when passing leading-dash paths to the bundle.
+
+For single-value `get`, `--format json` writes `{"value":"field text"}`.
 `--format null` writes the field bytes followed by one NUL byte. It does not
 suppress output.
 
@@ -308,20 +345,6 @@ custom field, use `field rm`.
 
 These commands have the same behavior as the matching `automation`
 subcommands. The shared credential flags also apply.
-
-### `secrets setx`
-
-```text
-nkp secrets setx --key PATH (--file PATH | --stdin) [--dry-run]
-```
-
-Reads bounded JSON for one existing entry and applies its fields as one
-update. Exactly one input source is required. `--dry-run` validates and
-reports without saving. See the [setx JSON schema and example](automation.md#setx).
-**Warning:** `secrets setx` and root `setx` accept `--age-encrypt`,
-`--age-decrypt`, `-r` / `--age-recipient`, and `-i` / `--age-identity`, but
-ignore them. They do not
-encrypt or decrypt the JSON input.
 
 ### `secrets import`
 

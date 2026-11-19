@@ -9,7 +9,7 @@ mod clipboard;
 mod completion;
 #[allow(
     dead_code,
-    reason = "also supplies the CLI's setx parser and format constants"
+    reason = "also supplies the CLI's interchange format constants"
 )]
 mod interchange;
 mod tui;
@@ -300,7 +300,37 @@ const GET_OPTIONS: &[HelpOption] = &[
         summary: "Write encrypted output to a private, no-clobber file.",
     },
 ];
-const GETX_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, FORMAT_OPTION];
+const GET_MANY_COMMANDS: &[HelpCommand] = &[help_command(
+    "many",
+    "many PATH... [OPTIONS]",
+    "Bundle selected fields in supplied path order; default field Password.",
+    GET_MANY_OPTIONS,
+    NO_COMMANDS,
+)];
+const GET_MANY_OPTIONS: &[HelpOption] = &[
+    FIELD_OPTION,
+    FORMAT_OPTION,
+    HelpOption {
+        label: "--age-encrypt",
+        summary: "Encrypt the complete rendered bundle once.",
+    },
+    HelpOption {
+        label: "-r, --age-recipient KEY",
+        summary: "Age/SSH key, @FILE, gh:USER, or HTTPS source; repeatable.",
+    },
+    HelpOption {
+        label: "--output PATH",
+        summary: "Write encrypted output to a private, no-clobber file.",
+    },
+    HelpOption {
+        label: "--is-output",
+        summary: "Mark Azure DevOps bindings as output variables.",
+    },
+    HelpOption {
+        label: "Path keys",
+        summary: "JSON uses literal paths; named formats require identifier-style paths or aliases.",
+    },
+];
 const SET_OPTIONS: &[HelpOption] = &[
     KEY_OPTION,
     HelpOption {
@@ -413,7 +443,6 @@ const OTP_OPTIONS: &[HelpOption] = &[
         summary: "Mark Azure DevOps output as an output variable.",
     },
 ];
-const SETX_OPTIONS: &[HelpOption] = &[KEY_OPTION, FILE_OPTION, STDIN_OPTION, DRY_RUN_OPTION];
 const IMPORT_OPTIONS: &[HelpOption] = &[
     FILE_OPTION,
     STDIN_OPTION,
@@ -507,14 +536,7 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
         "get [PATH] [OPTIONS]",
         "Reveal one explicitly selected value.",
         GET_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "getx",
-        "getx --key PATH [OPTIONS]",
-        "Reveal selected data as JSON.",
-        GETX_OPTIONS,
-        NO_COMMANDS,
+        GET_MANY_COMMANDS,
     ),
     help_command(
         "set",
@@ -545,13 +567,6 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
         NO_COMMANDS,
     ),
     help_command(
-        "setx",
-        "setx --key PATH (--file PATH|--stdin)",
-        "Atomically set exact fields from bounded JSON.",
-        SETX_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
         "import",
         "import (--file PATH|--stdin) [OPTIONS]",
         "Import a bounded interchange snapshot.",
@@ -574,13 +589,6 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
     ),
 ];
 const AUTOMATION_COMMANDS: &[HelpCommand] = &[
-    help_command(
-        "setx",
-        "setx --key PATH (--file PATH|--stdin)",
-        "Set exact fields from bounded JSON.",
-        SETX_OPTIONS,
-        NO_COMMANDS,
-    ),
     help_command(
         "import",
         "import (--file PATH|--stdin) [OPTIONS]",
@@ -881,14 +889,7 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         "get [PATH] [OPTIONS]",
         "Shortcut for secrets get.",
         GET_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "getx",
-        "getx [OPTIONS]",
-        "Shortcut for secrets getx.",
-        GETX_OPTIONS,
-        NO_COMMANDS,
+        GET_MANY_COMMANDS,
     ),
     help_command(
         "list|ls",
@@ -937,13 +938,6 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         "otp [OPTIONS]",
         "Shortcut for secrets otp.",
         OTP_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "setx",
-        "setx [OPTIONS]",
-        "Shortcut for secrets setx.",
-        SETX_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
@@ -1916,11 +1910,16 @@ enum Positional {
     Key,
     /// Set additionally accepts repeatable field assignments.
     SetKey,
+    /// Multiple explicit entry paths for the reserved get-many subcommand.
+    Many,
 }
 
 impl Positional {
     /// Selects the deliberately narrow positional syntax for each command.
     fn for_action(action: &str) -> Self {
+        if action == "get-many" {
+            return Self::Many;
+        }
         if action == "set" {
             return Self::SetKey;
         }
@@ -1938,6 +1937,7 @@ impl Positional {
 #[derive(Default)]
 struct Options<'a> {
     key: Option<&'a str>,
+    requested_paths: Vec<&'a str>,
     field: Option<&'a str>,
     assignment_inputs: Vec<&'a str>,
     literal_input: Option<&'a str>,
@@ -1987,10 +1987,15 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
         let arg = args[i].as_str();
         if matches!(
             positional,
-            Positional::Glob | Positional::Key | Positional::SetKey
+            Positional::Glob | Positional::Key | Positional::SetKey | Positional::Many
         ) && arg == "--"
         {
             i += 1;
+            if matches!(positional, Positional::Many) {
+                opts.requested_paths
+                    .extend(args[i..].iter().map(String::as_str));
+                break;
+            }
             if i < args.len() {
                 if matches!(positional, Positional::Glob) && opts.glob.is_some() {
                     return Err(err("invalid or duplicate option"));
@@ -2122,6 +2127,7 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
                 opts.age_identity = value;
             }
             word if !word.starts_with('-') => match positional {
+                Positional::Many => opts.requested_paths.push(word),
                 Positional::Glob if opts.glob.is_none() => opts.glob = Some(word),
                 Positional::Path if opts.path.is_none() => opts.path = Some(word),
                 Positional::Key | Positional::SetKey if opts.key.is_none() => opts.key = Some(word),
@@ -3403,9 +3409,7 @@ fn validate_named_value(format: &str, value: &str) -> Result<()> {
 ///
 /// Embedded single quotes use the standard `'\''` sequence, so metacharacters,
 /// command substitutions, and newlines stay data.
-fn emit_shell_value(name: &str, value: &str) -> Result<()> {
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
+fn emit_shell_value(output: &mut impl Write, name: &str, value: &str) -> Result<()> {
     write!(output, "export {name}='").map_err(|_| err("cannot write value"))?;
     for (index, part) in value.split('\'').enumerate() {
         if index > 0 {
@@ -3428,11 +3432,21 @@ fn emit_shell_value(name: &str, value: &str) -> Result<()> {
 /// and the backtick are ordinary characters inside one, so neither needs an
 /// escape. The single quote is the only character that can end the literal, and
 /// doubling it is PowerShell's own escape.
-fn emit_powershell_value(name: &str, value: &str) -> Result<()> {
-    write_stdout(
-        format!("$env:{name} = '{}'\n", value.replace('\'', "''")).as_bytes(),
-        "cannot write value",
-    )
+fn emit_powershell_value(output: &mut impl Write, name: &str, value: &str) -> Result<()> {
+    write!(output, "$env:{name} = '").map_err(|_| err("cannot write value"))?;
+    for (index, part) in value.split('\'').enumerate() {
+        if index > 0 {
+            output
+                .write_all(b"''")
+                .map_err(|_| err("cannot write value"))?;
+        }
+        output
+            .write_all(part.as_bytes())
+            .map_err(|_| err("cannot write value"))?;
+    }
+    output
+        .write_all(b"'\n")
+        .map_err(|_| err("cannot write value"))
 }
 
 /// `NAME<<NKP_EOF` / value / `NKP_EOF`, the `$GITHUB_OUTPUT` form.
@@ -3441,11 +3455,9 @@ fn emit_powershell_value(name: &str, value: &str) -> Result<()> {
 /// escape to get wrong. That is the reason to prefer it over the deprecated
 /// `::set-output name=value` workflow command, which is a quoted string the
 /// runner has to parse, and which GitHub has scheduled for removal.
-fn emit_github_actions_value(name: &str, value: &str) -> Result<()> {
-    write_stdout(
-        format!("{name}<<{GITHUB_EOF}\n{value}\n{GITHUB_EOF}\n").as_bytes(),
-        "cannot write value",
-    )
+fn emit_github_actions_value(output: &mut impl Write, name: &str, value: &str) -> Result<()> {
+    writeln!(output, "{name}<<{GITHUB_EOF}\n{value}\n{GITHUB_EOF}")
+        .map_err(|_| err("cannot write value"))
 }
 
 /// `##vso[task.setvariable variable=NAME]value`.
@@ -3466,55 +3478,78 @@ fn emit_github_actions_value(name: &str, value: &str) -> Result<()> {
 /// a value containing a literal `%0D` or `%0A` is decoded to a line ending by a
 /// pipeline that enables `DECODE_PERCENTS`, which is that pipeline's choice to
 /// turn decoding on, not something this format can encode around.
-fn emit_azure_devops_value(name: &str, value: &str, is_output: bool) -> Result<()> {
+fn emit_azure_devops_value(
+    output: &mut impl Write,
+    name: &str,
+    value: &str,
+    is_output: bool,
+) -> Result<()> {
     let is_output = if is_output { ";isOutput=true" } else { "" };
-    write_stdout(
-        format!("##vso[task.setvariable variable={name}{is_output}]{value}\n").as_bytes(),
-        "cannot write value",
+    writeln!(
+        output,
+        "##vso[task.setvariable variable={name}{is_output}]{value}"
     )
+    .map_err(|_| err("cannot write value"))
 }
 
 fn emit_value(value: &[u8], format: &str, name: Option<&str>, is_output: bool) -> Result<()> {
+    write_value(&mut io::stdout().lock(), value, format, name, is_output)
+}
+
+fn write_value(
+    output: &mut impl Write,
+    value: &[u8],
+    format: &str,
+    name: Option<&str>,
+    is_output: bool,
+) -> Result<()> {
     if is_output && format != "azure-devops" {
         return Err(err("--is-output requires the azure-devops format"));
     }
     match format {
-        "text" => write_stdout(value, "cannot write value"),
-        "null" => {
-            let stdout = io::stdout();
-            let mut output = stdout.lock();
-            output
-                .write_all(value)
-                .and_then(|()| output.write_all(b"\0"))
-                .map_err(|_| err("cannot write value"))
-        }
+        "text" => output
+            .write_all(value)
+            .map_err(|_| err("cannot write value")),
+        "null" => output
+            .write_all(value)
+            .and_then(|()| output.write_all(b"\0"))
+            .map_err(|_| err("cannot write value")),
         "json" => {
             let text = std::str::from_utf8(value).map_err(|_| err("value is not UTF-8"))?;
-            json(&serde_json::json!({"value": text}))
+            let mut serializer = serde_json::Serializer::new(&mut *output);
+            let mut map = serializer
+                .serialize_map(Some(1))
+                .map_err(|_| err("cannot encode output"))?;
+            map.serialize_entry("value", text)
+                .map_err(|_| err("cannot encode output"))?;
+            map.end().map_err(|_| err("cannot encode output"))?;
+            output
+                .write_all(b"\n")
+                .map_err(|_| err("cannot write value"))
         }
         "dotenv" => {
             let (name, text) = named_text(format, name, value)?;
-            let encoded = serde_json::to_string(text).map_err(|_| err("cannot encode value"))?;
-            write_stdout(
-                format!("{name}={encoded}\n").as_bytes(),
-                "cannot write value",
-            )
+            write!(output, "{name}=").map_err(|_| err("cannot write value"))?;
+            serde_json::to_writer(&mut *output, text).map_err(|_| err("cannot encode value"))?;
+            output
+                .write_all(b"\n")
+                .map_err(|_| err("cannot write value"))
         }
         "shell" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_shell_value(name, text)
+            emit_shell_value(output, name, text)
         }
         "pwsh" | "powershell" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_powershell_value(name, text)
+            emit_powershell_value(output, name, text)
         }
         "github-actions" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_github_actions_value(name, text)
+            emit_github_actions_value(output, name, text)
         }
         "azure-devops" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_azure_devops_value(name, text, is_output)
+            emit_azure_devops_value(output, name, text, is_output)
         }
         _ => Err(err("invalid output format")),
     }
@@ -3575,10 +3610,6 @@ fn reveal_native_service_field(
             nkeepass::ServiceError::NotFound => err("field not found"),
             _ => err("cannot reveal value"),
         })
-}
-
-fn interchange_error(error: interchange::InterchangeError) -> CliError {
-    err(error.message())
 }
 
 #[allow(
@@ -3789,6 +3820,34 @@ fn validate_new_options(action: &str, opts: &Options<'_>) -> Result<()> {
 )]
 fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
     validate_new_options(action, opts)?;
+    if action == "get-many" {
+        if opts.requested_paths.is_empty() || opts.requested_paths.len() > 256 {
+            return Err(err("get many requires 1 to 256 explicit paths"));
+        }
+        let mut seen = BTreeSet::new();
+        if opts.requested_paths.iter().any(|path| !seen.insert(*path)) {
+            return Err(err("get many paths must be unique"));
+        }
+        if opts
+            .requested_paths
+            .iter()
+            .map(|path| path.len())
+            .sum::<usize>()
+            > 64 * 1024
+        {
+            return Err(err("get many paths exceed size limit"));
+        }
+        let format = opts.format.unwrap_or("text");
+        if !is_named_format(format) && !matches!(format, "text" | "json" | "null") {
+            return Err(err("invalid output format"));
+        }
+        if opts.is_output && format != "azure-devops" {
+            return Err(err("--is-output requires the azure-devops format"));
+        }
+        if opts.allow_plaintext {
+            return Err(err("invalid get many option"));
+        }
+    }
     if opts.clipboard && action != "get" {
         return Err(err("--clipboard is only valid for get"));
     }
@@ -3805,7 +3864,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
         || opts.age_decrypt
         || !opts.age_recipients.is_empty()
         || opts.age_identity.is_some();
-    if has_age_options && !matches!(action, "get" | "set") {
+    if has_age_options && !matches!(action, "get" | "get-many" | "set") {
         return Err(err("age options are only valid for get and set"));
     }
     let invalid = match action {
@@ -3840,7 +3899,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.strategy.is_some()
                 || opts.stdin
         }
-        "get" | "getx" | "field-get" => {
+        "get" | "get-many" | "field-get" => {
             opts.file.is_some()
                 || (opts.output.is_some() && !opts.age_encrypt)
                 || opts.yes
@@ -3854,9 +3913,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.age_identity.is_some()
                 || (!opts.age_encrypt && !opts.age_recipients.is_empty())
                 || (opts.age_encrypt && opts.age_recipients.is_empty())
-                // `getx` is the JSON interchange read: there is no variable to
-                // name and no output scope to declare.
-                || (action == "getx" && (opts.name.is_some() || opts.is_output))
+                || (action == "get-many" && (opts.key.is_some() || opts.name.is_some()))
         }
         "set" | "field-set" | "attachment-add" => {
             opts.key.is_none()
@@ -3988,18 +4045,6 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
         || opts.glob.is_some()
         || opts.is_output;
     match action {
-        "setx" => {
-            if opts.key.is_none()
-                || unexpected
-                || opts.format.is_some()
-                || opts.allow_plaintext
-                || opts.replace
-                || opts.strategy.is_some()
-                || usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1
-            {
-                return Err(err("invalid setx option"));
-            }
-        }
         "import" => {
             if opts.key.is_some()
                 || unexpected
@@ -4046,24 +4091,131 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
     Ok(())
 }
 
+/// A preallocated, zeroizing, bounded renderer. Capacity is chosen before any
+/// plaintext is written so Vec growth never leaves secret-bearing old buffers.
+struct BundleBuffer(Zeroizing<Vec<u8>>);
+
+impl Write for BundleBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.0.capacity() - self.0.len()
+            || bytes.len() > (64 * 1024 * 1024_usize).saturating_sub(self.0.len())
+        {
+            return Err(io::Error::other("bundle exceeds output limit"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn get_many(
+    opts: &Options<'_>,
+    path: &Path,
+    credentials: &mut KdbxCredentials,
+    config: &Config,
+) -> Result<()> {
+    let mut service = VaultService::default();
+    let session = service
+        .open(path, credentials, &KDBX_LIMITS)
+        .map_err(|error| err(error.message()))?;
+    let result = (|| {
+        let mut bindings = Vec::with_capacity(opts.requested_paths.len());
+        let mut total = 0_usize;
+        let mut worst_encoded = 0_usize;
+        for supplied in &opts.requested_paths {
+            let selector = if let Some(alias) = config.aliases.get(*supplied) {
+                if alias.kind != Kind::Entry {
+                    return Err(err("entry alias required"));
+                }
+                entry_path(&alias.target)?;
+                if alias.target != *supplied {
+                    match service.resolve_entry(session, supplied) {
+                        Ok(_) => return Err(err("ambiguous entry selector")),
+                        Err(nkeepass::ServiceError::NotFound) => {}
+                        Err(error) => return Err(err(error.message())),
+                    }
+                }
+                alias.target.as_str()
+            } else {
+                supplied
+            };
+            let entry = service
+                .resolve_entry(session, selector)
+                .map_err(|error| match error {
+                    // Do not send user/vault labels through suggestion errors
+                    // during a multi-value disclosure.
+                    nkeepass::ServiceError::NotFound => err("get many entry not found"),
+                    error => err(error.message()),
+                })?;
+            let value = reveal_service_field(&service, &entry, opts.field.unwrap_or("Password"))?;
+            total = total
+                .checked_add(value.as_slice().len())
+                .filter(|total| *total <= 16 * 1024 * 1024)
+                .ok_or_else(|| err("get many values exceed size limit"))?;
+            worst_encoded = worst_encoded.saturating_add(
+                value
+                    .as_slice()
+                    .len()
+                    .saturating_add(supplied.len())
+                    .saturating_mul(6)
+                    .saturating_add(128),
+            );
+            bindings.push(((*supplied).to_owned(), value));
+        }
+        let mut bundle = BundleBuffer(Zeroizing::new(Vec::with_capacity(
+            worst_encoded.min(64 * 1024 * 1024),
+        )));
+        write_environment(
+            &mut bundle,
+            &bindings,
+            opts.format.unwrap_or("text"),
+            opts.is_output,
+            true,
+        )?;
+        if opts.age_encrypt {
+            let recipients = age_recipients(&opts.age_recipients)?;
+            let encrypted = AgeFile::encrypt_armored(&bundle.0, &recipients)
+                .map_err(|_| err("age encryption failed"))?;
+            if let Some(output) = opts.output {
+                write_private_output(output, encrypted.as_bytes())
+            } else {
+                io::stdout()
+                    .write_all(encrypted.as_bytes())
+                    .and_then(|()| io::stdout().write_all(b"\n"))
+                    .map_err(|_| err("cannot write encrypted output"))
+            }
+        } else {
+            write_stdout(&bundle.0, "cannot write value")
+        }
+    })();
+    let locked = service.lock(session).map_err(|error| err(error.message()));
+    result?;
+    locked?;
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "shared command handler keeps nested and shortcut operations identical"
 )]
 fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config) -> Result<()> {
+    if action == "get" && args.first().is_some_and(|argument| argument == "many") {
+        return operation("get-many", &args[1..], vault, config);
+    }
     if !matches!(
         action,
         "ls" | "search"
             | "show"
             | "field-ls"
             | "get"
-            | "getx"
+            | "get-many"
             | "field-get"
             | "attachment-ls"
             | "attachment-get"
             | "set"
             | "field-set"
-            | "setx"
             | "ensure"
             | "rm"
             | "field-rm"
@@ -4080,12 +4232,12 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         return Err(err("unknown operation"));
     }
     let mut opts = options(args, Positional::for_action(action))?;
-    if matches!(action, "import" | "export" | "sync" | "setx") {
+    if matches!(action, "import" | "export" | "sync") {
         validate_automation_options(action, &opts)?;
     } else {
         validate_regular_options(action, &opts)?;
     }
-    if matches!(action, "get" | "getx" | "set") && opts.field.is_none() {
+    if matches!(action, "get" | "set") && opts.field.is_none() {
         opts.field = opts
             .key
             .and_then(|name| config.aliases.get(name))
@@ -4093,7 +4245,7 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
     }
     let requires_key = !matches!(
         action,
-        "ls" | "search" | "import" | "export" | "sync" | "group-ls"
+        "ls" | "search" | "import" | "export" | "sync" | "group-ls" | "get-many"
     );
     let selector = if requires_key {
         Some(opts.key.ok_or_else(|| err("--key required"))?)
@@ -4102,6 +4254,9 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
     };
     let (path, _) = active_vault(vault, config)?;
     let mut credentials = credentials(&opts)?;
+    if action == "get-many" {
+        return get_many(&opts, &path, &mut credentials, config);
+    }
     if matches!(action, "group-ls" | "group-add" | "group-rm") {
         return group_operation(action, &opts, &path, &mut credentials);
     }
@@ -4240,14 +4395,9 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         locked?;
         return Ok(());
     }
-    if matches!(action, "get" | "getx" | "field-get") {
+    if matches!(action, "get" | "field-get") {
         let selector = selector.ok_or_else(|| err("--key required"))?;
-        let format = opts
-            .format
-            .unwrap_or(if action == "getx" { "json" } else { "text" });
-        if action == "getx" && format != "json" {
-            return Err(err("getx requires JSON format"));
-        }
+        let format = opts.format.unwrap_or("text");
         if opts.age_encrypt
             && (action != "get"
                 || !matches!(format, "text")
@@ -4671,76 +4821,6 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         locked?;
         return Ok(());
     }
-    if action == "setx" {
-        let selector = selector.ok_or_else(|| err("--key required"))?;
-        let input = automation_input(&opts, interchange::SETX_LIMITS.max_bytes)?;
-        let updates = interchange::decode_setx(&input).map_err(interchange_error)?;
-        let updates = updates
-            .into_iter()
-            .map(|update| FieldUpdate {
-                key: update.key,
-                value: update.value,
-                protected: update.protected,
-                protect_in_memory: update.protect_in_memory,
-            })
-            .collect();
-        let mut service = VaultService::default();
-        let session = service
-            .open(&path, &mut credentials, &KDBX_LIMITS)
-            .map_err(|error| err(error.message()))?;
-        let result = (|| {
-            let entry_selector = if let Some(alias) = config.aliases.get(selector) {
-                if alias.kind != Kind::Entry {
-                    return Err(err("entry alias required"));
-                }
-                entry_path(&alias.target)?;
-                if alias.target != selector {
-                    match service.resolve_entry(session, selector) {
-                        Ok(_) => return Err(err("ambiguous entry selector")),
-                        Err(nkeepass::ServiceError::NotFound) => {}
-                        Err(error) => return Err(err(error.message())),
-                    }
-                }
-                alias.target.as_str()
-            } else {
-                selector
-            };
-            let resolved = service
-                .resolve_entry(session, entry_selector)
-                .map_err(|error| match error {
-                    nkeepass::ServiceError::NotFound => {
-                        entry_not_found(&service, session, entry_selector)
-                    }
-                    error => err(error.message()),
-                })?;
-            let field_count = service.set_fields(&resolved.reference(), updates).map_err(
-                |error| match error {
-                    nkeepass::ServiceError::DuplicateIds => {
-                        err("vault contains duplicate object UUIDs")
-                    }
-                    nkeepass::ServiceError::DuplicateFields => {
-                        err("entry contains duplicate fields")
-                    }
-                    nkeepass::ServiceError::InvalidFieldName => err("invalid setx field"),
-                    error => err(error.message()),
-                },
-            )?;
-            if !opts.dry_run {
-                service
-                    .save(&path, &mut credentials)
-                    .map_err(|error| err(error.message()))?;
-            }
-            json(&serde_json::json!({
-                "operation": "setx",
-                "dry_run": opts.dry_run,
-                "fields_updated": field_count,
-            }))
-        })();
-        let locked = service.lock(session).map_err(|error| err(error.message()));
-        result?;
-        locked?;
-        return Ok(());
-    }
     if action == "ensure" {
         let selector = selector.ok_or_else(|| err("--key required"))?;
         let mut service = VaultService::default();
@@ -5158,6 +5238,18 @@ fn emit_environment(
     format: &str,
     is_output: bool,
 ) -> Result<()> {
+    write_environment(&mut io::stdout().lock(), bindings, format, is_output, false)
+}
+
+// Shared key/value formatting for env and get many. The latter supplies paths
+// as names, and changes only text/null framing, not quoting or name validation.
+fn write_environment(
+    output: &mut impl Write,
+    bindings: &[(String, SecretBytes)],
+    format: &str,
+    is_output: bool,
+    values_only: bool,
+) -> Result<()> {
     if is_output && format != "azure-devops" {
         return Err(err("--is-output requires the azure-devops format"));
     }
@@ -5183,33 +5275,47 @@ fn emit_environment(
                     }
                 }
             }
+            "text" if values_only => {}
             _ => return Err(err("invalid output format")),
         }
     }
     if is_named_format(format) {
         for (name, value) in bindings {
-            emit_value(value.as_slice(), format, Some(name), is_output)?;
+            write_value(output, value.as_slice(), format, Some(name), is_output)?;
         }
         return Ok(());
     }
     match format {
-        "null" => {
-            let stdout = io::stdout();
-            let mut output = stdout.lock();
-            for (name, value) in bindings {
+        "text" if values_only => {
+            for (index, (_, value)) in bindings.iter().enumerate() {
+                if index > 0 {
+                    output
+                        .write_all(b",")
+                        .map_err(|_| err("cannot write value"))?;
+                }
                 output
-                    .write_all(name.as_bytes())
-                    .and_then(|()| output.write_all(b"\0"))
-                    .and_then(|()| output.write_all(value.as_slice()))
+                    .write_all(value.as_slice())
+                    .map_err(|_| err("cannot write value"))?;
+            }
+            Ok(())
+        }
+        "null" => {
+            for (name, value) in bindings {
+                if !values_only {
+                    output
+                        .write_all(name.as_bytes())
+                        .and_then(|()| output.write_all(b"\0"))
+                        .map_err(|_| err("cannot write value"))?;
+                }
+                output
+                    .write_all(value.as_slice())
                     .and_then(|()| output.write_all(b"\0"))
                     .map_err(|_| err("cannot write value"))?;
             }
             Ok(())
         }
         "json" => {
-            let stdout = io::stdout();
-            let mut output = stdout.lock();
-            let mut serializer = serde_json::Serializer::new(&mut output);
+            let mut serializer = serde_json::Serializer::new(&mut *output);
             let mut map = serializer
                 .serialize_map(Some(bindings.len()))
                 .map_err(|_| err("cannot encode output"))?;
@@ -6446,15 +6552,15 @@ fn public_secrets_action(action: &str) -> Option<&str> {
         "list" => Some("ls"),
         "remove" => Some("rm"),
         "environment" => Some("env"),
-        "get" | "getx" | "ls" | "search" | "show" | "env" | "set" | "rm" | "ensure" | "otp"
-        | "setx" | "import" | "export" | "sync" => Some(action),
+        "get" | "ls" | "search" | "show" | "env" | "set" | "rm" | "ensure" | "otp" | "import"
+        | "export" | "sync" => Some(action),
         _ => None,
     }
 }
 
 fn public_automation_action(action: &str) -> Option<&str> {
     match action {
-        "setx" | "import" | "export" | "sync" => Some(action),
+        "import" | "export" | "sync" => Some(action),
         _ => None,
     }
 }
@@ -6507,7 +6613,17 @@ fn help_request(args: &[String]) -> Option<Vec<String>> {
             {
                 return None;
             }
-            return Some(resolve_help_route(&route_tokens));
+            let route = resolve_help_route(&route_tokens);
+            if (!route_tokens.is_empty() && route.is_empty())
+                || (route_tokens
+                    .first()
+                    .is_some_and(|group| matches!(group.as_str(), "secrets" | "automation"))
+                    && route_tokens.len() > 1
+                    && route.len() < 2)
+            {
+                return None;
+            }
+            return Some(route);
         }
         if takes_option_value(arg) {
             expecting_value = true;
@@ -6535,6 +6651,11 @@ fn takes_option_value(option: &str) -> bool {
             | "--username"
             | "--url"
             | "--notes"
+            | "--value"
+            | "--value-env"
+            | "--value-file"
+            | "--chars"
+            | "-c"
             | "--bin"
             | "--name"
             | "--file"
@@ -6594,13 +6715,14 @@ fn command_path<'a>(commands: &'a [HelpCommand], route: &[String]) -> Option<&'a
 
 fn uses_credentials(route: &[String]) -> bool {
     match route {
+        [get, many] if get == "get" && many == "many" => true,
+        [secrets, get, many] if secrets == "secrets" && get == "get" && many == "many" => true,
         [command] => matches!(
             command.as_str(),
             "init"
                 | "exec"
                 | "x"
                 | "get"
-                | "getx"
                 | "list"
                 | "ls"
                 | "search"
@@ -6610,7 +6732,6 @@ fn uses_credentials(route: &[String]) -> bool {
                 | "remove"
                 | "ensure"
                 | "otp"
-                | "setx"
                 | "import"
                 | "export"
                 | "sync"
@@ -6858,18 +6979,26 @@ fn with_root_credentials<'a>(
     }
     let command_help = find_help_command(ROOT_COMMANDS, command);
     let nested = command_help.is_some_and(|help| !help.children.is_empty());
+    // `get` is both a default operation and a parent. Insert credentials after
+    // the actual route, never between `get` and reserved `many`.
+    let offset = if command == "get" {
+        usize::from(rest.first().is_some_and(|word| word == "many"))
+    } else if command == "secrets"
+        && rest.first().is_some_and(|word| word == "get")
+        && rest.get(1).is_some_and(|word| word == "many")
+    {
+        2
+    } else {
+        usize::from(nested)
+    };
     let mut route = vec![command.to_owned()];
-    if nested {
-        route.push(
-            rest.first()
-                .ok_or_else(|| err("subcommand required"))?
-                .clone(),
-        );
-    }
+    route.extend_from_slice(
+        rest.get(..offset)
+            .ok_or_else(|| err("subcommand required"))?,
+    );
     if !uses_credentials(&route) {
         return Err(err("this command does not accept root credential options"));
     }
-    let offset = usize::from(nested);
     let mut merged = Vec::with_capacity(rest.len() + credentials.len());
     merged.extend_from_slice(&rest[..offset]);
     merged.extend_from_slice(credentials);
@@ -7180,8 +7309,8 @@ fn run(args: &[String], program: &str) -> Result<()> {
                 operation(action, &rest[1..], vault, &config)
             }
         }
-        "get" | "getx" | "list" | "ls" | "search" | "show" | "set" | "rm" | "remove" | "ensure"
-        | "otp" | "setx" | "import" | "export" | "sync" => {
+        "get" | "list" | "ls" | "search" | "show" | "set" | "rm" | "remove" | "ensure" | "otp"
+        | "import" | "export" | "sync" => {
             let action = match command {
                 "list" => "ls",
                 "remove" => "rm",
@@ -7275,6 +7404,26 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_writer_is_bounded_and_does_not_reallocate_secret_storage() {
+        let mut bundle = BundleBuffer(Zeroizing::new(Vec::with_capacity(4)));
+        let original = bundle.0.as_ptr();
+        bundle.write_all(b"1234").unwrap();
+        assert!(bundle.write_all(b"5").is_err());
+        assert_eq!(bundle.0.as_ptr(), original);
+        assert_eq!(bundle.0.as_slice(), b"1234");
+    }
+
+    #[test]
+    fn get_many_path_budget_is_checked_before_vault_or_credentials() {
+        let over_budget = "A".repeat(64 * 1024 + 1);
+        let opts = Options {
+            requested_paths: vec![over_budget.as_str()],
+            ..Options::default()
+        };
+        assert!(validate_regular_options("get-many", &opts).is_err());
+    }
 
     #[test]
     fn exec_reserves_all_default_password_variable_names() {

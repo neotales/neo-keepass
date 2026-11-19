@@ -160,7 +160,7 @@ These root commands are shortcuts for `secrets` commands:
 | Root command | Equivalent |
 | --- | --- |
 | `get` | `secrets get` |
-| `getx` | `secrets getx` |
+| `get many` | `secrets get many` |
 | `ls`, `list` | `secrets ls` |
 | `search` | `secrets search` |
 | `show` | `secrets show` |
@@ -168,7 +168,6 @@ These root commands are shortcuts for `secrets` commands:
 | `rm`, `remove` | `secrets rm` |
 | `ensure` | `secrets ensure` |
 | `otp` | `secrets otp` |
-| `setx` | `secrets setx` |
 | `import` | `secrets import` |
 | `export` | `secrets export` |
 | `sync` | `secrets sync` |

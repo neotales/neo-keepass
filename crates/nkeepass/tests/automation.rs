@@ -22,7 +22,7 @@ const ENTRY_SECRET: &str = "automation-entry-disposable-93ac";
 const FIELD_SECRET: &str = "automation-field-disposable-440e";
 const NOTES_SECRET: &str = "automation-notes-disposable-e2b1";
 const ATTACHMENT_SECRET: &[u8] = b"automation-attachment-disposable-5a90";
-const SETX_SECRET: &str = "automation-setx-disposable-682f";
+const SECONDARY_SECRET: &str = "automation-secondary-disposable-682f";
 const IMPORT_SECRET: &str = "automation-import-disposable-03ce";
 
 struct TestVault {
@@ -92,8 +92,7 @@ fn automation_age_options_fail_before_vault_or_output_access() {
     .unwrap();
     let input = input.to_str().unwrap();
     let output_path = output.to_str().unwrap();
-    let actions: [&[&str]; 4] = [
-        &["setx", "--key", "LOGIN", "--file", input],
+    let actions: [&[&str]; 3] = [
         &["import", "--file", input],
         &["export", "--output", output_path],
         &["sync", "--file", input],
@@ -278,116 +277,6 @@ fn login_entry() -> Entry {
     });
     entry.set_field(Field::new("Notes", NOTES_SECRET));
     entry
-}
-
-#[test]
-fn setx_is_redacted_bounded_and_a_real_dry_run() {
-    let database = database_with_entry(login_entry());
-    let vault = TestVault::new("setx.kdbx", &database);
-    let home = tempfile::tempdir().unwrap();
-    let input = home.path().join("setx.json");
-    let before = std::fs::read(&vault.path).unwrap();
-    let document = format!(
-        r#"{{"fields":[{{"key":"Token","value":"{SETX_SECRET}"}},{{"key":"Password","value":"{IMPORT_SECRET}","protected":true}}]}}"#
-    );
-    std::fs::write(&input, document).unwrap();
-
-    let output = run(
-        &vault.path,
-        home.path(),
-        &[
-            "secrets",
-            "setx",
-            "--key",
-            "LOGIN",
-            "--file",
-            input.to_str().unwrap(),
-            "--dry-run",
-            "--password-env",
-            "NKEEPASS_TEST_PASSWORD",
-        ],
-    );
-    let result = assert_success_without(&output, &[SETX_SECRET, IMPORT_SECRET]);
-    assert_eq!(result["dry_run"], true);
-    assert_eq!(result["fields_updated"], 2);
-    assert_eq!(std::fs::read(&vault.path).unwrap(), before);
-
-    let original = load(&vault.path);
-    let entry = &original.root.entries[0];
-    assert_eq!(
-        entry
-            .field("Token")
-            .unwrap()
-            .value
-            .reveal_text()
-            .unwrap()
-            .as_str(),
-        FIELD_SECRET
-    );
-    assert_eq!(entry.password.reveal_text().unwrap().as_str(), ENTRY_SECRET);
-
-    let output = run(
-        &vault.path,
-        home.path(),
-        &[
-            "setx",
-            "--key",
-            "LOGIN",
-            "--file",
-            input.to_str().unwrap(),
-            "--password-env",
-            "NKEEPASS_TEST_PASSWORD",
-        ],
-    );
-    assert_success_without(&output, &[SETX_SECRET, IMPORT_SECRET]);
-    let changed = load(&vault.path);
-    let entry = &changed.root.entries[0];
-    assert_eq!(
-        entry
-            .field("Token")
-            .unwrap()
-            .value
-            .reveal_text()
-            .unwrap()
-            .as_str(),
-        SETX_SECRET
-    );
-    assert_eq!(
-        entry.password.reveal_text().unwrap().as_str(),
-        IMPORT_SECRET
-    );
-
-    std::fs::write(
-        &input,
-        r#"{"fields":[{"key":"Token","value":"duplicate-secret"},{"key":"Token","value":"other-secret"}]}"#,
-    )
-    .unwrap();
-    let output = run(
-        &vault.path,
-        home.path(),
-        &[
-            "secrets",
-            "setx",
-            "--key",
-            "LOGIN",
-            "--file",
-            input.to_str().unwrap(),
-            "--password-env",
-            "NKEEPASS_TEST_PASSWORD",
-        ],
-    );
-    assert!(!output.status.success());
-    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
-    assert!(
-        !combined
-            .windows(b"duplicate-secret".len())
-            .any(|window| window == b"duplicate-secret")
-    );
-    assert!(
-        !combined
-            .windows(b"other-secret".len())
-            .any(|window| window == b"other-secret")
-    );
 }
 
 #[test]
@@ -1442,7 +1331,7 @@ fn sync_dry_run_does_not_save_and_merges_without_deleting_target_data() {
     source_entry.times.modified = KdbxTimestamp::from_unix_seconds(100);
     source_entry.set_field(Field {
         key: "Token".into(),
-        value: ProtectedValue::from_text(SETX_SECRET),
+        value: ProtectedValue::from_text(SECONDARY_SECRET),
         protected: false,
         protect_in_memory: false,
     });
@@ -1469,7 +1358,7 @@ fn sync_dry_run_does_not_save_and_merges_without_deleting_target_data() {
             "NKEEPASS_TEST_PASSWORD",
         ],
     );
-    assert_success_without(&output, &[IMPORT_SECRET, SETX_SECRET]);
+    assert_success_without(&output, &[IMPORT_SECRET, SECONDARY_SECRET]);
 
     let before = std::fs::read(&target.path).unwrap();
     let output = run(
@@ -1485,7 +1374,7 @@ fn sync_dry_run_does_not_save_and_merges_without_deleting_target_data() {
             "NKEEPASS_TEST_PASSWORD",
         ],
     );
-    let result = assert_success_without(&output, &[IMPORT_SECRET, SETX_SECRET]);
+    let result = assert_success_without(&output, &[IMPORT_SECRET, SECONDARY_SECRET]);
     assert_eq!(result["dry_run"], true);
     assert_eq!(result["entries_added"], 1);
     assert_eq!(std::fs::read(&target.path).unwrap(), before);
@@ -1503,7 +1392,7 @@ fn sync_dry_run_does_not_save_and_merges_without_deleting_target_data() {
             "NKEEPASS_TEST_PASSWORD",
         ],
     );
-    assert_success_without(&output, &[IMPORT_SECRET, SETX_SECRET]);
+    assert_success_without(&output, &[IMPORT_SECRET, SECONDARY_SECRET]);
     let merged = load(&target.path);
     assert_eq!(merged.root.entries.len(), 2);
     let original = merged
@@ -1550,7 +1439,7 @@ fn sync_dry_run_does_not_save_and_merges_without_deleting_target_data() {
             .reveal_text()
             .unwrap()
             .as_str(),
-        SETX_SECRET
+        SECONDARY_SECRET
     );
     assert_eq!(
         merged
@@ -1883,7 +1772,7 @@ fn export_does_not_carry_the_directive_and_the_round_trip_reproduces_the_value()
 #[test]
 fn sync_honours_the_directive_without_touching_the_rest_of_the_vault() {
     let mut source_entry = Entry::new("GENERATED");
-    source_entry.set_field(Field::new("Token", SETX_SECRET));
+    source_entry.set_field(Field::new("Token", SECONDARY_SECRET));
     let source_db = database_with_entry(source_entry);
     let source = TestVault::new("source.kdbx", &source_db);
     let target = TestVault::new("target.kdbx", &database_with_entry(login_entry()));
@@ -1907,7 +1796,7 @@ fn sync_honours_the_directive_without_touching_the_rest_of_the_vault() {
             "NKEEPASS_TEST_PASSWORD",
         ],
     );
-    let result = assert_success_without(&output, &[SETX_SECRET]);
+    let result = assert_success_without(&output, &[SECONDARY_SECRET]);
     assert_eq!(result["dry_run"], true);
     assert_eq!(result["entries_added"], 1);
     assert_eq!(result["passwords_generated"], 0);
@@ -1925,7 +1814,7 @@ fn sync_honours_the_directive_without_touching_the_rest_of_the_vault() {
             "NKEEPASS_TEST_PASSWORD",
         ],
     );
-    let result = assert_success_without(&output, &[SETX_SECRET]);
+    let result = assert_success_without(&output, &[SECONDARY_SECRET]);
     assert_eq!(result["passwords_generated"], 1);
     assert_eq!(result["passwords_pending"], 0);
 

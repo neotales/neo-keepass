@@ -1,42 +1,22 @@
 # Exchange vault data with automation files
 
-Use `setx` to set fields from JSON, `export` to create a snapshot, and
+Use `set --field` to set fields, `export` to create a snapshot, and
 `import` or `sync` to apply a snapshot. These files can contain secrets.
 Protect them like the vault itself and avoid printing their contents.
 
-## Set fields from JSON
+## Set multiple fields
 
-Create `entry.json` with the fields to set. This example contains only public
-sample data:
-
-```json
-{
-  "fields": [
-    {
-      "key": "UserName",
-      "value": "demo-user"
-    },
-    {
-      "key": "Notes",
-      "value": "example",
-      "protected": false,
-      "protect_in_memory": false
-    }
-  ]
-}
-```
-
-Apply the document:
+This example contains only public sample data:
 
 ```sh
-nkp secrets setx --key 'Demo/Example' --file entry.json
+nkp secrets set 'Demo/Example' --field UserName=demo-user --field Notes=example
 ```
 
-The CLI validates the bounded JSON input and applies the selected fields as
-one update. The entry must already exist. Add `--dry-run` to validate and
-report without saving. Missing standard fields are added; missing custom
-fields are ignored. The complete schema and size limits are in the
-[setx reference](../reference/automation.md#setx).
+The selected fields are applied atomically to an existing entry; missing
+custom fields are created. Argument values are visible in process listings
+and shell history. For a sensitive single value, prefer `--value-stdin`,
+`--value-file`, `--value-env`, or the hidden prompt. See the
+[set reference](../reference/secrets.md#secrets-set).
 
 ## Export a snapshot
 
@@ -59,6 +39,6 @@ Review the dry-run report before repeating the operation without
 `--replace`. Sync accepts `--strategy newest` or `--strategy source`.
 Both operations read from exactly one of `--file PATH` and `--stdin`.
 
-The same four operations are available under `nkp automation`. See
+The three snapshot operations are available under `nkp automation`. See
 [automation command reference](../reference/automation.md) for each option and
 its constraints.

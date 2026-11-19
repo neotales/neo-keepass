@@ -84,8 +84,8 @@ The password options appear only on routes that open or create a vault.
 
 - `init`
 - `exec` and its alias `x`
-- Root shortcuts `get`, `getx`, `ls`, `list`, `search`, `show`, `set`, `rm`,
-  `remove`, `ensure`, `otp`, `setx`, `import`, `export`, `sync`, and `env`
+- Root shortcuts `get` (including `get many`), `ls`, `list`, `search`, `show`, `set`, `rm`,
+  `remove`, `ensure`, `otp`, `import`, `export`, `sync`, and `env`
 - Subcommands under `secrets`, `automation`, `attachment`, `attachments`,
   `group`, `groups`, `field`, and `custom-field`
 
@@ -108,7 +108,7 @@ complete accepted flag set.
 | --- | --- |
 | `init` | `--password-env NAME`, `--password-stdin`, `--password-file PATH`, `--key-file PATH`, `--password VALUE` |
 | `exec` and `x` | Same five credential flags |
-| Root `get`, `getx`, `ls`, `list`, `search`, `show`, `set`, `rm`, `remove`, `ensure`, `otp`, `setx`, `import`, `export`, `sync`, `env` | Same five credential flags |
+| Root `get` (including `get many`), `ls`, `list`, `search`, `show`, `set`, `rm`, `remove`, `ensure`, `otp`, `import`, `export`, `sync`, `env` | Same five credential flags |
 | Any valid subcommand of `secrets`, `automation`, `attachment`, `attachments`, `group`, `groups`, `field`, or `custom-field` | Same five credential flags |
 | `tui`, `context`, `alias`, `config`, `completion`, `version` | No credential flags |
 

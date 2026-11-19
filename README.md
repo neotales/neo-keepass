@@ -118,6 +118,18 @@ init backup identity, then the conventional age `keys.txt` file.
 class. No selection requires all four. `set --generate` uses the same policy.
 This composition policy is not a NIST mandate.
 
+`nkp get many PATH...` (also `nkp secrets get many`) reveals one ordered bundle,
+not separate per-entry outputs. Text joins values with commas; `null` terminates
+each value with NUL; JSON maps literal supplied paths to values. Named formats
+reuse the existing quoting rules and require identifier-style paths or aliases.
+`--age-encrypt` encrypts the complete rendered bundle once. See the
+[bundle reference](docs/reference/secrets.md#secrets-get-many) for bounds,
+collision handling and the spelling for an entry named `many`.
+
+The former JSON-only read and JSON field-update shortcuts are deliberately no
+longer accepted. Use `get --format json` and `set --field NAME=VALUE` instead;
+the latter creates missing custom fields and does not have a dry-run mode.
+
 KeePass XML is an explicit limited interchange format, not the default JSON
 snapshot format. Export requires `--format keepass-xml --allow-plaintext` and
 can reveal ordinary protected text values, including passwords. Protected
