@@ -7,6 +7,12 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+const ECHO_MARKERS: &[&[u8]] = &[
+    b"S\xc3\xabcre",
+    b"AFTER-ENTER-SENTINEL",
+    b"AFTER-CANCEL-SENTINEL",
+];
+
 /// Drain while the worker is alive: a failing termios assertion/backtrace can
 /// itself fill a PTY and otherwise look like a blocked input reader.
 #[derive(Default)]
@@ -18,6 +24,31 @@ struct Transcript {
 }
 
 impl Transcript {
+    fn record(&mut self, chunk: &[u8]) {
+        self.total += chunk.len();
+        self.scan.extend_from_slice(chunk);
+        self.echoed |= ECHO_MARKERS
+            .iter()
+            .any(|marker| self.scan.windows(marker.len()).any(|part| part == *marker));
+        let keep = ECHO_MARKERS
+            .iter()
+            .map(|marker| marker.len())
+            .max()
+            .unwrap()
+            - 1;
+        let discard = self.scan.len().saturating_sub(keep);
+        self.scan.drain(..discard);
+        const LIMIT: usize = 64 * 1024;
+        if chunk.len() >= LIMIT {
+            self.tail.clear();
+            self.tail.extend_from_slice(&chunk[chunk.len() - LIMIT..]);
+        } else {
+            let discard = (self.tail.len() + chunk.len()).saturating_sub(LIMIT);
+            self.tail.drain(..discard);
+            self.tail.extend_from_slice(chunk);
+        }
+    }
+
     fn drain(&mut self, master: &mut std::fs::File) {
         let mut bytes = [0; 8192];
         // Bound each drain as well as retention; a noisy child must not starve
@@ -26,16 +57,7 @@ impl Transcript {
             match master.read(&mut bytes) {
                 Ok(0) => break,
                 Ok(count) => {
-                    let chunk = &bytes[..count];
-                    self.total += count;
-                    self.scan.extend_from_slice(chunk);
-                    self.echoed |= self.scan.windows(6).any(|part| part == b"S\xc3\xabcre");
-                    let discard = self.scan.len().saturating_sub(5);
-                    self.scan.drain(..discard);
-                    const LIMIT: usize = 64 * 1024;
-                    let discard = (self.tail.len() + count).saturating_sub(LIMIT);
-                    self.tail.drain(..discard);
-                    self.tail.extend_from_slice(chunk);
+                    self.record(&bytes[..count]);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
@@ -47,6 +69,31 @@ impl Transcript {
 
     fn text(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.tail)
+    }
+}
+
+#[test]
+fn echo_scanning_covers_split_typeahead_markers_and_retention_overflow() {
+    for marker in ECHO_MARKERS {
+        for split in 1..marker.len() {
+            let mut transcript = Transcript::default();
+            transcript.record(&marker[..split]);
+            transcript.record(&marker[split..]);
+            for _ in 0..20 {
+                transcript.record(&[b'.'; 8192]);
+            }
+            assert!(
+                transcript.echoed,
+                "marker crossing a read boundary was lost"
+            );
+            assert_eq!(transcript.tail.len(), 64 * 1024);
+            assert!(
+                !transcript
+                    .tail
+                    .windows(marker.len())
+                    .any(|part| part == *marker)
+            );
+        }
     }
 }
 

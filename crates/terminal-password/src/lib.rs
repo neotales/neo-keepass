@@ -7,8 +7,11 @@ use zeroize::Zeroizing;
 /// Reads UTF-8 from terminal stdin without echo, bounded by an absolute deadline.
 /// Redirected stdin is refused. Enter submits; Ctrl-C, Ctrl-D and Escape cancel.
 /// Terminal state is restored before returning, including on timeout.
-/// On Unix, unconsumed terminal input is discarded when the prompt ends.
-/// Hidden typeahead cannot be echoed or read as a command after restoration.
+/// On Unix, restoration first settles the saved canonical/raw discipline with
+/// echo and signal generation disabled, then flushes pending input before
+/// reinstating the exact saved flags. That quiet flush is the input-ownership
+/// handoff: bytes arriving later are not guaranteed to be discarded and obey
+/// the restored flags (including an originally set PENDIN).
 ///
 /// # Process-wide ownership
 /// On Unix this call temporarily owns the process-wide SIGINT, SIGTERM, SIGHUP
@@ -17,11 +20,14 @@ use zeroize::Zeroizing;
 /// Restoration reinstalls the saved actions and would overwrite concurrent
 /// changes. The internal lock excludes other calls to this function only; it
 /// does not coordinate external signal-action installers. Likewise, no other
-/// consumer may read terminal stdin concurrently.
+/// consumer may read terminal stdin or change its terminal modes concurrently.
 ///
 /// # Errors
 /// Refuses nonterminal or concurrent input, cancellation, expired deadlines,
 /// invalid Unicode, oversized values, and terminal I/O or restoration errors.
+/// On Unix, failed preparation never enables echo or signals over unsettled
+/// input; the guard retries the same staged sequence.
+/// A persistent OS error can prevent complete restoration and is reported.
 pub fn read(timeout: Duration) -> io::Result<Zeroizing<String>> {
     use std::io::IsTerminal;
     static READER: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -89,6 +95,44 @@ mod platform {
         }
     }
 
+    enum RestoreOp<'a> {
+        FlushInput,
+        SetMode(&'a Termios),
+    }
+
+    fn quiet_mode(original: &Termios) -> Termios {
+        let mut mode = original.clone();
+        mode.local_flags.remove(
+            LocalFlags::ECHO
+                | LocalFlags::ECHONL
+                | LocalFlags::ISIG
+                | LocalFlags::IEXTEN
+                | LocalFlags::PENDIN,
+        );
+        mode.input_flags.remove(nix::sys::termios::InputFlags::IXON);
+        mode
+    }
+
+    fn restore_mode(
+        original: &Termios,
+        mut apply: impl FnMut(RestoreOp<'_>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        // Enter the ORIGINAL canonical/raw discipline, but keep echo/signal
+        // generation, extended input and start/stop handling disabled. Darwin can
+        // generate PENDIN here and replay bytes arriving during the change;
+        // neither that replay nor newly arriving bytes may expose input.
+        let quiet = quiet_mode(original);
+        apply(RestoreOp::SetMode(&quiet))?;
+        // Clear queued input AND kernel-generated PENDIN while still quiet.
+        // TCIFLUSH never waits for output. Preparation failure must not fall
+        // through to enabling the original flags; Drop retries this sequence.
+        apply(RestoreOp::FlushInput)?;
+        // Canonical mode no longer changes, so this does not generate PENDIN.
+        // Restore all original bits, including an originally set PENDIN.
+        // Input arriving after the quiet flush belongs to the restored owner.
+        apply(RestoreOp::SetMode(original))
+    }
+
     struct Restore<'a> {
         stdin: &'a io::Stdin,
         original: Termios,
@@ -96,29 +140,15 @@ mod platform {
     }
     impl Restore<'_> {
         fn restore(&mut self) -> io::Result<()> {
-            // Do not replay unread secret typeahead with echo/signals enabled.
-            // TCIFLUSH does not wait for output, unlike TCSAFLUSH/TCSADRAIN.
-            let flushed = tcflush(self.stdin, FlushArg::TCIFLUSH);
-            // A failed flush must not prevent the attempt to restore modes.
-            let mode_restored = tcsetattr(self.stdin, SetArg::TCSANOW, &self.original);
-            let settled = if mode_restored.is_ok()
-                && self.original.local_flags.contains(LocalFlags::ICANON)
-                && !self.original.local_flags.contains(LocalFlags::PENDIN)
-            {
-                // Darwin/BSD's TIOCSETA sets PENDIN on raw -> canonical even
-                // with empty queues, and ORs it into the supplied mode. A
-                // second tcsetattr cannot clear it. TCIFLUSH clears that
-                // generated pending-input state without draining output or
-                // replaying hidden bytes. Preserve PENDIN if originally set.
-                tcflush(self.stdin, FlushArg::TCIFLUSH)
-            } else {
-                Ok(())
-            };
-            self.restored = flushed.is_ok() && mode_restored.is_ok() && settled.is_ok();
-            mode_restored?;
-            flushed?;
-            settled?;
-            Ok(())
+            let result = restore_mode(&self.original, |operation| {
+                match operation {
+                    RestoreOp::FlushInput => tcflush(self.stdin, FlushArg::TCIFLUSH),
+                    RestoreOp::SetMode(mode) => tcsetattr(self.stdin, SetArg::TCSANOW, mode),
+                }
+                .map_err(io::Error::from)
+            });
+            self.restored = result.is_ok();
+            result
         }
     }
     impl Drop for Restore<'_> {
@@ -150,15 +180,8 @@ mod platform {
             signals.0.push((signal, previous));
         }
         let original = tcgetattr(&stdin)?;
-        let mut mode = original.clone();
-        mode.local_flags.remove(
-            LocalFlags::ECHO
-                | LocalFlags::ECHONL
-                | LocalFlags::ICANON
-                | LocalFlags::ISIG
-                | LocalFlags::IEXTEN,
-        );
-        mode.input_flags.remove(nix::sys::termios::InputFlags::IXON);
+        let mut mode = quiet_mode(&original);
+        mode.local_flags.remove(LocalFlags::ICANON);
         // Poll is readiness, not a guarantee that a subsequent blocking read
         // cannot stall. MIN=TIME=0 makes every read itself nonblocking without
         // changing shared descriptor flags or leaving an input thread behind.
@@ -231,6 +254,175 @@ mod platform {
         restore.restore()?;
         signals.restore()?;
         outcome
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        use nix::pty::openpty;
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, OwnedFd};
+
+        fn available(fd: &OwnedFd) -> io::Result<usize> {
+            let mut count: nix::libc::c_int = 0;
+            // SAFETY: the owned PTY descriptor is live; FIONREAD writes one
+            // c_int to this initialized local. It does not consume input.
+            if unsafe { nix::libc::ioctl(fd.as_raw_fd(), nix::libc::FIONREAD, &mut count) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            usize::try_from(count).map_err(|_| io::Error::other("invalid queued-byte count"))
+        }
+
+        fn inject(master: &mut std::fs::File, slave: &OwnedFd, bytes: &[u8]) -> io::Result<()> {
+            // Querying readiness also forces Darwin's PENDIN replay. Linux
+            // can defer PTY input processing, so acknowledge the entire burst,
+            // not merely that a previous complete line is readable.
+            let expected = available(slave)? + bytes.len();
+            master.write_all(bytes)?;
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while available(slave)? < expected {
+                assert!(
+                    Instant::now() < deadline,
+                    "test input did not reach the terminal discipline"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn transition_arrivals_are_not_echoed_before_the_cleanup_flush() {
+            for (canonical, pending) in [(true, false), (true, true), (false, false)] {
+                let pty = openpty(None, None).unwrap();
+                let mut original = tcgetattr(&pty.slave).unwrap();
+                original.local_flags.set(LocalFlags::ICANON, canonical);
+                original.local_flags.set(LocalFlags::PENDIN, pending);
+                original
+                    .local_flags
+                    .insert(LocalFlags::ECHO | LocalFlags::ISIG);
+                tcsetattr(&pty.slave, SetArg::TCSANOW, &original).unwrap();
+                let original = tcgetattr(&pty.slave).unwrap();
+                let mut active = original.clone();
+                active.local_flags.remove(
+                    LocalFlags::ECHO
+                        | LocalFlags::ECHONL
+                        | LocalFlags::ISIG
+                        | LocalFlags::IEXTEN
+                        | LocalFlags::ICANON
+                        | LocalFlags::PENDIN,
+                );
+                tcsetattr(&pty.slave, SetArg::TCSANOW, &active).unwrap();
+                let flags = OFlag::from_bits_retain(fcntl(&pty.master, FcntlArg::F_GETFL).unwrap());
+                fcntl(&pty.master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
+                let mut master = std::fs::File::from(pty.master);
+                inject(&mut master, &pty.slave, b"AFTER-ENTER-SENTINEL\n").unwrap();
+                let mut operations = 0;
+                let mut modes = 0;
+                let mut transition_flags = None;
+                let mut transition_input_flags = None;
+                restore_mode(&original, |operation| {
+                    match operation {
+                        RestoreOp::FlushInput => tcflush(&pty.slave, FlushArg::TCIFLUSH)?,
+                        RestoreOp::SetMode(mode) => {
+                            tcsetattr(&pty.slave, SetArg::TCSANOW, mode)?;
+                            modes += 1;
+                            if modes == 1 {
+                                let attributes = tcgetattr(&pty.slave)?;
+                                let flags = attributes.local_flags;
+                                transition_flags = Some(flags);
+                                transition_input_flags = Some(attributes.input_flags);
+                                // This input also forces Darwin to replay any
+                                // raw bytes retained under generated PENDIN.
+                                inject(&mut master, &pty.slave, b"AFTER-CANCEL-SENTINEL\n")?;
+                                if !flags.contains(LocalFlags::ISIG) {
+                                    inject(&mut master, &pty.slave, b"\x03\n")?;
+                                }
+                            }
+                        }
+                    }
+                    operations += 1;
+                    if operations == 1 {
+                        inject(&mut master, &pty.slave, b"AFTER-ENTER-SENTINEL\n")?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                let mut output = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    match master.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            output.extend_from_slice(&chunk[..count]);
+                            assert!(output.len() <= 64 * 1024);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) => panic!("cannot read transition transcript: {error}"),
+                    }
+                }
+                for marker in [
+                    b"AFTER-ENTER-SENTINEL".as_slice(),
+                    b"AFTER-CANCEL-SENTINEL".as_slice(),
+                ] {
+                    assert!(
+                        !output.windows(marker.len()).any(|part| part == marker),
+                        "hidden transition input echoed: canonical={canonical}, pending={pending}"
+                    );
+                }
+                assert!(!transition_flags.unwrap().intersects(
+                    LocalFlags::ECHO | LocalFlags::ECHONL | LocalFlags::ISIG | LocalFlags::IEXTEN
+                ));
+                assert!(
+                    !transition_input_flags
+                        .unwrap()
+                        .contains(nix::sys::termios::InputFlags::IXON)
+                );
+                assert_eq!(tcgetattr(&pty.slave).unwrap(), original);
+                let flags = OFlag::from_bits_retain(fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap());
+                fcntl(&pty.slave, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
+                assert!(matches!(
+                    nix::unistd::read(&pty.slave, &mut chunk),
+                    Err(nix::errno::Errno::EAGAIN)
+                ));
+            }
+        }
+
+        #[test]
+        fn preparation_errors_never_enable_original_echo_or_signals() {
+            let pty = openpty(None, None).unwrap();
+            let mut original = tcgetattr(&pty.slave).unwrap();
+            original
+                .local_flags
+                .insert(LocalFlags::ECHO | LocalFlags::ISIG | LocalFlags::ICANON);
+            for fail_at in [1, 2] {
+                let mut operations = 0;
+                let mut original_enabled = false;
+                let result = restore_mode(&original, |operation| {
+                    operations += 1;
+                    if let RestoreOp::SetMode(mode) = operation {
+                        original_enabled |= mode
+                            .local_flags
+                            .intersects(LocalFlags::ECHO | LocalFlags::ISIG);
+                        assert_eq!(
+                            mode.local_flags.contains(LocalFlags::ICANON),
+                            original.local_flags.contains(LocalFlags::ICANON)
+                        );
+                    }
+                    if operations == fail_at {
+                        Err(io::Error::other("injected preparation failure"))
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert!(result.is_err());
+                assert_eq!(
+                    operations, fail_at,
+                    "failed preparation fell through to restoration"
+                );
+                assert!(!original_enabled);
+            }
+        }
     }
 }
 

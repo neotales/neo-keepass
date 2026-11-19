@@ -23,8 +23,8 @@ It does not replace the CLI's unrelated vault-password or TUI input paths.
   defaults. No crossterm event reader, overlapped read, or background thread.
 - Enter submits; Ctrl-C, Ctrl-D and Escape cancel. Unicode backspace is
   supported; input is bounded and held in zeroizing buffers.
-  On Unix, unconsumed typeahead is discarded before echo/signals are restored,
-  rather than passed to a later input consumer.
+  On Unix, a quiet canonical/raw transition and input-only flush discard queued
+  typeahead before echo/signals are restored.
 - A process-wide try-lock refuses concurrent calls. Callers must not run an
   independent input consumer at the same time.
   Callers must also avoid concurrently replacing process-wide signal actions.
@@ -49,12 +49,34 @@ the supplied termios flags, so repeating `tcsetattr(TCSANOW)` does not clear it.
 See `ttioctl_locked` and `ttyflush` in Apple's
 [`bsd/kern/tty.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c).
 
-Restoration uses input-only `tcflush(TCIFLUSH)` before restoring attributes,
-then again for an originally canonical mode without `PENDIN`. The second flush
-clears the kernel-generated pending-input state without replaying hidden
-typeahead. An originally set `PENDIN` bit is preserved. Unlike `TCSAFLUSH` or
-`TCSADRAIN`, this does **not** wait for the output queue to drain. Explicit
-restoration and the unwind guard share the same implementation.
+Restoration is ordered as three operations:
+
+1. Set the saved canonical/raw discipline with `ECHO`, `ECHONL`, `ISIG`,
+   `IEXTEN`, `IXON` and the requested `PENDIN` disabled. Darwin may generate
+   `PENDIN` during this transition; any replay or arriving input is still
+   private and cannot generate terminal signals or interpret start/stop bytes.
+2. Use input-only `tcflush(TCIFLUSH)` to clear queued input and generated
+   `PENDIN` **while still quiet**.
+3. Restore the complete saved attributes. Canonical mode no longer changes,
+   so this step does not generate another `PENDIN`; an originally set bit is
+   explicitly preserved.
+
+There is no post-restoration flush with echo/signals enabled. The previous
+flush/original-mode/flush sequence left a window in which arriving input could
+be replayed visibly before the second flush. Empty queues afterwards did not
+prove that input had stayed hidden.
+
+The quiet flush is the input-ownership handoff. Input arriving after it is
+future-consumer input, not guaranteed discarded: restoring an originally set
+`PENDIN` deliberately restores its normal replay semantics too. This API
+cannot atomically exclude physical input across separate POSIX calls or
+promise that input arriving after handoff stays hidden. Callers must not
+concurrently change modes or read stdin during the operation.
+
+These operations do **not** wait for output, unlike `TCSAFLUSH`/`TCSADRAIN`.
+Preparation errors short-circuit before enabling the saved echo/signals; the
+unwind guard retries the same staged sequence, with no unsafe direct-mode
+fallback. Persistent OS errors are reported and may prevent full restoration.
 
 The macOS CI failure at `fcb669e` reported only a worker that failed to exit
 within five seconds. The old parent did not drain the PTY until after exit:
@@ -73,3 +95,13 @@ masking `PENDIN`. They cover original cooked/raw modes, an originally set
 typeahead disposal, signal restoration, and a controlled assertion failure
 with output larger than PTY capacity. Native macOS CI must still validate the
 kernel-specific restoration path.
+
+Transition tests inject both AFTER-* sentinels before and between the mode
+operations, acknowledge their arrival in the real PTY discipline, and scan
+actual output as well as checking the final queue and full saved attributes.
+Readiness queries force native Darwin `PENDIN` processing while the transition
+must still be quiet. The input-injection test reproduced visible sentinel
+output with the old ordering on Linux. Fault-injection tests also prohibit
+reenabling saved flags after preparation failure. The subprocess scanner
+checks both tail sentinels across read boundaries and keeps detecting echo
+after its retained transcript overflows.
