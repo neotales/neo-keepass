@@ -10,6 +10,57 @@ fn credentials() -> KdbxCredentials {
 }
 
 #[test]
+fn scalar_edits_reject_xml_invalid_characters_without_mutation() {
+    let limits = KdbxReadLimits::default();
+    let mut bytes = Vec::new();
+    KdbxFile::save(
+        &KeePassDatabase::default(),
+        &mut bytes,
+        &mut credentials(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..Default::default()
+        },
+        &limits,
+    )
+    .unwrap();
+    let mut doc =
+        KdbxFile::load_with_source(bytes.as_slice(), &mut credentials(), &limits).unwrap();
+    for invalid in ["\0", "\u{1}", "\u{b}", "\u{fffe}"] {
+        assert!(doc.create_entry(&[], invalid).is_err());
+    }
+    assert!(doc.database().root.entries.is_empty());
+    let index = doc.create_entry(&[], "valid λ\r\n\t").unwrap();
+    for invalid in ["\0", "\u{1}", "\u{b}", "\u{fffe}"] {
+        assert!(doc.set_entry_field(&[], index, invalid, "good").is_err());
+        assert!(
+            doc.set_entry_field(&[], index, "Password", invalid)
+                .is_err()
+        );
+        assert!(doc.set_entry_field(&[], index, "custom", invalid).is_err());
+    }
+    assert!(doc.database().root.entries[index].fields.is_empty());
+    doc.set_entry_field(&[], index, "custom λ", "valid 🦀\r\n\t")
+        .unwrap();
+    let mut saved = Vec::new();
+    doc.save_preserving_source(&mut saved, &mut credentials(), &limits)
+        .unwrap();
+    let loaded = KdbxFile::load_with_source(saved.as_slice(), &mut credentials(), &limits).unwrap();
+    let entry = &loaded.database().root.entries[index];
+    assert_eq!(entry.title, "valid λ\r\n\t");
+    assert_eq!(
+        entry
+            .field("custom λ")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "valid 🦀\r\n\t"
+    );
+}
+
+#[test]
 fn scalar_edits_create_and_update_nested_entries_without_imports() {
     let limits = KdbxReadLimits::default();
     let mut model = KeePassDatabase::default();
@@ -278,8 +329,12 @@ fn keepassxc_reads_source_preserving_writes() {
             )
             .unwrap();
         }
-        let document =
+        let mut document =
             KdbxFile::load_with_source(bytes.as_slice(), &mut credentials(), &limits).unwrap();
+        let entry = document.create_entry(&[], "valid λ\r\n\t").unwrap();
+        document
+            .set_entry_field(&[], entry, "custom λ", "valid 🦀\r\n\t")
+            .unwrap();
         let path = dir
             .path()
             .join(if legacy { "legacy.kdbx" } else { "modern.kdbx" });

@@ -2035,7 +2035,7 @@ fn escape(value: &str) -> String {
     escaped
 }
 
-fn xml_1_0_character(character: char) -> bool {
+pub(crate) fn xml_1_0_character(character: char) -> bool {
     matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
         || matches!(character, '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
 }

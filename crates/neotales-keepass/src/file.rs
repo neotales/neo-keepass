@@ -217,12 +217,14 @@ impl KdbxLoadedDocument {
     ///
     /// # Errors
     ///
-    /// Rejects an invalid group path or a document with unsupported extensions.
+    /// Rejects a title containing characters forbidden by XML 1.0, an invalid
+    /// group path, or a document with unsupported extensions.
     ///
     /// # Panics
     ///
     /// Panics if the operating system cannot supply a fresh entry UUID.
     pub fn create_entry(&mut self, group_path: &[usize], title: &str) -> Result<usize, KdbxError> {
+        validate_edit_text(title)?;
         let group = self.editable_group(group_path)?;
         let index = group.entries.len();
         group.entries.push(crate::model::Entry::new(title));
@@ -237,8 +239,9 @@ impl KdbxLoadedDocument {
     ///
     /// # Errors
     ///
-    /// Rejects invalid indexes, duplicate field keys, empty keys, or a document
-    /// with unsupported extensions.
+    /// Rejects keys or values containing characters forbidden by XML 1.0,
+    /// including protected values, invalid indexes, duplicate or empty keys,
+    /// or a document with unsupported extensions.
     pub fn set_entry_field(
         &mut self,
         group_path: &[usize],
@@ -252,6 +255,8 @@ impl KdbxLoadedDocument {
                 "empty field key",
             ));
         }
+        validate_edit_text(key)?;
+        validate_edit_text(value)?;
         let group = self.editable_group(group_path)?;
         let entry = group.entries.get_mut(entry_index).ok_or_else(|| {
             KdbxError::new(KdbxFailureKind::InvalidArgument, "invalid entry index")
@@ -325,6 +330,17 @@ impl KdbxLoadedDocument {
                 KdbxFile::save(&self.database, destination, credentials, options, limits)
             }
         }
+    }
+}
+
+fn validate_edit_text(value: &str) -> Result<(), KdbxError> {
+    if value.chars().all(crate::xml::xml_1_0_character) {
+        Ok(())
+    } else {
+        Err(KdbxError::new(
+            KdbxFailureKind::InvalidArgument,
+            "text contains a character forbidden by XML 1.0",
+        ))
     }
 }
 
