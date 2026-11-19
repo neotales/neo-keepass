@@ -1267,6 +1267,38 @@ impl VaultService {
         size: Option<usize>,
         dry_run: bool,
     ) -> Result<bool, ServiceError> {
+        self.ensure_entry_using(session, path, size, dry_run, |size| {
+            generate_password(size).map(Zeroizing::new)
+        })
+    }
+
+    /// Ensures a CLI entry exists, generating only when newly created.
+    /// Existing entries and dry runs never consume randomness.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::ensure_entry`], plus policy failures.
+    pub fn ensure_entry_with_policy(
+        &mut self,
+        session: SessionId,
+        path: &str,
+        size: usize,
+        dry_run: bool,
+        policy: crate::password_generator::Policy,
+    ) -> Result<bool, ServiceError> {
+        policy.validate(size)?;
+        self.ensure_entry_using(session, path, Some(size), dry_run, |size| {
+            policy.generate(size)
+        })
+    }
+
+    fn ensure_entry_using(
+        &mut self,
+        session: SessionId,
+        path: &str,
+        size: Option<usize>,
+        dry_run: bool,
+        generate: impl FnOnce(usize) -> Result<Zeroizing<String>, ServiceError>,
+    ) -> Result<bool, ServiceError> {
         let (group_locator, title) = split_entry_path(path)?;
         let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
         if live.id != session {
@@ -1296,7 +1328,7 @@ impl VaultService {
         }
         let mut entry = Entry::new(title);
         if let Some(size) = size {
-            let mut password = Zeroizing::new(generate_password(size)?);
+            let mut password = generate(size)?;
             entry.password = ProtectedValue::from_text(std::mem::take(&mut *password));
         }
         let group = apply_group_plan(&mut live.database.root, &plan);

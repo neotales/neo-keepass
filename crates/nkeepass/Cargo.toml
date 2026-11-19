@@ -28,6 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 zeroize.workspace = true
+terminal-password = { path = "../terminal-password" }
 
 [dev-dependencies]
 tempfile.workspace = true

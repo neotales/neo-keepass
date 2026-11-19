@@ -56,6 +56,11 @@ Do not supply both. `PATH` may be an entry path or configured entry alias.
 For a selector beginning with `-`, place `--` after options immediately
 before the selector, such as `nkp get --field Password -- -DashEntry`.
 `--field` also accepts `-F`; `--file` accepts `-f`.
+`set` additionally accepts repeatable `--field NAME=VALUE`. Its `--value-file`
+and `--value-stdin` sources alias `--file` and `--stdin`.
+Generator `--chars` / `-c` aliases `--size`; class flags are `--upper` / `-U`,
+`--lower` / `-L`, `--digits` / `-D`, and `--symbols` / `-S`. These apply to
+`ensure` and to `set --generate`.
 `--bin NAME=FILE_PATH` accepts `-b` and may be repeated. These short options
 are not rewritten after an `exec --` child separator. The global vault option
 is `-V PATH` or `--vault PATH`.

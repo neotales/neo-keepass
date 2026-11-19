@@ -303,7 +303,54 @@ const GET_OPTIONS: &[HelpOption] = &[
 const GETX_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, FORMAT_OPTION];
 const SET_OPTIONS: &[HelpOption] = &[
     KEY_OPTION,
-    FIELD_OPTION,
+    HelpOption {
+        label: "--field NAME=VALUE",
+        summary: "Repeatable assignments; legacy --field NAME selects a value-source target.",
+    },
+    HelpOption {
+        label: "--value VALUE",
+        summary: "Set the selected field from argv (visible in process listings).",
+    },
+    HelpOption {
+        label: "--value-stdin",
+        summary: "Read the selected value from stdin; alias --stdin.",
+    },
+    HelpOption {
+        label: "--value-env NAME",
+        summary: "Read the selected value from this environment variable.",
+    },
+    HelpOption {
+        label: "--value-file PATH",
+        summary: "Read a bounded UTF-8 value file; alias --file.",
+    },
+    HelpOption {
+        label: "--generate",
+        summary: "Generate the selected field instead of reading a value.",
+    },
+    HelpOption {
+        label: "-c, --chars N, --size N",
+        summary: "Generated length (default 16); only with --generate.",
+    },
+    HelpOption {
+        label: "-U, --upper",
+        summary: "Select uppercase ASCII letters for generation.",
+    },
+    HelpOption {
+        label: "-L, --lower",
+        summary: "Select lowercase ASCII letters for generation.",
+    },
+    HelpOption {
+        label: "-D, --digits",
+        summary: "Select ASCII digits for generation.",
+    },
+    HelpOption {
+        label: "-S, --symbols",
+        summary: "Select ASCII punctuation for generation.",
+    },
+    HelpOption {
+        label: "No update supplied",
+        summary: "Prompt without echo for up to 60 seconds; redirected stdin is refused.",
+    },
     HelpOption {
         label: "--username VALUE",
         summary: "Set the UserName field from an argument.",
@@ -325,15 +372,35 @@ const SET_OPTIONS: &[HelpOption] = &[
     },
     HelpOption {
         label: "-i, --age-identity PATH",
-        summary: "Read an age or unencrypted SSH identity from this file.",
+        summary: "Explicit identity wins; otherwise discover init-password.agekey or age/keys.txt.",
     },
 ];
 const RM_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, YES_OPTION];
 const ENSURE_OPTIONS: &[HelpOption] = &[
     KEY_OPTION,
     HelpOption {
-        label: "--size N",
-        summary: "Generate a password of N characters for a new entry only.",
+        label: "-c, --chars N, --size N",
+        summary: "Generated length for new entries only (default 16).",
+    },
+    HelpOption {
+        label: "-U, --upper",
+        summary: "Select uppercase ASCII letters.",
+    },
+    HelpOption {
+        label: "-L, --lower",
+        summary: "Select lowercase ASCII letters.",
+    },
+    HelpOption {
+        label: "-D, --digits",
+        summary: "Select ASCII digits.",
+    },
+    HelpOption {
+        label: "-S, --symbols",
+        summary: "Select ASCII punctuation.",
+    },
+    HelpOption {
+        label: "Character policy",
+        summary: "No selection: all four. Selected classes only; each is guaranteed.",
     },
     DRY_RUN_OPTION,
 ];
@@ -1847,12 +1914,17 @@ enum Positional {
     Path,
     /// One entry selector for get, set, or remove.
     Key,
+    /// Set additionally accepts repeatable field assignments.
+    SetKey,
 }
 
 impl Positional {
     /// Selects the deliberately narrow positional syntax for each command.
     fn for_action(action: &str) -> Self {
-        if matches!(action, "get" | "set" | "rm") {
+        if action == "set" {
+            return Self::SetKey;
+        }
+        if matches!(action, "get" | "rm") {
             return Self::Key;
         }
         if matches!(action, "ls" | "search") {
@@ -1867,6 +1939,13 @@ impl Positional {
 struct Options<'a> {
     key: Option<&'a str>,
     field: Option<&'a str>,
+    assignment_inputs: Vec<&'a str>,
+    literal_input: Option<&'a str>,
+    value_env: Option<&'a str>,
+    value_alias: bool,
+    chars_alias: bool,
+    generate: bool,
+    generation_policy: nkeepass::password_generator::Policy,
     username: Option<&'a str>,
     url: Option<&'a str>,
     notes: Option<&'a str>,
@@ -1906,7 +1985,11 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        if matches!(positional, Positional::Glob | Positional::Key) && arg == "--" {
+        if matches!(
+            positional,
+            Positional::Glob | Positional::Key | Positional::SetKey
+        ) && arg == "--"
+        {
             i += 1;
             if i < args.len() {
                 if matches!(positional, Positional::Glob) && opts.glob.is_some() {
@@ -1932,6 +2015,9 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             arg,
             "--key"
                 | "--field"
+                | "--value"
+                | "--value-env"
+                | "--value-file"
                 | "--username"
                 | "--url"
                 | "--notes"
@@ -1945,6 +2031,8 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
                 | "--password-file"
                 | "--key-file"
                 | "--size"
+                | "--chars"
+                | "-c"
                 | "--format"
                 | "--strategy"
                 | "--kdf"
@@ -1968,25 +2056,49 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
                     "entry key specified more than once; use either a positional key or --key",
                 ));
             }
+            "--field"
+                if matches!(positional, Positional::SetKey)
+                    && value.is_some_and(|value| value.contains('=')) =>
+            {
+                opts.assignment_inputs
+                    .push(value.ok_or_else(|| err("field assignment required"))?)
+            }
             "--field" if opts.field.is_none() => opts.field = value,
+            "--value" if opts.literal_input.is_none() => opts.literal_input = value,
+            "--value-env" if opts.value_env.is_none() => opts.value_env = value,
+            "--generate" if !opts.generate => opts.generate = true,
+            "--upper" | "-U" if !opts.generation_policy.upper => {
+                opts.generation_policy.upper = true
+            }
+            "--lower" | "-L" if !opts.generation_policy.lower => {
+                opts.generation_policy.lower = true
+            }
+            "--digits" | "-D" if !opts.generation_policy.digits => {
+                opts.generation_policy.digits = true
+            }
+            "--symbols" | "-S" if !opts.generation_policy.symbols => {
+                opts.generation_policy.symbols = true
+            }
             "--username" if opts.username.is_none() => opts.username = value,
             "--url" if opts.url.is_none() => opts.url = value,
             "--notes" if opts.notes.is_none() => opts.notes = value,
             "--bin" | "-b" => opts.bins.push(value.ok_or_else(|| err("invalid option"))?),
             "--name" if opts.name.is_none() => opts.name = value,
-            "--file" if opts.file.is_none() => opts.file = value,
+            "--file" | "--value-file" if opts.file.is_none() => opts.file = value,
             "--output" if opts.output.is_none() => opts.output = value,
             "--password" if opts.password.is_none() => opts.password = value,
             "--password-env" if opts.password_env.is_none() => opts.password_env = value,
             "--password-file" if opts.password_file.is_none() => opts.password_file = value,
             "--key-file" if opts.key_file.is_none() => opts.key_file = value,
             "--password-stdin" if !opts.password_stdin => opts.password_stdin = true,
-            "--stdin" if !opts.stdin => opts.stdin = true,
+            "--stdin" | "--value-stdin" if !opts.stdin => opts.stdin = true,
             "--yes" if !opts.yes => opts.yes = true,
             "--dry-run" if !opts.dry_run => opts.dry_run = true,
             "--replace" if !opts.replace => opts.replace = true,
             "--allow-plaintext" if !opts.allow_plaintext => opts.allow_plaintext = true,
-            "--size" if opts.size.is_none() => opts.size = Some(count(value, "invalid size")?),
+            "--size" | "--chars" | "-c" if opts.size.is_none() => {
+                opts.size = Some(count(value, "invalid size")?)
+            }
             "--format" if opts.format.is_none() => opts.format = value,
             "--is-output" if !opts.is_output => opts.is_output = true,
             "--clipboard" if !opts.clipboard => opts.clipboard = true,
@@ -2012,8 +2124,8 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             word if !word.starts_with('-') => match positional {
                 Positional::Glob if opts.glob.is_none() => opts.glob = Some(word),
                 Positional::Path if opts.path.is_none() => opts.path = Some(word),
-                Positional::Key if opts.key.is_none() => opts.key = Some(word),
-                Positional::Key => {
+                Positional::Key | Positional::SetKey if opts.key.is_none() => opts.key = Some(word),
+                Positional::Key | Positional::SetKey => {
                     return Err(err(
                         "entry key specified more than once; use either a positional key or --key",
                     ));
@@ -2022,6 +2134,8 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             },
             _ => return Err(err("invalid or duplicate option")),
         }
+        opts.value_alias |= matches!(arg, "--value-file" | "--value-stdin");
+        opts.chars_alias |= matches!(arg, "--chars" | "-c");
         i += 1;
     }
     validate_shared_options(&opts)?;
@@ -2042,6 +2156,17 @@ fn count<T: std::str::FromStr>(value: Option<&str>, invalid: &'static str) -> Re
 /// Checks the option conflicts every command shares, before the per-action
 /// matrix gets a say.
 fn validate_shared_options(opts: &Options<'_>) -> Result<()> {
+    let value_sources = usize::from(opts.literal_input.is_some())
+        + usize::from(opts.value_env.is_some())
+        + usize::from(opts.file.is_some())
+        + usize::from(opts.stdin)
+        + usize::from(opts.generate);
+    if value_sources > 1 {
+        return Err(err("select exactly one value source"));
+    }
+    if opts.value_env.is_some_and(|name| !valid_name(name)) {
+        return Err(err("invalid value environment variable name"));
+    }
     let password_sources = usize::from(opts.password.is_some())
         + usize::from(opts.password_env.is_some())
         + usize::from(opts.password_file.is_some())
@@ -2826,6 +2951,57 @@ fn age_identities(path: &str) -> Result<Vec<AgeIdentity>> {
     Ok(identities)
 }
 
+/// Explicit identities never fall back. Discovery is local, deterministic and
+/// never creates a key: prefer this application's init backup identity, then
+/// the conventional age keys.txt file.
+fn selected_age_identities(explicit: Option<&str>) -> Result<Vec<AgeIdentity>> {
+    if let Some(path) = explicit {
+        return age_identities(path);
+    }
+    let application = config_dir()?.join("init-password.agekey");
+    if let Some(identities) = existing_age_identities(&application)? {
+        return Ok(identities);
+    }
+    let age = if let Some(root) = env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(root).join("age/keys.txt")
+    } else {
+        home_dir()?.join(".config/age/keys.txt")
+    };
+    existing_age_identities(&age)?
+        .ok_or_else(|| err("no known age identity; supply --age-identity"))
+}
+
+fn existing_age_identities(path: &Path) -> Result<Option<Vec<AgeIdentity>>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => age_identities(
+            path.to_str()
+                .ok_or_else(|| err("age identity path is not Unicode"))?,
+        )
+        .map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(err("cannot inspect age identity file")),
+    }
+}
+
+fn set_input_value(opts: &Options<'_>) -> Result<Zeroizing<Vec<u8>>> {
+    if let Some(value) = opts.literal_input {
+        if value.len() > 16 * 1024 * 1024 {
+            return Err(err("input exceeds size limit"));
+        }
+        return Ok(Zeroizing::new(value.as_bytes().to_vec()));
+    }
+    if let Some(name) = opts.value_env {
+        let value = Zeroizing::new(
+            env::var(name).map_err(|_| err("cannot read value environment variable"))?,
+        );
+        if value.len() > 16 * 1024 * 1024 {
+            return Err(err("input exceeds size limit"));
+        }
+        return Ok(Zeroizing::new(value.as_bytes().to_vec()));
+    }
+    input_value(opts)
+}
+
 /// Decrypts either strict age ASCII armor or the binary age file format.
 fn decrypt_age_input(input: &[u8], identities: &[AgeIdentity]) -> Result<Zeroizing<Vec<u8>>> {
     let plaintext = if input.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----") {
@@ -3575,11 +3751,44 @@ fn vault_creation_options(opts: &Options<'_>) -> bool {
         || opts.parallelism.is_some()
 }
 
+fn validate_new_options(action: &str, opts: &Options<'_>) -> Result<()> {
+    if action != "set"
+        && (opts.literal_input.is_some()
+            || opts.value_env.is_some()
+            || opts.value_alias
+            || opts.generate
+            || !opts.assignment_inputs.is_empty())
+    {
+        return Err(err(
+            "value sources and field assignments are only valid for set",
+        ));
+    }
+    if (opts.generation_policy.selected() || opts.chars_alias)
+        && action != "ensure"
+        && !(action == "set" && opts.generate)
+    {
+        return Err(err("generator options require ensure or set --generate"));
+    }
+    if action == "set" && opts.size.is_some() && !opts.generate {
+        return Err(err("--size requires --generate"));
+    }
+    if action == "ensure" || (action == "set" && opts.generate) {
+        opts.generation_policy
+            .validate(opts.size.unwrap_or(16))
+            .map_err(|_| err("invalid size for selected character classes"))?;
+    }
+    if opts.age_decrypt && opts.generate {
+        return Err(err("--age-decrypt conflicts with --generate"));
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the explicit per-action option matrix is easier to audit in one place"
 )]
 fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
+    validate_new_options(action, opts)?;
     if opts.clipboard && action != "get" {
         return Err(err("--clipboard is only valid for get"));
     }
@@ -3656,19 +3865,20 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.yes
                 || opts.dry_run
                 || opts.replace
-                || opts.size.is_some()
+                || (opts.size.is_some() && !opts.generate)
                 || opts.glob.is_some()
                 || opts.format.is_some()
                 || opts.is_output
                 || opts.strategy.is_some()
-                || (!value_input
+                || (action != "set"
+                    && !value_input
                     && opts.bins.is_empty()
                     && opts.username.is_none()
                     && opts.url.is_none()
                     && opts.notes.is_none())
                 || opts.age_encrypt
                 || !opts.age_recipients.is_empty()
-                || (opts.age_decrypt != opts.age_identity.is_some())
+                || (!opts.age_decrypt && opts.age_identity.is_some())
                 || (opts.age_identity.is_some() && action != "set")
         }
         "rm" | "field-rm" | "attachment-rm" => {
@@ -3762,6 +3972,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
 }
 
 fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
+    validate_new_options(action, opts)?;
     if opts.age_encrypt
         || opts.age_decrypt
         || !opts.age_recipients.is_empty()
@@ -4245,18 +4456,27 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         {
             return Err(err("custom field required"));
         }
-        let has_input = opts.file.is_some() || opts.stdin;
+        let has_input = opts.file.is_some()
+            || opts.stdin
+            || opts.literal_input.is_some()
+            || opts.value_env.is_some();
+        if opts.field.is_some()
+            && !has_input
+            && !opts.generate
+            && !opts.assignment_inputs.is_empty()
+        {
+            return Err(err(
+                "legacy --field NAME requires a value source when combined with assignments",
+            ));
+        }
         if opts.age_decrypt && !has_input {
-            return Err(err("age decryption requires --file or --stdin"));
+            return Err(err("age decryption requires an explicit value source"));
         }
         let mut updates = Vec::new();
         if has_input {
-            let bytes = input_value(&opts)?;
+            let bytes = set_input_value(&opts)?;
             let bytes = if opts.age_decrypt {
-                let identities = age_identities(
-                    opts.age_identity
-                        .ok_or_else(|| err("age identity required"))?,
-                )?;
+                let identities = selected_age_identities(opts.age_identity)?;
                 decrypt_age_input(&bytes, &identities)?
             } else {
                 bytes
@@ -4267,6 +4487,31 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             updates.push(FieldUpdate {
                 key: name.to_owned(),
                 value,
+                protected: None,
+                protect_in_memory: None,
+            });
+        }
+        if opts.generate {
+            updates.push(FieldUpdate {
+                key: name.to_owned(),
+                value: opts
+                    .generation_policy
+                    .generate(opts.size.unwrap_or(16))
+                    .map_err(|error| err(error.message()))?,
+                protected: None,
+                protect_in_memory: None,
+            });
+        }
+        for specification in &opts.assignment_inputs {
+            let (key, value) = specification
+                .split_once('=')
+                .ok_or_else(|| err("--field requires NAME=VALUE"))?;
+            if key.is_empty() || key.chars().any(char::is_control) {
+                return Err(err("invalid field name"));
+            }
+            updates.push(FieldUpdate {
+                key: key.to_owned(),
+                value: Zeroizing::new(value.to_owned()),
                 protected: None,
                 protect_in_memory: None,
             });
@@ -4284,6 +4529,23 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                     protect_in_memory: None,
                 });
             }
+        }
+        if action == "set" && updates.is_empty() && opts.bins.is_empty() {
+            if !io::stdin().is_terminal() {
+                return Err(err("value input requires a terminal or an explicit source"));
+            }
+            eprint!("Value (hidden; 60 second timeout): ");
+            io::stderr()
+                .flush()
+                .map_err(|_| err("cannot write prompt"))?;
+            let value = terminal_password::read(std::time::Duration::from_secs(60));
+            eprintln!();
+            updates.push(FieldUpdate {
+                key: name.to_owned(),
+                value: value.map_err(|error| err(error.to_string()))?,
+                protected: None,
+                protect_in_memory: None,
+            });
         }
         let mut update_names = BTreeSet::new();
         if updates
@@ -4503,7 +4765,13 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                 selector
             };
             let created = service
-                .ensure_entry(session, entry_selector, opts.size, opts.dry_run)
+                .ensure_entry_with_policy(
+                    session,
+                    entry_selector,
+                    opts.size.unwrap_or(16),
+                    opts.dry_run,
+                    opts.generation_policy,
+                )
                 .map_err(|error| match error {
                     nkeepass::ServiceError::NotFound => {
                         entry_not_found(&service, session, entry_selector)
@@ -4841,6 +5109,7 @@ fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
         ));
     }
     let common_options = options(&common, Positional::Forbidden)?;
+    validate_new_options("env", &common_options)?;
     // `secrets env` has no value-file, mutation, or interchange options. Check
     // this allowlist before resolving a vault or reading credentials.
     if common_options.key.is_some()
@@ -4965,6 +5234,7 @@ fn emit_environment(
 /// defaults to *rejected* here. A silently ignored flag is how a caller comes to
 /// believe a vault was hardened or written when it was not.
 fn validate_init_options(opts: &Options<'_>) -> Result<()> {
+    validate_new_options("init", opts)?;
     if opts.key.is_some()
         || opts.field.is_some()
         || opts.name.is_some()
@@ -9941,7 +10211,7 @@ mod tests {
         }
 
         const SCANNED: &[&str] = &["clipboard", "completion", "tui"];
-        const SCANNED_LIBRARY: &[&str] = &["glob", "private_file"];
+        const SCANNED_LIBRARY: &[&str] = &["glob", "private_file", "password_generator"];
         // These remain explicit trust-boundary exemptions: they are library-side
         // model adapters/implementations, not user-facing CLI modules.
         const TRUSTED_LIBRARY_BOUNDARIES: &[&str] = &["service", "automation", "interchange"];
@@ -9992,6 +10262,7 @@ mod tests {
             ("glob", "glob.rs"),
             ("interchange", "interchange.rs"),
             ("private_file", "private_file.rs"),
+            ("password_generator", "password_generator.rs"),
             ("service", "service.rs"),
         ];
         let library_accounted_for = [SCANNED_LIBRARY, TRUSTED_LIBRARY_BOUNDARIES].concat();
@@ -10023,7 +10294,7 @@ mod tests {
                 .filter(|(name, _)| SCANNED_LIBRARY.contains(&name.as_str()))
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
-            ["glob", "private_file"],
+            ["glob", "password_generator", "private_file"],
             "only non-service library modules are scanned as frontend code"
         );
 

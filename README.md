@@ -102,10 +102,21 @@ serve newline-delimited age or SSH public keys. These network forms make an
 explicit HTTPS request only when supplied. They require `curl`, cap responses
 at 64 KiB and the request at five seconds, reject redirects, and validate every
 returned key before encryption.
-`set --age-decrypt -i IDENTITY --file ciphertext.age --key service/account`
+`set --age-decrypt -i IDENTITY --value-file ciphertext.age --key service/account`
 decrypts armored or binary age input before updating the field. Identity files
 may contain native age identities or unencrypted SSH private keys. Encrypted
 SSH identities are not supported yet.
+
+`set` accepts `--value`, `--value-stdin`, `--value-env NAME`, or
+`--value-file PATH`, plus repeatable `--field NAME=VALUE` assignments.
+With no update it prompts without echo, with a 60-second timeout; redirected
+stdin requires an explicit source. Without `-i`, age decryption discovers the
+init backup identity, then the conventional age `keys.txt` file.
+`ensure` generates a 16-character password for new entries by default.
+`--chars`/`-c` (or `--size`) changes the length; `--upper`/`-U`, `--lower`/`-L`,
+`--digits`/`-D`, and `--symbols`/`-S` select classes and guarantee each selected
+class. No selection requires all four. `set --generate` uses the same policy.
+This composition policy is not a NIST mandate.
 
 KeePass XML is an explicit limited interchange format, not the default JSON
 snapshot format. Export requires `--format keepass-xml --allow-plaintext` and
@@ -119,6 +130,7 @@ limits and security behavior.
 ## Workspace layout
 
 - `crates/nkeepass/` — CLI/TUI application and integration tests.
+- [`crates/terminal-password/`](crates/terminal-password/README.md) — bounded hidden terminal input and platform restoration tests.
 - `crates/neotales-keepass/` — KDBX library.
 - `crates/neotales-age/` — age file-encryption library vendored from plab.
 - `crates/neotales-x509/` — local dependency required by `neotales-age`.

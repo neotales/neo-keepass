@@ -948,8 +948,12 @@ fn completion_scripts_are_static_for_every_advertised_shell() {
             "{shell} omitted operation options"
         );
         assert!(
-            !script.contains("--value"),
-            "{shell} advertised a secret argv option"
+            script.contains(if shell == "fish" {
+                "-l value"
+            } else {
+                "--value"
+            }),
+            "{shell} omitted the explicit argv value source"
         );
         scripts.insert(shell, script);
     }
@@ -1772,7 +1776,8 @@ fn shortcuts_fields_attachments_and_exec() {
         auth[0],
         auth[1],
     ]);
-    assert!(!argv_secret.status.success());
+    assert!(argv_secret.status.success());
+    assert!(argv_secret.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&argv_secret.stderr).contains("argv-password-SENTINEL"));
     std::fs::write(&value_file, "changed").unwrap();
     assert!(

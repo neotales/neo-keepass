@@ -446,8 +446,8 @@ fn ensure_mutation_uses_service_paths_aliases_and_dry_run() {
     assert_eq!(created.title, "new");
     assert_eq!(created.password.reveal_text().unwrap().as_str().len(), 24);
 
-    // An existing entry is a no-op, even when --size would be invalid for a
-    // new entry, and an alias resolves through the same service boundary.
+    // An existing entry is never regenerated; an alias resolves through the
+    // same service boundary. Invalid CLI policies are now refused up front.
     let alias = run(
         &vault.path,
         home.path(),
@@ -467,7 +467,7 @@ fn ensure_mutation_uses_service_paths_aliases_and_dry_run() {
             "--key",
             "NEW",
             "--size",
-            "0",
+            "16",
             "--password-env",
             "NKEEPASS_TEST_PASSWORD",
         ],
@@ -516,7 +516,15 @@ fn ensure_mutation_uses_service_paths_aliases_and_dry_run() {
     let parent = &hierarchy.root.groups[1];
     assert_eq!(parent.entries.len(), 1);
     assert_eq!(parent.entries[0].title, "new");
-    assert!(parent.entries[0].password.is_empty());
+    assert_eq!(
+        parent.entries[0]
+            .password
+            .reveal_text()
+            .unwrap()
+            .as_str()
+            .len(),
+        16
+    );
     assert_eq!(hierarchy.root.groups[0].id, reopened.root.groups[0].id);
     assert_eq!(hierarchy.root.groups[0].entries[0].id, created.id);
     assert_eq!(

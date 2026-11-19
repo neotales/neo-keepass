@@ -142,14 +142,40 @@ HOTP entries. `--format` defaults to `text`; the other formats are `json`,
 ### `secrets set`
 
 ```text
-nkp secrets set [PATH] [--key PATH] [--field FIELD] [--file PATH | --stdin]
-  [--age-decrypt -i PATH] [--username VALUE] [--url VALUE] [--notes VALUE]
+nkp secrets set [PATH] [--key PATH] [--field NAME=VALUE]...
+  [--value VALUE | --value-stdin | --value-env NAME | --value-file PATH | --generate]
+  [--chars N] [--upper] [--lower] [--digits] [--symbols]
+  [--age-decrypt [-i PATH]] [--username VALUE] [--url VALUE] [--notes VALUE]
   [--bin NAME=FILE_PATH]...
 ```
 
-Reads one value from a file or stdin and updates the selected field. `--file`
-and `--stdin` are mutually exclusive; at least one input, direct field update,
-or `--bin` is required. `--field` defaults to `Password`. Repeat `--bin` or
+Select at most one value source: literal `--value`, exact stdin bytes with
+`--value-stdin`, a Unicode environment value with `--value-env NAME`, or bounded
+UTF-8 file bytes with `--value-file PATH`. Empty values are allowed; no newline
+is removed. `--file` and `--stdin` retain their old meanings as aliases.
+`--password-*` options still unlock the vault and do not supply the new value;
+stdin cannot carry both an unlock password and a field value.
+
+Repeat `--field NAME=VALUE` to update multiple fields atomically; the first `=`
+separates name and value. Duplicate names, including collisions with a value
+source or `--username`/`--url`/`--notes`, are refused. The legacy `--field NAME`
+selects the value-source target (default `Password`). With assignments it
+requires an explicit value source so the selector is not silently ignored.
+Direct arguments, including `--value` and field assignments, can appear in
+process listings and shell history.
+
+With no field, value-source, generated, or attachment update, `set` prompts
+without echo. Enter submits; Ctrl-C, Ctrl-D or Escape cancel with nonzero exit.
+The prompt times out after 60 seconds and refuses redirected stdin promptly.
+The synchronous reader leaves no input thread behind and restores the saved
+terminal mode on submission, cancellation, error and timeout. On Unix it also
+handles SIGINT, SIGTERM, SIGHUP and SIGQUIT while reading. As with other terminal
+programs, forced termination (such as SIGKILL) cannot perform cleanup.
+
+`--generate` uses the generator policy described under `ensure` below, with
+the same flags and default length of 16. Generator flags on `set` require
+`--generate`, which conflicts with explicit value sources and `--age-decrypt`.
+Repeat `--bin` or
 `-b` to add attachments using `NAME=FILE_PATH`; the first `=` separates the
 name, and further equals signs belong to the path. `--file`/`-f` always retains
 its value-input meaning. Combined attachments and fields are saved only after
@@ -238,20 +264,35 @@ native Windows or PowerShell 5.1.
 To select a key beginning with `-`, put `--` after the options and immediately
 before the selector, for example `nkp get --field Password -- -DashEntry`.
 With
-`--age-decrypt`, the input must be age ciphertext and `-i` or
-`--age-identity PATH` is required. The CLI supports native age identities and
+`--age-decrypt`, the value source must contain age ciphertext. An explicit
+`-i` / `--age-identity PATH` always wins and never falls back. Otherwise the
+CLI looks for the application's `init-password.agekey` in its resolved config
+directory, then `$XDG_CONFIG_HOME/age/keys.txt` (or `~/.config/age/keys.txt`).
+The first existing identity file is used; unreadable or malformed files fail
+closed. Discovery never creates a key or contacts a remote service.
+The CLI supports native age identities and
 unencrypted SSH private keys, not encrypted SSH keys. This command saves the
 vault; malformed input or credential failures prevent the update.
 
 ### `secrets ensure`
 
 ```text
-nkp secrets ensure --key PATH [--size N] [--dry-run]
+nkp secrets ensure --key PATH [--chars N] [-U] [-L] [-D] [-S] [--dry-run]
 ```
 
 Creates a missing entry and its parent groups, but keeps an existing entry
-unchanged. `--size N` generates a 1 to 4096 character password for the new
-entry. `--dry-run` validates and reports without saving.
+unchanged. A new entry receives a generated 16-character password by default.
+`--chars N` / `-c N` / the retained `--size N` choose its length (up to 4096).
+With no class flags, uppercase, lowercase, digits and ASCII punctuation are
+all required. Explicit `--upper` / `-U`, `--lower` / `-L`, `--digits` / `-D`
+and `--symbols` / `-S` select only those classes, guaranteeing at least one
+character from each selected class. Lengths smaller than the number of
+required classes are refused, even for dry runs and existing entries.
+Randomness comes from the OS; byte and complete-candidate rejection sampling
+avoid modulo and composition-placement bias. This composition policy is an
+application choice, **not** a NIST requirement or certification.
+Existing entries are never regenerated. `--dry-run` validates without
+generating a password or saving.
 
 ### `secrets rm`
 
