@@ -105,3 +105,44 @@ output with the old ordering on Linux. Fault-injection tests also prohibit
 reenabling saved flags after preparation failure. The subprocess scanner
 checks both tail sentinels across read boundaries and keeps detecting echo
 after its retained transcript overflows.
+
+## Darwin file-status flags and PTY diagnostics
+
+At `7be4e11503a735c0fad3a81abd17dd1186307580`, macOS
+[run 44622094675](https://github.com/neotales/neo-keepass/actions/runs/44622094675)
+reported input `F_GETFL` changing from `0x2` to `0x10002`, despite prompt
+success and exact termios restoration. The extra bit is **`FWASWRITTEN`
+(`0x10000`)**, not `O_NONBLOCK` (Darwin `0x4`). It is kernel write history,
+not a user-settable mode:
+
+- XNU [`bsd/sys/fcntl.h`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/fcntl.h)
+  defines `FWASWRITTEN`, the `OFLAGS` conversion, and the narrower `FCNTLFLAGS`
+  settable mask.
+- [`fp_writev` in `bsd/kern/sys_generic.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/sys_generic.c)
+  sets it after a write transfers bytes, including ordinary `write` calls.
+- [`F_GETFL` in `bsd/kern/kern_descrip.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_descrip.c)
+  returns `OFLAGS(f_flag)` without removing that bit.
+
+The old harness used `try_clone` for all three child streams: these duplicates
+share the parent's input open-file description. Libtest output and worker
+diagnostics therefore mark **input** as written. The Unix product reader does
+not write or call `F_SETFL`; changing it to reset or mask this bit would conceal
+a harness error, not restore a caller-controlled flag.
+
+The harness now reopens the same PTY slave with `O_NOCTTY | O_CLOEXEC` for
+stdout/stderr. Output still reaches the PTY master for live draining and echo
+scanning; terminal modes remain shared, but output status/history is independent
+of stdin. It retains **raw, exact** input `F_GETFL` comparisons before, during,
+and after the prompt, adds `F_GETFD` comparisons, and snapshots worker flags
+immediately around the product call before printing diagnostics. Failures show
+hexadecimal before/active/after flags and XOR deltas.
+
+A no-reader native macOS regression writes through a duplicate to reproduce
+`FWASWRITTEN` directly. A cross-platform regression checks that output writes
+and `O_NONBLOCK` changes cannot affect input while termios and PTY output
+remain shared. Using the old duplicate in that regression failed on Linux
+(`0x2` became `0x802`), proving descriptor coupling independently of Darwin's
+write-history behavior. Prompt scenarios also cover initially nonblocking
+stdin on success and timeout without relaxing secrecy or exact restoration.
+Native macOS execution of this fix and its Darwin-only regression remains
+required; Linux validation cannot confirm Darwin kernel behavior.

@@ -3,6 +3,7 @@ use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::pty::openpty;
 use nix::sys::termios::{LocalFlags, SetArg, SpecialCharacterIndices, tcgetattr, tcsetattr};
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -12,6 +13,73 @@ const ECHO_MARKERS: &[&[u8]] = &[
     b"AFTER-ENTER-SENTINEL",
     b"AFTER-CANCEL-SENTINEL",
 ];
+
+fn worker_output(slave: &OwnedFd) -> OwnedFd {
+    // dup/try_clone shares status flags and Darwin's FWASWRITTEN history.
+    // Reopen this same PTY instead: termios and captured output remain shared,
+    // but harness writes cannot contaminate the reader's file description.
+    nix::fcntl::open(
+        &nix::unistd::ttyname(slave).unwrap(),
+        OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn worker_output_has_independent_status_flags_but_the_same_terminal() {
+    let pty = openpty(None, None).unwrap();
+    let output = worker_output(&pty.slave);
+    let input_flags = fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap();
+    let output_flags = fcntl(&output, FcntlArg::F_GETFL).unwrap();
+    fcntl(
+        &output,
+        FcntlArg::F_SETFL(OFlag::from_bits_retain(output_flags) | OFlag::O_NONBLOCK),
+    )
+    .unwrap();
+    nix::unistd::write(&output, b"harness diagnostic\n").unwrap();
+    assert_eq!(
+        fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap(),
+        input_flags,
+        "output writes/status changes contaminated the input description"
+    );
+    let mut mode = tcgetattr(&pty.slave).unwrap();
+    mode.local_flags.toggle(LocalFlags::ECHO);
+    tcsetattr(&pty.slave, SetArg::TCSANOW, &mode).unwrap();
+    assert_eq!(tcgetattr(&output).unwrap(), mode);
+    let mut master = std::fs::File::from(pty.master);
+    // A missing output route must fail within a deadline, not block this test.
+    let flags = OFlag::from_bits_retain(fcntl(&master, FcntlArg::F_GETFL).unwrap());
+    fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut transcript = Transcript::default();
+    while !transcript.text().contains("harness diagnostic") {
+        transcript.drain(&mut master);
+        assert!(
+            Instant::now() < deadline,
+            "output did not reach the PTY master"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_duplicate_output_write_changes_input_write_history_without_a_reader() {
+    // XNU bsd/sys/fcntl.h: kernel-only FWASWRITTEN, not a settable O_* flag.
+    const FWASWRITTEN: i32 = 0x0001_0000;
+    let pty = openpty(None, None).unwrap();
+    let output = pty.slave.try_clone().unwrap();
+    let before = fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap();
+    assert_eq!(before & FWASWRITTEN, 0);
+    nix::unistd::write(&output, b"diagnostic without terminal_password::read\n").unwrap();
+    let after = fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap();
+    assert_eq!(
+        after,
+        before | FWASWRITTEN,
+        "before={before:#x}, after={after:#x}"
+    );
+}
 
 /// Drain while the worker is alive: a failing termios assertion/backtrace can
 /// itself fill a PTY and otherwise look like a blocked input reader.
@@ -144,7 +212,24 @@ fn worker() {
     // Signal readiness only after the input mode was set: the parent observes
     // the slave's flags before sending anything, so no typed secret can echo.
     eprintln!("ready");
+    // Snapshot immediately around the product call, before any diagnostic
+    // writes. Keep raw bits (including unknown kernel flags), not an OFlag
+    // truncation that could hide a regression.
+    let input_flags = fcntl(&stdin, FcntlArg::F_GETFL).unwrap();
+    let descriptor_flags = fcntl(&stdin, FcntlArg::F_GETFD).unwrap();
     let result = terminal_password::read(Duration::from_millis(300));
+    let returned_flags = fcntl(&stdin, FcntlArg::F_GETFL).unwrap();
+    let returned_descriptor_flags = fcntl(&stdin, FcntlArg::F_GETFD).unwrap();
+    assert_eq!(
+        returned_flags,
+        input_flags,
+        "product changed input status flags: scenario={scenario}, before={input_flags:#x}, after={returned_flags:#x}, delta={:#x}",
+        input_flags ^ returned_flags
+    );
+    assert_eq!(
+        returned_descriptor_flags, descriptor_flags,
+        "product changed input descriptor flags: scenario={scenario}"
+    );
     eprintln!(
         "read returned: {}",
         if result.is_ok() { "success" } else { "error" }
@@ -158,13 +243,14 @@ fn worker() {
     }
     assert_eq!(restored, original, "restore every termios bit");
     match scenario.as_str() {
-        "enter" | "post-enter" | "enter-tail" | "raw-enter" | "pendin-enter" => {
+        "enter" | "post-enter" | "enter-tail" | "raw-enter" | "pendin-enter"
+        | "nonblocking-enter" => {
             assert_eq!(&*result.unwrap(), "Sëcret")
         }
         "cancel" | "escape" | "eof" | "signal" | "post-cancel" | "cancel-tail" => {
             assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted)
         }
-        "timeout" | "post-timeout" | "prior" | "partial-timeout" => {
+        "timeout" | "post-timeout" | "prior" | "partial-timeout" | "nonblocking-timeout" => {
             assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut)
         }
         "invalid-utf8" => assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Other),
@@ -203,6 +289,8 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
         ("invalid-utf8", b"\xff\n".as_slice()),
         ("raw-enter", "Sëcret\n".as_bytes()),
         ("pendin-enter", "Sëcret\n".as_bytes()),
+        ("nonblocking-enter", "Sëcret\n".as_bytes()),
+        ("nonblocking-timeout", b"".as_slice()),
         ("diagnostic", "SëcreX\u{7f}t\n".as_bytes()),
     ] {
         let pty = openpty(None, None).unwrap();
@@ -217,11 +305,17 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
             mode.local_flags.insert(LocalFlags::PENDIN);
         }
         tcsetattr(&pty.slave, SetArg::TCSANOW, &mode).unwrap();
+        if scenario.starts_with("nonblocking-") {
+            let flags = OFlag::from_bits_retain(fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap());
+            fcntl(&pty.slave, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
+        }
         let original_flags = fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap();
         for fd in [&pty.master, &pty.slave] {
             let flags = FdFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFD).unwrap());
             fcntl(fd, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
         }
+        let original_descriptor_flags = fcntl(&pty.slave, FcntlArg::F_GETFD).unwrap();
+        let output = worker_output(&pty.slave);
         let flags = OFlag::from_bits_retain(fcntl(&pty.master, FcntlArg::F_GETFL).unwrap());
         fcntl(&pty.master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
         let mut master = std::fs::File::from(pty.master);
@@ -238,8 +332,8 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
                     },
                 )
                 .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
-                .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
-                .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+                .stdout(Stdio::from(output.try_clone().unwrap()))
+                .stderr(Stdio::from(output))
                 .spawn()
                 .unwrap(),
         );
@@ -272,6 +366,13 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
             std::thread::sleep(Duration::from_millis(1));
         }
         let active_mode = tcgetattr(&pty.slave).unwrap();
+        let active_flags = fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap();
+        assert_eq!(
+            active_flags,
+            original_flags,
+            "input status flags changed while reading: scenario={scenario}, before={original_flags:#x}, active={active_flags:#x}, delta={:#x}",
+            original_flags ^ active_flags
+        );
         master.write_all(input).unwrap();
         if scenario == "signal" {
             nix::sys::signal::kill(
@@ -309,10 +410,17 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
             "scenario={scenario}, transcript={}",
             transcript.text()
         );
+        let restored_flags = fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap();
         assert_eq!(
-            fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap(),
+            restored_flags,
             original_flags,
-            "reader changed shared descriptor flags: scenario={scenario}"
+            "input status flags changed: scenario={scenario}, before={original_flags:#x}, active={active_flags:#x}, after={restored_flags:#x}, delta={:#x}",
+            original_flags ^ restored_flags
+        );
+        assert_eq!(
+            fcntl(&pty.slave, FcntlArg::F_GETFD).unwrap(),
+            original_descriptor_flags,
+            "parent descriptor flags changed: scenario={scenario}"
         );
         assert_eq!(
             active_mode.control_chars[SpecialCharacterIndices::VMIN as usize],
