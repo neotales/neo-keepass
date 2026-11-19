@@ -80,42 +80,21 @@ pub struct Kdbx3WriteOptions {
     pub block_bytes: usize,
 }
 
-/// Format settings obtained from the same successful load as the database.
-///
-/// KDBX 4 authenticates its header with a keyed HMAC. KDBX 3 verifies its
-/// encrypted stream marker, block hashes, and the XML header hash; these are
-/// not a keyed MAC and do not provide KDBX 4's authenticity guarantees.
-/// Random seeds and IVs are deliberately not retained and are regenerated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct KdbxSourceFormat {
+struct KdbxSourceFormat {
     version: u32,
     options: KdbxWriteOptions,
     lossless: bool,
 }
 
-/// Validated source-preserving options for a supported writer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum KdbxPreservingWriteOptions {
-    /// Preserve a KDBX 3.1 source.
+enum KdbxPreservingWriteOptions {
     Kdbx3(Kdbx3WriteOptions),
-    /// Preserve a KDBX 4.1 source.
     Kdbx4(KdbxWriteOptions),
 }
 
 impl KdbxSourceFormat {
-    /// Raw KDBX version, with major version in the high 16 bits.
-    #[must_use]
-    pub fn version(self) -> u32 {
-        self.version
-    }
-
-    /// Obtain validated options without upgrading or downgrading the format.
-    ///
-    /// # Errors
-    ///
-    /// Fails for versions without a matching writer or settings exceeding
-    /// the caller's limits.
-    pub fn write_options(
+    fn write_options(
         self,
         limits: &KdbxReadLimits,
     ) -> Result<KdbxPreservingWriteOptions, KdbxError> {
@@ -156,9 +135,165 @@ impl KdbxSourceFormat {
     }
 }
 
+/// A database bound to the format verified during the same load.
+///
+/// KDBX 4 authenticates its header with a keyed HMAC. KDBX 3 verifies its
+/// encrypted stream marker, block hashes, and XML header hash; these are not a
+/// keyed MAC and do not provide KDBX 4's authenticity guarantees. Fresh random
+/// seeds and IVs are generated on every save.
+///
+/// There is no mutable reference to the complete database or its source
+/// settings: the source cannot accidentally be paired with another model.
+/// To deliberately convert formats, use the independent [`KdbxFile::save`]
+/// APIs rather than this handle's preserving save.
+///
+/// ```compile_fail
+/// # use neotales_keepass::KdbxLoadedDocument;
+/// fn swap_models(a: &mut KdbxLoadedDocument, b: &mut KdbxLoadedDocument) {
+///     std::mem::swap(a.database_mut(), b.database_mut());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use neotales_keepass::{KdbxFile, KdbxLoadedDocument, KdbxCredentials, KdbxReadLimits};
+/// fn exchange(a: &KdbxLoadedDocument, b: &KdbxLoadedDocument,
+///     out: &mut Vec<u8>, credentials: &mut KdbxCredentials, limits: &KdbxReadLimits) {
+///     KdbxFile::save_preserving_source(a.database(), out, credentials, b.source_options(), limits);
+/// }
+/// ```
+pub struct KdbxLoadedDocument {
+    database: KeePassDatabase,
+    source: KdbxSourceFormat,
+}
+
+impl fmt::Debug for KdbxLoadedDocument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KdbxLoadedDocument")
+            .field("source_version", &self.source.version)
+            .finish_non_exhaustive()
+    }
+}
+
+impl KdbxLoadedDocument {
+    /// Inspect the loaded database without replacing it.
+    #[must_use]
+    pub fn database(&self) -> &KeePassDatabase {
+        &self.database
+    }
+
+    /// Edit the root group and its entries.
+    pub fn root_mut(&mut self) -> &mut crate::model::Group {
+        &mut self.database.root
+    }
+
+    /// The raw source version, with the major version in the high 16 bits.
+    #[must_use]
+    pub fn source_version(&self) -> u32 {
+        self.source.version
+    }
+
+    /// Inspect the source cipher, compression, KDF and work factors.
+    ///
+    /// Fields unused by the source KDF and block size are defaults, not source
+    /// parameters. These values must not be applied to a different database.
+    #[must_use]
+    pub fn source_options(&self) -> &KdbxWriteOptions {
+        &self.source.options
+    }
+
+    /// Save this document using its bound source format.
+    ///
+    /// # Errors
+    ///
+    /// Fails for an unsupported source version or extension, invalid limits,
+    /// unsupported document state, entropy failure, or I/O failure.
+    pub fn save_preserving_source(
+        &self,
+        destination: impl Write,
+        credentials: &mut KdbxCredentials,
+        limits: &KdbxReadLimits,
+    ) -> Result<(), KdbxError> {
+        match self.source.write_options(limits)? {
+            KdbxPreservingWriteOptions::Kdbx3(options) => {
+                KdbxFile::save_kdbx3(&self.database, destination, credentials, options, limits)
+            }
+            KdbxPreservingWriteOptions::Kdbx4(options) => {
+                KdbxFile::save(&self.database, destination, credentials, options, limits)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod source_format_tests {
     use super::*;
+
+    #[test]
+    fn unknown_kdf_parameter_is_refused_on_public_load_paths() {
+        let limits = KdbxReadLimits::default();
+        let mut bytes = Vec::new();
+        KdbxFile::save(
+            &KeePassDatabase::default(),
+            &mut bytes,
+            &mut KdbxCredentials::password("test-only").unwrap(),
+            KdbxWriteOptions {
+                aes_kdf_rounds: 8,
+                ..Default::default()
+            },
+            &limits,
+        )
+        .unwrap();
+        let (header, end) = wire::parse_header(&bytes, &limits).unwrap();
+        let composite = Zeroizing::new(
+            KdbxCredentials::password("test-only")
+                .unwrap()
+                .composite_key()
+                .unwrap(),
+        );
+        let (_, base_hmac) = wire::derive_key(&header, &composite[..], &limits).unwrap();
+
+        let mut offset = 12;
+        loop {
+            let id = bytes[offset];
+            let len =
+                u32::from_le_bytes(bytes[offset + 1..offset + 5].try_into().unwrap()) as usize;
+            if id == 11 {
+                let mut extra = vec![0x42];
+                extra.extend_from_slice(&7u32.to_le_bytes());
+                extra.extend_from_slice(b"unknown");
+                extra.extend_from_slice(&1u32.to_le_bytes());
+                extra.push(0);
+                let insert = offset + 5 + len - 1;
+                bytes.splice(insert..insert, extra.iter().copied());
+                bytes[offset + 1..offset + 5]
+                    .copy_from_slice(&((len + extra.len()) as u32).to_le_bytes());
+                let new_end = end + extra.len();
+                let hash = crypto::sha256(&bytes[..new_end]);
+                let hmac = wire::header_hmac(&bytes[..new_end], &base_hmac).unwrap();
+                bytes[new_end..new_end + 32].copy_from_slice(&hash);
+                bytes[new_end + 32..new_end + 64].copy_from_slice(&hmac);
+                break;
+            }
+            assert_ne!(id, 0);
+            offset += 5 + len;
+        }
+        for result in [
+            KdbxFile::load(
+                bytes.as_slice(),
+                &mut KdbxCredentials::password("test-only").unwrap(),
+                &limits,
+            )
+            .map(|_| ()),
+            KdbxFile::load_with_source(
+                bytes.as_slice(),
+                &mut KdbxCredentials::password("test-only").unwrap(),
+                &limits,
+            )
+            .map(|_| ()),
+        ] {
+            assert_eq!(result.unwrap_err().kind, KdbxFailureKind::Unsupported);
+        }
+    }
 
     #[test]
     fn unsupported_versions_and_extensions_cannot_produce_write_options() {
@@ -546,7 +681,7 @@ impl KdbxFile {
     /// Loads the database and its source format from one verified input.
     ///
     /// KDBX 4 metadata is authenticated. KDBX 3 provides only the weaker
-    /// integrity checks described on [`KdbxSourceFormat`].
+    /// integrity checks described on [`KdbxLoadedDocument`].
     ///
     /// # Errors
     ///
@@ -555,8 +690,14 @@ impl KdbxFile {
         source: impl Read,
         credentials: &mut KdbxCredentials,
         limits: &KdbxReadLimits,
-    ) -> Result<(KeePassDatabase, KdbxSourceFormat), KdbxError> {
-        Self::load_source_with_cancellation(source, credentials, limits, KdbxCancellation::never())
+    ) -> Result<KdbxLoadedDocument, KdbxError> {
+        let (database, source) = Self::load_source_with_cancellation(
+            source,
+            credentials,
+            limits,
+            KdbxCancellation::never(),
+        )?;
+        Ok(KdbxLoadedDocument { database, source })
     }
 
     fn load_source_with_cancellation(
@@ -696,31 +837,6 @@ impl KdbxFile {
         source_format.lossless &= database.can_save_losslessly;
         cancellation.checkpoint()?;
         Ok((database, source_format))
-    }
-
-    /// Saves using the settings returned by [`Self::load_with_source`].
-    ///
-    /// The matching writer rejects unsupported document extensions; versions
-    /// without matching writers fail instead of being silently converted.
-    ///
-    /// # Errors
-    ///
-    /// Returns validation, losslessness, entropy, or I/O errors.
-    pub fn save_preserving_source(
-        database: &KeePassDatabase,
-        destination: impl Write,
-        credentials: &mut KdbxCredentials,
-        source: KdbxSourceFormat,
-        limits: &KdbxReadLimits,
-    ) -> Result<(), KdbxError> {
-        match source.write_options(limits)? {
-            KdbxPreservingWriteOptions::Kdbx3(options) => {
-                Self::save_kdbx3(database, destination, credentials, options, limits)
-            }
-            KdbxPreservingWriteOptions::Kdbx4(options) => {
-                Self::save(database, destination, credentials, options, limits)
-            }
-        }
     }
 
     /// Saves a database as KDBX 4.1.

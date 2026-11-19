@@ -26,6 +26,19 @@ writer emits only standard KeePass entry fields.
 
 KDBX 3.1 writing is available through [`KdbxFile::save_kdbx3`]; KDBX 3.0 and KDBX 3 Argon2/ChaCha20 writing remain unsupported because they are not part of the selected KDBX 3 writer path. Argon2d/Argon2id writing is available for KDBX 4.1. Configuration-framework adapters and UI/platform integrations are intentionally outside this crate.
 
+`KdbxFile::load_with_source` returns a `KdbxLoadedDocument` whose
+`save_preserving_source` method binds the original format to that document.
+The handle allows root-group edits without exposing a replaceable whole
+database or transferable source-format token. KDBX 4 authenticates its header;
+KDBX 3's stream-start marker, block hashes, and encrypted XML header hash
+are not a keyed MAC and do not have equivalent authenticity guarantees.
+
+KDF dictionaries with unrecognized parameters are intentionally rejected even
+by the ordinary `KdbxFile::load` reader. This is a read compatibility change:
+unknown parameters may affect key derivation or carry required semantics, so
+silently ignoring them could misrepresent what was verified and later written.
+No claim is made that an unknown parameter is safe to ignore.
+
 ## Security
 
 All untrusted lengths are bounded before allocation. KDBX4 authentication

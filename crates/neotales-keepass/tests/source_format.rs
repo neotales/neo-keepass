@@ -2,11 +2,52 @@
 
 use neotales_keepass::{
     Kdbx3WriteOptions, KdbxCompression, KdbxCredentials, KdbxFile, KdbxKdf, KdbxOuterCipher,
-    KdbxPreservingWriteOptions, KdbxReadLimits, KdbxWriteOptions, KeePassDatabase,
+    KdbxReadLimits, KdbxWriteOptions, KeePassDatabase,
 };
 
 fn credentials() -> KdbxCredentials {
     KdbxCredentials::password("test-only-password").unwrap()
+}
+
+#[test]
+fn different_databases_cannot_exchange_source_settings() {
+    let limits = KdbxReadLimits::default();
+    let mut strong = Vec::new();
+    let mut weak = Vec::new();
+    for (out, rounds) in [(&mut strong, 41), (&mut weak, 17)] {
+        KdbxFile::save(
+            &KeePassDatabase::default(),
+            out,
+            &mut credentials(),
+            KdbxWriteOptions {
+                aes_kdf_rounds: rounds,
+                ..Default::default()
+            },
+            &limits,
+        )
+        .unwrap();
+    }
+    let mut strong_doc =
+        KdbxFile::load_with_source(strong.as_slice(), &mut credentials(), &limits).unwrap();
+    let mut weak_doc =
+        KdbxFile::load_with_source(weak.as_slice(), &mut credentials(), &limits).unwrap();
+    strong_doc
+        .root_mut()
+        .entries
+        .push(neotales_keepass::Entry::new("strong"));
+    weak_doc
+        .root_mut()
+        .entries
+        .push(neotales_keepass::Entry::new("weak"));
+    for (doc, rounds, label) in [(&strong_doc, 41, "strong"), (&weak_doc, 17, "weak")] {
+        let mut saved = Vec::new();
+        doc.save_preserving_source(&mut saved, &mut credentials(), &limits)
+            .unwrap();
+        let loaded =
+            KdbxFile::load_with_source(saved.as_slice(), &mut credentials(), &limits).unwrap();
+        assert_eq!(loaded.source_options().aes_kdf_rounds, rounds);
+        assert_eq!(loaded.database().root.entries[0].title, label);
+    }
 }
 
 #[test]
@@ -34,15 +75,11 @@ fn preserving_roundtrips_all_supported_kdf_cipher_and_compression_modes() {
                     &limits,
                 )
                 .unwrap();
-                let (database, source) =
+                let document =
                     KdbxFile::load_with_source(bytes.as_slice(), &mut credentials(), &limits)
                         .unwrap();
-                assert_eq!(source.version(), 0x0004_0001);
-                let KdbxPreservingWriteOptions::Kdbx4(options) =
-                    source.write_options(&limits).unwrap()
-                else {
-                    panic!("wrong version")
-                };
+                assert_eq!(document.source_version(), 0x0004_0001);
+                let options = document.source_options();
                 assert_eq!(options.kdf, kdf);
                 assert_eq!(options.cipher, cipher);
                 assert_eq!(options.compression, compression);
@@ -59,18 +96,13 @@ fn preserving_roundtrips_all_supported_kdf_cipher_and_compression_modes() {
                     );
                 }
                 let mut saved = Vec::new();
-                KdbxFile::save_preserving_source(
-                    &database,
-                    &mut saved,
-                    &mut credentials(),
-                    source,
-                    &limits,
-                )
-                .unwrap();
-                let (_, reloaded) =
+                document
+                    .save_preserving_source(&mut saved, &mut credentials(), &limits)
+                    .unwrap();
+                let reloaded =
                     KdbxFile::load_with_source(saved.as_slice(), &mut credentials(), &limits)
                         .unwrap();
-                assert_eq!(source, reloaded);
+                assert_eq!(document.source_options(), reloaded.source_options());
                 assert_ne!(bytes, saved);
             }
         }
@@ -101,20 +133,19 @@ fn preserving_kdbx3_roundtrips_and_rejects_wrong_credentials() {
         )
         .is_err()
     );
-    let (database, source) =
+    let document =
         KdbxFile::load_with_source(bytes.as_slice(), &mut credentials(), &limits).unwrap();
-    assert_eq!(source.version(), 0x0003_0001);
-    let KdbxPreservingWriteOptions::Kdbx3(options) = source.write_options(&limits).unwrap() else {
-        panic!("wrong version")
-    };
+    assert_eq!(document.source_version(), 0x0003_0001);
+    let options = document.source_options();
     assert_eq!(options.aes_kdf_rounds, 23);
     assert_eq!(options.compression, KdbxCompression::GZip);
     let mut saved = Vec::new();
-    KdbxFile::save_preserving_source(&database, &mut saved, &mut credentials(), source, &limits)
+    document
+        .save_preserving_source(&mut saved, &mut credentials(), &limits)
         .unwrap();
-    let (_, reloaded) =
+    let reloaded =
         KdbxFile::load_with_source(saved.as_slice(), &mut credentials(), &limits).unwrap();
-    assert_eq!(source, reloaded);
+    assert_eq!(document.source_options(), reloaded.source_options());
 }
 
 #[test]
@@ -183,19 +214,18 @@ fn keepassxc_reads_source_preserving_writes() {
             )
             .unwrap();
         }
-        let (database, source) =
+        let document =
             KdbxFile::load_with_source(bytes.as_slice(), &mut credentials(), &limits).unwrap();
         let path = dir
             .path()
             .join(if legacy { "legacy.kdbx" } else { "modern.kdbx" });
-        KdbxFile::save_preserving_source(
-            &database,
-            std::fs::File::create(&path).unwrap(),
-            &mut credentials(),
-            source,
-            &limits,
-        )
-        .unwrap();
+        document
+            .save_preserving_source(
+                std::fs::File::create(&path).unwrap(),
+                &mut credentials(),
+                &limits,
+            )
+            .unwrap();
         let mut child = Command::new("keepassxc-cli")
             .arg("db-info")
             .arg(path)
