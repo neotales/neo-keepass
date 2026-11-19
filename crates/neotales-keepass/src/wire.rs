@@ -141,7 +141,7 @@ pub(crate) fn parse_header(
         _ => return Err(KdbxError::unsupported("unsupported KDBX cipher")),
     };
     let compression = match fields.remove(&3).as_deref() {
-        Some(value) if value.len() == 4 && value[0] == 0 => Compression::None,
+        Some(value) if value == [0, 0, 0, 0] => Compression::None,
         Some(value) if value.len() == 4 && value[0] == 1 && value[1..] == [0, 0, 0] => {
             Compression::GZip
         }
@@ -272,6 +272,9 @@ fn parse_kdf(data: &[u8]) -> Result<KdfSpec, KdbxError> {
     }
     let uuid = bytes_value(&values, "$UUID", 0x42)?;
     if uuid == AES_KDF {
+        if values.len() != 3 {
+            return Err(KdbxError::unsupported("unsupported AES-KDF parameter"));
+        }
         let seed = bytes_value(&values, "S", 0x42)?;
         let rounds = u64_value(&values, "R", 0x05)?;
         if seed.len() != 32 {
@@ -280,6 +283,9 @@ fn parse_kdf(data: &[u8]) -> Result<KdfSpec, KdbxError> {
         return Ok(KdfSpec::Aes { seed, rounds });
     }
     if uuid == ARGON2D || uuid == ARGON2ID {
+        if values.len() != 6 {
+            return Err(KdbxError::unsupported("unsupported Argon2 parameter"));
+        }
         let salt = bytes_value(&values, "S", 0x42)?;
         let memory = u64_value(&values, "M", 0x05)?;
         let iterations = u64_value(&values, "I", 0x05)?;
@@ -818,15 +824,26 @@ impl InnerHeader {
             }
             match id {
                 1 => {
+                    if stream_id.is_some() {
+                        return Err(KdbxError::malformed("duplicate inner stream ID"));
+                    }
                     if value.len() != 4 {
                         return Err(KdbxError::malformed("invalid inner stream ID"));
                     }
                     stream_id = Some(u32::from_le_bytes(value.try_into().expect("checked")));
                 }
-                2 => stream_key = Some(value.to_vec()),
+                2 => {
+                    if stream_key.is_some() {
+                        return Err(KdbxError::malformed("duplicate inner stream key"));
+                    }
+                    stream_key = Some(value.to_vec());
+                }
                 3 => {
                     if value.is_empty() {
                         return Err(KdbxError::malformed("empty inner binary"));
+                    }
+                    if value[0] & !1 != 0 {
+                        return Err(KdbxError::unsupported("unsupported inner binary flags"));
                     }
                     if binaries.len() >= limits.max_binary_records {
                         return Err(KdbxError::resource_limit(
@@ -876,6 +893,17 @@ pub(crate) fn parse_xml_payload(
 #[cfg(test)]
 mod tests {
     use super::{KdbxFailureKind, KdbxReadLimits, read_hashed_blocks};
+
+    #[test]
+    fn unknown_kdf_parameters_are_not_silently_discarded() {
+        let mut dictionary = super::aes_kdf_dictionary(&[0; 32], 10);
+        dictionary.pop();
+        dictionary.push(0x42);
+        super::write_value(&mut dictionary, b"unknown");
+        super::write_value(&mut dictionary, b"data");
+        dictionary.push(0);
+        assert!(super::parse_kdf(&dictionary).is_err());
+    }
 
     fn hashed_block(index: u32, data: &[u8]) -> Vec<u8> {
         let hash = if data.is_empty() {

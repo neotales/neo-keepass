@@ -47,7 +47,7 @@ pub use credentials::{CredentialProvider, KdbxCredentials, KdbxKeyFile, read_key
 pub use error::{KdbxError, KdbxFailureKind, KdbxLimitDetail, KdbxLimitParameter};
 pub use file::{
     Kdbx3WriteOptions, Kdbx4AuthenticatedBlockReader, KdbxCompression, KdbxFile, KdbxKdf,
-    KdbxOuterCipher, KdbxWriteOptions,
+    KdbxOuterCipher, KdbxPreservingWriteOptions, KdbxSourceFormat, KdbxWriteOptions,
 };
 pub use limits::KdbxReadLimits;
 pub use model::{
