@@ -28,8 +28,8 @@ KDBX 3.1 writing is available through [`KdbxFile::save_kdbx3`]; KDBX 3.0 and KDB
 
 `KdbxFile::load_with_source` returns a `KdbxLoadedDocument` whose
 `save_preserving_source` method binds the original format to that document.
-The handle allows root-group edits without exposing a replaceable whole
-database or transferable source-format token. KDBX 4 authenticates its header;
+The handle permits scalar entry creation and field updates without exposing
+mutable trees, entries, or transferable source-format tokens. KDBX 4 authenticates its header;
 KDBX 3's stream-start marker, block hashes, and encrypted XML header hash
 are not a keyed MAC and do not have equivalent authenticity guarantees.
 

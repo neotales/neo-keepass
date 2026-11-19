@@ -10,6 +10,76 @@ fn credentials() -> KdbxCredentials {
 }
 
 #[test]
+fn scalar_edits_create_and_update_nested_entries_without_imports() {
+    let limits = KdbxReadLimits::default();
+    let mut model = KeePassDatabase::default();
+    model
+        .root
+        .groups
+        .push(neotales_keepass::Group::new("nested"));
+    let mut bytes = Vec::new();
+    KdbxFile::save(
+        &model,
+        &mut bytes,
+        &mut credentials(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..Default::default()
+        },
+        &limits,
+    )
+    .unwrap();
+    let mut doc =
+        KdbxFile::load_with_source(bytes.as_slice(), &mut credentials(), &limits).unwrap();
+    assert!(doc.create_entry(&[1], "bad").is_err());
+    let index = doc.create_entry(&[0], "entry").unwrap();
+    doc.set_entry_field(&[0], index, "Password", "test-value")
+        .unwrap();
+    doc.set_entry_field(&[0], index, "UserName", "test-user")
+        .unwrap();
+    doc.set_entry_field(&[0], index, "Title", "renamed")
+        .unwrap();
+    doc.set_entry_field(&[0], index, "custom", "first").unwrap();
+    doc.set_entry_field(&[0], index, "custom", "second")
+        .unwrap();
+    assert!(
+        doc.set_entry_field(&[0], index + 1, "custom", "bad")
+            .is_err()
+    );
+    let entry = &doc.database().root.groups[0].entries[index];
+    assert_eq!(entry.title, "renamed");
+    assert_eq!(entry.username, "test-user");
+    assert!(entry.field("Password").unwrap().protected);
+    assert_eq!(
+        entry
+            .field("custom")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "second"
+    );
+    let mut saved = Vec::new();
+    doc.save_preserving_source(&mut saved, &mut credentials(), &limits)
+        .unwrap();
+    let loaded = KdbxFile::load_with_source(saved.as_slice(), &mut credentials(), &limits).unwrap();
+    let entry = &loaded.database().root.groups[0].entries[index];
+    assert_eq!(entry.title, "renamed");
+    assert_eq!(
+        entry
+            .field("Password")
+            .unwrap()
+            .value
+            .reveal_text()
+            .unwrap()
+            .as_str(),
+        "test-value"
+    );
+    assert!(entry.field("Password").unwrap().protected);
+}
+
+#[test]
 fn different_databases_cannot_exchange_source_settings() {
     let limits = KdbxReadLimits::default();
     let mut strong = Vec::new();
@@ -31,14 +101,8 @@ fn different_databases_cannot_exchange_source_settings() {
         KdbxFile::load_with_source(strong.as_slice(), &mut credentials(), &limits).unwrap();
     let mut weak_doc =
         KdbxFile::load_with_source(weak.as_slice(), &mut credentials(), &limits).unwrap();
-    strong_doc
-        .root_mut()
-        .entries
-        .push(neotales_keepass::Entry::new("strong"));
-    weak_doc
-        .root_mut()
-        .entries
-        .push(neotales_keepass::Entry::new("weak"));
+    strong_doc.create_entry(&[], "strong").unwrap();
+    weak_doc.create_entry(&[], "weak").unwrap();
     for (doc, rounds, label) in [(&strong_doc, 41, "strong"), (&weak_doc, 17, "weak")] {
         let mut saved = Vec::new();
         doc.save_preserving_source(&mut saved, &mut credentials(), &limits)

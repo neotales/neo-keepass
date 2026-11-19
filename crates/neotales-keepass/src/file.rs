@@ -142,8 +142,8 @@ impl KdbxSourceFormat {
 /// keyed MAC and do not provide KDBX 4's authenticity guarantees. Fresh random
 /// seeds and IVs are generated on every save.
 ///
-/// There is no mutable reference to the complete database or its source
-/// settings: the source cannot accidentally be paired with another model.
+/// There is no mutable reference to the database, tree, entries, or source
+/// settings. Edits accept scalar values and cannot import arbitrary models.
 /// To deliberately convert formats, use the independent [`KdbxFile::save`]
 /// APIs rather than this handle's preserving save.
 ///
@@ -151,6 +151,20 @@ impl KdbxSourceFormat {
 /// # use neotales_keepass::KdbxLoadedDocument;
 /// fn swap_models(a: &mut KdbxLoadedDocument, b: &mut KdbxLoadedDocument) {
 ///     std::mem::swap(a.database_mut(), b.database_mut());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use neotales_keepass::KdbxLoadedDocument;
+/// fn swap_roots(a: &mut KdbxLoadedDocument, b: &mut KdbxLoadedDocument) {
+///     std::mem::swap(a.root_mut(), b.root_mut());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use neotales_keepass::{KdbxLoadedDocument, Group};
+/// fn import_root(document: &mut KdbxLoadedDocument, group: Group) {
+///     *document.root_mut() = group;
 /// }
 /// ```
 ///
@@ -181,9 +195,99 @@ impl KdbxLoadedDocument {
         &self.database
     }
 
-    /// Edit the root group and its entries.
-    pub fn root_mut(&mut self) -> &mut crate::model::Group {
-        &mut self.database.root
+    fn editable_group(&mut self, path: &[usize]) -> Result<&mut crate::model::Group, KdbxError> {
+        if !self.source.lossless || !self.database.can_save_losslessly {
+            return Err(KdbxError::unsupported(
+                "document cannot be edited losslessly",
+            ));
+        }
+        let mut group = &mut self.database.root;
+        for &index in path {
+            group = group.groups.get_mut(index).ok_or_else(|| {
+                KdbxError::new(KdbxFailureKind::InvalidArgument, "invalid group index")
+            })?;
+        }
+        Ok(group)
+    }
+
+    /// Create an entry from a title, returning its index within the group.
+    ///
+    /// `group_path` contains child-group indexes, beginning at the root.
+    /// This operation never accepts an externally constructed entry or group.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid group path or a document with unsupported extensions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system cannot supply a fresh entry UUID.
+    pub fn create_entry(&mut self, group_path: &[usize], title: &str) -> Result<usize, KdbxError> {
+        let group = self.editable_group(group_path)?;
+        let index = group.entries.len();
+        group.entries.push(crate::model::Entry::new(title));
+        Ok(index)
+    }
+
+    /// Set an entry field from scalar text, preserving existing protection flags.
+    ///
+    /// New password fields are protected. Standard-field projections are kept
+    /// in sync. Duplicate existing field keys are rejected without mutation.
+    /// The group path uses child-group indexes, beginning at the root.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid indexes, duplicate field keys, empty keys, or a document
+    /// with unsupported extensions.
+    pub fn set_entry_field(
+        &mut self,
+        group_path: &[usize],
+        entry_index: usize,
+        key: &str,
+        value: &str,
+    ) -> Result<(), KdbxError> {
+        if key.is_empty() {
+            return Err(KdbxError::new(
+                KdbxFailureKind::InvalidArgument,
+                "empty field key",
+            ));
+        }
+        let group = self.editable_group(group_path)?;
+        let entry = group.entries.get_mut(entry_index).ok_or_else(|| {
+            KdbxError::new(KdbxFailureKind::InvalidArgument, "invalid entry index")
+        })?;
+        let mut matches = entry
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.key == key);
+        let existing = matches.next().map(|(index, _)| index);
+        if matches.next().is_some() {
+            return Err(KdbxError::new(
+                KdbxFailureKind::InvalidArgument,
+                "duplicate field key",
+            ));
+        }
+        let protected_value = crate::model::ProtectedValue::from_text(value);
+        if let Some(index) = existing {
+            entry.fields[index].value = protected_value;
+        } else {
+            entry.fields.push(crate::model::Field {
+                key: key.to_owned(),
+                value: protected_value,
+                protected: key == "Password",
+                protect_in_memory: false,
+            });
+        }
+        match key {
+            "Title" => entry.title = value.to_owned(),
+            "UserName" => entry.username = value.to_owned(),
+            "Password" => entry.password = crate::model::ProtectedValue::from_text(value),
+            "URL" => entry.url = value.to_owned(),
+            "Notes" => entry.notes = value.to_owned(),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// The raw source version, with the major version in the high 16 bits.
@@ -1700,6 +1804,36 @@ mod tests {
 
         let loaded = KdbxFile::load_password(bytes.as_slice(), "pw", &limits).unwrap();
         assert!(!loaded.can_save_losslessly);
+        let mut document = KdbxFile::load_with_source(
+            bytes.as_slice(),
+            &mut KdbxCredentials::password("pw").unwrap(),
+            &limits,
+        )
+        .unwrap();
+        let original_count = document.database().root.entries.len();
+        assert_eq!(
+            document.create_entry(&[], "not imported").unwrap_err().kind,
+            KdbxFailureKind::Unsupported
+        );
+        assert_eq!(
+            document
+                .set_entry_field(&[], 0, "Password", "not imported")
+                .unwrap_err()
+                .kind,
+            KdbxFailureKind::Unsupported
+        );
+        assert_eq!(document.database().root.entries.len(), original_count);
+        assert_eq!(
+            document
+                .save_preserving_source(
+                    &mut Vec::new(),
+                    &mut KdbxCredentials::password("pw").unwrap(),
+                    &limits
+                )
+                .unwrap_err()
+                .kind,
+            KdbxFailureKind::Unsupported
+        );
         let error = KdbxFile::save(
             &loaded,
             &mut Vec::new(),
