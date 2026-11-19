@@ -140,7 +140,15 @@ collisions and shell/workflow injection. `--name`, `--key` and `--clipboard`
 are not accepted. `--is-output` applies only to `azure-devops`.
 
 Duplicate literal paths are refused in every format; different aliases to
-the same entry are distinct supplied keys. An alias that collides with a
+the same entry are distinct supplied keys unless their output names collide
+under the destination's rules. Azure DevOps variables and GitHub Actions
+output names are case-insensitive: `TOKEN` and `token` cannot share a bundle.
+Both PowerShell spellings also reject case-only collisions on every host,
+so output generated on Unix remains safe for Windows environment variables.
+Dotenv bindings use host environment casing (case-insensitive on Windows).
+POSIX shell bindings and JSON keys retain their literal case distinctions.
+The same checks apply to named `secrets env` output, before any binding is
+printed. An alias that collides with a
 different real entry is refused, as for single `get`. Missing or ambiguous
 entries, missing fields, invalid names, and format-validation errors fail
 the whole request without printing earlier values. Diagnostics do not include

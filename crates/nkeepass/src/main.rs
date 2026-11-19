@@ -3355,6 +3355,31 @@ fn is_named_format(format: &str) -> bool {
     )
 }
 
+/// Compare the namespace the consumer will assign, not just the spelling we
+/// print. Named output accepts ASCII identifiers, so ASCII folding is enough.
+/// PowerShell output is conservatively Windows-safe even when rendered on Unix.
+fn validate_binding_names<'a>(
+    format: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let case_insensitive = matches!(
+        format,
+        "azure-devops" | "github-actions" | "pwsh" | "powershell"
+    ) || (cfg!(windows) && format == "dotenv");
+    let mut seen = BTreeSet::new();
+    for name in names {
+        let key = if case_insensitive {
+            Cow::Owned(name.to_ascii_uppercase())
+        } else {
+            Cow::Borrowed(name)
+        };
+        if !seen.insert(key) {
+            return Err(err("output names collide for selected format"));
+        }
+    }
+    Ok(())
+}
+
 /// The name and text every named format is rendered from.
 ///
 /// All four refusals live in one function on purpose. A format added later that
@@ -3838,6 +3863,9 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
             return Err(err("get many paths exceed size limit"));
         }
         let format = opts.format.unwrap_or("text");
+        if is_named_format(format) {
+            validate_binding_names(format, opts.requested_paths.iter().copied())?;
+        }
         if !is_named_format(format) && !matches!(format, "text" | "json" | "null") {
             return Err(err("invalid output format"));
         }
@@ -5254,6 +5282,7 @@ fn write_environment(
         return Err(err("--is-output requires the azure-devops format"));
     }
     if is_named_format(format) {
+        validate_binding_names(format, bindings.iter().map(|(name, _)| name.as_str()))?;
         // Every binding goes through the same validation `emit_value` does, and
         // it happens before the first record is written: a refusal after a
         // disclosure would leave the caller with a truncated set that looks
@@ -7404,6 +7433,21 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_collision_checks_follow_format_namespaces() {
+        for format in ["azure-devops", "github-actions", "pwsh", "powershell"] {
+            assert!(validate_binding_names(format, ["TOKEN", "token"]).is_err());
+            assert!(validate_binding_names(format, ["TOKEN", "OTHER"]).is_ok());
+        }
+        for format in ["json", "text", "null", "shell"] {
+            assert!(validate_binding_names(format, ["TOKEN", "token"]).is_ok());
+        }
+        assert_eq!(
+            validate_binding_names("dotenv", ["TOKEN", "token"]).is_err(),
+            cfg!(windows)
+        );
+    }
 
     #[test]
     fn bundle_writer_is_bounded_and_does_not_reallocate_secret_storage() {

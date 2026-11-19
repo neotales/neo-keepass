@@ -223,6 +223,72 @@ fn named_bundle_formats_reuse_single_value_conventions() {
 }
 
 #[test]
+fn target_name_collisions_fail_before_disclosure_but_json_keeps_literal_keys() {
+    let fixture = Fixture::new();
+    fixture.success(&["alias", "set", "TOKEN", "A"]);
+    fixture.success(&["alias", "set", "token", "B"]);
+    for format in ["azure-devops", "github-actions", "pwsh", "powershell"] {
+        fixture.refused(&["get", "many", "TOKEN", "token", "--format", format]);
+        let output = fixture.run(&[
+            "env", "--key", "A", "--field", "Password", "--name", "TOKEN", "--key", "B", "--field",
+            "Password", "--name", "token", "--format", format,
+        ]);
+        assert!(!output.status.success() && output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("output names collide"));
+    }
+    #[cfg(windows)]
+    {
+        fixture.refused(&["get", "many", "TOKEN", "token", "--format", "dotenv"]);
+        fixture.refused(&[
+            "env", "--key", "A", "--field", "Password", "--name", "TOKEN", "--key", "B", "--field",
+            "Password", "--name", "token", "--format", "dotenv",
+        ]);
+    }
+    let key = neotales_age::AgeKey::generate().unwrap();
+    let output_path = fixture.directory.path().join("colliding.age");
+    let output = fixture.run(&[
+        "get",
+        "many",
+        "TOKEN",
+        "token",
+        "--format",
+        "azure-devops",
+        "--age-encrypt",
+        "-r",
+        &key.public_key,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success() && output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("output names collide"));
+    assert!(!output_path.exists());
+    assert_eq!(
+        fixture.success(&["get", "many", "TOKEN", "token", "--format", "json"]),
+        format!("{{\"TOKEN\":\"{FIRST}\",\"token\":\"{SECOND}\"}}\n").as_bytes()
+    );
+    assert_eq!(
+        fixture.success(&["get", "many", "token", "TOKEN", "--format", "json"]),
+        format!("{{\"token\":\"{SECOND}\",\"TOKEN\":\"{FIRST}\"}}\n").as_bytes()
+    );
+    assert_eq!(
+        fixture.success(&["get", "many", "TOKEN", "token", "--format", "shell"]),
+        format!("export TOKEN='{FIRST}';\nexport token='{SECOND}';\n").as_bytes()
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        fixture.success(&["get", "many", "TOKEN", "token", "--format", "dotenv"]),
+        format!("TOKEN=\"{FIRST}\"\ntoken=\"{SECOND}\"\n").as_bytes()
+    );
+    assert_eq!(
+        fixture.success(&[
+            "env", "--key", "A", "--field", "Password", "--name", "TOKEN", "--key", "B", "--field",
+            "Password", "--name", "token", "--format", "json"
+        ]),
+        format!("{{\"TOKEN\":\"{FIRST}\",\"token\":\"{SECOND}\"}}\n").as_bytes()
+    );
+}
+
+#[test]
 fn request_and_format_failures_are_atomic_and_redacted() {
     let fixture = Fixture::new();
     for args in [

@@ -8,6 +8,15 @@ use zeroize::Zeroizing;
 /// Redirected stdin is refused. Enter submits; Ctrl-C, Ctrl-D and Escape cancel.
 /// Terminal state is restored before returning, including on timeout.
 ///
+/// # Process-wide ownership
+/// On Unix this call temporarily owns the process-wide SIGINT, SIGTERM, SIGHUP
+/// and SIGQUIT actions. The caller must ensure that no other thread, component
+/// or library concurrently changes those actions until this call returns.
+/// Restoration reinstalls the saved actions and would overwrite concurrent
+/// changes. The internal lock excludes other calls to this function only; it
+/// does not coordinate external signal-action installers. Likewise, no other
+/// consumer may read terminal stdin concurrently.
+///
 /// # Errors
 /// Refuses nonterminal or concurrent input, cancellation, expired deadlines,
 /// invalid Unicode, oversized values, and terminal I/O or restoration errors.
