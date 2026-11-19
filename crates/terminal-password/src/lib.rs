@@ -7,6 +7,8 @@ use zeroize::Zeroizing;
 /// Reads UTF-8 from terminal stdin without echo, bounded by an absolute deadline.
 /// Redirected stdin is refused. Enter submits; Ctrl-C, Ctrl-D and Escape cancel.
 /// Terminal state is restored before returning, including on timeout.
+/// On Unix, unconsumed terminal input is discarded when the prompt ends.
+/// Hidden typeahead cannot be echoed or read as a command after restoration.
 ///
 /// # Process-wide ownership
 /// On Unix this call temporarily owns the process-wide SIGINT, SIGTERM, SIGHUP
@@ -52,7 +54,8 @@ mod platform {
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
     use nix::sys::termios::{
-        LocalFlags, SetArg, SpecialCharacterIndices, Termios, tcgetattr, tcsetattr,
+        FlushArg, LocalFlags, SetArg, SpecialCharacterIndices, Termios, tcflush, tcgetattr,
+        tcsetattr,
     };
     use std::os::fd::AsFd;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,10 +89,43 @@ mod platform {
         }
     }
 
-    struct Restore<'a>(&'a io::Stdin, Termios);
+    struct Restore<'a> {
+        stdin: &'a io::Stdin,
+        original: Termios,
+        restored: bool,
+    }
+    impl Restore<'_> {
+        fn restore(&mut self) -> io::Result<()> {
+            // Do not replay unread secret typeahead with echo/signals enabled.
+            // TCIFLUSH does not wait for output, unlike TCSAFLUSH/TCSADRAIN.
+            let flushed = tcflush(self.stdin, FlushArg::TCIFLUSH);
+            // A failed flush must not prevent the attempt to restore modes.
+            let mode_restored = tcsetattr(self.stdin, SetArg::TCSANOW, &self.original);
+            let settled = if mode_restored.is_ok()
+                && self.original.local_flags.contains(LocalFlags::ICANON)
+                && !self.original.local_flags.contains(LocalFlags::PENDIN)
+            {
+                // Darwin/BSD's TIOCSETA sets PENDIN on raw -> canonical even
+                // with empty queues, and ORs it into the supplied mode. A
+                // second tcsetattr cannot clear it. TCIFLUSH clears that
+                // generated pending-input state without draining output or
+                // replaying hidden bytes. Preserve PENDIN if originally set.
+                tcflush(self.stdin, FlushArg::TCIFLUSH)
+            } else {
+                Ok(())
+            };
+            self.restored = flushed.is_ok() && mode_restored.is_ok() && settled.is_ok();
+            mode_restored?;
+            flushed?;
+            settled?;
+            Ok(())
+        }
+    }
     impl Drop for Restore<'_> {
         fn drop(&mut self) {
-            let _ = tcsetattr(self.0, SetArg::TCSANOW, &self.1);
+            if !self.restored {
+                let _ = self.restore();
+            }
         }
     }
 
@@ -123,9 +159,16 @@ mod platform {
                 | LocalFlags::IEXTEN,
         );
         mode.input_flags.remove(nix::sys::termios::InputFlags::IXON);
-        mode.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;
+        // Poll is readiness, not a guarantee that a subsequent blocking read
+        // cannot stall. MIN=TIME=0 makes every read itself nonblocking without
+        // changing shared descriptor flags or leaving an input thread behind.
+        mode.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
         mode.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
-        let restore = Restore(&stdin, original);
+        let mut restore = Restore {
+            stdin: &stdin,
+            original,
+            restored: false,
+        };
         tcsetattr(&stdin, SetArg::TCSANOW, &mode)?;
         let outcome = (|| {
             let mut bytes = Zeroizing::new(Vec::new());
@@ -145,9 +188,25 @@ mod platform {
                     Err(error) => return Err(error.into()),
                     _ => {}
                 }
+                let events = fds[0]
+                    .revents()
+                    .ok_or_else(|| io::Error::other("invalid terminal readiness event"))?;
+                if events.contains(PollFlags::POLLNVAL) {
+                    return Err(io::Error::other("invalid terminal input descriptor"));
+                }
+                if !events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR) {
+                    continue;
+                }
                 let mut byte = [0];
-                if nix::unistd::read(&stdin, &mut byte)? == 0 {
-                    return Err(cancelled());
+                match nix::unistd::read(&stdin, &mut byte) {
+                    Ok(0) if events.contains(PollFlags::POLLHUP) => return Err(cancelled()),
+                    Ok(0) if events.contains(PollFlags::POLLERR) => {
+                        return Err(io::Error::other("terminal input failed"));
+                    }
+                    Ok(0) => continue, // Empty nonblocking read, not EOF.
+                    Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => continue,
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {}
                 }
                 match byte[0] {
                     b'\r' | b'\n' => {
@@ -169,8 +228,7 @@ mod platform {
                 }
             }
         })();
-        tcsetattr(&stdin, SetArg::TCSANOW, &restore.1)?;
-        drop(restore);
+        restore.restore()?;
         signals.restore()?;
         outcome
     }
