@@ -166,6 +166,53 @@ fn assert_markers_absent(output: &Output) {
 }
 
 #[test]
+fn unsupported_age_options_fail_before_disclosure_or_init_side_effects() {
+    let fixture = Fixture::new();
+    let before = std::fs::read(&fixture.vault).unwrap();
+    for flag in [
+        vec!["--age-encrypt"],
+        vec!["--age-decrypt"],
+        vec!["-r", "unused-recipient"],
+        vec!["-i", "unused-identity"],
+    ] {
+        for route in [vec!["env"], vec!["secrets", "env"]] {
+            let mut args = route;
+            args.extend(["--key", "LOGIN", "--field", "Password", "--name", "DEMO"]);
+            args.extend(["--password-env", "NKEEPASS_TEST_PASSWORD"]);
+            args.extend(flag.iter().copied());
+            let output = run(&fixture, &args);
+            assert!(!output.status.success(), "unsupported age option succeeded");
+            assert!(
+                output.stdout.is_empty(),
+                "unsupported age option wrote stdout"
+            );
+            assert_markers_absent(&output);
+            assert!(String::from_utf8_lossy(&output.stderr).contains("age options"));
+        }
+        let destination = fixture.directory.path().join("new.kdbx");
+        let mut args = vec![
+            "init",
+            destination.to_str().unwrap(),
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ];
+        args.extend(flag.iter().copied());
+        let output = run(&fixture, &args);
+        assert!(
+            !output.status.success(),
+            "unsupported init age option succeeded"
+        );
+        assert!(output.stdout.is_empty());
+        assert_markers_absent(&output);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("age options"));
+        assert!(!destination.exists());
+        assert!(!fixture.directory.path().join("config").exists());
+        assert!(!fixture.directory.path().join("data").exists());
+        assert!(std::fs::read(&fixture.vault).unwrap() == before);
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines, reason = "output parity cases stay together")]
 fn get_formats_are_explicit_bounded_and_shell_safe() {
     let fixture = Fixture::new();

@@ -3893,7 +3893,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
         || !opts.age_recipients.is_empty()
         || opts.age_identity.is_some();
     if has_age_options && !matches!(action, "get" | "get-many" | "set") {
-        return Err(err("age options are only valid for get and set"));
+        return Err(err("age options are only valid for get, get many, and set"));
     }
     let invalid = match action {
         "ls" | "search" | "group-ls" => {
@@ -4056,15 +4056,22 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
     Ok(())
 }
 
-fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
-    validate_new_options(action, opts)?;
+// Shared parsers must not silently downgrade a request for encryption to plaintext.
+fn reject_age_options(opts: &Options<'_>) -> Result<()> {
     if opts.age_encrypt
         || opts.age_decrypt
         || !opts.age_recipients.is_empty()
         || opts.age_identity.is_some()
     {
-        return Err(err("age options are not supported for automation commands"));
+        return Err(err("age options are not supported for this command"));
     }
+    Ok(())
+}
+
+fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
+    validate_new_options(action, opts)?;
+    reject_age_options(opts)
+        .map_err(|_| err("age options are not supported for automation commands"))?;
     let unexpected = opts.field.is_some()
         || opts.name.is_some()
         || opts.output.is_some()
@@ -5218,6 +5225,7 @@ fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
     }
     let common_options = options(&common, Positional::Forbidden)?;
     validate_new_options("env", &common_options)?;
+    reject_age_options(&common_options)?;
     // `secrets env` has no value-file, mutation, or interchange options. Check
     // this allowlist before resolving a vault or reading credentials.
     if common_options.key.is_some()
@@ -5370,6 +5378,7 @@ fn write_environment(
 /// believe a vault was hardened or written when it was not.
 fn validate_init_options(opts: &Options<'_>) -> Result<()> {
     validate_new_options("init", opts)?;
+    reject_age_options(opts)?;
     if opts.key.is_some()
         || opts.field.is_some()
         || opts.name.is_some()

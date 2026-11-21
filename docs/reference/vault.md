@@ -131,9 +131,9 @@ discusses randomly assigned passwords and password managers; its requirements
 address network authentication, not this local vault. This is not a claim of
 NIST or FIPS certification.
 
-`init` accepts `--age-encrypt`, `--age-decrypt`, `-r` /
-`--age-recipient`, and `-i` / `--age-identity`, but ignores them. They do not
-encrypt or decrypt the vault.
+`init` rejects `--age-encrypt`, `--age-decrypt`, `-r` /
+`--age-recipient`, and `-i` / `--age-identity` before creating any files.
+These flags do not configure its automatic password backup or vault encryption.
 
 ## `context`
 

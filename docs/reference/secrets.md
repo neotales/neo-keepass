@@ -59,11 +59,10 @@ Each binding starts with `--key PATH`, may select a field with `--field`,
 then must end with `--name NAME`. Repeat the sequence for additional values.
 The field is required unless the key is an entry alias that already binds a
 field. Use the field name `otp` to emit a TOTP code; HOTP is refused.
-**Warning:** `secrets env`, its `environment` alias, and root `env` accept
+`secrets env`, its `environment` alias, and root `env` reject
 `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and
-`-i` / `--age-identity`, but
-ignore them. Env output remains plaintext; these options do not encrypt or
-decrypt it.
+`-i` / `--age-identity` before unlocking or writing output.
+Env output is plaintext; use `secrets get many --age-encrypt` for an encrypted bundle.
 
 The default format is `shell`. Supported formats are `shell`, `dotenv`,
 `pwsh`, `powershell`, `github-actions`, `azure-devops`, `json`, and `null`.
@@ -362,9 +361,9 @@ nkp secrets import (--file PATH | --stdin) [--replace] [--dry-run]
 
 Reads an interchange snapshot. Exactly one input source is required.
 `--replace` permits replacing a non-empty vault. `--dry-run` validates and
-reports without saving. **Warning:** `secrets import` and root `import` accept
+reports without saving. `secrets import` and root `import` reject
 `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and `-i` /
-`--age-identity`, but ignore them. Import does not decrypt the input.
+`--age-identity`. Import does not decrypt the input.
 
 ### `secrets export`
 
@@ -373,10 +372,9 @@ nkp secrets export --output PATH
 ```
 
 Writes an interchange snapshot to a private, no-clobber file. `--output` is
-required, and an existing destination is not overwritten. **Warning:**
-`secrets export` and root `export` accept `--name NAME`, `--age-encrypt`,
-`--age-decrypt`, `-r` / `--age-recipient`, and `-i` / `--age-identity`, but
-ignore them. Export
+required, and an existing destination is not overwritten.
+`secrets export` and root `export` reject `--name NAME`, `--age-encrypt`,
+`--age-decrypt`, `-r` / `--age-recipient`, and `-i` / `--age-identity`. Export
 remains plaintext JSON; these options do not encrypt it.
 
 ### `secrets sync`
@@ -388,9 +386,9 @@ nkp secrets sync (--file PATH | --stdin)
 
 Synchronizes an interchange snapshot with the vault. Exactly one input source
 is required. `--strategy` defaults to `newest`; `source` is the other
-accepted value. `--dry-run` reports without saving. **Warning:** `secrets sync`
-and root `sync` accept `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`,
-and `-i` / `--age-identity`, but ignore them. Sync does not encrypt or decrypt the
+accepted value. `--dry-run` reports without saving. `secrets sync`
+and root `sync` reject `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`,
+and `-i` / `--age-identity`. Sync does not encrypt or decrypt the
 interchange data.
 
 ## Output formats and credentials
