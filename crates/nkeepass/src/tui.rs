@@ -2731,6 +2731,50 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used, reason = "disposable private deletion workflow")]
+    fn warning_enter_retains_valid_entry_with_complete_deletion_consent() {
+        // Private modal focus regression: use a real selectable entry and YES,
+        // so a leaked Enter would actually delete, not merely cancel a draft.
+        let (_directory, mut app) = app_fixture();
+        let reference = app.hits[0].reference();
+        super::begin_delete_entry(&mut app);
+        for character in ['Y', 'E', 'S'] {
+            super::handle_modal_key(&mut app, super::KeyCode::Char(character));
+        }
+        assert!(app.service.selected_entry(&reference).is_ok());
+        app.clipboard_warning_pending = true;
+        super::open_clipboard_warning(&mut app);
+        super::handle_modal_key(&mut app, super::KeyCode::Enter);
+        assert!(matches!(&app.modal,
+            Some(super::Modal::ConfirmDelete { entry: Some(_), input, .. })
+                if input.as_str() == "YES"));
+        assert!(app.service.selected_entry(&reference).is_ok());
+        assert_eq!(
+            app.service
+                .list_page(app.session, None, None)
+                .unwrap()
+                .hits
+                .len(),
+            1
+        );
+        assert!(!app.dirty);
+        assert!(app.clipboard_warning_pending);
+
+        // Positive control: a separate Enter in the restored confirmation
+        // deletes this disposable entry in memory. The target/YES were live.
+        super::handle_modal_key(&mut app, super::KeyCode::Enter);
+        assert!(app.dirty);
+        assert_eq!(
+            app.service
+                .list_page(app.session, None, None)
+                .unwrap()
+                .hits
+                .len(),
+            0
+        );
+    }
+
+    #[test]
     fn unsaved_decision_exposes_clipboard_warning_hint_at_minimum_size() {
         // Exact private projection: this full-screen dialog covers the footer.
         let (_directory, mut app) = app_fixture();
