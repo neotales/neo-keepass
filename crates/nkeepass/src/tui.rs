@@ -32,6 +32,8 @@ const CLIPBOARD_TTL: Duration = Duration::from_secs(30);
 const IDLE_LOCK: Duration = Duration::from_secs(300);
 const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INTERCHANGE_BYTES: usize = 16 * 1024 * 1024;
+const MIN_COLUMNS: u16 = 40;
+const MIN_ROWS: u16 = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
@@ -87,6 +89,11 @@ enum DeleteKind {
 }
 
 enum Modal {
+    Target {
+        label: String,
+        target: String,
+        offset: usize,
+    },
     Help {
         scroll: usize,
     },
@@ -103,6 +110,7 @@ enum Modal {
         entry: Option<EntryRef>,
         group: Option<GroupRef>,
         input: Zeroizing<String>,
+        offset: usize,
     },
 }
 
@@ -178,6 +186,7 @@ struct App {
     tree_stack: Vec<GroupRef>,
     tree_cursor: Option<TreeCursor>,
     list_cursor: Option<ListCursor>,
+    page_failure: Option<String>,
     selected: usize,
     query: Zeroizing<String>,
     query_before_input: Zeroizing<String>,
@@ -199,6 +208,7 @@ struct App {
     dirty: bool,
     pending_decision: Option<PendingDecision>,
     attachment_selected: usize,
+    action_target: Option<AttachmentTarget>,
     field_to_reveal: Zeroizing<String>,
     generation_size: usize,
     clipboard: ClipboardLease<ArboardAdapter>,
@@ -206,6 +216,12 @@ struct App {
     include_groups: bool,
     aliases: Vec<String>,
     modal: Option<Modal>,
+}
+
+#[derive(Clone)]
+struct AttachmentTarget {
+    label: String,
+    name: String,
 }
 
 fn clear_input(input: &mut Zeroizing<String>) {
@@ -371,9 +387,71 @@ fn bounded_read(path: &Path, limit: usize) -> io::Result<Zeroizing<Vec<u8>>> {
 fn begin_action(app: &mut App, action: Action, prompt: &str) {
     app.clear_reveal();
     app.action = action;
+    app.action_target = None;
     app.input_mode = true;
     clear_input(&mut app.input);
     prompt.clone_into(&mut app.status);
+}
+
+fn selected_attachment(app: &App) -> Option<AttachmentTarget> {
+    let items = app.service.attachment_metadata(app.entry.as_ref()?).ok()?;
+    let item = items.get(app.attachment_selected)?;
+    Some(AttachmentTarget {
+        label: format!("Attachment {}/{}", app.attachment_selected + 1, items.len()),
+        name: item.name().to_owned(),
+    })
+}
+
+fn begin_attachment_action(app: &mut App, action: Action) {
+    let Some(target) = selected_attachment(app) else {
+        app.status = "No attachment selected".into();
+        return;
+    };
+    let instruction = if action == Action::ExportAttachment {
+        "Export to a NEW owner-only path; no overwrite. Destination:"
+    } else {
+        "Remove this attachment? Type YES to confirm."
+    };
+    begin_action(
+        app,
+        action,
+        &format!("{}\n{instruction}\nF2 inspect full target", target.label),
+    );
+    app.action_target = Some(target);
+}
+
+fn inspect_attachment(app: &mut App) {
+    let target = if app.input_mode {
+        app.action_target.clone()
+    } else {
+        selected_attachment(app)
+    };
+    let Some(target) = target else {
+        app.status = "No attachment selected".into();
+        return;
+    };
+    app.clear_reveal();
+    app.modal = Some(Modal::Target {
+        label: target.label,
+        target: target.name,
+        offset: 0,
+    });
+}
+
+// Offset is in sanitized Unicode characters, not bytes or terminal columns.
+// Keep a final 32-character window so colliding prefixes can be distinguished
+// even on the minimum-size terminal.
+fn move_target_offset(offset: usize, target: &str, key: KeyCode) -> usize {
+    let end = clean(target).chars().count().saturating_sub(32);
+    match key {
+        KeyCode::Left | KeyCode::Up => offset.saturating_sub(1),
+        KeyCode::Right | KeyCode::Down => offset.saturating_add(1).min(end),
+        KeyCode::PageUp => offset.saturating_sub(32),
+        KeyCode::PageDown => offset.saturating_add(32).min(end),
+        KeyCode::Home => 0,
+        KeyCode::End => end,
+        _ => offset,
+    }
 }
 
 fn selected_group(app: &App) -> Option<GroupRef> {
@@ -404,10 +482,15 @@ fn begin_delete_entry(app: &mut App) {
     let path = selected.map_or_else(|| "selected entry".to_owned(), |hit| hit.path().to_owned());
     app.modal = Some(Modal::ConfirmDelete {
         kind: DeleteKind::Entry,
-        path,
+        path: format!(
+            "Entry row {}/{}: {path}",
+            app.selected + 1,
+            app.visible_row_count()
+        ),
         entry: Some(reference),
         group: None,
         input: Zeroizing::new(String::new()),
+        offset: 0,
     });
 }
 
@@ -426,10 +509,16 @@ fn begin_delete_group(app: &mut App) {
     };
     app.modal = Some(Modal::ConfirmDelete {
         kind: DeleteKind::Group,
-        path: group.path.clone(),
+        path: format!(
+            "Group row {}/{}: {}",
+            app.selected + 1,
+            app.visible_row_count(),
+            group.path
+        ),
         entry: None,
         group: Some(reference),
         input: Zeroizing::new(String::new()),
+        offset: 0,
     });
 }
 
@@ -501,6 +590,20 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
         return;
     };
     match modal {
+        Modal::Target {
+            label,
+            target,
+            offset,
+        } => {
+            if !matches!(key, KeyCode::Esc | KeyCode::Enter | KeyCode::F(2)) {
+                let offset = move_target_offset(offset, &target, key);
+                app.modal = Some(Modal::Target {
+                    label,
+                    target,
+                    offset,
+                });
+            }
+        }
         Modal::Help { mut scroll } => match key {
             KeyCode::Esc => {}
             KeyCode::Up | KeyCode::Char('k') => {
@@ -565,6 +668,7 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
             entry,
             group,
             mut input,
+            offset,
         } => match key {
             KeyCode::Esc => {
                 clear_input(&mut input);
@@ -581,6 +685,7 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
                     entry,
                     group,
                     input,
+                    offset,
                 });
             }
             KeyCode::Char(value) if input.len() < 3 && value.is_ascii_alphabetic() => {
@@ -591,6 +696,7 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
                     entry,
                     group,
                     input,
+                    offset,
                 });
             }
             KeyCode::Enter if deletion_confirmed(&input) => {
@@ -602,12 +708,14 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
                 app.status = "Deletion not confirmed".into();
             }
             _ => {
+                let offset = move_target_offset(offset, &path, key);
                 app.modal = Some(Modal::ConfirmDelete {
                     kind,
                     path,
                     entry,
                     group,
                     input,
+                    offset,
                 });
             }
         },
@@ -889,6 +997,31 @@ fn deletion_confirmed(input: &str) -> bool {
 }
 
 impl App {
+    fn move_attachment(&mut self, forward: bool) {
+        let Some(reference) = &self.entry else { return };
+        let Ok(items) = self.service.attachment_metadata(reference) else {
+            self.status = "Cannot list attachments".into();
+            return;
+        };
+        if items.is_empty() {
+            self.attachment_selected = 0;
+            self.status = "No attachment selected".into();
+            return;
+        }
+        self.attachment_selected = if forward {
+            self.attachment_selected.saturating_add(1)
+        } else {
+            self.attachment_selected.saturating_sub(1)
+        }
+        .min(items.len() - 1);
+        self.status = format!(
+            "Selected attachment {}/{}: {} · x export · n/p select",
+            self.attachment_selected + 1,
+            items.len(),
+            clean(items[self.attachment_selected].name())
+        );
+    }
+
     fn visible_row_count(&self) -> usize {
         self.groups.len().saturating_add(self.hits.len())
     }
@@ -915,6 +1048,7 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        self.page_failure = None;
         if let Some(cursor) = self.tree_cursor.take() {
             let _ = self.service.release_tree_cursor(cursor);
         }
@@ -983,7 +1117,7 @@ impl App {
             }
             Err(error) => {
                 self.hits.clear();
-                self.status = clean(error.message());
+                self.record_page_failure(error);
             }
         }
     }
@@ -999,9 +1133,11 @@ impl App {
 
     fn next_page(&mut self) {
         self.clear_reveal();
-        self.hits.clear();
+        if let Some(message) = &self.page_failure {
+            self.status.clone_from(message);
+            return;
+        }
         let page = if self.query.is_empty() {
-            self.groups.clear();
             self.tree_cursor
                 .take()
                 .map(|cursor| self.service.tree_page(&self.tree_parent, Some(cursor)))
@@ -1058,8 +1194,18 @@ impl App {
                 );
             }
             Ok(None) => self.status = "No more entries".into(),
-            Err(error) => self.status = clean(error.message()),
+            Err(error) => self.record_page_failure(error),
         }
+    }
+
+    fn record_page_failure(&mut self, error: nkeepass::ServiceError) {
+        // Continuations are consumed even on error. Do not mistake an absent
+        // cursor for exhaustion or restart and silently duplicate earlier rows.
+        self.status = format!(
+            "Page failed. Use / then Enter to restart; q quits. Cause: {}",
+            clean(error.message())
+        );
+        self.page_failure = Some(self.status.clone());
     }
 
     fn select(&mut self) {
@@ -1122,19 +1268,6 @@ impl App {
                     .collect();
                 self.selected_field = self.selected_field.min(self.fields.len().saturating_sub(1));
                 self.detail.push("Attachments:".to_owned());
-                self.detail
-                    .extend(view.attachments().iter().enumerate().map(|(index, a)| {
-                        format!(
-                            "{} {} ({} bytes)",
-                            if index == self.attachment_selected {
-                                ">"
-                            } else {
-                                " "
-                            },
-                            clean(a.name()),
-                            a.size()
-                        )
-                    }));
                 self.entry = Some(reference);
                 self.status = "↑/↓ select field · e edit value · r reveal password for 15s · s save · Esc back".into();
             }
@@ -1209,6 +1342,7 @@ impl App {
         self.input_mode = false;
         self.edit_mode = false;
         self.pending_group = None;
+        self.action_target = None;
         self.modal = None;
         self.action = Action::Query;
         if let Some(cursor) = self.tree_cursor.take() {
@@ -1235,13 +1369,21 @@ impl App {
     reason = "keeps the compact two-pane Ratatui projection together"
 )]
 fn draw(frame: &mut Frame<'_>, app: &App) {
+    if !usable_size(frame.area()) {
+        frame.render_widget(
+            Paragraph::new("Resize terminal to at least 40 columns by 12 rows. Input paused.")
+                .wrap(Wrap { trim: false }),
+            frame.area(),
+        );
+        return;
+    }
     let reveal_render = app.reveal.as_deref().map(|value| clean_secret(value));
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(5),
         ])
         .split(frame.area());
     let body = Layout::default()
@@ -1337,6 +1479,23 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                         }),
                 );
             }
+            if line == "Attachments:"
+                && let Some(reference) = &app.entry
+                && let Ok(items) = app.service.attachment_metadata(reference)
+            {
+                rows.extend(items.iter().enumerate().map(|(index, item)| {
+                    Line::from(format!(
+                        "{} {} ({} bytes)",
+                        if index == app.attachment_selected {
+                            ">"
+                        } else {
+                            " "
+                        },
+                        clean(item.name()),
+                        item.size()
+                    ))
+                }));
+            }
             rows
         })
         .collect::<Vec<_>>();
@@ -1390,12 +1549,85 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         body[1],
     );
     frame.render_widget(
-        Paragraph::new(clean(&app.status)).block(Block::default().borders(Borders::TOP)),
+        Paragraph::new(clean(&app.status)).wrap(Wrap { trim: false }),
         areas[2],
     );
-    if let Some(modal) = &app.modal {
+    if app.pending_decision.is_some() {
+        draw_action_dialog(
+            frame,
+            "Unsaved changes",
+            &app.status,
+            "",
+            "s save · d discard · c cancel",
+        );
+    } else if let Some(modal @ Modal::Target { .. }) = &app.modal {
+        draw_modal(frame, modal, &app.aliases);
+    } else if app.input_mode && app.action != Action::Query {
+        let input = if app.edit_mode {
+            "•".repeat(app.input.chars().count().min(64))
+        } else {
+            clean(&app.input)
+        };
+        draw_action_dialog(
+            frame,
+            "Action",
+            &app.status,
+            &input,
+            "Enter submit · Esc cancel",
+        );
+    } else if !app.locked
+        && let Some(value) = reveal_render.as_deref()
+    {
+        let area = frame.area();
+        frame.render_widget(Clear, area);
+        let block = Block::default()
+            .title("REVEALED (15s maximum)")
+            .borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let chunks = Layout::vertical([Constraint::Length(4), Constraint::Min(1)]).split(inner);
+        frame.render_widget(
+            Paragraph::new(
+                "WARNING: terminal scrollback and screenshots persist. Esc hides the value.",
+            )
+            .wrap(Wrap { trim: false }),
+            chunks[0],
+        );
+        frame.render_widget(
+            Paragraph::new(value.as_str()).wrap(Wrap { trim: false }),
+            chunks[1],
+        );
+    } else if let Some(modal) = &app.modal {
         draw_modal(frame, modal, &app.aliases);
     }
+}
+
+fn usable_size(area: Rect) -> bool {
+    area.width >= MIN_COLUMNS && area.height >= MIN_ROWS
+}
+
+fn draw_action_dialog(frame: &mut Frame<'_>, title: &str, prompt: &str, input: &str, keys: &str) {
+    // Full width and separate control rows keep confirmation text visible on
+    // narrow terminals even when metadata or the input is very long.
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    let prompt = prompt.lines().map(clean).collect::<Vec<_>>().join("\n");
+    frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), chunks[0]);
+    let tail: String = input.chars().rev().take(usize::from(inner.width)).collect();
+    frame.render_widget(
+        Paragraph::new(tail.chars().rev().collect::<String>()),
+        chunks[1],
+    );
+    frame.render_widget(Paragraph::new(keys).wrap(Wrap { trim: false }), chunks[2]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1437,7 +1669,8 @@ fn help_lines() -> Vec<Line<'static>> {
         "Entry view:",
         "  e edit selected field · r reveal password · v reveal selected field",
         "  c copy password · t reveal TOTP · g generate password (entry view)",
-        "  a add attachment · x export attachment · d remove attachment",
+        "  a add attachment · x export selected · d remove selected (type YES)",
+        "  F2 inspect full attachment name; arrows/PgUp/PgDn/Home/End pan target",
         "  o export interchange · i import interchange · s save",
         "  Esc/Enter back to tree · n/p select attachment",
         "Palette/help/aliases: Up/Down or j/k scroll; Esc closes",
@@ -1456,6 +1689,19 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
     let area = centered_rect(78, 78, frame.area());
     frame.render_widget(Clear, area);
     match modal {
+        Modal::Target {
+            label,
+            target,
+            offset,
+        } => draw_target_dialog(
+            frame,
+            "Inspect target",
+            label,
+            target,
+            *offset,
+            "",
+            "Arrows/PgUp/PgDn inspect full target\nHome/End · Enter/Esc back",
+        ),
         Modal::Help { scroll } => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -1534,29 +1780,67 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
             );
         }
         Modal::ConfirmDelete {
-            kind, path, input, ..
+            kind,
+            path,
+            input,
+            offset,
+            ..
         } => {
             let label = match kind {
                 DeleteKind::Entry => "entry",
                 DeleteKind::Group => "group and all its contents",
             };
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(format!("Remove {label}?")),
-                    Line::from(clean(path)),
-                    Line::from("Type YES and press Enter to confirm; Esc cancels."),
-                    Line::from(format!("Confirmation: {}", clean(input))),
-                ])
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .title("Confirm deletion")
-                        .borders(Borders::ALL),
+            draw_target_dialog(
+                frame,
+                "Confirm deletion",
+                &format!(
+                    "{}\nRemove {label}?\nType YES to confirm.",
+                    path.split_once(": ")
+                        .map_or("Selected target", |(label, _)| label)
                 ),
-                area,
+                path,
+                *offset,
+                &clean(input),
+                "Arrows/PgUp/PgDn inspect full target\nHome/End · Enter delete · Esc cancel",
             );
         }
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "private target projection shared by inspection and confirmation"
+)]
+fn draw_target_dialog(
+    frame: &mut Frame<'_>,
+    title: &str,
+    prompt: &str,
+    target: &str,
+    offset: usize,
+    input: &str,
+    keys: &str,
+) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+    ])
+    .split(inner);
+    let prompt = prompt.lines().map(clean).collect::<Vec<_>>().join("\n");
+    frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), chunks[0]);
+    let visible: String = clean(target).chars().skip(offset).collect();
+    frame.render_widget(
+        Paragraph::new(visible).wrap(Wrap { trim: false }),
+        chunks[1],
+    );
+    frame.render_widget(Paragraph::new(clean(input)), chunks[2]);
+    frame.render_widget(Paragraph::new(keys).wrap(Wrap { trim: false }), chunks[3]);
 }
 
 #[allow(
@@ -1573,6 +1857,9 @@ fn run_ui(
     loop {
         let was_revealed = reveal_was_drawn;
         app.tick();
+        if !usable_size(terminal.size()?.into()) {
+            app.clear_reveal();
+        }
         if was_revealed && app.reveal.is_none() {
             // Drop Ratatui's retained frame/cell contents and repaint the screen.
             // This does not erase terminal-emulator scrollback or screenshots.
@@ -1588,6 +1875,7 @@ fn run_ui(
             app.clear_reveal();
             app.modal = None;
             app.pending_group = None;
+            app.action_target = None;
             let query_was_active = app.input_mode && app.action == Action::Query;
             handle_focus_lost(
                 &mut app.input_mode,
@@ -1601,6 +1889,10 @@ fn run_ui(
             continue;
         }
         let Event::Key(key) = event else { continue };
+        if !usable_size(terminal.size()?.into()) {
+            app.clear_reveal();
+            continue;
+        }
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -1608,6 +1900,16 @@ fn run_ui(
         if app.locked {
             if key.code == KeyCode::Char('q') {
                 break;
+            }
+            continue;
+        }
+        // Disclosure owns focus: other interactions must not open invisibly
+        // behind it and consume the one Escape needed to hide the value.
+        if app.reveal.is_some() {
+            app.modal = None;
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                app.clear_reveal();
+                app.status = "Revealed value hidden".into();
             }
             continue;
         }
@@ -1688,6 +1990,13 @@ fn run_ui(
             handle_modal_key(app, key.code);
             continue;
         }
+        if key.code == KeyCode::F(2)
+            && app.entry.is_some()
+            && (!app.input_mode || app.action_target.is_some())
+        {
+            inspect_attachment(app);
+            continue;
+        }
         if !app.input_mode
             && key.code == KeyCode::Char('p')
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1705,6 +2014,7 @@ fn run_ui(
         if app.input_mode {
             match key.code {
                 KeyCode::Esc => {
+                    app.action_target = None;
                     if app.action == Action::Query {
                         cancel_live_query(
                             &mut app.query,
@@ -1796,6 +2106,9 @@ fn run_ui(
                                     Action::GenerateConfirm,
                                     "This replaces the current password. Type YES to confirm; any other input cancels.",
                                 );
+                                // A transition to another input action must not
+                                // fall through the common input_mode cleanup.
+                                continue;
                             }
                             _ => app.status = "Password size must be 1..=4096".into(),
                         },
@@ -1809,12 +2122,12 @@ fn run_ui(
                                         Ok(()) => {
                                             app.dirty = true;
                                             app.reset_tree_after_mutation();
-                                            app.status =
-                                                "Password replaced in memory; save to persist"
-                                                    .into();
                                             app.entry = None;
                                             app.detail.clear();
                                             app.refresh();
+                                            app.status =
+                                                "Password replaced in memory; save to persist"
+                                                    .into();
                                         }
                                         Err(error) => app.status = clean(error.message()),
                                     }
@@ -1825,7 +2138,15 @@ fn run_ui(
                         }
                         Action::AddAttachment => attachment_add(app, &value),
                         Action::ExportAttachment => attachment_export(app, &value),
-                        Action::RemoveAttachment => attachment_remove(app, &value),
+                        Action::RemoveAttachment => {
+                            if value.as_str() == "YES" {
+                                if let Some(target) = app.action_target.take() {
+                                    attachment_remove(app, &target.name);
+                                }
+                            } else {
+                                app.status = "Attachment removal cancelled".into();
+                            }
+                        }
                         Action::AddGroup | Action::AddEntry => {
                             create_group_or_entry(app, app.action, &value);
                             app.pending_group = None;
@@ -1848,6 +2169,7 @@ fn run_ui(
                     clear_input(&mut app.input);
                     app.input_mode = false;
                     app.edit_mode = false;
+                    app.action_target = None;
                 }
                 KeyCode::Enter => {
                     app.query.zeroize();
@@ -2013,16 +2335,8 @@ fn run_ui(
                     Action::AddAttachment,
                     "Add attachment as name=source-path (bounded to 16 MiB)",
                 ),
-                KeyCode::Char('x') => begin_action(
-                    app,
-                    Action::ExportAttachment,
-                    "Export selected attachment to a NEW owner-only path; no overwrite. Enter destination.",
-                ),
-                KeyCode::Char('d') => begin_action(
-                    app,
-                    Action::RemoveAttachment,
-                    "Enter exact attachment name to remove",
-                ),
+                KeyCode::Char('x') => begin_attachment_action(app, Action::ExportAttachment),
+                KeyCode::Char('d') => begin_attachment_action(app, Action::RemoveAttachment),
                 KeyCode::Char('o') => begin_action(
                     app,
                     Action::ExportInterchange,
@@ -2033,24 +2347,8 @@ fn run_ui(
                     Action::ImportInterchange,
                     "Import interchange from path (max 16 MiB); existing non-empty vaults are refused.",
                 ),
-                KeyCode::Char('n') => {
-                    if let Some(reference) = &app.entry
-                        && let Ok(items) = app.service.attachment_metadata(reference)
-                    {
-                        app.attachment_selected = app
-                            .attachment_selected
-                            .saturating_add(1)
-                            .min(items.len().saturating_sub(1));
-                        app.status = format!(
-                            "Selected attachment {}/{}",
-                            app.attachment_selected + 1,
-                            items.len()
-                        );
-                    }
-                }
-                KeyCode::Char('p') => {
-                    app.attachment_selected = app.attachment_selected.saturating_sub(1);
-                }
+                KeyCode::Char('n') => app.move_attachment(true),
+                KeyCode::Char('p') => app.move_attachment(false),
                 KeyCode::Down | KeyCode::Char('j') => {
                     move_field_selection(&mut app.selected_field, app.fields.len(), true);
                 }
@@ -2091,10 +2389,29 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
     let session = service
         .open(path, &mut credentials, &KDBX_LIMITS)
         .map_err(|_| io::Error::other("cannot unlock vault"))?;
+    let mut app = new_app(service, session, aliases)?;
+    app.refresh();
+    let result = ratatui::run(|terminal| run_ui(terminal, &mut app, &mut credentials, path));
+    app.clear_reveal();
+    app.query.zeroize();
+    app.query_before_input.zeroize();
+    clear_input(&mut app.input);
+    clear_input(&mut app.field_to_reveal);
+    app.edit_field.clear();
+    let _ = app.clipboard.release();
+    let _ = app.service.lock(app.session);
+    result
+}
+
+fn new_app(
+    service: VaultService,
+    session: nkeepass::SessionId,
+    aliases: Vec<String>,
+) -> io::Result<App> {
     let tree_parent = service
         .root_group(session)
         .map_err(|_| io::Error::other("cannot read vault root"))?;
-    let mut app = App {
+    Ok(App {
         service,
         session,
         hits: Vec::new(),
@@ -2103,6 +2420,7 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
         tree_stack: Vec::new(),
         tree_cursor: None,
         list_cursor: None,
+        page_failure: None,
         selected: 0,
         query: Zeroizing::new(String::new()),
         query_before_input: Zeroizing::new(String::new()),
@@ -2124,6 +2442,7 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
         dirty: false,
         pending_decision: None,
         attachment_selected: 0,
+        action_target: None,
         field_to_reveal: Zeroizing::new(String::new()),
         generation_size: 32,
         clipboard: ClipboardLease::new(ArboardAdapter::default(), CLIPBOARD_TTL),
@@ -2131,23 +2450,243 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
         include_groups: true,
         aliases,
         modal: None,
-    };
-    app.refresh();
-    let result = ratatui::run(|terminal| run_ui(terminal, &mut app, &mut credentials, path));
-    app.clear_reveal();
-    app.query.zeroize();
-    app.query_before_input.zeroize();
-    clear_input(&mut app.input);
-    clear_input(&mut app.field_to_reveal);
-    app.edit_field.clear();
-    let _ = app.clipboard.release();
-    let _ = app.service.lock(app.session);
-    result
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::clean;
+
+    // Private projection branches need exact cells, not an escape-sequence transcript.
+    #[allow(clippy::unwrap_used, reason = "disposable UI fixture")]
+    fn app_fixture() -> (tempfile::TempDir, super::App) {
+        use neotales_keepass::{
+            Attachment, Entry, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions,
+            KeePassDatabase,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.kdbx");
+        let mut database = KeePassDatabase::default();
+        let mut entry = Entry::new("Example");
+        for (name, bytes) in [("first.bin", b"first"), ("second.bin", b"other")] {
+            let reference = database.binary_pool.add(bytes.to_vec(), true);
+            entry.attachments.push(Attachment {
+                name: name.into(),
+                reference,
+            });
+        }
+        database.root.entries.push(entry);
+        let mut credentials = KdbxCredentials::password("disposable-tui-fixture").unwrap();
+        KdbxFile::save(
+            &database,
+            std::fs::File::create(&path).unwrap(),
+            &mut credentials,
+            KdbxWriteOptions {
+                aes_kdf_rounds: 8,
+                ..KdbxWriteOptions::default()
+            },
+            &KdbxReadLimits::default(),
+        )
+        .unwrap();
+        let mut service = nkeepass::VaultService::default();
+        let session = service
+            .open(&path, &mut credentials, &nkeepass::KDBX_LIMITS)
+            .unwrap();
+        let mut app = super::new_app(service, session, Vec::new()).unwrap();
+        app.refresh();
+        (directory, app)
+    }
+
+    #[allow(clippy::unwrap_used, reason = "in-memory test renderer must succeed")]
+    fn screen(app: &super::App, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| super::draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn status_warning_and_action_confirmation_are_visible_at_narrow_size() {
+        let (_directory, mut app) = app_fixture();
+        app.status = "Clipboard expiry could not safely clear it; it may still contain the password. Clear it manually.".into();
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Clipboard expiry"));
+        assert!(text.contains("Clear it manually."));
+        super::begin_action(
+            &mut app,
+            super::Action::PasswordReveal,
+            "Reveal password? Type YES. WARNING: terminal scrollback and screenshots may retain it; shown for 15s.",
+        );
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Type YES."));
+        assert!(text.contains("WARNING:"));
+        assert!(text.contains("Esc cancel"));
+        app.input_mode = false;
+        app.pending_decision = Some(super::PendingDecision::Exit);
+        app.status = "Save failed: cannot save vault.".into();
+        let text = screen(&app, 40, 12);
+        for expected in ["Save failed:", "s save", "d discard", "c cancel"] {
+            assert!(text.contains(expected));
+        }
+        app.pending_decision = Some(super::PendingDecision::Lock);
+        app.status = "Idle lock requested. Unsaved changes: s save · d discard · c cancel".into();
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Idle lock requested."));
+        assert!(text.contains("d discard"));
+        app.pending_decision = None;
+        app.clipboard_may_contain_password = true;
+        app.lock_vault();
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Vault locked; clipboard"));
+        assert!(text.contains("Press q to exit."));
+    }
+
+    #[test]
+    fn last_tree_and_filter_pages_remain_visible_without_a_next_cursor() {
+        let (_directory, mut app) = app_fixture();
+        assert_eq!(app.hits.len(), 1);
+        app.next_page();
+        assert_eq!(app.hits.len(), 1);
+        app.query.push('*');
+        app.refresh();
+        assert_eq!(app.hits.len(), 1);
+        app.next_page();
+        assert_eq!(app.hits.len(), 1);
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "private continuation failure with disposable data"
+    )]
+    fn failed_continuations_retain_rows_and_error_until_explicit_restart() {
+        for filtered in [false, true] {
+            let (_directory, mut app) = app_fixture();
+            let path = app.service.group_path(&app.tree_parent).unwrap();
+            for index in 0..if filtered { 350 } else { 130 } {
+                let title = if filtered {
+                    format!("row-{index}-{}", "x".repeat(3500))
+                } else {
+                    format!("row-{index}")
+                };
+                app.service
+                    .ensure_entry(app.session, &format!("{path}/{title}"), None, false)
+                    .unwrap();
+            }
+            if filtered {
+                app.query.push('*');
+            }
+            app.refresh();
+            assert!(if filtered {
+                app.list_cursor.is_some()
+            } else {
+                app.tree_cursor.is_some()
+            });
+            let rows = app.hits.len();
+            app.service
+                .ensure_entry(
+                    app.session,
+                    &format!("{path}/invalidate-continuation"),
+                    None,
+                    false,
+                )
+                .unwrap();
+            app.next_page();
+            let failure = app.status.clone();
+            assert!(failure.contains("restart"));
+            app.status = "unrelated status".into();
+            app.next_page();
+            assert_eq!(app.status, failure);
+            assert_eq!(app.hits.len(), rows);
+            app.refresh();
+            assert!(app.page_failure.is_none()); // Explicit refresh rebases stale handles.
+        }
+    }
+
+    #[test]
+    fn deletion_and_reveal_warnings_survive_long_metadata_and_small_screens() {
+        let (_directory, mut app) = app_fixture();
+        app.modal = Some(super::Modal::ConfirmDelete {
+            kind: super::DeleteKind::Group,
+            path: format!("Group row 2/2: {}TAIL", "long-target".repeat(200)),
+            entry: None,
+            group: None,
+            input: zeroize::Zeroizing::new(String::new()),
+            offset: 0,
+        });
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Type YES"));
+        assert!(text.contains("Esc cancel"));
+        super::handle_modal_key(&mut app, super::KeyCode::End);
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("TAIL"));
+        assert!(text.contains("Group row 2/2"));
+        app.modal = None;
+        app.reveal = Some(zeroize::Zeroizing::new("disposable-render-marker".into()));
+        app.detail = vec!["metadata".into(); 100];
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("WARNING:"));
+        assert!(text.contains("disposable-render-marker"));
+        let text = screen(&app, 30, 8);
+        assert!(text.contains("Resize terminal"));
+        assert!(!text.contains("disposable-render-marker"));
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "private attachment projection and disposable export"
+    )]
+    fn attachment_marker_and_action_target_follow_live_selection() {
+        let (directory, mut app) = app_fixture();
+        app.select();
+        app.move_attachment(true);
+        let text = screen(&app, 120, 40);
+        assert!(text.contains("> second.bin"));
+        assert!(!text.contains("> first.bin"));
+        super::begin_attachment_action(&mut app, super::Action::ExportAttachment);
+        super::inspect_attachment(&mut app);
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Attachment 2/2"));
+        assert!(text.contains("second.bin"));
+        super::handle_modal_key(&mut app, super::KeyCode::Esc);
+        assert!(app.input_mode);
+        let destination = directory.path().join("export.bin");
+        super::attachment_export(&mut app, destination.to_str().unwrap());
+        let selected_bytes_match = std::fs::read(destination).unwrap() == b"other";
+        assert!(
+            selected_bytes_match,
+            "export did not match the marked target"
+        );
+        app.input_mode = false;
+        app.move_attachment(false);
+        let text = screen(&app, 120, 40);
+        assert!(text.contains("> first.bin"));
+        assert!(!text.contains("> second.bin"));
+    }
+
+    #[test]
+    fn target_offsets_use_sanitized_characters_and_reach_distinct_suffixes() {
+        let target = format!("{}SECOND.bin\u{1b}", "界".repeat(100));
+        let end = super::move_target_offset(0, &target, super::KeyCode::End);
+        let tail: String = clean(&target).chars().skip(end).collect();
+        assert!(tail.ends_with("SECOND.bin\\u{1b}"));
+        assert_eq!(tail.chars().count(), 32);
+        assert_eq!(
+            super::move_target_offset(end, &target, super::KeyCode::Right),
+            end
+        );
+        assert_eq!(
+            super::move_target_offset(end, &target, super::KeyCode::Home),
+            0
+        );
+    }
 
     #[test]
     fn path_filter_globs_group_paths_and_can_hide_groups() {

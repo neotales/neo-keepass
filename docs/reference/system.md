@@ -16,6 +16,24 @@ selection; pass the path to the vault you want to open. The global `--vault`
 flag is accepted before `tui` but does not replace the required positional
 path.
 
+The UI pauses key handling below 40 columns by 12 rows. Revealed values own
+focus: Esc or Enter hides them; unrelated keys do not open hidden dialogs.
+Generating a replacement password requires a length followed by a separate
+`YES` confirmation. Save explicitly to persist changes.
+
+In entry view, `n`/`p` selects an attachment and updates its live marker.
+Export and removal identify the selected index; removal requires `YES`.
+Use F2 before submitting either action to inspect the full attachment name.
+Arrows, PgUp/PgDn, and Home/End pan long targets; Esc returns to the action.
+Entry/group deletion dialogs also show the row index and allow full-target
+inspection with those navigation keys. Failed page continuations retain their
+last rows and error; `/` then Enter explicitly restarts the traversal.
+
+These UI safeguards do not establish terminal admission or signal safety.
+Split-terminal/Crossterm input identity and signal/input-boundary risks remain
+unresolved. Startup behavior, including Windows startup, is unchanged; the
+UI PTY checks have been run on Linux, not Windows or macOS.
+
 ## `config`
 
 ### `config ls`

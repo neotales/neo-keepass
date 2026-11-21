@@ -1,0 +1,236 @@
+"""UI-only PTY checks. Never print captured terminal data or OS error details."""
+import codecs
+import errno
+import fcntl
+import os
+import pty
+import re
+import select
+import struct
+import subprocess
+import sys
+import termios
+import time
+
+
+class Screen:
+    """Cursor/erase CSI subset emitted by the pinned Crossterm backend."""
+    def __init__(self, reply):
+        self.cells = [[" "] * 40 for _ in range(12)]
+        self.x = self.y = 0
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.pending = ""
+        self.reply = reply
+
+    def feed(self, chunk):
+        self.pending += self.decoder.decode(chunk)
+        while self.pending:
+            if self.pending.startswith("\x1b"):
+                match = re.match(r"\x1b\[([0-9;?]*)([@-~])", self.pending)
+                if not match:
+                    return
+                parameters, command = match.groups()
+                self.pending = self.pending[match.end():]
+                values = [int(v) if v else 1 for v in parameters.lstrip("?").split(";")]
+                if command in ("H", "f"):
+                    self.y = max(0, min(11, values[0] - 1))
+                    self.x = max(0, min(39, (values[1] if len(values) > 1 else 1) - 1))
+                elif command == "J" or (command == "h" and parameters == "?1049"):
+                    self.cells = [[" "] * 40 for _ in range(12)]
+                elif command == "K":
+                    self.cells[self.y][self.x:] = [" "] * (40 - self.x)
+                elif command == "n" and parameters == "6":
+                    self.reply(("\x1b[%d;%dR" % (self.y + 1, self.x + 1)).encode("ascii"))
+                continue
+            character = self.pending[0]
+            self.pending = self.pending[1:]
+            if character == "\r":
+                self.x = 0
+            elif character == "\n":
+                self.y = min(11, self.y + 1)
+            elif character >= " ":
+                self.cells[self.y][self.x] = character
+                self.x = min(39, self.x + 1)
+
+    def text(self):
+        return "\n".join("".join(row) for row in self.cells)
+
+
+def check(value, label):
+    if not value:
+        raise AssertionError(label)
+
+
+def run(binary, vault, mode):
+    master, slave = pty.openpty()
+    process = None
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
+    initial_attributes = termios.tcgetattr(slave)
+
+    def session():
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+    transcript = bytearray()
+    screen = Screen(lambda response: os.write(master, response))
+    deadline = time.monotonic() + 20
+    state = "startup"
+
+    def pump():
+        check(time.monotonic() < deadline, "PTY deadline: " + mode + " / " + state)
+        if select.select([master], [], [], 0.03)[0]:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                chunk = b""
+            transcript.extend(chunk)
+            screen.feed(chunk)
+
+    def wait_for(text, absent=False, within=None):
+        nonlocal state
+        state = ("hide " if absent else "show ") + text
+        local_deadline = deadline if within is None else time.monotonic() + within
+        while (text in screen.text()) == absent:
+            check(time.monotonic() < local_deadline, "UI response deadline: " + mode + " / " + state)
+            check(process.poll() is None, "PTY exited: " + mode + " / " + state)
+            pump()
+
+    def send(keys):
+        os.write(master, keys)
+
+    try:
+        process = subprocess.Popen(
+            [binary, "tui", vault], stdin=slave, stdout=slave, stderr=slave,
+            env=dict(os.environ, TERM="xterm-256color"), preexec_fn=session,
+            close_fds=True, cwd=os.path.dirname(vault),
+        )
+        wait_for("Vault password: ")
+        while termios.tcgetattr(slave)[3] & termios.ECHO:
+            pump()
+        send(b"disposable-tui-fixture\n")
+        wait_for("Example")
+        if mode == "save-failure":
+            send(b"e")
+            wait_for("New entry title")
+            send(b"Temporary\r")
+            wait_for("Entry added in memory")
+            send(b"q")
+            wait_for("Unsaved changes")
+            backup = vault + ".saved"
+            os.rename(vault, backup)
+            os.mkdir(vault)
+            try:
+                send(b"s")
+                wait_for("Save failed:")
+                wait_for("s save")
+                wait_for("c cancel")
+            finally:
+                os.rmdir(vault)
+                os.rename(backup, vault)
+            send(b"d")
+        else:
+            send(b"\r")
+            wait_for("Title: Example")
+            if mode == "reveal":
+                send(b"r")
+                wait_for("Type YES.")
+                send(b"YES\r")
+                wait_for("disposable-reveal-marker")
+                send(b"?")
+                pump()
+                send(b"\x1b")
+                # Must hide because of this Escape, not the 15-second TTL.
+                wait_for("disposable-reveal-marker", absent=True, within=2)
+                wait_for("REVEALED", absent=True, within=2)
+            elif mode.startswith("generation-"):
+                send(b"g")
+                wait_for("password length")
+                send(b"32\r")
+                wait_for("This replaces the current password.")
+                wait_for("Enter submit")
+                send(b"NO\r" if mode.endswith("cancel") else b"YES\r")
+                if mode.endswith("cancel"):
+                    wait_for("Password generation cancelled")
+                else:
+                    wait_for("Password replaced in memory")
+                    send(b"s")
+                    wait_for("Saved")
+            elif mode == "remove-confirm":
+                send(b"n")
+                wait_for("Selected attachment 2/2")
+                send(b"d")
+                wait_for("Attachment 2/2")
+                wait_for("Type YES")
+                send(b"\x1b[12~")
+                wait_for("Inspect target")
+                send(b"\x1b[F")
+                wait_for("SECOND.bin")
+                send(b"\x1b")
+                wait_for("Remove this attachment?")
+                send(b"YES\r")
+                wait_for("Attachment removed")
+                send(b"s")
+                wait_for("Saved")
+            elif mode == "targets":
+                send(b"n")
+                wait_for("Selected attachment 2/2")
+                send(b"x")
+                wait_for("Attachment 2/2")
+                wait_for("F2 inspect full target")
+                send(b"\x1b[12~")
+                wait_for("Inspect target")
+                send(b"\x1b[F")
+                wait_for("SECOND.bin")
+                send(b"\x1b")
+                wait_for("Destination")
+                send(b"selected.bin\r")
+                wait_for("Attachment exported")
+                send(b"d")
+                wait_for("Attachment 2/2")
+                wait_for("Type YES")
+                send(b"\x1b[12~")
+                wait_for("Inspect target")
+                send(b"\x1b[F")
+                wait_for("SECOND.bin")
+                send(b"\x1b")
+                wait_for("Remove this attachment?")
+                send(b"NO\r")
+                wait_for("Attachment removal cancelled")
+                send(b"\x1b")
+                wait_for("Title:", absent=True)
+                send(b"j")
+                send(b"x")
+                wait_for("Entry row 2/2")
+                wait_for("Type YES")
+                send(b"\x1b[F")
+                wait_for("TAIL")
+                wait_for("Entry row 2/2")
+                send(b"\x1b")
+                wait_for("Confirm deletion", absent=True)
+            send(b"q")
+        state = "exit"
+        while process.poll() is None:
+            pump()
+        for _ in range(3):
+            pump()
+        check(process.returncode == 0, "interactive TUI failed")
+        check(b"disposable-tui-fixture" not in transcript, "credential echoed")
+        check(b"\x1b[?1049l" in transcript, "alternate screen not restored")
+        check(termios.tcgetattr(slave) == initial_attributes, "terminal attributes not restored")
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        os.close(slave)
+        os.close(master)
+
+
+try:
+    run(*sys.argv[1:])
+except (AssertionError, OSError) as error:
+    label = str(error) if isinstance(error, AssertionError) else "PTY operating-system failure"
+    sys.stderr.write(label + "\n")
+    sys.exit(1)

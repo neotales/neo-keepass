@@ -1,5 +1,20 @@
 # Shared CLI test support
 
+## UI PTY checks
+
+`cargo test -p nkeepass --test tui_ui` runs `tui_ui_pty.py` via Python 3 on Unix.
+Every case uses its own disposable vault, HOME/config/data paths, and PTY;
+display/clipboard environment access is removed. Captured terminal data is
+never printed. The small cursor/erase emulator checks visible cells at 40×12.
+Coverage includes disclosure focus, generation consent, long indexed targets,
+selected attachment removal/export, and an actionable failed-save decision.
+Exact pagination/error retention and projection branches live in `tui.rs` tests.
+
+This is UI coverage, not proof of terminal admission, signal safety, or
+Crossterm event-reader identity. No split-terminal or signal machinery is
+changed here. Linux was exercised; Windows and macOS runtime behavior is
+unverified. Windows startup is not disabled by this patch.
+
 `cli_support.rs` is the library's disposable KDBX fixture and its byte-level
 secret-leak checks, copied verbatim from the library crate. `tests/cli.rs`
 includes it and maps every scenario to this executable.
