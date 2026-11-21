@@ -20,12 +20,20 @@ The UI pauses key handling below 40 columns by 12 rows. Revealed values own
 focus: Esc or Enter hides them; unrelated keys do not open hidden dialogs.
 Compact entry views prioritize a scrolling field list, keeping the selected
 field visible. Selected-field reveal prompts name that field before consent.
+Their indexed target viewport is separate from reserved consent/warning rows,
+so long names cannot hide instructions. F2 opens full-name inspection; arrows,
+PgUp/PgDn, and Home/End distinguish even names with long colliding prefixes.
 Generating a replacement password requires a length followed by a separate
 `YES` confirmation. Save explicitly to persist changes.
 Action instructions are captured separately from transient status notices;
 clipboard expiry cannot replace the instructions of an active confirmation.
 Notices have a separate summary row; Esc cancels the action and shows the full
 notice in the status area.
+Clipboard clear failures and uncertain/manual-clear outcomes additionally
+retain an independent actionable warning across action confirmation and status
+updates. F3 opens its full text; `a` explicitly acknowledges it only in that
+view. Esc/Enter returns without acknowledgement. Acknowledging does not clear
+the clipboard or claim that its password is gone.
 
 In entry view, `n`/`p` selects an attachment and updates its live marker.
 Export and removal identify the selected index; removal requires `YES`.

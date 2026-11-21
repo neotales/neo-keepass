@@ -12,6 +12,10 @@ The 40×12 field-navigation case checks selection beyond the compact viewport
 and the named target in its reveal prompt before consent. A private reducer
 test expires a real lease with a fake clipboard adapter while confirmation is
 open, covering successful, refused, and failed clears without clipboard access.
+The long-field PTY case inspects two colliding name suffixes before consent,
+then verifies only the second field is revealed. Private workflow coverage
+confirms a replacement password with a failed-clear warning pending, overwrites
+status/refreshes, and checks full warning review and explicit acknowledgement.
 Exact pagination/error retention and projection branches live in `tui.rs` tests.
 
 This is UI coverage, not proof of terminal admission, signal safety, or

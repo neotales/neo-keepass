@@ -34,6 +34,7 @@ const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INTERCHANGE_BYTES: usize = 16 * 1024 * 1024;
 const MIN_COLUMNS: u16 = 40;
 const MIN_ROWS: u16 = 12;
+const CLIPBOARD_WARNING: &str = "Clipboard could not be safely cleared; it may still contain the password. Clear it manually. Acknowledging does not clear it.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
@@ -89,6 +90,7 @@ enum DeleteKind {
 }
 
 enum Modal {
+    ClipboardWarning,
     Target {
         label: String,
         target: String,
@@ -216,6 +218,7 @@ struct App {
     generation_size: usize,
     clipboard: ClipboardLease<ArboardAdapter>,
     clipboard_may_contain_password: bool,
+    clipboard_warning_pending: bool,
     include_groups: bool,
     aliases: Vec<String>,
     modal: Option<Modal>,
@@ -403,11 +406,39 @@ fn begin_field_reveal(app: &mut App) {
         app.status = "No field selected".into();
         return;
     }
-    let prompt = format!(
-        "Reveal field: {}\nType YES. Warning: terminal scrollback and screenshots may persist.",
-        clean(&app.field_to_reveal)
-    );
+    // Only bounded instructions/index go in the heading. The full captured
+    // name has its own viewport and can be inspected without submitting.
+    let prompt = format!("Field {}/{}", app.selected_field + 1, app.fields.len());
     begin_action(app, Action::RevealField, &prompt);
+}
+
+fn confirm_generation(app: &mut App, value: &str) {
+    if value != "YES" {
+        app.status = "Password generation cancelled".into();
+        return;
+    }
+    let Some(reference) = &app.entry else { return };
+    match app
+        .service
+        .generate_entry_password(reference, app.generation_size)
+    {
+        Ok(()) => {
+            app.dirty = true;
+            app.reset_tree_after_mutation();
+            app.entry = None;
+            app.detail.clear();
+            app.refresh();
+            app.status = "Password replaced in memory; save to persist".into();
+        }
+        Err(error) => app.status = clean(error.message()),
+    }
+}
+
+fn open_clipboard_warning(app: &mut App) {
+    if app.clipboard_warning_pending {
+        app.clear_reveal();
+        app.modal = Some(Modal::ClipboardWarning);
+    }
 }
 
 fn selected_attachment(app: &App) -> Option<AttachmentTarget> {
@@ -437,7 +468,15 @@ fn begin_attachment_action(app: &mut App, action: Action) {
     app.action_target = Some(target);
 }
 
-fn inspect_attachment(app: &mut App) {
+fn inspect_action_target(app: &mut App) {
+    if app.input_mode && app.action == Action::RevealField {
+        app.modal = Some(Modal::Target {
+            label: app.action_prompt.clone(),
+            target: app.field_to_reveal.to_string(),
+            offset: 0,
+        });
+        return;
+    }
     let target = if app.input_mode {
         app.action_target.clone()
     } else {
@@ -607,6 +646,15 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
         return;
     };
     match modal {
+        Modal::ClipboardWarning => match key {
+            KeyCode::Char('a') => {
+                app.clipboard_warning_pending = false;
+                app.status =
+                    "Clipboard warning acknowledged; this does not clear the clipboard.".into();
+            }
+            KeyCode::Esc | KeyCode::Enter => {}
+            _ => app.modal = Some(Modal::ClipboardWarning),
+        },
         Modal::Target {
             label,
             target,
@@ -809,6 +857,9 @@ fn copy_password(app: &mut App) {
     match app.clipboard.copy(Zeroizing::new(value.to_owned())) {
         Ok(ClipboardCopyOutcome::Copied) => {
             app.clipboard_may_contain_password = true;
+            if !app.clipboard.supports_timed_clear() {
+                app.clipboard_warning_pending = true;
+            }
             app.status = if app.clipboard.supports_timed_clear() {
                 "Password copied; an ownership-safe clear will be attempted after 30s. Verify manually; it may remain.".into()
             } else {
@@ -817,6 +868,7 @@ fn copy_password(app: &mut App) {
         }
         Ok(ClipboardCopyOutcome::MayHaveCopied) => {
             app.clipboard_may_contain_password = true;
+            app.clipboard_warning_pending = true;
             app.status = "Clipboard write may have succeeded; clear it manually. A timed clear will be attempted if ownership was captured.".into();
         }
         Ok(ClipboardCopyOutcome::RejectedNul) => {
@@ -824,6 +876,7 @@ fn copy_password(app: &mut App) {
         }
         Ok(ClipboardCopyOutcome::TimedClearFailed) => {
             app.clipboard_may_contain_password = true;
+            app.clipboard_warning_pending = true;
             app.status = "Clipboard could not be cleared; the copied password may remain".into();
         }
         Err(_) => app.status = "Clipboard unavailable; password was not copied".into(),
@@ -1343,6 +1396,7 @@ impl App {
             }
             Ok(Some(false)) | Err(_) => {
                 self.clipboard_may_contain_password = true;
+                self.clipboard_warning_pending = true;
                 self.status = "Clipboard expiry could not safely clear it; it may still contain the password. Clear it manually.".into();
             }
             Ok(None) => {}
@@ -1353,9 +1407,11 @@ impl App {
         self.clear_reveal();
         let had_clipboard_lease = self.clipboard.has_lease();
         if had_clipboard_lease {
-            match self.clipboard.release() {
-                Ok(true) => self.clipboard_may_contain_password = false,
-                Ok(false) | Err(_) => self.clipboard_may_contain_password = true,
+            if let Ok(true) = self.clipboard.release() {
+                self.clipboard_may_contain_password = false;
+            } else {
+                self.clipboard_may_contain_password = true;
+                self.clipboard_warning_pending = true;
             }
         }
         let clipboard_warning = self.clipboard_may_contain_password;
@@ -1573,14 +1629,29 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         ),
         body[1],
     );
-    frame.render_widget(
-        Paragraph::new(clean(&app.status)).wrap(Wrap { trim: false }),
-        areas[2],
-    );
+    if app.clipboard_warning_pending {
+        let footer = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(areas[2]);
+        frame.render_widget(
+            Paragraph::new(clean(&app.status)).wrap(Wrap { trim: false }),
+            footer[0],
+        );
+        frame.render_widget(
+            Paragraph::new("Clipboard may contain password.\nClear it manually. F3 review/ack.")
+                .wrap(Wrap { trim: false }),
+            footer[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(clean(&app.status)).wrap(Wrap { trim: false }),
+            areas[2],
+        );
+    }
     if !app.locked && app.entry.is_some() && (body[1].height < 12 || body[1].width < 40) {
         draw_compact_entry(frame, app, areas[1]);
     }
-    if app.pending_decision.is_some() {
+    if let Some(modal @ Modal::ClipboardWarning) = &app.modal {
+        draw_modal(frame, modal, &app.aliases);
+    } else if app.pending_decision.is_some() {
         draw_action_dialog(
             frame,
             "Unsaved changes",
@@ -1591,6 +1662,20 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         );
     } else if let Some(modal @ Modal::Target { .. }) = &app.modal {
         draw_modal(frame, modal, &app.aliases);
+    } else if app.input_mode && app.action == Action::RevealField {
+        draw_target_dialog(
+            frame,
+            &app.action_prompt,
+            "Type YES to reveal.\nWARNING: scrollback and\nscreenshots may persist.",
+            &format!("Reveal field: {}", app.field_to_reveal.as_str()),
+            0,
+            &clean(&app.input),
+            if app.clipboard_warning_pending {
+                "F2 inspect full target\nEnter submit · Esc cancel\nF3 clipboard warning pending"
+            } else {
+                "F2 inspect full target\nEnter submit · Esc cancel"
+            },
+        );
     } else if app.input_mode && app.action != Action::Query {
         let input = if app.edit_mode {
             "•".repeat(app.input.chars().count().min(64))
@@ -1599,7 +1684,11 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         };
         draw_action_dialog(
             frame,
-            "Action",
+            if app.clipboard_warning_pending {
+                "Action · F3 clipboard warning"
+            } else {
+                "Action"
+            },
             &app.action_prompt,
             &input,
             "Enter submit · Esc cancel",
@@ -1617,9 +1706,11 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         frame.render_widget(block, area);
         let chunks = Layout::vertical([Constraint::Length(4), Constraint::Min(1)]).split(inner);
         frame.render_widget(
-            Paragraph::new(
-                "WARNING: terminal scrollback and screenshots persist. Esc hides the value.",
-            )
+            Paragraph::new(if app.clipboard_warning_pending {
+                "WARNING: scrollback/screenshots persist.\nEsc hides value. F3 clipboard warning."
+            } else {
+                "WARNING: terminal scrollback and screenshots persist. Esc hides the value."
+            })
             .wrap(Wrap { trim: false }),
             chunks[0],
         );
@@ -1757,7 +1848,8 @@ fn help_lines() -> Vec<Line<'static>> {
         "  e edit selected field · r reveal password · v reveal selected field",
         "  c copy password · t reveal TOTP · g generate password (entry view)",
         "  a add attachment · x export selected · d remove selected (type YES)",
-        "  F2 inspect full attachment name; arrows/PgUp/PgDn/Home/End pan target",
+        "  F2 inspect full attachment or field-consent target; arrows/Home/End pan",
+        "  F3 review pending clipboard warning; a acknowledges only in that view",
         "  o export interchange · i import interchange · s save",
         "  Esc/Enter back to tree · n/p select attachment",
         "Palette/help/aliases: Up/Down or j/k scroll; Esc closes",
@@ -1776,6 +1868,14 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
     let area = centered_rect(78, 78, frame.area());
     frame.render_widget(Clear, area);
     match modal {
+        Modal::ClipboardWarning => draw_action_dialog(
+            frame,
+            "Clipboard warning",
+            CLIPBOARD_WARNING,
+            "",
+            "a acknowledge · Esc back",
+            None,
+        ),
         Modal::Target {
             label,
             target,
@@ -1984,6 +2084,17 @@ fn run_ui(
             continue;
         }
         app.last_activity = Instant::now();
+        // Warning inspection/acknowledgement is independent of an action,
+        // unsaved decision, disclosure, or lock screen. Other keys cannot
+        // accidentally acknowledge it or submit the interaction beneath it.
+        if key.code == KeyCode::F(3) && app.clipboard_warning_pending {
+            open_clipboard_warning(app);
+            continue;
+        }
+        if matches!(&app.modal, Some(Modal::ClipboardWarning)) {
+            handle_modal_key(app, key.code);
+            continue;
+        }
         if app.locked {
             if key.code == KeyCode::Char('q') {
                 break;
@@ -2079,9 +2190,9 @@ fn run_ui(
         }
         if key.code == KeyCode::F(2)
             && app.entry.is_some()
-            && (!app.input_mode || app.action_target.is_some())
+            && (!app.input_mode || app.action_target.is_some() || app.action == Action::RevealField)
         {
-            inspect_attachment(app);
+            inspect_action_target(app);
             continue;
         }
         if !app.input_mode
@@ -2199,30 +2310,7 @@ fn run_ui(
                             }
                             _ => app.status = "Password size must be 1..=4096".into(),
                         },
-                        Action::GenerateConfirm => {
-                            if value.as_str() == "YES" {
-                                if let Some(reference) = &app.entry {
-                                    match app
-                                        .service
-                                        .generate_entry_password(reference, app.generation_size)
-                                    {
-                                        Ok(()) => {
-                                            app.dirty = true;
-                                            app.reset_tree_after_mutation();
-                                            app.entry = None;
-                                            app.detail.clear();
-                                            app.refresh();
-                                            app.status =
-                                                "Password replaced in memory; save to persist"
-                                                    .into();
-                                        }
-                                        Err(error) => app.status = clean(error.message()),
-                                    }
-                                }
-                            } else {
-                                app.status = "Password generation cancelled".into();
-                            }
-                        }
+                        Action::GenerateConfirm => confirm_generation(app, &value),
                         Action::AddAttachment => attachment_add(app, &value),
                         Action::ExportAttachment => attachment_export(app, &value),
                         Action::RemoveAttachment => {
@@ -2519,6 +2607,7 @@ fn new_app(
         generation_size: 32,
         clipboard: ClipboardLease::new(ArboardAdapter::default(), CLIPBOARD_TTL),
         clipboard_may_contain_password: false,
+        clipboard_warning_pending: false,
         include_groups: true,
         aliases,
         modal: None,
@@ -2588,6 +2677,90 @@ mod tests {
     }
 
     #[test]
+    fn long_field_targets_cannot_displace_consent_or_disclosure_warning() {
+        // Private minimum-size projection: arbitrarily long metadata must not
+        // consume the rows reserved for consent and disclosure warnings.
+        let (_directory, mut app) = app_fixture();
+        app.select();
+        app.fields = ["FIRST-FIELD", "SECOND-FIELD"]
+            .into_iter()
+            .map(|suffix| (format!("{}{suffix}", "shared-prefix-".repeat(40)), true))
+            .collect();
+        for (selected, suffix) in ["FIRST-FIELD", "SECOND-FIELD"].into_iter().enumerate() {
+            app.selected_field = selected;
+            super::begin_field_reveal(&mut app);
+            let text = screen(&app, 40, 12);
+            for required in [
+                "Type YES",
+                "WARNING:",
+                "screenshots may persist.",
+                "F2 inspect full target",
+            ] {
+                assert!(text.contains(required));
+            }
+            super::inspect_action_target(&mut app);
+            super::handle_modal_key(&mut app, super::KeyCode::End);
+            let text = screen(&app, 40, 12);
+            assert!(text.contains(suffix));
+            assert!(text.contains(&format!("Field {}/2", selected + 1)));
+            super::handle_modal_key(&mut app, super::KeyCode::Esc);
+            assert!(app.input_mode);
+            assert!(screen(&app, 40, 12).contains("Type YES"));
+        }
+    }
+
+    #[test]
+    fn failed_clipboard_clear_warning_survives_confirmation_status() {
+        // Private async notice reduction: action success must not erase an
+        // unacknowledged warning about an external copy of the password.
+        let (_directory, mut app) = app_fixture();
+        app.select();
+        super::begin_action(
+            &mut app,
+            super::Action::GenerateConfirm,
+            "Type YES to replace password.",
+        );
+        app.apply_clipboard_tick(Err(crate::clipboard::ClipboardError));
+        assert!(app.clipboard_warning_pending);
+        super::open_clipboard_warning(&mut app);
+        let text = screen(&app, 40, 12);
+        for required in [
+            "Clear it manually.",
+            "Acknowledging",
+            "a acknowledge",
+            "Esc back",
+        ] {
+            assert!(text.contains(required));
+        }
+        super::handle_modal_key(&mut app, super::KeyCode::Esc);
+        assert!(app.clipboard_warning_pending);
+        assert!(app.input_mode);
+        super::confirm_generation(&mut app, "YES");
+        app.input_mode = false;
+        assert!(app.dirty);
+        assert!(app.status.contains("Password replaced in memory"));
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Clear it manually."));
+        assert!(text.contains("F3"));
+        app.status = "Saved".into();
+        app.refresh();
+        assert!(app.clipboard_warning_pending);
+        super::open_clipboard_warning(&mut app);
+        let text = screen(&app, 40, 12);
+        assert!(text.contains("Clear it manually."));
+        assert!(text.contains("Acknowledging"));
+        super::handle_modal_key(&mut app, super::KeyCode::Enter);
+        assert!(app.clipboard_warning_pending); // Enter is not acknowledgement.
+        app.lock_vault();
+        assert!(app.clipboard_warning_pending);
+        assert!(screen(&app, 40, 12).contains("Clear it manually."));
+        super::open_clipboard_warning(&mut app);
+        super::handle_modal_key(&mut app, super::KeyCode::Char('a'));
+        assert!(!app.clipboard_warning_pending);
+        assert!(app.clipboard_may_contain_password); // Ack does not claim a clear.
+    }
+
+    #[test]
     fn compact_entry_keeps_each_selected_field_visible() {
         // Exact private viewport projection at the supported minimum size.
         let (_directory, mut app) = app_fixture();
@@ -2642,6 +2815,7 @@ mod tests {
                 .unwrap();
             app.apply_clipboard_tick(lease.tick(std::time::Instant::now()));
             assert!(!lease.has_lease());
+            assert_eq!(app.clipboard_warning_pending, outcome != 0);
             assert_eq!(app.action, super::Action::GenerateConfirm);
             assert!(app.input_mode);
             assert_eq!(app.action_prompt, instructions);
@@ -2798,7 +2972,7 @@ mod tests {
         assert!(text.contains("> second.bin"));
         assert!(!text.contains("> first.bin"));
         super::begin_attachment_action(&mut app, super::Action::ExportAttachment);
-        super::inspect_attachment(&mut app);
+        super::inspect_action_target(&mut app);
         let text = screen(&app, 40, 12);
         assert!(text.contains("Attachment 2/2"));
         assert!(text.contains("second.bin"));

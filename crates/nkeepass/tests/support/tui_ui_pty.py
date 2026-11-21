@@ -135,9 +135,8 @@ def run(binary, vault, mode):
             wait_for("Title: Example")
             if mode == "field-identity":
                 wait_for("> Title", within=2)
-                # Traverse beyond the compact viewport, then move back. The
-                # fixture's serialized standard fields end in Password/Notes.
-                for _ in range(16):
+                # Traverse beyond the compact viewport, then move back.
+                for _ in range(4):
                     send(b"j")
                 wait_for("> Notes", within=2)
                 send(b"k")
@@ -149,6 +148,34 @@ def run(binary, vault, mode):
                 check("disposable-reveal-marker" not in screen.text(), "field value shown before consent")
                 send(b"\x1b")
                 wait_for("> Password", within=2)
+            elif mode == "long-field-targets":
+                for _ in range(5):
+                    send(b"j")
+                for index, suffix in [(6, "FIRST-FIELD"), (7, "SECOND-FIELD")]:
+                    send(b"v")
+                    wait_for("Type YES", within=2)
+                    wait_for("WARNING:", within=2)
+                    wait_for("screenshots may persist.", within=2)
+                    wait_for("F2 inspect full target", within=2)
+                    send(b"\x1b[12~")
+                    wait_for("Inspect target", within=2)
+                    wait_for("Field %d/7" % index, within=2)
+                    send(b"\x1b[F")
+                    wait_for(suffix, within=2)
+                    check("first-field-marker" not in screen.text(), "first field disclosed before consent")
+                    check("second-field-marker" not in screen.text(), "second field disclosed before consent")
+                    send(b"\x1b")
+                    wait_for("Type YES", within=2)
+                    if index == 6:
+                        send(b"\x1b")
+                        wait_for("Entry detail", within=2)
+                        send(b"j")
+                    else:
+                        send(b"YES\r")
+                        wait_for("second-field-marker", within=2)
+                        check("first-field-marker" not in screen.text(), "wrong field revealed")
+                        send(b"\x1b")
+                        wait_for("second-field-marker", absent=True, within=2)
             elif mode == "reveal":
                 send(b"r")
                 wait_for("Type YES.")

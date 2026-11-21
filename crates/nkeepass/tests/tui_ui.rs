@@ -10,7 +10,7 @@
 mod application_environment;
 use application_environment::IsolatedApplicationEnvironment;
 use neotales_keepass::{
-    Attachment, Entry, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions,
+    Attachment, Entry, Field, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions,
     KeePassDatabase, ProtectedValue,
 };
 use std::path::Path;
@@ -25,6 +25,14 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     entry.url = "https://example.invalid".into();
     entry.notes = "disposable-notes".into();
     entry.password = ProtectedValue::from_text("disposable-reveal-marker");
+    for (suffix, value) in [
+        ("FIRST-FIELD", "first-field-marker"),
+        ("SECOND-FIELD", "second-field-marker"),
+    ] {
+        let mut field = Field::new(format!("{}{suffix}", "shared-field-".repeat(40)), value);
+        field.protected = true;
+        entry.fields.push(field);
+    }
     for (suffix, bytes) in [("FIRST.bin", b"first"), ("SECOND.bin", b"other")] {
         let reference = database.binary_pool.add(bytes.to_vec(), true);
         entry.attachments.push(Attachment {
@@ -78,6 +86,14 @@ fn drive(directory: &Path, path: &Path, case: &str) {
 fn assert_unchanged(path: &Path, before: &[u8]) {
     let unchanged = std::fs::read(path).unwrap() == before;
     assert!(unchanged, "UI unexpectedly persisted changes");
+}
+
+#[test]
+fn long_colliding_field_names_are_inspectable_before_reveal_consent() {
+    let (directory, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    drive(directory.path(), &path, "long-field-targets");
+    assert_unchanged(&path, &before);
 }
 
 #[test]
