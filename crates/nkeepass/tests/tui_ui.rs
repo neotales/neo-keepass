@@ -21,6 +21,9 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let path = directory.path().join("fixture.kdbx");
     let mut database = KeePassDatabase::default();
     let mut entry = Entry::new("Example");
+    entry.username = "disposable-user".into();
+    entry.url = "https://example.invalid".into();
+    entry.notes = "disposable-notes".into();
     entry.password = ProtectedValue::from_text("disposable-reveal-marker");
     for (suffix, bytes) in [("FIRST.bin", b"first"), ("SECOND.bin", b"other")] {
         let reference = database.binary_pool.add(bytes.to_vec(), true);
@@ -75,6 +78,14 @@ fn drive(directory: &Path, path: &Path, case: &str) {
 fn assert_unchanged(path: &Path, before: &[u8]) {
     let unchanged = std::fs::read(path).unwrap() == before;
     assert!(unchanged, "UI unexpectedly persisted changes");
+}
+
+#[test]
+fn compact_field_navigation_identifies_the_target_before_consent() {
+    let (directory, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    drive(directory.path(), &path, "field-identity");
+    assert_unchanged(&path, &before);
 }
 
 #[test]

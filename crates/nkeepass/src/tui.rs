@@ -204,6 +204,9 @@ struct App {
     edit_mode: bool,
     input: Zeroizing<String>,
     action: Action,
+    // Captured when the interaction begins; asynchronous notices only change
+    // status, never the instructions for the action Enter/YES will submit.
+    action_prompt: String,
     pending_group: Option<GroupRef>,
     dirty: bool,
     pending_decision: Option<PendingDecision>,
@@ -387,10 +390,24 @@ fn bounded_read(path: &Path, limit: usize) -> io::Result<Zeroizing<Vec<u8>>> {
 fn begin_action(app: &mut App, action: Action, prompt: &str) {
     app.clear_reveal();
     app.action = action;
+    prompt.clone_into(&mut app.action_prompt);
     app.action_target = None;
     app.input_mode = true;
+    app.edit_mode = false;
     clear_input(&mut app.input);
     prompt.clone_into(&mut app.status);
+}
+
+fn begin_field_reveal(app: &mut App) {
+    if !select_field_for_reveal(&app.fields, app.selected_field, &mut app.field_to_reveal) {
+        app.status = "No field selected".into();
+        return;
+    }
+    let prompt = format!(
+        "Reveal field: {}\nType YES. Warning: terminal scrollback and screenshots may persist.",
+        clean(&app.field_to_reveal)
+    );
+    begin_action(app, Action::RevealField, &prompt);
 }
 
 fn selected_attachment(app: &App) -> Option<AttachmentTarget> {
@@ -1290,17 +1307,8 @@ impl App {
             self.clear_reveal();
             self.status = "Transient reveal expired".into();
         }
-        match self.clipboard.tick(Instant::now()) {
-            Ok(Some(true)) => {
-                self.clipboard_may_contain_password = false;
-                self.status = "Clipboard lease expired and clipboard was cleared".into();
-            }
-            Ok(Some(false)) | Err(_) => {
-                self.clipboard_may_contain_password = true;
-                self.status = "Clipboard expiry could not safely clear it; it may still contain the password. Clear it manually.".into();
-            }
-            Ok(None) => {}
-        }
+        let clipboard_tick = self.clipboard.tick(Instant::now());
+        self.apply_clipboard_tick(clipboard_tick);
         if !self.locked
             && self.pending_decision.is_none()
             && self.last_activity.elapsed() >= IDLE_LOCK
@@ -1321,6 +1329,23 @@ impl App {
                 return;
             }
             self.lock_vault();
+        }
+    }
+
+    fn apply_clipboard_tick(
+        &mut self,
+        outcome: Result<Option<bool>, crate::clipboard::ClipboardError>,
+    ) {
+        match outcome {
+            Ok(Some(true)) => {
+                self.clipboard_may_contain_password = false;
+                self.status = "Clipboard lease expired and clipboard was cleared".into();
+            }
+            Ok(Some(false)) | Err(_) => {
+                self.clipboard_may_contain_password = true;
+                self.status = "Clipboard expiry could not safely clear it; it may still contain the password. Clear it manually.".into();
+            }
+            Ok(None) => {}
         }
     }
 
@@ -1552,6 +1577,9 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         Paragraph::new(clean(&app.status)).wrap(Wrap { trim: false }),
         areas[2],
     );
+    if !app.locked && app.entry.is_some() && (body[1].height < 12 || body[1].width < 40) {
+        draw_compact_entry(frame, app, areas[1]);
+    }
     if app.pending_decision.is_some() {
         draw_action_dialog(
             frame,
@@ -1559,6 +1587,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             &app.status,
             "",
             "s save · d discard · c cancel",
+            None,
         );
     } else if let Some(modal @ Modal::Target { .. }) = &app.modal {
         draw_modal(frame, modal, &app.aliases);
@@ -1571,9 +1600,10 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         draw_action_dialog(
             frame,
             "Action",
-            &app.status,
+            &app.action_prompt,
             &input,
             "Enter submit · Esc cancel",
+            (app.status != app.action_prompt).then_some(app.status.as_str()),
         );
     } else if !app.locked
         && let Some(value) = reveal_render.as_deref()
@@ -1602,11 +1632,53 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
+fn draw_compact_entry(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    // On small screens metadata headings used to occupy every visible row.
+    // Give fields the full width and let List keep the selected row in view.
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title("Entry detail · secrets masked")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    frame.render_widget(
+        Paragraph::new(app.detail.first().map_or("", String::as_str)),
+        chunks[0],
+    );
+    let rows = app
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, (name, protected))| {
+            ListItem::new(field_row(name, *protected, index == app.selected_field))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default();
+    state.select((!rows.is_empty()).then_some(app.selected_field));
+    frame.render_stateful_widget(
+        List::new(rows).highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        chunks[1],
+        &mut state,
+    );
+}
+
 fn usable_size(area: Rect) -> bool {
     area.width >= MIN_COLUMNS && area.height >= MIN_ROWS
 }
 
-fn draw_action_dialog(frame: &mut Frame<'_>, title: &str, prompt: &str, input: &str, keys: &str) {
+fn draw_action_dialog(
+    frame: &mut Frame<'_>,
+    title: &str,
+    prompt: &str,
+    input: &str,
+    keys: &str,
+    notice: Option<&str>,
+) {
     // Full width and separate control rows keep confirmation text visible on
     // narrow terminals even when metadata or the input is very long.
     let area = frame.area();
@@ -1623,10 +1695,25 @@ fn draw_action_dialog(frame: &mut Frame<'_>, title: &str, prompt: &str, input: &
     let prompt = prompt.lines().map(clean).collect::<Vec<_>>().join("\n");
     frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), chunks[0]);
     let tail: String = input.chars().rev().take(usize::from(inner.width)).collect();
+    let input_rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
     frame.render_widget(
         Paragraph::new(tail.chars().rev().collect::<String>()),
-        chunks[1],
+        input_rows[0],
     );
+    // A separate summary row cannot displace instructions or the target.
+    // Esc preserves status and returns to its full-width, multiline display.
+    if let Some(notice) = notice {
+        frame.render_widget(
+            Paragraph::new(format!("Notice: {}", clean(notice))),
+            input_rows[1],
+        );
+    }
+    let keys = if notice.is_some() {
+        format!("{keys}\nEsc: full notice in status")
+    } else {
+        keys.to_owned()
+    };
     frame.render_widget(Paragraph::new(keys).wrap(Wrap { trim: false }), chunks[2]);
 }
 
@@ -2278,14 +2365,12 @@ fn run_ui(
                         continue;
                     }
                     field.clone_into(&mut app.edit_field);
-                    app.input_mode = true;
-                    app.edit_mode = true;
-                    app.action = Action::Edit;
-                    clear_input(&mut app.input);
-                    app.status = format!(
+                    let prompt = format!(
                         "Edit {} value; input is masked · Enter apply · Esc cancel",
                         clean(&app.edit_field)
                     );
+                    begin_action(app, Action::Edit, &prompt);
+                    app.edit_mode = true;
                 }
                 KeyCode::Char('g') => {
                     begin_action(
@@ -2315,21 +2400,7 @@ fn run_ui(
                     Action::TotpReveal,
                     "Reveal current TOTP? Type YES. HOTP is unsupported. WARNING: terminal scrollback may retain the code.",
                 ),
-                KeyCode::Char('v') => {
-                    if !select_field_for_reveal(
-                        &app.fields,
-                        app.selected_field,
-                        &mut app.field_to_reveal,
-                    ) {
-                        app.status = "No field selected".into();
-                        continue;
-                    }
-                    begin_action(
-                        app,
-                        Action::RevealField,
-                        "Reveal selected field? Type YES. Warning: terminal scrollback and screenshots may persist.",
-                    );
-                }
+                KeyCode::Char('v') => begin_field_reveal(app),
                 KeyCode::Char('a') => begin_action(
                     app,
                     Action::AddAttachment,
@@ -2438,6 +2509,7 @@ fn new_app(
         edit_mode: false,
         input: Zeroizing::new(String::new()),
         action: Action::Query,
+        action_prompt: String::new(),
         pending_group: None,
         dirty: false,
         pending_decision: None,
@@ -2468,6 +2540,10 @@ mod tests {
         let path = directory.path().join("fixture.kdbx");
         let mut database = KeePassDatabase::default();
         let mut entry = Entry::new("Example");
+        entry.username = "disposable-user".into();
+        entry.url = "https://example.invalid".into();
+        entry.notes = "disposable-notes".into();
+        entry.password = neotales_keepass::ProtectedValue::from_text("disposable-password");
         for (name, bytes) in [("first.bin", b"first"), ("second.bin", b"other")] {
             let reference = database.binary_pool.add(bytes.to_vec(), true);
             entry.attachments.push(Attachment {
@@ -2509,6 +2585,77 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect()
+    }
+
+    #[test]
+    fn compact_entry_keeps_each_selected_field_visible() {
+        // Exact private viewport projection at the supported minimum size.
+        let (_directory, mut app) = app_fixture();
+        app.select();
+        assert_eq!(app.fields.len(), 5);
+        for selected in 0..app.fields.len() {
+            app.selected_field = selected;
+            let text = screen(&app, 40, 12);
+            assert!(text.contains(&format!("> {}", app.fields[selected].0)));
+            let name = app.fields[selected].0.clone();
+            super::begin_field_reveal(&mut app);
+            let text = screen(&app, 40, 12);
+            assert!(text.contains(&format!("Reveal field: {name}")));
+            assert!(text.contains("Type YES"));
+            assert_eq!(app.field_to_reveal.as_str(), name);
+            app.input_mode = false;
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "in-memory clipboard expiry fixture")]
+    fn clipboard_lease_expiry_does_not_replace_live_consent_instructions() {
+        // Private projection/async reduction with an actual expired lease and
+        // a fake adapter: no system clipboard, clock sleeps, or user data.
+        use crate::clipboard::{
+            ClipboardAdapter, ClipboardError, ClipboardLease, ClipboardSetOutcome,
+        };
+        struct Adapter(u8);
+        impl ClipboardAdapter for Adapter {
+            fn set_text(&mut self, _: &str) -> Result<ClipboardSetOutcome, ClipboardError> {
+                Ok(ClipboardSetOutcome::Copied)
+            }
+            fn clear_if_current(&mut self, _: &str) -> Result<bool, ClipboardError> {
+                match self.0 {
+                    0 => Ok(true),
+                    1 => Ok(false),
+                    _ => Err(ClipboardError),
+                }
+            }
+        }
+        for outcome in 0..3 {
+            let (_directory, mut app) = app_fixture();
+            super::begin_action(
+                &mut app,
+                super::Action::GenerateConfirm,
+                "This replaces the current password. Type YES to confirm; any other input cancels.",
+            );
+            let instructions = app.action_prompt.clone();
+            let mut lease = ClipboardLease::new(Adapter(outcome), std::time::Duration::ZERO);
+            lease
+                .copy(zeroize::Zeroizing::new("disposable-copy".into()))
+                .unwrap();
+            app.apply_clipboard_tick(lease.tick(std::time::Instant::now()));
+            assert!(!lease.has_lease());
+            assert_eq!(app.action, super::Action::GenerateConfirm);
+            assert!(app.input_mode);
+            assert_eq!(app.action_prompt, instructions);
+            assert!(app.status.contains(if outcome == 0 {
+                "Clipboard lease expired"
+            } else {
+                "Clear it manually"
+            }));
+            let text = screen(&app, 40, 12);
+            assert!(text.contains("This replaces the current password."));
+            assert!(text.contains("Type YES"));
+            assert!(text.contains("Notice: Clipboard"));
+            assert!(text.contains("Esc: full notice in status"));
+        }
     }
 
     #[test]

@@ -8,6 +8,10 @@ display/clipboard environment access is removed. Captured terminal data is
 never printed. The small cursor/erase emulator checks visible cells at 40×12.
 Coverage includes disclosure focus, generation consent, long indexed targets,
 selected attachment removal/export, and an actionable failed-save decision.
+The 40×12 field-navigation case checks selection beyond the compact viewport
+and the named target in its reveal prompt before consent. A private reducer
+test expires a real lease with a fake clipboard adapter while confirmation is
+open, covering successful, refused, and failed clears without clipboard access.
 Exact pagination/error retention and projection branches live in `tui.rs` tests.
 
 This is UI coverage, not proof of terminal admission, signal safety, or

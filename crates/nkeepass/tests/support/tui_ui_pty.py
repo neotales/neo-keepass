@@ -133,7 +133,23 @@ def run(binary, vault, mode):
         else:
             send(b"\r")
             wait_for("Title: Example")
-            if mode == "reveal":
+            if mode == "field-identity":
+                wait_for("> Title", within=2)
+                # Traverse beyond the compact viewport, then move back. The
+                # fixture's serialized standard fields end in Password/Notes.
+                for _ in range(16):
+                    send(b"j")
+                wait_for("> Notes", within=2)
+                send(b"k")
+                wait_for("> Password", within=2)
+                send(b"v")
+                wait_for("Reveal field: Password", within=2)
+                wait_for("Type YES", within=2)
+                check("REVEALED" not in screen.text(), "field disclosed before consent")
+                check("disposable-reveal-marker" not in screen.text(), "field value shown before consent")
+                send(b"\x1b")
+                wait_for("> Password", within=2)
+            elif mode == "reveal":
                 send(b"r")
                 wait_for("Type YES.")
                 send(b"YES\r")
