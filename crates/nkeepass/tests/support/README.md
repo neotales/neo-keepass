@@ -16,6 +16,9 @@ The long-field PTY case inspects two colliding name suffixes before consent,
 then verifies only the second field is revealed. Private workflow coverage
 confirms a replacement password with a failed-clear warning pending, overwrites
 status/refreshes, and checks full warning review and explicit acknowledgement.
+Private modal tests check that warning return/acknowledgement restores target
+position and deletion drafts, repeated F3 does not nest, and dirty exit/lock
+dialogs expose the warning shortcut at the minimum size.
 Exact pagination/error retention and projection branches live in `tui.rs` tests.
 
 This is UI coverage, not proof of terminal admission, signal safety, or

@@ -90,7 +90,9 @@ enum DeleteKind {
 }
 
 enum Modal {
-    ClipboardWarning,
+    ClipboardWarning {
+        previous: Option<Box<Modal>>,
+    },
     Target {
         label: String,
         target: String,
@@ -435,9 +437,12 @@ fn confirm_generation(app: &mut App, value: &str) {
 }
 
 fn open_clipboard_warning(app: &mut App) {
-    if app.clipboard_warning_pending {
+    if app.clipboard_warning_pending && !matches!(&app.modal, Some(Modal::ClipboardWarning { .. }))
+    {
         app.clear_reveal();
-        app.modal = Some(Modal::ClipboardWarning);
+        app.modal = Some(Modal::ClipboardWarning {
+            previous: app.modal.take().map(Box::new),
+        });
     }
 }
 
@@ -646,14 +651,15 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
         return;
     };
     match modal {
-        Modal::ClipboardWarning => match key {
+        Modal::ClipboardWarning { previous } => match key {
             KeyCode::Char('a') => {
                 app.clipboard_warning_pending = false;
                 app.status =
                     "Clipboard warning acknowledged; this does not clear the clipboard.".into();
+                app.modal = previous.map(|modal| *modal);
             }
-            KeyCode::Esc | KeyCode::Enter => {}
-            _ => app.modal = Some(Modal::ClipboardWarning),
+            KeyCode::Esc | KeyCode::Enter => app.modal = previous.map(|modal| *modal),
+            _ => app.modal = Some(Modal::ClipboardWarning { previous }),
         },
         Modal::Target {
             label,
@@ -1649,7 +1655,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     if !app.locked && app.entry.is_some() && (body[1].height < 12 || body[1].width < 40) {
         draw_compact_entry(frame, app, areas[1]);
     }
-    if let Some(modal @ Modal::ClipboardWarning) = &app.modal {
+    if let Some(modal @ Modal::ClipboardWarning { .. }) = &app.modal {
         draw_modal(frame, modal, &app.aliases);
     } else if app.pending_decision.is_some() {
         draw_action_dialog(
@@ -1657,7 +1663,11 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             "Unsaved changes",
             &app.status,
             "",
-            "s save · d discard · c cancel",
+            if app.clipboard_warning_pending {
+                "s save · d discard · c cancel\nF3 clipboard warning pending"
+            } else {
+                "s save · d discard · c cancel"
+            },
             None,
         );
     } else if let Some(modal @ Modal::Target { .. }) = &app.modal {
@@ -1868,7 +1878,7 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
     let area = centered_rect(78, 78, frame.area());
     frame.render_widget(Clear, area);
     match modal {
-        Modal::ClipboardWarning => draw_action_dialog(
+        Modal::ClipboardWarning { .. } => draw_action_dialog(
             frame,
             "Clipboard warning",
             CLIPBOARD_WARNING,
@@ -2091,7 +2101,7 @@ fn run_ui(
             open_clipboard_warning(app);
             continue;
         }
-        if matches!(&app.modal, Some(Modal::ClipboardWarning)) {
+        if matches!(&app.modal, Some(Modal::ClipboardWarning { .. })) {
             handle_modal_key(app, key.code);
             continue;
         }
@@ -2674,6 +2684,66 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect()
+    }
+
+    #[test]
+    fn clipboard_warning_returns_to_modal_position_and_deletion_draft() {
+        // Private modal ownership branches: warning review must not consume
+        // the previous interaction, its scroll position, or typed consent.
+        for close in [
+            super::KeyCode::Esc,
+            super::KeyCode::Enter,
+            super::KeyCode::Char('a'),
+        ] {
+            let (_directory, mut app) = app_fixture();
+            app.clipboard_warning_pending = true;
+            app.modal = Some(super::Modal::Target {
+                label: "Field 2/2".into(),
+                target: "long-name".repeat(100),
+                offset: 137,
+            });
+            super::open_clipboard_warning(&mut app);
+            super::open_clipboard_warning(&mut app); // Repeated F3 must not nest.
+            super::handle_modal_key(&mut app, close);
+            assert!(
+                matches!(&app.modal, Some(super::Modal::Target { label, offset: 137, .. }) if label == "Field 2/2")
+            );
+            assert_eq!(
+                app.clipboard_warning_pending,
+                close != super::KeyCode::Char('a')
+            );
+            app.clipboard_warning_pending = true;
+            app.modal = Some(super::Modal::ConfirmDelete {
+                kind: super::DeleteKind::Entry,
+                path: "Entry row 1/1: long-name".repeat(30),
+                entry: None,
+                group: None,
+                input: zeroize::Zeroizing::new("YE".into()),
+                offset: 71,
+            });
+            super::open_clipboard_warning(&mut app);
+            super::handle_modal_key(&mut app, close);
+            assert!(
+                matches!(&app.modal, Some(super::Modal::ConfirmDelete { offset: 71, input, .. }) if input.as_str() == "YE")
+            );
+            assert!(!app.dirty); // Enter in the warning must not submit deletion.
+        }
+    }
+
+    #[test]
+    fn unsaved_decision_exposes_clipboard_warning_hint_at_minimum_size() {
+        // Exact private projection: this full-screen dialog covers the footer.
+        let (_directory, mut app) = app_fixture();
+        app.dirty = true;
+        app.clipboard_warning_pending = true;
+        for decision in [super::PendingDecision::Exit, super::PendingDecision::Lock] {
+            app.pending_decision = Some(decision);
+            app.status = "Unsaved changes: s save · d discard · c cancel".into();
+            let text = screen(&app, 40, 12);
+            for required in ["s save", "d discard", "c cancel", "F3 clipboard warning"] {
+                assert!(text.contains(required));
+            }
+        }
     }
 
     #[test]

@@ -34,6 +34,9 @@ retain an independent actionable warning across action confirmation and status
 updates. F3 opens its full text; `a` explicitly acknowledges it only in that
 view. Esc/Enter returns without acknowledgement. Acknowledging does not clear
 the clipboard or claim that its password is gone.
+Warning review preserves the previous modal, including target inspection
+position and deletion confirmation drafts; returning or acknowledging restores
+that interaction. Unsaved-changes dialogs also expose the F3 warning hint.
 
 In entry view, `n`/`p` selects an attachment and updates its live marker.
 Export and removal identify the selected index; removal requires `YES`.
