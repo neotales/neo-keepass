@@ -21,6 +21,20 @@ position and deletion drafts, repeated F3 does not nest, and dirty exit/lock
 dialogs expose the warning shortcut at the minimum size.
 Exact pagination/error retention and projection branches live in `tui.rs` tests.
 
+The Python driver owns the controlling-terminal session until after it checks
+the exited app's terminal attributes. Making the app the session leader caused
+all seven UI cases in macOS CI run `44962432310` (`4be59aa`) to fail after their
+behavior/exit/alternate-screen checks: final `tcgetattr(slave)` raised ENOTTY.
+Darwin revokes the controlling terminal on session-leader exit (XNU
+`bsd/kern/kern_exit.c`, `SESS_LEADER` / `VNOP_REVOKE` branch).
+The driver now stays alive as session leader and launches the app in that
+foreground session, like a shell launching an ordinary child. SIGHUP is ignored
+only during final driver cleanup, never inherited by the app. Exact termios
+equality remains required. A portable lifetime probe checks child session
+inheritance and post-exit inspection; negative controls leave ECHO changed and
+probe a nonterminal descriptor, ensuring restoration/ioctl failures still fail
+with sanitized stage/errno diagnostics rather than captured terminal data.
+
 This is UI coverage, not proof of terminal admission, signal safety, or
 Crossterm event-reader identity. No split-terminal or signal machinery is
 changed here. Linux was exercised; Windows and macOS runtime behavior is

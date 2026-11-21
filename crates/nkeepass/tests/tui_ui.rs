@@ -56,8 +56,8 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     (directory, path)
 }
 
-fn drive(directory: &Path, path: &Path, case: &str) {
-    let output = Command::new("python3")
+fn run_driver(directory: &Path, path: &Path, case: &str) -> std::process::Output {
+    Command::new("python3")
         .isolate_application_environment()
         .args(["-c", include_str!("support/tui_ui_pty.py")])
         .arg(env!("CARGO_BIN_EXE_nkp"))
@@ -72,7 +72,11 @@ fn drive(directory: &Path, path: &Path, case: &str) {
         .env_remove("XDG_RUNTIME_DIR")
         .stdin(Stdio::null())
         .output()
-        .expect("python3 is required for Unix TUI PTY tests");
+        .expect("python3 is required for Unix TUI PTY tests")
+}
+
+fn drive(directory: &Path, path: &Path, case: &str) {
+    let output = run_driver(directory, path, case);
     assert!(
         output.status.success(),
         "TUI UI PTY checks failed: {}",
@@ -86,6 +90,31 @@ fn drive(directory: &Path, path: &Path, case: &str) {
 fn assert_unchanged(path: &Path, before: &[u8]) {
     let unchanged = std::fs::read(path).unwrap() == before;
     assert!(unchanged, "UI unexpectedly persisted changes");
+}
+
+#[test]
+fn pty_driver_retains_terminal_lifetime_and_rejects_unrestored_attributes() {
+    let directory = tempfile::tempdir().unwrap();
+    let unused = directory.path().join("unused.kdbx");
+    drive(directory.path(), &unused, "terminal-lifetime");
+    let output = run_driver(directory.path(), &unused, "terminal-lifetime-unrestored");
+    assert!(!output.status.success(), "unrestored terminal was accepted");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("terminal attributes not restored (changed: lflag)"));
+    let no_output = output.stdout.is_empty();
+    assert!(no_output, "unexpected PTY driver output");
+    let output = run_driver(directory.path(), &unused, "terminal-lifetime-ioctl-error");
+    assert!(
+        !output.status.success(),
+        "invalid terminal descriptor was accepted"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("PTY terminal operation failed: read restored attributes / errno=")
+    );
+    assert!(!diagnostic.contains("Traceback"));
+    let no_output = output.stdout.is_empty();
+    assert!(no_output, "unexpected PTY driver output");
 }
 
 #[test]

@@ -6,6 +6,7 @@ import os
 import pty
 import re
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -61,15 +62,35 @@ def check(value, label):
         raise AssertionError(label)
 
 
+def terminal_operation(stage, operation, *args):
+    try:
+        return operation(*args)
+    except (OSError, termios.error) as error:
+        number = error.args[0] if error.args and isinstance(error.args[0], int) else "unknown"
+        raise AssertionError("PTY terminal operation failed: " + stage + " / errno=" + str(number)) from None
+
+
+def check_restored(slave, initial_attributes):
+    restored = terminal_operation("read restored attributes", termios.tcgetattr, slave)
+    names = ("iflag", "oflag", "cflag", "lflag", "ispeed", "ospeed", "cc")
+    changed = [name for name, before, after in zip(names, initial_attributes, restored) if before != after]
+    # Compare every termios component, including control characters and speeds.
+    # Report names only, never terminal contents or raw OS exception messages.
+    check(restored == initial_attributes, "terminal attributes not restored (changed: " + (",".join(changed) or "shape") + ")")
+
+
 def run(binary, vault, mode):
     master, slave = pty.openpty()
     process = None
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
-    initial_attributes = termios.tcgetattr(slave)
-
-    def session():
-        os.setsid()
-        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    def own_terminal():
+        # The DRIVER must outlive the app as the controlling session leader.
+        # Darwin revokes the controlling terminal when its leader exits, so
+        # making the app the leader invalidates our post-exit tcgetattr check.
+        terminal_operation("create driver session", os.setsid)
+        terminal_operation("acquire driver terminal", fcntl.ioctl, slave, termios.TIOCSCTTY, 0)
+        check(os.getsid(0) == os.getpid(), "driver session ownership not established")
+        foreground = terminal_operation("read foreground group", os.tcgetpgrp, slave)
+        check(foreground == os.getpgrp(), "driver terminal is not foreground")
 
     transcript = bytearray()
     screen = Screen(lambda response: os.write(master, response))
@@ -101,13 +122,44 @@ def run(binary, vault, mode):
         os.write(master, keys)
 
     try:
+        terminal_operation("set window size", fcntl.ioctl, slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
+        initial_attributes = terminal_operation("read initial attributes", termios.tcgetattr, slave)
+        own_terminal()
+        command = [binary, "tui", vault]
+        if mode.startswith("terminal-lifetime"):
+            # A fast disposable child proves the harness owns the living
+            # controlling session. A second probe deliberately leaves ECHO
+            # changed, so restoration checks must reject it on every Unix.
+            command = [sys.executable, "-c", """
+import os, sys, termios
+if os.getsid(0) != os.getppid():
+    sys.exit(77)
+if sys.argv[1] == "terminal-lifetime-unrestored":
+    attributes = termios.tcgetattr(0)
+    attributes[3] ^= termios.ECHO
+    termios.tcsetattr(0, termios.TCSANOW, attributes)
+""", mode]
         process = subprocess.Popen(
-            [binary, "tui", vault], stdin=slave, stdout=slave, stderr=slave,
-            env=dict(os.environ, TERM="xterm-256color"), preexec_fn=session,
+            command, stdin=slave, stdout=slave, stderr=slave,
+            env=dict(os.environ, TERM="xterm-256color"),
             close_fds=True, cwd=os.path.dirname(vault),
         )
+        if mode.startswith("terminal-lifetime"):
+            state = "terminal lifetime probe exit"
+            while process.poll() is None:
+                pump()
+            check(process.returncode == 0, "PTY child did not inherit the living driver session")
+            if mode == "terminal-lifetime-ioctl-error":
+                read_end, write_end = os.pipe()
+                try:
+                    check_restored(read_end, initial_attributes)
+                finally:
+                    os.close(read_end)
+                    os.close(write_end)
+            check_restored(slave, initial_attributes)
+            return
         wait_for("Vault password: ")
-        while termios.tcgetattr(slave)[3] & termios.ECHO:
+        while terminal_operation("read password-prompt attributes", termios.tcgetattr, slave)[3] & termios.ECHO:
             pump()
         send(b"disposable-tui-fixture\n")
         wait_for("Example")
@@ -261,14 +313,23 @@ def run(binary, vault, mode):
         check(process.returncode == 0, "interactive TUI failed")
         check(b"disposable-tui-fixture" not in transcript, "credential echoed")
         check(b"\x1b[?1049l" in transcript, "alternate screen not restored")
-        check(termios.tcgetattr(slave) == initial_attributes, "terminal attributes not restored")
+        check_restored(slave, initial_attributes)
     finally:
-        if process is not None:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-        os.close(slave)
-        os.close(master)
+        try:
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError("PTY child cleanup deadline exceeded") from None
+        finally:
+            # Closing our own controlling PTY can send us SIGHUP. Ignore it
+            # only in final cleanup, never before spawning the app: the app
+            # never inherits this disposition.
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            os.close(slave)
+            os.close(master)
 
 
 try:
