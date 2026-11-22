@@ -75,8 +75,23 @@ def check_restored(slave, initial_attributes):
     names = ("iflag", "oflag", "cflag", "lflag", "ispeed", "ospeed", "cc")
     changed = [name for name, before, after in zip(names, initial_attributes, restored) if before != after]
     # Compare every termios component, including control characters and speeds.
-    # Report names only, never terminal contents or raw OS exception messages.
-    check(restored == initial_attributes, "terminal attributes not restored (changed: " + (",".join(changed) or "shape") + ")")
+    # Numeric mode flags are safe diagnostics. Never print terminal contents,
+    # queued bytes, control-character values, or raw OS exception messages.
+    differences = []
+    for index in range(4):
+        before, after = initial_attributes[index], restored[index]
+        if before != after:
+            name = names[index]
+            differences.append("%s_before=%#x %s_after=%#x %s_xor=%#x" %
+                               (name, before, name, after, name, before ^ after))
+    if initial_attributes[3] != restored[3]:
+        delta = initial_attributes[3] ^ restored[3]
+        bits = [name for name in ("ECHO", "ECHONL", "ICANON", "ISIG", "IEXTEN", "PENDIN", "EXTPROC", "NOFLSH")
+                if getattr(termios, name, 0) & delta]
+        differences.append("lflag_bits=" + ",".join(bits))
+        differences.append("pendin_mask=%#x" % getattr(termios, "PENDIN", 0))
+    check(restored == initial_attributes, "terminal attributes not restored (changed: " +
+          (",".join(changed) or "shape") + "); " + "; ".join(differences))
 
 
 def write_pty(master, data, deadline):
@@ -154,7 +169,7 @@ def run(binary, vault, mode, control_directory):
         initial_attributes = terminal_operation("read initial attributes", termios.tcgetattr, slave)
         if mode == "startup-before-session":
             publish("startup-paused", "before-session")
-            os.kill(os.getpid(), signal.SIGSTOP)
+            terminal_operation("stop driver before session", os.kill, os.getpid(), signal.SIGSTOP)
         own_terminal()
         publish("ready", str(os.getpid()))
         if mode == "startup-after-session":
@@ -189,12 +204,19 @@ os.kill(os.getpid(), signal.SIGSTOP)
             # controlling session. A second probe deliberately leaves ECHO
             # changed, so restoration checks must reject it on every Unix.
             command = [sys.executable, "-c", """
-import os, sys, termios
+import os, sys, termios, tty
 if os.getsid(0) != os.getppid():
     sys.exit(77)
-if sys.argv[1] == "terminal-lifetime-unrestored":
+if sys.argv[1] == "terminal-lifetime-canonical-cycle":
+    original = termios.tcgetattr(0)
+    tty.setraw(0, termios.TCSANOW)
+    termios.tcsetattr(0, termios.TCSANOW, original)
+if sys.argv[1] in ("terminal-lifetime-unrestored", "terminal-lifetime-pendin", "terminal-lifetime-pendin-echo"):
     attributes = termios.tcgetattr(0)
-    attributes[3] ^= termios.ECHO
+    if sys.argv[1] != "terminal-lifetime-pendin":
+        attributes[3] ^= termios.ECHO
+    if sys.argv[1] != "terminal-lifetime-unrestored":
+        attributes[3] |= termios.PENDIN
     termios.tcsetattr(0, termios.TCSANOW, attributes)
 """, mode]
         publish("app-spawn-attempt", "attempt")
@@ -213,7 +235,7 @@ if sys.argv[1] == "terminal-lifetime-unrestored":
             # Deliberately bypass Python finally on TERM: the app ignores TERM
             # and terminal hangup. Observing this leader exit is NOT cleanup.
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            os.kill(os.getpid(), signal.SIGSTOP)
+            terminal_operation("stop TERM-resistant driver", os.kill, os.getpid(), signal.SIGSTOP)
             raise AssertionError("TERM-resistant probe resumed without termination")
         if mode.startswith("stopped-"):
             with open(os.path.join(os.path.dirname(vault), "stopped-child.pid"), "w") as marker:
@@ -222,12 +244,12 @@ if sys.argv[1] == "terminal-lifetime-unrestored":
             while True:
                 waited, status = os.waitpid(process.pid, os.WNOHANG | os.WUNTRACED)
                 if waited == process.pid:
-                    check(os.WIFSTOPPED(status), "negative-control child exited instead of stopping")
+                    check(os.WIFSTOPPED(status), "negative-control child exited instead of stopping: status=%#x" % status)
                     break
                 check(time.monotonic() < stop_deadline, "negative-control child did not stop")
                 time.sleep(0.01)
             if mode == "stopped-driver":
-                os.kill(os.getpid(), signal.SIGSTOP)
+                terminal_operation("stop driver after child stopped", os.kill, os.getpid(), signal.SIGSTOP)
                 raise AssertionError("stopped driver resumed without watchdog termination")
             deadline = time.monotonic() + 0.4
             if mode == "stopped-key-writes":

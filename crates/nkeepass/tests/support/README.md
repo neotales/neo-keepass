@@ -81,6 +81,35 @@ The harness does not print transcripts or send terminating
 signals to reaped PIDs; signal 0 is used only to observe the fixture child's
 absence.
 
+### Native macOS restoration investigation (not resolved)
+
+Run `44966622037` at `5069d21` (macOS 15.8.2) reports seven final restoration
+failures with `changed: lflag`, but that revision did not report numeric flag
+differences. Its two watchdog failures also omitted the case/exit status/driver
+stderr. Do not infer the exact native flag or watchdog cause from those labels.
+
+Failures now include mode-flag before/after/XOR values and symbolic local bits,
+but never queued input, control-character values, or terminal transcripts.
+Watchdog failures include the case, exit status, bounded metadata-only wait
+observations (`si_signo`/`si_code`), and driver phase diagnostics. A wait status
+must positively identify exit, signal death, or core death; `Some(status)` is
+not enough. A real stopped-child regression exercises this distinction without
+changing the elapsed-time watchdog or consuming its status.
+
+XNU `bsd/kern/tty.c` sets PENDIN on a non-flushing raw→canonical transition,
+preserves it through `TIOCSETA`, and replays queued input via `ttypend`.
+`rpassword` and Crossterm currently restore this TUI's mode with TCSANOW.
+An empty-input canonical-cycle probe isolates that kernel behavior; it does
+not prove that pending input is absent/safe in the real UI. PENDIN-only and
+PENDIN+ECHO negative controls still fail exact equality. **No flags are masked,
+normalized, flushed, or excused in the UI restoration assertion.**
+
+Native before/after/XOR and wait-status evidence is still required before
+declaring these macOS failures fixed. If PENDIN is confirmed, a secure product
+restoration design must handle queued input before enabling echo/signals;
+the separate terminal boundary cannot be replaced by a lenient harness check.
+The diagnostic/guard patch is not native macOS integration clearance.
+
 This is UI coverage, not proof of terminal admission, signal safety, or
 Crossterm event-reader identity. No split-terminal or signal machinery is
 changed here. Linux was exercised; Windows and macOS runtime behavior is

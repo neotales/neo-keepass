@@ -14,15 +14,15 @@ use neotales_keepass::{
     KeePassDatabase, ProtectedValue,
 };
 use rustix::process::{
-    Pid, Signal, WaitId, WaitIdOptions, getpgid, getsid, kill_process_group, test_kill_process,
-    test_kill_process_group, waitid,
+    Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, getpgid, getsid, kill_process_group,
+    test_kill_process, test_kill_process_group, waitid,
 };
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DriverEvent {
     SessionVerified,
     SpawnPermitted,
@@ -46,11 +46,24 @@ struct DriverRun {
     timed_out: bool,
     capture_overflow: bool,
     events: Vec<DriverEvent>,
+    wait_observations: Vec<WaitObservation>,
 }
 
 impl DriverRun {
     fn observed(&self, event: DriverEvent) -> bool {
         self.events.contains(&event)
+    }
+
+    fn diagnostics(&self, case: &str) -> String {
+        format!(
+            "case={case} status={:?} timed_out={} capture_overflow={} events={:?} wait={:?}; driver stderr: {}",
+            self.status,
+            self.timed_out,
+            self.capture_overflow,
+            self.events,
+            self.wait_observations,
+            String::from_utf8_lossy(&self.stderr)
+        )
     }
 }
 
@@ -66,13 +79,36 @@ fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<Option<Ex
     }
 }
 
-fn exited_unreaped(child: &Child) -> rustix::io::Result<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WaitObservation {
+    present: bool,
+    signo: i32,
+    code: i32,
+    terminal: bool,
+}
+
+fn observe_wait(child: &Child) -> rustix::io::Result<WaitObservation> {
     // rustix supports Darwin waitid/WNOWAIT (nix's waitid API does not).
     waitid(
         WaitId::Pid(Pid::from_child(child)),
         WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
     )
-    .map(|status| status.is_some())
+    .map(|status| WaitObservation {
+        present: status.is_some(),
+        signo: status.as_ref().map_or(0, WaitIdStatus::raw_signo),
+        code: status.as_ref().map_or(0, WaitIdStatus::raw_code),
+        terminal: terminal_wait_status(status.as_ref()),
+    })
+}
+
+fn exited_unreaped(child: &Child) -> rustix::io::Result<bool> {
+    observe_wait(child).map(|status| status.terminal)
+}
+
+fn terminal_wait_status(status: Option<&WaitIdStatus>) -> bool {
+    // Presence alone is not evidence of exit: stopped/continued/unknown
+    // observations must not short-circuit the real elapsed-time watchdog.
+    status.is_some_and(|status| status.exited() || status.killed() || status.dumped())
 }
 
 struct OwnedDriver {
@@ -351,8 +387,16 @@ fn run_driver_bounded(directory: &Path, path: &Path, case: &str, budget: Duratio
     };
     let deadline = Instant::now() + budget;
     let mut events = Vec::new();
+    let mut wait_observations = Vec::new();
     let timed_out = loop {
-        if exited_unreaped(&driver.child).unwrap() {
+        let observation = observe_wait(&driver.child).unwrap();
+        if wait_observations.last() != Some(&observation) {
+            if wait_observations.len() == 8 {
+                wait_observations.remove(0);
+            }
+            wait_observations.push(observation);
+        }
+        if observation.terminal {
             break false;
         }
         if Instant::now() >= deadline {
@@ -411,6 +455,7 @@ fn run_driver_bounded(directory: &Path, path: &Path, case: &str, budget: Duratio
         timed_out,
         capture_overflow: stdout_overflow || stderr_overflow,
         events,
+        wait_observations,
     }
 }
 
@@ -421,11 +466,8 @@ fn drive(directory: &Path, path: &Path, case: &str) {
             && !output.capture_overflow
             && output.observed(DriverEvent::NoRunningMembersConfirmed)
             && output.status.success(),
-        "TUI UI PTY checks failed (timeout={}, capture_overflow={}, cleanup_not_running={}): {}",
-        output.timed_out,
-        output.capture_overflow,
-        output.observed(DriverEvent::NoRunningMembersConfirmed),
-        String::from_utf8_lossy(&output.stderr)
+        "TUI UI PTY checks failed: {}",
+        output.diagnostics(case)
     );
     // Assert only on the predicate, never expose captured data on failure.
     let no_output = output.stdout.is_empty();
@@ -478,6 +520,7 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
             case,
             Duration::from_secs(3),
         );
+        let diagnostic_context = output.diagnostics(case);
         assert!(
             started.elapsed() < Duration::from_secs(8),
             "watchdog exceeded cleanup budget"
@@ -490,7 +533,8 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
         // reaped PID (which could have been reused by an unrelated process).
         assert_eq!(
             test_kill_process(Pid::from_raw(pid).unwrap()),
-            Err(rustix::io::Errno::SRCH)
+            Err(rustix::io::Errno::SRCH),
+            "{diagnostic_context}"
         );
         assert!(
             bystander.0.try_wait().unwrap().is_none(),
@@ -498,19 +542,67 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
         );
         assert!(!output.status.success());
         assert!(!output.capture_overflow);
-        assert!(output.observed(DriverEvent::NoRunningMembersConfirmed));
+        assert!(
+            output.observed(DriverEvent::NoRunningMembersConfirmed),
+            "{diagnostic_context}"
+        );
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         if case == "stopped-driver" {
-            assert!(output.timed_out);
+            assert!(output.timed_out, "{diagnostic_context}");
             assert!(diagnostic.contains("PTY driver watchdog termination"));
         } else {
             assert!(
                 !output.timed_out,
-                "PTY write blocked until the outer watchdog"
+                "PTY write blocked until the outer watchdog; {diagnostic_context}"
             );
             assert!(diagnostic.contains("PTY write deadline exceeded"));
         }
     }
+}
+
+#[test]
+fn stopped_wait_status_is_not_exit_or_timeout_completion() {
+    let child = Command::new("python3")
+        .isolate_application_environment()
+        .args([
+            "-c",
+            "import os, signal; os.kill(os.getpid(), signal.SIGSTOP)",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let owned = OwnedDriver {
+        child,
+        session_verified: false,
+        reaped: false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let stopped = loop {
+        let status = waitid(
+            WaitId::Pid(Pid::from_child(&owned.child)),
+            WaitIdOptions::STOPPED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        )
+        .unwrap();
+        if let Some(status) = status {
+            assert!(status.stopped());
+            break status;
+        }
+        assert!(Instant::now() < deadline, "stopped wait fixture deadline");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        !terminal_wait_status(Some(&stopped)),
+        "Some(wait status) is not proof of exit"
+    );
+    assert!(!terminal_wait_status(None));
+    let exit_only = observe_wait(&owned.child).unwrap();
+    assert!(
+        !exit_only.terminal,
+        "stopped child reported as exited: {exit_only:?}"
+    );
+    // OwnedDriver's guard kills/reaps this still-owned stopped fixture.
 }
 
 #[test]
@@ -579,13 +671,17 @@ fn startup_permission_and_unreaped_leader_close_watchdog_cleanup_races() {
             case,
             Duration::from_secs(3),
         );
+        let diagnostic_context = output.diagnostics(case);
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "cleanup exceeded bounded allowance"
         );
-        assert!(output.timed_out);
+        assert!(output.timed_out, "{diagnostic_context}");
         assert!(!output.status.success());
-        assert!(output.observed(DriverEvent::NoRunningMembersConfirmed));
+        assert!(
+            output.observed(DriverEvent::NoRunningMembersConfirmed),
+            "{diagnostic_context}"
+        );
         assert!(
             bystander.0.try_wait().unwrap().is_none(),
             "cleanup harmed bystander"
@@ -638,6 +734,33 @@ fn startup_permission_and_unreaped_leader_close_watchdog_cleanup_races() {
 }
 
 #[test]
+fn canonical_cycle_keeps_exact_check_and_exposes_kernel_pending_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let case = "terminal-lifetime-canonical-cycle";
+    let output = run_driver(
+        directory.path(),
+        &directory.path().join("unused.kdbx"),
+        case,
+    );
+    assert!(!output.timed_out, "{}", output.diagnostics(case));
+    #[cfg(target_os = "linux")]
+    assert!(output.status.success(), "{}", output.diagnostics(case));
+    #[cfg(target_os = "macos")]
+    {
+        // XNU tty.c unconditionally generates PENDIN when TCSANOW restores
+        // ICANON. Even this empty-input probe must fail exact equality; it
+        // does not excuse a real UI's restoration mismatch or typeahead echo.
+        assert!(!output.status.success(), "{}", output.diagnostics(case));
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains("lflag_bits=PENDIN"),
+            "{}",
+            output.diagnostics(case)
+        );
+    }
+}
+
+#[test]
 fn pty_driver_retains_terminal_lifetime_and_rejects_unrestored_attributes() {
     let directory = tempfile::tempdir().unwrap();
     let unused = directory.path().join("unused.kdbx");
@@ -646,8 +769,32 @@ fn pty_driver_retains_terminal_lifetime_and_rejects_unrestored_attributes() {
     assert!(!output.status.success(), "unrestored terminal was accepted");
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert!(diagnostic.contains("terminal attributes not restored (changed: lflag)"));
+    assert!(diagnostic.contains("lflag_before=0x"));
+    assert!(diagnostic.contains("lflag_after=0x"));
+    assert!(diagnostic.contains("lflag_xor=0x"));
+    assert!(diagnostic.contains("lflag_bits=ECHO"));
     let no_output = output.stdout.is_empty();
     assert!(no_output, "unexpected PTY driver output");
+    // PENDIN is NOT masked/normalized, alone or alongside a real ECHO change.
+    // These disposable probes must continue failing the exact equality check.
+    for (case, bits) in [
+        ("terminal-lifetime-pendin", "lflag_bits=PENDIN"),
+        ("terminal-lifetime-pendin-echo", "lflag_bits=ECHO,PENDIN"),
+    ] {
+        let output = run_driver(directory.path(), &unused, case);
+        assert!(
+            !output.timed_out && !output.status.success(),
+            "{}",
+            output.diagnostics(case)
+        );
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("terminal attributes not restored (changed: lflag)"));
+        assert!(diagnostic.contains("lflag_xor=0x"));
+        assert!(diagnostic.contains(bits));
+        assert!(diagnostic.contains("pendin_mask=0x"));
+        let no_output = output.stdout.is_empty();
+        assert!(no_output, "unexpected PTY driver output");
+    }
     let output = run_driver(directory.path(), &unused, "terminal-lifetime-ioctl-error");
     assert!(
         !output.status.success(),
