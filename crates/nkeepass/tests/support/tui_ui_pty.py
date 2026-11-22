@@ -94,7 +94,7 @@ def write_pty(master, data, deadline):
             continue
 
 
-def run(binary, vault, mode):
+def run(binary, vault, mode, control_directory):
     master, slave = pty.openpty()
     process = None
     def own_terminal():
@@ -141,13 +141,43 @@ def run(binary, vault, mode):
     def watchdog_termination(_signal, _frame):
         raise AssertionError("PTY driver watchdog termination")
 
+    def publish(name, contents):
+        temporary = os.path.join(control_directory, name + ".tmp")
+        with open(temporary, "w") as marker:
+            marker.write(contents)
+        os.replace(temporary, os.path.join(control_directory, name))
+
     try:
         signal.signal(signal.SIGTERM, watchdog_termination)
         terminal_operation("make PTY master nonblocking", os.set_blocking, master, False)
         terminal_operation("set window size", fcntl.ioctl, slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
         initial_attributes = terminal_operation("read initial attributes", termios.tcgetattr, slave)
+        if mode == "startup-before-session":
+            publish("startup-paused", "before-session")
+            os.kill(os.getpid(), signal.SIGSTOP)
         own_terminal()
+        publish("ready", str(os.getpid()))
+        if mode == "startup-after-session":
+            publish("startup-paused", "after-session")
+        permit = os.path.join(control_directory, "permit")
+        # No subprocess may be created before Rust verifies our stable session
+        # identity and explicitly publishes this per-run permission. A timeout
+        # before permission therefore cannot race setsid/app creation.
+        while not os.path.exists(permit):
+            check(time.monotonic() < deadline, "PTY spawn permission deadline exceeded")
+            time.sleep(0.01)
+        with open(permit) as marker:
+            check(marker.read() == str(os.getpid()), "PTY spawn permission identity mismatch")
         command = [binary, "tui", vault]
+        if mode == "term-resistant-app":
+            command = [sys.executable, "-c", """
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+with open(os.path.join(sys.argv[1], "resistant-ready"), "w") as marker:
+    marker.write("ready")
+time.sleep(60)
+""", control_directory]
         if mode.startswith("stopped-"):
             command = [sys.executable, "-c", """
 import os, signal, tty
@@ -167,11 +197,24 @@ if sys.argv[1] == "terminal-lifetime-unrestored":
     attributes[3] ^= termios.ECHO
     termios.tcsetattr(0, termios.TCSANOW, attributes)
 """, mode]
+        publish("app-spawn-attempt", "attempt")
         process = subprocess.Popen(
             command, stdin=slave, stdout=slave, stderr=slave,
             env=dict(os.environ, TERM="xterm-256color"),
             close_fds=True, cwd=os.path.dirname(vault),
         )
+        if mode == "term-resistant-app":
+            with open(os.path.join(os.path.dirname(vault), "stopped-child.pid"), "w") as marker:
+                marker.write(str(process.pid))
+            ready_deadline = time.monotonic() + 1
+            while not os.path.exists(os.path.join(control_directory, "resistant-ready")):
+                check(time.monotonic() < ready_deadline, "TERM-resistant app did not become ready")
+                time.sleep(0.01)
+            # Deliberately bypass Python finally on TERM: the app ignores TERM
+            # and terminal hangup. Observing this leader exit is NOT cleanup.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGSTOP)
+            raise AssertionError("TERM-resistant probe resumed without termination")
         if mode.startswith("stopped-"):
             with open(os.path.join(os.path.dirname(vault), "stopped-child.pid"), "w") as marker:
                 marker.write(str(process.pid))

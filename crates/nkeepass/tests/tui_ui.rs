@@ -13,12 +13,27 @@ use neotales_keepass::{
     Attachment, Entry, Field, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions,
     KeePassDatabase, ProtectedValue,
 };
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::{Pid, getpgid, getsid};
+use rustix::process::{
+    Pid, Signal, WaitId, WaitIdOptions, getpgid, getsid, kill_process_group, test_kill_process,
+    test_kill_process_group, waitid,
+};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DriverEvent {
+    SessionVerified,
+    SpawnPermitted,
+    AppSpawnAttempted,
+    StartupPaused,
+    LeaderExitedBeforeGroupKill,
+    ResistantAppOutlivedLeader,
+    GroupKillAttempted,
+    LeaderReaped,
+    CleanupComplete,
+}
 
 struct DriverRun {
     status: ExitStatus,
@@ -26,43 +41,121 @@ struct DriverRun {
     stderr: Vec<u8>,
     timed_out: bool,
     capture_overflow: bool,
+    events: Vec<DriverEvent>,
 }
 
-fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+impl DriverRun {
+    fn observed(&self, event: DriverEvent) -> bool {
+        self.events.contains(&event)
+    }
+}
+
+fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<Option<ExitStatus>> {
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .expect("owned child status must be readable")
-        {
-            return Some(status);
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
         }
         if Instant::now() >= deadline {
-            return None;
+            return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn stop_owned_driver(child: &mut Child) -> ExitStatus {
-    // The caller has NOT reaped this child. Its PID pins any verified session
-    // and group ID through signaling; never signal a cached/reaped PID/group.
-    let pid = Pid::from_raw(i32::try_from(child.id()).unwrap());
-    let owns_session = getsid(Some(pid)) == Ok(pid) && getpgid(Some(pid)) == Ok(pid);
-    if owns_session {
-        // Let a stopped driver run its finally block and reap its own child.
-        // TERM precedes CONT so a stopped app cannot resume normal execution.
-        let _ = killpg(pid, Signal::SIGTERM);
-        let _ = killpg(pid, Signal::SIGCONT);
-        if let Some(status) = wait_until(child, Instant::now() + Duration::from_secs(1)) {
-            return status; // Already reaped: no further signaling is allowed.
+fn exited_unreaped(child: &Child) -> rustix::io::Result<bool> {
+    // rustix supports Darwin waitid/WNOWAIT (nix's waitid API does not).
+    waitid(
+        WaitId::Pid(Pid::from_child(child)),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    )
+    .map(|status| status.is_some())
+}
+
+struct OwnedDriver {
+    child: Child,
+    session_verified: bool,
+    reaped: bool,
+}
+
+impl Drop for OwnedDriver {
+    fn drop(&mut self) {
+        // Panic/error cleanup also honors the ownership pin. An ECHILD error
+        // means ownership is lost: do not signal a potentially reused ID.
+        if !self.reaped && exited_unreaped(&self.child).is_ok() {
+            if self.session_verified {
+                let _ = kill_process_group(Pid::from_child(&self.child), Signal::KILL);
+            }
+            let _ = self.child.kill();
+            let _ = wait_until(&mut self.child, Instant::now() + Duration::from_secs(2));
         }
-        let _ = killpg(pid, Signal::SIGKILL);
     }
-    // Before session setup there cannot be an app child. Never target the
-    // inherited process group (which could include the Rust test runner).
-    let _ = child.kill();
-    wait_until(child, Instant::now() + Duration::from_secs(2))
-        .expect("owned driver did not terminate within cleanup deadline")
+}
+
+fn signal_pinned_group(driver: &OwnedDriver, signal: Signal) {
+    assert!(driver.session_verified && !driver.reaped);
+    // Recheck waitability WITHOUT reaping before every terminating signal.
+    exited_unreaped(&driver.child).expect("driver ownership pin was lost");
+    let result = kill_process_group(Pid::from_child(&driver.child), signal);
+    // Darwin can report EPERM for a zombie-only group. This is not taken as
+    // absence: after the final kill/reap we separately require ESRCH.
+    assert!(matches!(
+        result,
+        Ok(()) | Err(rustix::io::Errno::SRCH | rustix::io::Errno::PERM)
+    ));
+}
+
+fn finish_driver(
+    driver: &mut OwnedDriver,
+    timed_out: bool,
+    resistant_app: Option<Pid>,
+) -> (ExitStatus, Vec<DriverEvent>) {
+    let mut events = Vec::new();
+    let pid = Pid::from_child(&driver.child);
+    if driver.session_verified && timed_out {
+        signal_pinned_group(driver, Signal::TERM);
+        signal_pinned_group(driver, Signal::CONT);
+        let grace = Instant::now() + Duration::from_secs(1);
+        while !exited_unreaped(&driver.child).unwrap() && Instant::now() < grace {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let exited_before_kill = exited_unreaped(&driver.child).unwrap();
+    let resistant_outlived =
+        exited_before_kill && resistant_app.is_some_and(|app| test_kill_process(app).is_ok());
+    if exited_before_kill {
+        events.push(DriverEvent::LeaderExitedBeforeGroupKill);
+    }
+    if resistant_outlived {
+        events.push(DriverEvent::ResistantAppOutlivedLeader);
+    }
+    if driver.session_verified {
+        // Required even if TERM already exited the leader: the unreaped PID
+        // pins this exact verified group until its remaining members are killed.
+        signal_pinned_group(driver, Signal::KILL);
+        events.push(DriverEvent::GroupKillAttempted);
+    } else {
+        // No permit was issued, so no app can race this direct-child-only kill,
+        // even if the driver establishes a session concurrently with timeout.
+        let _ = driver.child.kill();
+    }
+    let status = wait_until(&mut driver.child, Instant::now() + Duration::from_secs(2))
+        .unwrap()
+        .expect("driver cleanup/reap deadline exceeded");
+    driver.reaped = true;
+    events.push(DriverEvent::LeaderReaped);
+    let absence_deadline = Instant::now() + Duration::from_secs(2);
+    let mut absent = !driver.session_verified;
+    while !absent && Instant::now() < absence_deadline {
+        absent = test_kill_process_group(pid) == Err(rustix::io::Errno::SRCH);
+        if !absent {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    // Observation only after reap: never send a terminating signal here.
+    if absent {
+        events.push(DriverEvent::CleanupComplete);
+    }
+    (status, events)
 }
 
 fn capture(file: &mut std::fs::File) -> (Vec<u8>, bool) {
@@ -123,12 +216,14 @@ fn run_driver_bounded(directory: &Path, path: &Path, case: &str, budget: Duratio
     // an inherited output descriptor open. Retention is separately capped.
     let mut stdout = tempfile::tempfile_in(directory).unwrap();
     let mut stderr = tempfile::tempfile_in(directory).unwrap();
-    let mut child = Command::new("python3")
+    let protocol = tempfile::tempdir_in(directory).unwrap();
+    let child = Command::new("python3")
         .isolate_application_environment()
         .args(["-c", include_str!("support/tui_ui_pty.py")])
         .arg(env!("CARGO_BIN_EXE_nkp"))
         .arg(path)
         .arg(case)
+        .arg(protocol.path())
         .env("HOME", directory)
         .env("XDG_CONFIG_HOME", directory.join("config"))
         .env("XDG_DATA_HOME", directory.join("data"))
@@ -141,9 +236,64 @@ fn run_driver_bounded(directory: &Path, path: &Path, case: &str, budget: Duratio
         .stderr(stderr.try_clone().unwrap())
         .spawn()
         .expect("python3 is required for Unix TUI PTY tests");
-    let status = wait_until(&mut child, Instant::now() + budget);
-    let timed_out = status.is_none();
-    let status = status.unwrap_or_else(|| stop_owned_driver(&mut child));
+    let mut driver = OwnedDriver {
+        child,
+        session_verified: false,
+        reaped: false,
+    };
+    let deadline = Instant::now() + budget;
+    let mut events = Vec::new();
+    let timed_out = loop {
+        if exited_unreaped(&driver.child).unwrap() {
+            break false;
+        }
+        if Instant::now() >= deadline {
+            break true;
+        }
+        let ready = protocol.path().join("ready");
+        if !driver.session_verified && ready.exists() {
+            let pid = Pid::from_child(&driver.child);
+            assert_eq!(
+                std::fs::read_to_string(ready).unwrap(),
+                driver.child.id().to_string()
+            );
+            assert_eq!(getsid(Some(pid)), Ok(pid));
+            assert_eq!(getpgid(Some(pid)), Ok(pid));
+            // Set this BEFORE publishing the permit: after this point every
+            // exit/error path performs pinned group cleanup, never driver-only.
+            driver.session_verified = true;
+            events.push(DriverEvent::SessionVerified);
+            if case != "startup-after-session" {
+                std::fs::write(
+                    protocol.path().join("permit.tmp"),
+                    driver.child.id().to_string(),
+                )
+                .unwrap();
+                std::fs::rename(
+                    protocol.path().join("permit.tmp"),
+                    protocol.path().join("permit"),
+                )
+                .unwrap();
+                events.push(DriverEvent::SpawnPermitted);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let resistant_app = (case == "term-resistant-app").then(|| {
+        let pid: i32 = std::fs::read_to_string(directory.join("stopped-child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        Pid::from_raw(pid).unwrap()
+    });
+    if protocol.path().join("startup-paused").exists() {
+        events.push(DriverEvent::StartupPaused);
+    }
+    if protocol.path().join("app-spawn-attempt").exists() {
+        events.push(DriverEvent::AppSpawnAttempted);
+    }
+    let (status, cleanup_events) = finish_driver(&mut driver, timed_out, resistant_app);
+    events.extend(cleanup_events);
     let (stdout, stdout_overflow) = capture(&mut stdout);
     let (stderr, stderr_overflow) = capture(&mut stderr);
     DriverRun {
@@ -152,16 +302,21 @@ fn run_driver_bounded(directory: &Path, path: &Path, case: &str, budget: Duratio
         stderr,
         timed_out,
         capture_overflow: stdout_overflow || stderr_overflow,
+        events,
     }
 }
 
 fn drive(directory: &Path, path: &Path, case: &str) {
     let output = run_driver(directory, path, case);
     assert!(
-        !output.timed_out && !output.capture_overflow && output.status.success(),
-        "TUI UI PTY checks failed (timeout={}, capture_overflow={}): {}",
+        !output.timed_out
+            && !output.capture_overflow
+            && output.observed(DriverEvent::CleanupComplete)
+            && output.status.success(),
+        "TUI UI PTY checks failed (timeout={}, capture_overflow={}, cleanup_complete={}): {}",
         output.timed_out,
         output.capture_overflow,
+        output.observed(DriverEvent::CleanupComplete),
         String::from_utf8_lossy(&output.stderr)
     );
     // Assert only on the predicate, never expose captured data on failure.
@@ -176,6 +331,19 @@ fn assert_unchanged(path: &Path, before: &[u8]) {
 
 struct Bystander(Child);
 
+fn bystander() -> Bystander {
+    Bystander(
+        Command::new("python3")
+            .isolate_application_environment()
+            .args(["-c", "import time; time.sleep(60)"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
 impl Drop for Bystander {
     fn drop(&mut self) {
         if matches!(self.0.try_wait(), Ok(None)) {
@@ -187,16 +355,7 @@ impl Drop for Bystander {
 
 #[test]
 fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
-    let mut bystander = Bystander(
-        Command::new("python3")
-            .isolate_application_environment()
-            .args(["-c", "import time; time.sleep(60)"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut bystander = bystander();
     for case in [
         "stopped-key-writes",
         "stopped-cursor-writes",
@@ -221,8 +380,8 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
         // Signal 0 observes absence only. Never send a terminating signal to a
         // reaped PID (which could have been reused by an unrelated process).
         assert_eq!(
-            nix::sys::signal::kill(Pid::from_raw(pid), None),
-            Err(nix::errno::Errno::ESRCH)
+            test_kill_process(Pid::from_raw(pid).unwrap()),
+            Err(rustix::io::Errno::SRCH)
         );
         assert!(
             bystander.0.try_wait().unwrap().is_none(),
@@ -230,6 +389,7 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
         );
         assert!(!output.status.success());
         assert!(!output.capture_overflow);
+        assert!(output.observed(DriverEvent::CleanupComplete));
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         if case == "stopped-driver" {
             assert!(output.timed_out);
@@ -240,6 +400,80 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
                 "PTY write blocked until the outer watchdog"
             );
             assert!(diagnostic.contains("PTY write deadline exceeded"));
+        }
+    }
+}
+
+#[test]
+fn startup_permission_and_unreaped_leader_close_watchdog_cleanup_races() {
+    let mut bystander = bystander();
+    for case in [
+        "startup-before-session",
+        "startup-after-session",
+        "term-resistant-app",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let output = run_driver_bounded(
+            directory.path(),
+            &directory.path().join("unused.kdbx"),
+            case,
+            Duration::from_secs(3),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "cleanup exceeded bounded allowance"
+        );
+        assert!(output.timed_out);
+        assert!(!output.status.success());
+        assert!(output.observed(DriverEvent::CleanupComplete));
+        assert!(
+            bystander.0.try_wait().unwrap().is_none(),
+            "cleanup harmed bystander"
+        );
+        if case.starts_with("startup-") {
+            assert!(output.observed(DriverEvent::StartupPaused));
+            assert!(!output.observed(DriverEvent::SpawnPermitted));
+            assert!(!output.observed(DriverEvent::AppSpawnAttempted));
+            assert_eq!(
+                output.observed(DriverEvent::SessionVerified),
+                case == "startup-after-session"
+            );
+            assert_eq!(
+                output.observed(DriverEvent::GroupKillAttempted),
+                case == "startup-after-session"
+            );
+            assert!(!directory.path().join("stopped-child.pid").exists());
+        } else {
+            assert!(output.observed(DriverEvent::SessionVerified));
+            assert!(output.observed(DriverEvent::SpawnPermitted));
+            assert!(output.observed(DriverEvent::AppSpawnAttempted));
+            // Actual observation before group KILL: the leader has exited,
+            // yet its TERM/HUP-resistant app still exists. Reap must wait.
+            assert!(output.observed(DriverEvent::LeaderExitedBeforeGroupKill));
+            assert!(output.observed(DriverEvent::ResistantAppOutlivedLeader));
+            let killed = output
+                .events
+                .iter()
+                .position(|event| *event == DriverEvent::GroupKillAttempted)
+                .unwrap();
+            let reaped = output
+                .events
+                .iter()
+                .position(|event| *event == DriverEvent::LeaderReaped)
+                .unwrap();
+            assert!(
+                killed < reaped,
+                "verified group must be killed before leader reap"
+            );
+            let pid: i32 = std::fs::read_to_string(directory.path().join("stopped-child.pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                test_kill_process(Pid::from_raw(pid).unwrap()),
+                Err(rustix::io::Errno::SRCH)
+            );
         }
     }
 }

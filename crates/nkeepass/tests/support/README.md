@@ -39,18 +39,29 @@ All master reads/writes are nonblocking. Key sends and cursor-position replies
 share a partial-write loop bounded by the case's absolute deadline (20 seconds
 for UI cases). Rust separately bounds each Python driver's lifetime to 45
 seconds, captures at most 64 KiB per stream from regular files rather than
-waiting for pipe EOF, and allows at most three more seconds for cleanup.
-Unix-only test support uses the already-locked `nix` version for safe signaling.
-It signals a group only while its driver is an unreaped child and its session
-and group IDs both match that child's PID. TERM/CONT lets a stopped driver
-execute cleanup and reap its app; a bounded grace is followed by KILL if needed.
-A driver that has not established its isolated session is killed directly,
-never through the inherited group. No group is signaled after the driver is
-reaped.
+waiting for pipe EOF, and allows five more seconds for cleanup/absence checks.
+A per-run private handshake directory gates app creation: the driver publishes
+its session identity, then waits for Rust to verify SID/PGID against its owned
+child PID and explicitly grant permission. No app can be spawned before that
+permission, including if timeout races session setup.
+
+Unix test support uses the already-locked `rustix` version for safe signaling
+and Darwin-compatible `waitid(WNOWAIT)`. Neither polling nor TERM grace reaps
+the driver. Once a session is verified, cleanup always issues group KILL while
+the leader remains waitable—even if TERM already exited it. Only then is the
+leader reaped; bounded signal-0 observations must establish group absence.
+EPERM is not accepted as absence. Before verification no permission can have
+been issued, so direct-child-only cleanup cannot race app creation. No
+terminating group signal is sent after leader reap.
 
 Negative controls stop a raw-mode child without reading: both large key sends
 and cursor replies must hit their write deadline, not the outer watchdog.
 A stopped-driver control exercises the outer deadline and graceful cleanup.
+Startup controls pause before session creation and after session verification
+with permission withheld, asserting no app appears. Another control makes the
+driver exit on TERM while its app ignores TERM and HUP. It observes the exited
+but unreaped leader alongside that surviving app, requires group KILL before
+reap, and confirms the group and app disappear.
 Each checks that the stopped child is gone and an independently owned bystander
 remains alive. The harness does not print transcripts or send terminating
 signals to reaped PIDs; signal 0 is used only to observe the fixture child's
