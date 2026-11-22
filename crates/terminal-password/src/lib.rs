@@ -9,20 +9,27 @@ static READER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Read from the Unix controlling terminal, with the same ownership, deadline,
 /// cancellation and quiet input-flush contract as [`read`]. This preserves
 /// interactive callers' `/dev/tty` selection rather than consuming piped stdin.
+/// The prompt is written and flushed only after the quiet input mode and its
+/// restoration guard are installed. Prompt I/O errors also restore the mode.
 #[cfg(unix)]
-pub fn read_controlling(timeout: Duration) -> io::Result<Zeroizing<String>> {
+pub fn read_controlling(prompt: &str, timeout: Duration) -> io::Result<Zeroizing<String>> {
+    use std::io::Write;
     let _exclusive = READER
         .try_lock()
         .map_err(|_| io::Error::other("terminal input is already in use"))?;
-    let terminal = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")?;
-    platform::read_from(
+    let terminal = std::fs::OpenOptions::new().read(true).open("/dev/tty")?;
+    // Independent output description: writes must not contaminate the input
+    // description's Darwin file-status history.
+    let mut output = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+    platform::read_from_ready(
         &terminal,
         Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| io::Error::other("invalid input timeout"))?,
+        || {
+            output.write_all(prompt.as_bytes())?;
+            output.flush()
+        },
     )
 }
 
@@ -227,6 +234,14 @@ mod platform {
     }
 
     pub(super) fn read_from(stdin: &impl AsFd, deadline: Instant) -> io::Result<Zeroizing<String>> {
+        read_from_ready(stdin, deadline, || Ok(()))
+    }
+
+    pub(super) fn read_from_ready(
+        stdin: &impl AsFd,
+        deadline: Instant,
+        ready: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Zeroizing<String>> {
         INTERRUPTED.store(false, Ordering::Relaxed);
         let mut signals = Signals(Vec::new());
         let handler = SigAction::new(
@@ -260,6 +275,7 @@ mod platform {
         };
         tcsetattr(stdin, SetArg::TCSANOW, &mode)?;
         let outcome = (|| {
+            ready()?;
             let mut bytes = Zeroizing::new(Vec::new());
             loop {
                 if INTERRUPTED.load(Ordering::Relaxed) {
@@ -329,6 +345,33 @@ mod platform {
         use nix::pty::openpty;
         use std::io::{Read, Write};
         use std::os::fd::{AsRawFd, OwnedFd};
+
+        // Private readiness/error branch: verify prompt publication is inside
+        // the real quiet-mode guard and a failed prompt restores exact modes.
+        #[test]
+        fn prompt_readiness_is_quiet_and_prompt_error_restores_modes() {
+            let pty = openpty(None, None).unwrap();
+            let original = tcgetattr(&pty.slave).unwrap();
+            let outcome =
+                read_from_ready(&pty.slave, Instant::now() + Duration::from_secs(1), || {
+                    let active = tcgetattr(&pty.slave)?;
+                    assert!(
+                        !active.local_flags.intersects(
+                            LocalFlags::ECHO
+                                | LocalFlags::ECHONL
+                                | LocalFlags::ISIG
+                                | LocalFlags::ICANON
+                        ),
+                        "prompt published before quiet mode"
+                    );
+                    Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "synthetic prompt failure",
+                    ))
+                });
+            assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+            assert_eq!(tcgetattr(&pty.slave).unwrap(), original);
+        }
 
         fn available(fd: &OwnedFd) -> io::Result<usize> {
             let mut count: nix::libc::c_int = 0;

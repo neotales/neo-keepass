@@ -2554,9 +2554,8 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
     let mut password = {
         use std::io::Write;
         let mut terminal = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
-        terminal.write_all(b"Vault password: ")?;
-        terminal.flush()?;
-        let result = terminal_password::read_controlling(Duration::from_secs(300));
+        let result =
+            terminal_password::read_controlling("Vault password: ", Duration::from_secs(300));
         let newline = terminal.write_all(b"\n");
         let password = result?;
         newline?;
@@ -2599,8 +2598,31 @@ fn run_terminal(run: impl FnOnce(&mut DefaultTerminal) -> io::Result<()>) -> io:
     // Ratatui's panic hook also restores its QUIET snapshot, before unwinding
     // reaches modes. It cannot replay input under the original echo/ISIG bits.
     let result = ratatui::try_init().and_then(|mut terminal| run(&mut terminal));
-    let result = finish_terminal(result, ratatui::try_restore());
-    finish_terminal(result, modes.restore())
+    restore_terminal_with(
+        result,
+        crossterm::terminal::disable_raw_mode,
+        || leave_alternate_screen(&mut io::stdout()),
+        || modes.restore(),
+    )
+}
+
+#[cfg(unix)]
+fn leave_alternate_screen(output: &mut impl io::Write) -> io::Result<()> {
+    crossterm::execute!(output, crossterm::terminal::LeaveAlternateScreen)
+}
+
+#[cfg(unix)]
+fn restore_terminal_with(
+    result: io::Result<()>,
+    disable_raw: impl FnOnce() -> io::Result<()>,
+    leave_screen: impl FnOnce() -> io::Result<()>,
+    restore_modes: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    // Never short-circuit: a failed backend mode restore must not strand the
+    // alternate screen, and a failed screen write must not skip exact modes.
+    let result = finish_terminal(result, disable_raw());
+    let result = finish_terminal(result, leave_screen());
+    finish_terminal(result, restore_modes())
 }
 
 #[cfg(unix)]
@@ -2671,6 +2693,71 @@ fn new_app(
 
 #[cfg(test)]
 mod tests {
+    // Private branching cleanup orchestration: every failure combination must
+    // preserve ordering, attempt all stages and retain every error.
+    #[cfg(unix)]
+    #[test]
+    fn terminal_cleanup_faults_never_skip_screen_exit_or_exact_modes() -> std::io::Result<()> {
+        use std::cell::RefCell;
+        use std::io;
+        for faults in 0u8..16 {
+            let calls = RefCell::new(Vec::new());
+            let operation = |bit, label| {
+                calls.borrow_mut().push(label);
+                if faults & bit != 0 {
+                    Err(io::Error::new(io::ErrorKind::BrokenPipe, label))
+                } else {
+                    Ok(())
+                }
+            };
+            let primary = if faults & 1 != 0 {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "primary"))
+            } else {
+                Ok(())
+            };
+            let result = super::restore_terminal_with(
+                primary,
+                || operation(2, "backend mode"),
+                || operation(4, "screen exit"),
+                || operation(8, "exact modes"),
+            );
+            assert_eq!(
+                *calls.borrow(),
+                ["backend mode", "screen exit", "exact modes"]
+            );
+            if faults == 0 {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+            if let Err(error) = result {
+                assert_eq!(
+                    error.kind(),
+                    if faults & 1 != 0 {
+                        io::ErrorKind::InvalidData
+                    } else {
+                        io::ErrorKind::BrokenPipe
+                    }
+                );
+                for (bit, label) in [
+                    (1, "primary"),
+                    (2, "backend mode"),
+                    (4, "screen exit"),
+                    (8, "exact modes"),
+                ] {
+                    assert_eq!(error.to_string().contains(label), faults & bit != 0);
+                }
+            }
+        }
+        let mut output = Vec::new();
+        super::leave_alternate_screen(&mut output)?;
+        assert_eq!(
+            output, b"\x1b[?1049l",
+            "screen exit must not erase primary screen"
+        );
+        Ok(())
+    }
+
     use super::clean;
 
     // Private lifecycle ownership is not observable through a terminal transcript.

@@ -38,7 +38,11 @@ reader. Windows TUI startup remains on its existing rpassword/Ratatui lifecycle.
 
 `read_controlling` uses the same reader, cancellation handlers, deadline and
 staged restoration as `read`, but opens `/dev/tty` instead of stdin. This keeps
-the TUI password prompt's existing terminal selection. The TUI prompt now has a
+the TUI password prompt's existing terminal selection. It writes and flushes
+the supplied prompt only after quiet mode and its restoration guard are active:
+prompt visibility is readiness to send a password, not a request to wait for
+echo to turn off. Prompt-output failure also runs staged restoration.
+The TUI prompt now has a
 five-minute deadline; Enter submits and Ctrl-C, Ctrl-D or Escape cancels. Queued
 password tails are intentionally discarded, not fed to the TUI as commands.
 
@@ -49,6 +53,12 @@ cannot replay raw typeahead under the original echo or signal settings.
 After backend teardown, the guard uses the same quiet transition, input-only
 flush and exact restoration described below. Successful restoration is
 idempotent; Drop does not flush a second owner's input.
+On normal/error returns the TUI attempts backend raw-mode restoration, alternate
+screen exit, and exact-mode restoration independently and in that order, retaining
+all errors. A backend mode failure cannot prevent the screen-exit write. Screen
+exit writes only LeaveAlternateScreen, never a primary-screen erase. The existing
+Ratatui panic hook remains a best-effort fallback, not this fault-tested return
+path.
 
 The TUI intentionally discards queued exit typeahead, including bytes typed
 after `q` in the same burst. This is an input-ownership handoff, not a promise

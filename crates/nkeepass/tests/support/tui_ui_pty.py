@@ -273,8 +273,8 @@ if sys.argv[1] in ("terminal-lifetime-unrestored", "terminal-lifetime-pendin", "
             check_restored(slave, initial_attributes)
             return
         wait_for("Vault password: ")
-        while terminal_operation("read password-prompt attributes", termios.tcgetattr, slave)[3] & termios.ECHO:
-            pump()
+        # Visibility is the readiness contract: send immediately, never wait
+        # for ECHO to turn off and thereby conceal a product prompt race.
         if mode in ("password-cancel", "password-failure"):
             if mode == "password-cancel":
                 send(b"\x03CANCEL-TAIL-SENTINEL\n")

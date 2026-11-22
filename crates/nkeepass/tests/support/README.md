@@ -128,6 +128,17 @@ Windows startup remains unchanged. External-signal lifecycle and split-terminal
 architecture remain separate work. Native macOS/Windows validation of this
 production patch is still required; Linux green is not native clearance.
 
+Prompt visibility is now the input-readiness boundary: the reader installs
+quiet mode and its guard before writing/flushing the prompt. The PTY sends its
+synthetic password immediately on visibility, with no ECHO-state wait. A private
+readiness/error regression verifies quiet flags and exact cleanup on prompt
+write failure. Normal/error-return teardown separately attempts backend mode
+restoration, alternate-screen exit, then exact modes; injected failures at every
+stage verify ordering, all attempts, and retention of primary/cleanup errors.
+The screen-exit command is checked byte-for-byte to exclude primary-screen
+clearing. Full-screen external-signal cleanup and split-terminal admission are
+still not solved by these changes.
+
 This is UI coverage, not proof of terminal admission, signal safety, or
 Crossterm event-reader identity. No split-terminal or signal machinery is
 changed here. Linux was exercised; Windows and macOS runtime behavior is
