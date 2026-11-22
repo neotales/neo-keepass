@@ -81,7 +81,7 @@ The harness does not print transcripts or send terminating
 signals to reaped PIDs; signal 0 is used only to observe the fixture child's
 absence.
 
-### Native macOS restoration investigation (not resolved)
+### Native macOS restoration evidence and production fix
 
 Run `44966622037` at `5069d21` (macOS 15.8.2) reports seven final restoration
 failures with `changed: lflag`, but that revision did not report numeric flag
@@ -104,11 +104,29 @@ not prove that pending input is absent/safe in the real UI. PENDIN-only and
 PENDIN+ECHO negative controls still fail exact equality. **No flags are masked,
 normalized, flushed, or excused in the UI restoration assertion.**
 
-Native before/after/XOR and wait-status evidence is still required before
-declaring these macOS failures fixed. If PENDIN is confirmed, a secure product
-restoration design must handle queued input before enabling echo/signals;
-the separate terminal boundary cannot be replaced by a lenient harness check.
-The diagnostic/guard patch is not native macOS integration clearance.
+Native run `44968122325` at `70fef16` confirmed all seven UI failures had exactly
+`lflag_before=0x5cb`, `lflag_after=0x200005cb`, XOR/PENDIN `0x20000000`.
+Both watchdog controls passed. This is product restoration behavior, not a
+reason to mask the bit or weaken the harness.
+
+Unix TUI startup now uses terminal-password's staged password reader on the
+same controlling terminal as before. Before Ratatui starts, a quiet-mode guard
+captures original backend modes and ensures Crossterm's snapshot cannot enable
+echo/signals during teardown (including its panic hook). After backend restore,
+the guard settles canonical/raw mode quietly, flushes input only, then restores
+exact saved modes. Password and exit typeahead are intentionally discarded at
+their respective handoffs; later arrivals belong to the restored owner.
+No primary-screen or scrollback clearing is added.
+
+The hidden-tail UI case checks password/exit sentinels, empty post-exit input,
+exact modes and non-destructive primary-screen teardown; cancellation and
+failed unlock must restore exact modes without entering the alternate screen.
+The public guard PTY regression covers cooked/raw origins, saved PENDIN, quiet
+backend snapshots, hidden Ctrl-C/typeahead and explicit/Drop restoration.
+Mutation checks removing the quiet snapshot or input flush fail on Linux.
+Windows startup remains unchanged. External-signal lifecycle and split-terminal
+architecture remain separate work. Native macOS/Windows validation of this
+production patch is still required; Linux green is not native clearance.
 
 This is UI coverage, not proof of terminal admission, signal safety, or
 Crossterm event-reader identity. No split-terminal or signal machinery is

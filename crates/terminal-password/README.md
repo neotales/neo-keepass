@@ -1,13 +1,15 @@
 # terminal-password
 
-Small synchronous input boundary for `nkp set`'s hidden value prompt.
+Small synchronous input boundary for `nkp set`'s hidden value prompt and the
+Unix TUI's vault-password prompt and terminal-mode handoff.
 
 `rpassword`'s blocking reader cannot be safely abandoned on timeout. A worker
 thread would retain a terminal reader after the caller returned. Crossterm's
 shared event reader and Windows cooked-mode reconstruction are not an exact
 saved-mode restoration boundary. This crate instead owns one synchronous
 reader, waits against an absolute deadline, and restores the actual saved mode.
-It does not replace the CLI's unrelated vault-password or TUI input paths.
+It does not replace the CLI's unrelated vault-password path or the TUI event
+reader. Windows TUI startup remains on its existing rpassword/Ratatui lifecycle.
 
 - Unix: safe nix termios, poll and read calls; a restoration guard; temporary
   scoped sigaction cancellation handlers for SIGINT/SIGTERM/SIGHUP/SIGQUIT.
@@ -31,6 +33,31 @@ It does not replace the CLI's unrelated vault-password or TUI input paths.
 - OS restoration failures are errors; drop retries restoration. Uncatchable
   process termination, including SIGKILL and forced Windows process termination,
   cannot run cleanup.
+
+## Unix TUI lifecycle
+
+`read_controlling` uses the same reader, cancellation handlers, deadline and
+staged restoration as `read`, but opens `/dev/tty` instead of stdin. This keeps
+the TUI password prompt's existing terminal selection. The TUI prompt now has a
+five-minute deadline; Enter submits and Ctrl-C, Ctrl-D or Escape cancels. Queued
+password tails are intentionally discarded, not fed to the TUI as commands.
+
+`QuietTerminal` captures the frontend's mode terminal before Crossterm captures
+its raw-mode snapshot. The saved backend snapshot has echo, signals and extended
+input handling disabled. Ratatui's normal restore and panic hook therefore
+cannot replay raw typeahead under the original echo or signal settings.
+After backend teardown, the guard uses the same quiet transition, input-only
+flush and exact restoration described below. Successful restoration is
+idempotent; Drop does not flush a second owner's input.
+
+The TUI intentionally discards queued exit typeahead, including bytes typed
+after `q` in the same burst. This is an input-ownership handoff, not a promise
+to hide input arriving after the quiet flush. No output flush, primary-screen
+erase or scrollback clear is used. Original mode flags (including an originally
+set PENDIN), control characters and speeds are restored without normalization.
+The caller must exclusively own backend mode changes and readers. This adds
+no TUI-wide signal handler and does not resolve split-terminal routing or
+external-signal cleanup of a running TUI.
 
 `cargo test -p terminal-password` runs bounded Unix PTY tests. Windows builds
 run `tests/windows_console.rs`, using disposable child consoles for submission,

@@ -5,6 +5,8 @@
 use std::fs::File;
 use std::io;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -2544,9 +2546,23 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
     Ok(())
 }
 
-/// Starts the explicitly selected TUI command and restores the terminal through
-/// Ratatui's `run` lifecycle wrapper, including unwind/error paths.
+/// Starts the explicitly selected TUI command.
+/// Unix restoration discards queued typeahead while echo/signals are disabled,
+/// then reinstates exact prior modes. No primary-screen clearing is performed.
 pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
+    #[cfg(unix)]
+    let mut password = {
+        use std::io::Write;
+        let mut terminal = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+        terminal.write_all(b"Vault password: ")?;
+        terminal.flush()?;
+        let result = terminal_password::read_controlling(Duration::from_secs(300));
+        let newline = terminal.write_all(b"\n");
+        let password = result?;
+        newline?;
+        password
+    };
+    #[cfg(not(unix))]
     let mut password = Zeroizing::new(rpassword::prompt_password("Vault password: ")?);
     let mut credentials = KdbxCredentials::password(&password)
         .map_err(|_| io::Error::other("invalid credentials"))?;
@@ -2558,9 +2574,45 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
         .map_err(|_| io::Error::other("cannot unlock vault"))?;
     let mut app = new_app(service, session, credentials, aliases)?;
     app.refresh();
+    #[cfg(unix)]
+    let result = run_terminal(|terminal| run_ui(terminal, &mut app, path));
+    #[cfg(not(unix))]
     let result = ratatui::run(|terminal| run_ui(terminal, &mut app, path));
     app.lock_vault();
     result
+}
+
+#[cfg(unix)]
+fn run_terminal(run: impl FnOnce(&mut DefaultTerminal) -> io::Result<()>) -> io::Result<()> {
+    use std::io::IsTerminal;
+    // Match Crossterm's existing mode-descriptor selection, without changing
+    // split-terminal admission or installing a second signal architecture.
+    let terminal = if io::stdin().is_terminal() {
+        io::stdin().as_fd().try_clone_to_owned().map(File::from)?
+    } else {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")?
+    };
+    let mut modes = terminal_password::QuietTerminal::new(terminal)?;
+    // Ratatui's panic hook also restores its QUIET snapshot, before unwinding
+    // reaches modes. It cannot replay input under the original echo/ISIG bits.
+    let result = ratatui::try_init().and_then(|mut terminal| run(&mut terminal));
+    let result = finish_terminal(result, ratatui::try_restore());
+    finish_terminal(result, modes.restore())
+}
+
+#[cfg(unix)]
+fn finish_terminal(result: io::Result<()>, cleanup: io::Result<()>) -> io::Result<()> {
+    match (result, cleanup) {
+        (Err(primary), Err(cleanup)) => Err(io::Error::new(
+            primary.kind(),
+            format!("{primary}; terminal restoration also failed: {cleanup}"),
+        )),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        _ => Ok(()),
+    }
 }
 
 fn new_app(

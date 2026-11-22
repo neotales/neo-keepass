@@ -4,6 +4,54 @@ use std::io;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
+static READER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read from the Unix controlling terminal, with the same ownership, deadline,
+/// cancellation and quiet input-flush contract as [`read`]. This preserves
+/// interactive callers' `/dev/tty` selection rather than consuming piped stdin.
+#[cfg(unix)]
+pub fn read_controlling(timeout: Duration) -> io::Result<Zeroizing<String>> {
+    let _exclusive = READER
+        .try_lock()
+        .map_err(|_| io::Error::other("terminal input is already in use"))?;
+    let terminal = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
+    platform::read_from(
+        &terminal,
+        Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| io::Error::other("invalid input timeout"))?,
+    )
+}
+
+/// Exclusive Unix terminal-mode ownership around a raw-mode frontend.
+///
+/// Capture and quiet the supplied terminal BEFORE a backend snapshots modes.
+/// That backend must finish restoring its snapshot before `restore` or Drop.
+/// Its snapshot therefore cannot re-enable echo/signals during canonical
+/// restoration. No signal handlers are installed here. Callers must exclude
+/// other mode owners and readers; this guard does not serialize external code.
+/// Restoration intentionally discards queued typeahead while quiet, then
+/// restores every original mode bit. Later input belongs to the restored owner.
+/// Preparation failures never enable echo/signals over unsettled input.
+#[cfg(unix)]
+pub struct QuietTerminal(platform::Restore<std::fs::File>);
+
+#[cfg(unix)]
+impl QuietTerminal {
+    /// Takes ownership of the descriptor; Drop retries incomplete restoration.
+    pub fn new(terminal: std::fs::File) -> io::Result<Self> {
+        platform::Restore::quiet(terminal).map(Self)
+    }
+
+    /// Report restoration errors on normal exits; Drop is only a fallback.
+    pub fn restore(&mut self) -> io::Result<()> {
+        self.0.restore()
+    }
+}
+
 /// Reads UTF-8 from terminal stdin without echo, bounded by an absolute deadline.
 /// Redirected stdin is refused. Enter submits; Ctrl-C, Ctrl-D and Escape cancel.
 /// Terminal state is restored before returning, including on timeout.
@@ -30,7 +78,6 @@ use zeroize::Zeroizing;
 /// A persistent OS error can prevent complete restoration and is reported.
 pub fn read(timeout: Duration) -> io::Result<Zeroizing<String>> {
     use std::io::IsTerminal;
-    static READER: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _exclusive = READER
         .try_lock()
         .map_err(|_| io::Error::other("terminal input is already in use"))?;
@@ -133,17 +180,32 @@ mod platform {
         apply(RestoreOp::SetMode(original))
     }
 
-    struct Restore<'a> {
-        stdin: &'a io::Stdin,
+    pub(super) struct Restore<F: AsFd> {
+        stdin: F,
         original: Termios,
         restored: bool,
     }
-    impl Restore<'_> {
-        fn restore(&mut self) -> io::Result<()> {
+    impl<F: AsFd> Restore<F> {
+        pub(super) fn quiet(stdin: F) -> io::Result<Self> {
+            let original = tcgetattr(&stdin)?;
+            let mode = quiet_mode(&original);
+            let restore = Self {
+                stdin,
+                original,
+                restored: false,
+            };
+            tcsetattr(&restore.stdin, SetArg::TCSANOW, &mode)?;
+            Ok(restore)
+        }
+
+        pub(super) fn restore(&mut self) -> io::Result<()> {
+            if self.restored {
+                return Ok(());
+            }
             let result = restore_mode(&self.original, |operation| {
                 match operation {
-                    RestoreOp::FlushInput => tcflush(self.stdin, FlushArg::TCIFLUSH),
-                    RestoreOp::SetMode(mode) => tcsetattr(self.stdin, SetArg::TCSANOW, mode),
+                    RestoreOp::FlushInput => tcflush(&self.stdin, FlushArg::TCIFLUSH),
+                    RestoreOp::SetMode(mode) => tcsetattr(&self.stdin, SetArg::TCSANOW, mode),
                 }
                 .map_err(io::Error::from)
             });
@@ -151,7 +213,7 @@ mod platform {
             result
         }
     }
-    impl Drop for Restore<'_> {
+    impl<F: AsFd> Drop for Restore<F> {
         fn drop(&mut self) {
             if !self.restored {
                 let _ = self.restore();
@@ -161,6 +223,10 @@ mod platform {
 
     pub(super) fn read(deadline: Instant) -> io::Result<Zeroizing<String>> {
         let stdin = io::stdin();
+        read_from(&stdin, deadline)
+    }
+
+    pub(super) fn read_from(stdin: &impl AsFd, deadline: Instant) -> io::Result<Zeroizing<String>> {
         INTERRUPTED.store(false, Ordering::Relaxed);
         let mut signals = Signals(Vec::new());
         let handler = SigAction::new(
@@ -179,7 +245,7 @@ mod platform {
             let previous = unsafe { sigaction(signal, &handler)? };
             signals.0.push((signal, previous));
         }
-        let original = tcgetattr(&stdin)?;
+        let original = tcgetattr(stdin)?;
         let mut mode = quiet_mode(&original);
         mode.local_flags.remove(LocalFlags::ICANON);
         // Poll is readiness, not a guarantee that a subsequent blocking read
@@ -188,11 +254,11 @@ mod platform {
         mode.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
         mode.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
         let mut restore = Restore {
-            stdin: &stdin,
+            stdin,
             original,
             restored: false,
         };
-        tcsetattr(&stdin, SetArg::TCSANOW, &mode)?;
+        tcsetattr(stdin, SetArg::TCSANOW, &mode)?;
         let outcome = (|| {
             let mut bytes = Zeroizing::new(Vec::new());
             loop {
@@ -221,7 +287,7 @@ mod platform {
                     continue;
                 }
                 let mut byte = [0];
-                match nix::unistd::read(&stdin, &mut byte) {
+                match nix::unistd::read(stdin, &mut byte) {
                     Ok(0) if events.contains(PollFlags::POLLHUP) => return Err(cancelled()),
                     Ok(0) if events.contains(PollFlags::POLLERR) => {
                         return Err(io::Error::other("terminal input failed"));

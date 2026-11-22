@@ -810,6 +810,16 @@ fn pty_driver_retains_terminal_lifetime_and_rejects_unrestored_attributes() {
 }
 
 #[test]
+fn hidden_password_and_exit_typeahead_are_not_replayed_or_retained() {
+    let (directory, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    drive(directory.path(), &path, "hidden-tail");
+    drive(directory.path(), &path, "password-cancel");
+    drive(directory.path(), &path, "password-failure");
+    assert_unchanged(&path, &before);
+}
+
+#[test]
 fn long_colliding_field_names_are_inspectable_before_reveal_consent() {
     let (directory, path) = fixture();
     let before = std::fs::read(&path).unwrap();

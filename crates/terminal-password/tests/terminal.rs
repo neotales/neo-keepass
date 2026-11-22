@@ -14,6 +14,110 @@ const ECHO_MARKERS: &[&[u8]] = &[
     b"AFTER-CANCEL-SENTINEL",
 ];
 
+#[test]
+fn frontend_quiet_snapshot_restores_exact_modes_without_hidden_replay() {
+    use nix::sys::termios::{InputFlags, cfmakeraw};
+    use std::os::fd::AsRawFd;
+    for (canonical, pending, explicit) in [
+        (true, false, true),
+        (true, true, true),
+        (false, false, true),
+        (true, false, false),
+    ] {
+        let pty = openpty(None, None).unwrap();
+        let mut original = tcgetattr(&pty.slave).unwrap();
+        original.local_flags.set(LocalFlags::ICANON, canonical);
+        original.local_flags.set(LocalFlags::PENDIN, pending);
+        original
+            .local_flags
+            .insert(LocalFlags::ECHO | LocalFlags::ECHONL | LocalFlags::ISIG);
+        original.input_flags.insert(InputFlags::IXON);
+        tcsetattr(&pty.slave, SetArg::TCSANOW, &original).unwrap();
+        let original = tcgetattr(&pty.slave).unwrap();
+        let mut guard = terminal_password::QuietTerminal::new(std::fs::File::from(
+            pty.slave.try_clone().unwrap(),
+        ))
+        .unwrap();
+        let snapshot = tcgetattr(&pty.slave).unwrap();
+        assert!(
+            !snapshot.local_flags.intersects(
+                LocalFlags::ECHO | LocalFlags::ECHONL | LocalFlags::ISIG | LocalFlags::IEXTEN,
+            ),
+            "backend snapshot must never re-enable input side effects"
+        );
+        let mut raw = snapshot.clone();
+        cfmakeraw(&mut raw);
+        tcsetattr(&pty.slave, SetArg::TCSANOW, &raw).unwrap();
+        let mut master = std::fs::File::from(pty.master);
+        master.write_all(b"HIDDEN-EXIT-TAIL\n\x03\n").unwrap();
+        // Acknowledge queued bytes before teardown; also forces Darwin replay.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            let mut count: nix::libc::c_int = 0;
+            // SAFETY: live PTY descriptor and correctly sized writable integer.
+            assert_eq!(
+                unsafe { nix::libc::ioctl(pty.slave.as_raw_fd(), nix::libc::FIONREAD, &mut count) },
+                0
+            );
+            if count == 19 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "hidden bytes not queued");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Simulate the backend's ordinary restore, before the guard's handoff.
+        tcsetattr(&pty.slave, SetArg::TCSANOW, &snapshot).unwrap();
+        if explicit {
+            guard.restore().unwrap();
+        }
+        drop(guard);
+        assert_eq!(tcgetattr(&pty.slave).unwrap(), original);
+        let mut count: nix::libc::c_int = -1;
+        // SAFETY: same live descriptor and output integer as above.
+        assert_eq!(
+            unsafe { nix::libc::ioctl(pty.slave.as_raw_fd(), nix::libc::FIONREAD, &mut count) },
+            0
+        );
+        assert_eq!(count, 0, "hidden typeahead survived the ownership handoff");
+        let flags = OFlag::from_bits_retain(fcntl(&master, FcntlArg::F_GETFL).unwrap());
+        fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            master.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "hidden typeahead was echoed"
+        );
+    }
+}
+
+#[test]
+fn restored_frontend_guard_does_not_flush_the_next_owners_input() {
+    let pty = openpty(None, None).unwrap();
+    let mut guard =
+        terminal_password::QuietTerminal::new(std::fs::File::from(pty.slave.try_clone().unwrap()))
+            .unwrap();
+    guard.restore().unwrap();
+    let mut master = std::fs::File::from(pty.master);
+    master.write_all(b"next-owner\n").unwrap();
+    // Repeated explicit restoration and Drop are no-ops after handoff.
+    guard.restore().unwrap();
+    drop(guard);
+    use nix::poll::{PollFd, PollFlags, poll};
+    use std::os::fd::AsFd;
+    let mut fds = [PollFd::new(pty.slave.as_fd(), PollFlags::POLLIN)];
+    assert_eq!(
+        poll(&mut fds, 500u16).unwrap(),
+        1,
+        "next owner's input was discarded"
+    );
+    let mut slave = std::fs::File::from(pty.slave);
+    let flags = OFlag::from_bits_retain(fcntl(&slave, FcntlArg::F_GETFL).unwrap());
+    fcntl(&slave, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
+    let mut bytes = [0; 11];
+    assert_eq!(slave.read(&mut bytes).unwrap(), bytes.len());
+    assert_eq!(&bytes, b"next-owner\n");
+}
+
 fn worker_output(slave: &OwnedFd) -> OwnedFd {
     // dup/try_clone shares status flags and Darwin's FWASWRITTEN history.
     // Reopen this same PTY instead: termios and captured output remain shared,

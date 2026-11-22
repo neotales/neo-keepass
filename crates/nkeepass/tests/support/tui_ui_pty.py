@@ -275,9 +275,32 @@ if sys.argv[1] in ("terminal-lifetime-unrestored", "terminal-lifetime-pendin", "
         wait_for("Vault password: ")
         while terminal_operation("read password-prompt attributes", termios.tcgetattr, slave)[3] & termios.ECHO:
             pump()
-        send(b"disposable-tui-fixture\n")
+        if mode in ("password-cancel", "password-failure"):
+            if mode == "password-cancel":
+                send(b"\x03CANCEL-TAIL-SENTINEL\n")
+            else:
+                send(b"wrong-disposable-password\nFAILURE-TAIL-SENTINEL\n")
+            state = "password error exit"
+            while process.poll() is None:
+                pump()
+            for _ in range(3):
+                pump()
+            check(process.returncode != 0, "password error unexpectedly succeeded")
+            for marker in (b"CANCEL-TAIL-SENTINEL", b"FAILURE-TAIL-SENTINEL", b"wrong-disposable-password"):
+                check(marker not in transcript, "password error exposed hidden input")
+            check(b"\x1b[?1049h" not in transcript, "password error entered alternate screen")
+            check_restored(slave, initial_attributes)
+            return
+        if mode == "hidden-tail":
+            send(b"disposable-tui-fixture\nPASSWORD-TAIL-SENTINEL\n")
+        else:
+            send(b"disposable-tui-fixture\n")
         wait_for("Example")
-        if mode == "save-failure":
+        if mode == "hidden-tail":
+            # One write queues a quit key followed by hidden typeahead. It
+            # belongs to the TUI, not the shell which inherits restored modes.
+            send(b"qEXIT-TAIL-SENTINEL\n")
+        elif mode == "save-failure":
             send(b"e")
             wait_for("New entry title")
             send(b"Temporary\r")
@@ -425,7 +448,22 @@ if sys.argv[1] in ("terminal-lifetime-unrestored", "terminal-lifetime-pendin", "
         for _ in range(3):
             pump()
         check(process.returncode == 0, "interactive TUI failed")
+        # Inspect exact modes BEFORE any readiness query can consume PENDIN.
+        check_restored(slave, initial_attributes)
         check(b"disposable-tui-fixture" not in transcript, "credential echoed")
+        if mode == "hidden-tail":
+            # Querying readability also provokes Darwin's pending-input replay.
+            count = terminal_operation("inspect queued input", fcntl.ioctl, slave, termios.FIONREAD, struct.pack("i", 0))
+            check(struct.unpack("i", count)[0] == 0, "hidden typeahead retained for next owner")
+            for _ in range(3):
+                pump()
+            for marker in (b"PASSWORD-TAIL-SENTINEL", b"EXIT-TAIL-SENTINEL"):
+                check(marker not in transcript, "hidden typeahead exposed")
+        # All erases must occur inside the alternate buffer, never after leaving
+        # it (which would destroy the user's primary-screen contents).
+        after_leave = bytes(transcript).rsplit(b"\x1b[?1049l", 1)[-1]
+        check(b"\x1b[2J" not in after_leave and b"\x1b[3J" not in after_leave,
+              "primary screen destructively cleared")
         check(b"\x1b[?1049l" in transcript, "alternate screen not restored")
         check_restored(slave, initial_attributes)
     finally:
