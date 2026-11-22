@@ -1,5 +1,5 @@
-//! Disposable PTY coverage of UI behavior, not terminal admission or signal safety.
-#![cfg(unix)]
+//! Linux/macOS PTY coverage, not generic Unix admission or signal-safety proof.
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -29,10 +29,14 @@ enum DriverEvent {
     AppSpawnAttempted,
     StartupPaused,
     LeaderExitedBeforeGroupKill,
-    ResistantAppOutlivedLeader,
+    ResistantAppPresentAfterLeaderExit,
     GroupKillAttempted,
     LeaderReaped,
-    CleanupComplete,
+    GroupAbsent,
+    ZombieOnlyGroupObserved,
+    ResistantAppAbsent,
+    ResistantAppZombieObserved,
+    NoRunningMembersConfirmed,
 }
 
 struct DriverRun {
@@ -96,8 +100,8 @@ fn signal_pinned_group(driver: &OwnedDriver, signal: Signal) {
     // Recheck waitability WITHOUT reaping before every terminating signal.
     exited_unreaped(&driver.child).expect("driver ownership pin was lost");
     let result = kill_process_group(Pid::from_child(&driver.child), signal);
-    // Darwin can report EPERM for a zombie-only group. This is not taken as
-    // absence: after the final kill/reap we separately require ESRCH.
+    // Darwin can report EPERM for a zombie-only group. This alone is neither
+    // absence nor proof of death; post-kill metadata must confirm the outcome.
     assert!(matches!(
         result,
         Ok(()) | Err(rustix::io::Errno::SRCH | rustix::io::Errno::PERM)
@@ -108,6 +112,7 @@ fn finish_driver(
     driver: &mut OwnedDriver,
     timed_out: bool,
     resistant_app: Option<Pid>,
+    directory: &Path,
 ) -> (ExitStatus, Vec<DriverEvent>) {
     let mut events = Vec::new();
     let pid = Pid::from_child(&driver.child);
@@ -126,7 +131,7 @@ fn finish_driver(
         events.push(DriverEvent::LeaderExitedBeforeGroupKill);
     }
     if resistant_outlived {
-        events.push(DriverEvent::ResistantAppOutlivedLeader);
+        events.push(DriverEvent::ResistantAppPresentAfterLeaderExit);
     }
     if driver.session_verified {
         // Required even if TERM already exited the leader: the unreaped PID
@@ -143,17 +148,55 @@ fn finish_driver(
         .expect("driver cleanup/reap deadline exceeded");
     driver.reaped = true;
     events.push(DriverEvent::LeaderReaped);
-    let absence_deadline = Instant::now() + Duration::from_secs(2);
-    let mut absent = !driver.session_verified;
-    while !absent && Instant::now() < absence_deadline {
-        absent = test_kill_process_group(pid) == Err(rustix::io::Errno::SRCH);
-        if !absent {
+    // Observation only after leader reap: never terminate a cached PID/group.
+    // An orphan can remain a zombie until init reaps it. That is not a running
+    // process, but it is also not PID/group absence or a reap performed by us.
+    if driver.session_verified {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let group_absent = test_kill_process_group(pid) == Err(rustix::io::Errno::SRCH);
+            if group_absent {
+                events.push(DriverEvent::GroupAbsent);
+            }
+            let app_absent = resistant_app
+                .is_none_or(|app| test_kill_process(app) == Err(rustix::io::Errno::SRCH));
+            let snapshot = if group_absent && app_absent {
+                None
+            } else {
+                process_snapshot(directory, deadline)
+            };
+            let group_quiet = group_absent
+                || snapshot
+                    .as_ref()
+                    .is_some_and(|rows| zombie_only_group(rows, pid));
+            if group_quiet && !group_absent {
+                events.push(DriverEvent::ZombieOnlyGroupObserved);
+            }
+            let app_quiet = resistant_app.is_none_or(|app| {
+                if test_kill_process(app) == Err(rustix::io::Errno::SRCH) {
+                    events.push(DriverEvent::ResistantAppAbsent);
+                    true
+                } else if snapshot
+                    .as_ref()
+                    .is_some_and(|rows| zombie_target(rows, app))
+                {
+                    events.push(DriverEvent::ResistantAppZombieObserved);
+                    true
+                } else {
+                    false
+                }
+            });
+            if group_quiet && app_quiet {
+                events.push(DriverEvent::NoRunningMembersConfirmed);
+                break;
+            }
+            if Instant::now() >= deadline {
+                break; // Unknown/live state is a cleanup failure, never success.
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
-    }
-    // Observation only after reap: never send a terminating signal here.
-    if absent {
-        events.push(DriverEvent::CleanupComplete);
+    } else {
+        events.push(DriverEvent::NoRunningMembersConfirmed); // No app was permitted.
     }
     (status, events)
 }
@@ -165,6 +208,71 @@ fn capture(file: &mut std::fs::File) -> (Vec<u8>, bool) {
     let mut bytes = Vec::new();
     file.take(LIMIT).read_to_end(&mut bytes).unwrap();
     (bytes, overflow)
+}
+
+struct ProcessRow {
+    pid: i32,
+    group: i32,
+    state: char,
+}
+
+fn parse_process_snapshot(bytes: &[u8]) -> Option<Vec<ProcessRow>> {
+    std::str::from_utf8(bytes)
+        .ok()?
+        .lines()
+        .map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let group: i32 = fields.next()?.parse().ok()?;
+            let state = fields.next()?.chars().next()?;
+            if pid < 0 || group < 0 || fields.next().is_some() {
+                return None;
+            }
+            Some(ProcessRow { pid, group, state })
+        })
+        .collect()
+}
+
+fn process_snapshot(directory: &Path, deadline: Instant) -> Option<Vec<ProcessRow>> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    // Metadata only: no argv, environment, command names, or terminal data.
+    // Regular-file capture, bounded child lifetime, and a truncation check
+    // prevent blocked pipe drains or incomplete snapshots being accepted.
+    let mut output = tempfile::tempfile_in(directory).ok()?;
+    let mut observer = OwnedLeaf(
+        Command::new("ps")
+            .args(["-axo", "pid=,pgid=,stat="])
+            .stdin(Stdio::null())
+            .stdout(output.try_clone().ok()?)
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?,
+    );
+    let status = wait_until(&mut observer.0, deadline).ok()??;
+    if !status.success() {
+        return None;
+    }
+    let (bytes, truncated) = capture(&mut output);
+    if truncated {
+        None
+    } else {
+        parse_process_snapshot(&bytes)
+    }
+}
+
+fn zombie_only_group(rows: &[ProcessRow], group: Pid) -> bool {
+    let mut members = rows
+        .iter()
+        .filter(|row| row.group == group.as_raw_pid())
+        .peekable();
+    members.peek().is_some() && members.all(|row| row.state == 'Z')
+}
+
+fn zombie_target(rows: &[ProcessRow], pid: Pid) -> bool {
+    rows.iter()
+        .any(|row| row.pid == pid.as_raw_pid() && row.state == 'Z')
 }
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -292,7 +400,7 @@ fn run_driver_bounded(directory: &Path, path: &Path, case: &str, budget: Duratio
     if protocol.path().join("app-spawn-attempt").exists() {
         events.push(DriverEvent::AppSpawnAttempted);
     }
-    let (status, cleanup_events) = finish_driver(&mut driver, timed_out, resistant_app);
+    let (status, cleanup_events) = finish_driver(&mut driver, timed_out, resistant_app, directory);
     events.extend(cleanup_events);
     let (stdout, stdout_overflow) = capture(&mut stdout);
     let (stderr, stderr_overflow) = capture(&mut stderr);
@@ -311,12 +419,12 @@ fn drive(directory: &Path, path: &Path, case: &str) {
     assert!(
         !output.timed_out
             && !output.capture_overflow
-            && output.observed(DriverEvent::CleanupComplete)
+            && output.observed(DriverEvent::NoRunningMembersConfirmed)
             && output.status.success(),
-        "TUI UI PTY checks failed (timeout={}, capture_overflow={}, cleanup_complete={}): {}",
+        "TUI UI PTY checks failed (timeout={}, capture_overflow={}, cleanup_not_running={}): {}",
         output.timed_out,
         output.capture_overflow,
-        output.observed(DriverEvent::CleanupComplete),
+        output.observed(DriverEvent::NoRunningMembersConfirmed),
         String::from_utf8_lossy(&output.stderr)
     );
     // Assert only on the predicate, never expose captured data on failure.
@@ -329,10 +437,11 @@ fn assert_unchanged(path: &Path, before: &[u8]) {
     assert!(unchanged, "UI unexpectedly persisted changes");
 }
 
-struct Bystander(Child);
+// These commands spawn no descendants (metadata ps and sleeping bystander).
+struct OwnedLeaf(Child);
 
-fn bystander() -> Bystander {
-    Bystander(
+fn bystander() -> OwnedLeaf {
+    OwnedLeaf(
         Command::new("python3")
             .isolate_application_environment()
             .args(["-c", "import time; time.sleep(60)"])
@@ -344,7 +453,7 @@ fn bystander() -> Bystander {
     )
 }
 
-impl Drop for Bystander {
+impl Drop for OwnedLeaf {
     fn drop(&mut self) {
         if matches!(self.0.try_wait(), Ok(None)) {
             let _ = self.0.kill();
@@ -389,7 +498,7 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
         );
         assert!(!output.status.success());
         assert!(!output.capture_overflow);
-        assert!(output.observed(DriverEvent::CleanupComplete));
+        assert!(output.observed(DriverEvent::NoRunningMembersConfirmed));
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         if case == "stopped-driver" {
             assert!(output.timed_out);
@@ -402,6 +511,56 @@ fn stopped_pty_reader_and_driver_fail_bounded_without_harming_bystander() {
             assert!(diagnostic.contains("PTY write deadline exceeded"));
         }
     }
+}
+
+#[test]
+fn retained_zombie_is_not_running_but_is_not_claimed_reaped() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = Command::new("python3")
+        .isolate_application_environment()
+        .args(["-c", "import os; os.setsid()"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut owned = OwnedDriver {
+        child,
+        session_verified: false,
+        reaped: false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !exited_unreaped(&owned.child).unwrap() {
+        assert!(Instant::now() < deadline, "owned zombie fixture deadline");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = Pid::from_child(&owned.child);
+    assert_eq!(test_kill_process(pid), Ok(())); // PID exists despite process exit.
+    let rows = process_snapshot(directory.path(), Instant::now() + Duration::from_secs(2)).unwrap();
+    assert!(zombie_target(&rows, pid));
+    assert!(!owned.reaped); // Metadata inspection/acceptance did not reap it.
+
+    // Pure classifier rows; these synthetic PIDs are never signaled.
+    // A missing/truncated/unknown group is not
+    // evidence of absence, and one live member defeats zombie-only evidence.
+    let group = Pid::from_raw(450_001).unwrap();
+    let zombie_rows = parse_process_snapshot(b"450002 450001 Z+\n450003 450001 Z\n").unwrap();
+    assert!(zombie_only_group(&zombie_rows, group));
+    assert!(zombie_target(&zombie_rows, Pid::from_raw(450_002).unwrap()));
+    let mixed = parse_process_snapshot(b"450002 450001 Z\n450003 450001 S+\n").unwrap();
+    assert!(!zombie_only_group(&mixed, group));
+    assert!(!zombie_target(&mixed, Pid::from_raw(450_003).unwrap()));
+    assert!(!zombie_only_group(&[], group));
+    let unknown = parse_process_snapshot(b"450002 450001 ?\n").unwrap();
+    assert!(!zombie_only_group(&unknown, group));
+    assert!(parse_process_snapshot(b"450002 450001\n").is_none());
+    assert!(parse_process_snapshot(b"450002 450001 Z unexpected\n").is_none());
+
+    let status = wait_until(&mut owned.child, Instant::now() + Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    owned.reaped = true; // Only the actual parent wait justifies this claim.
+    assert!(status.success());
 }
 
 #[test]
@@ -426,7 +585,7 @@ fn startup_permission_and_unreaped_leader_close_watchdog_cleanup_races() {
         );
         assert!(output.timed_out);
         assert!(!output.status.success());
-        assert!(output.observed(DriverEvent::CleanupComplete));
+        assert!(output.observed(DriverEvent::NoRunningMembersConfirmed));
         assert!(
             bystander.0.try_wait().unwrap().is_none(),
             "cleanup harmed bystander"
@@ -449,9 +608,9 @@ fn startup_permission_and_unreaped_leader_close_watchdog_cleanup_races() {
             assert!(output.observed(DriverEvent::SpawnPermitted));
             assert!(output.observed(DriverEvent::AppSpawnAttempted));
             // Actual observation before group KILL: the leader has exited,
-            // yet its TERM/HUP-resistant app still exists. Reap must wait.
+            // yet its app PID still exists. Existence alone is not liveness.
             assert!(output.observed(DriverEvent::LeaderExitedBeforeGroupKill));
-            assert!(output.observed(DriverEvent::ResistantAppOutlivedLeader));
+            assert!(output.observed(DriverEvent::ResistantAppPresentAfterLeaderExit));
             let killed = output
                 .events
                 .iter()
@@ -466,13 +625,13 @@ fn startup_permission_and_unreaped_leader_close_watchdog_cleanup_races() {
                 killed < reaped,
                 "verified group must be killed before leader reap"
             );
-            let pid: i32 = std::fs::read_to_string(directory.path().join("stopped-child.pid"))
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert_eq!(
-                test_kill_process(Pid::from_raw(pid).unwrap()),
-                Err(rustix::io::Errno::SRCH)
+            assert!(
+                output.observed(DriverEvent::ResistantAppAbsent)
+                    || output.observed(DriverEvent::ResistantAppZombieObserved)
+            );
+            assert!(
+                output.observed(DriverEvent::GroupAbsent)
+                    || output.observed(DriverEvent::ZombieOnlyGroupObserved)
             );
         }
     }

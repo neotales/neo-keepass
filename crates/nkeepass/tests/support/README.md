@@ -2,7 +2,11 @@
 
 ## UI PTY checks
 
-`cargo test -p nkeepass --test tui_ui` runs `tui_ui_pty.py` via Python 3 on Unix.
+`cargo test -p nkeepass --test tui_ui` runs `tui_ui_pty.py` via Python 3 on
+Linux and macOS only. Both this test crate and its `rustix` dev dependency are
+gated to those targets; other Unix targets (including OpenBSD, where this
+`waitid` API is absent) and Windows do not compile or run this harness. This is
+test scope, not a change to the application's supported platforms.
 Every case uses its own disposable vault, HOME/config/data paths, and PTY;
 display/clipboard environment access is removed. Captured terminal data is
 never printed. The small cursor/erase emulator checks visible cells at 40×12.
@@ -39,7 +43,8 @@ All master reads/writes are nonblocking. Key sends and cursor-position replies
 share a partial-write loop bounded by the case's absolute deadline (20 seconds
 for UI cases). Rust separately bounds each Python driver's lifetime to 45
 seconds, captures at most 64 KiB per stream from regular files rather than
-waiting for pipe EOF, and allows five more seconds for cleanup/absence checks.
+waiting for pipe EOF, and bounds cleanup observations and observer cleanup
+separately (up to seven more seconds including a stalled metadata helper).
 A per-run private handshake directory gates app creation: the driver publishes
 its session identity, then waits for Rust to verify SID/PGID against its owned
 child PID and explicitly grant permission. No app can be spawned before that
@@ -49,8 +54,12 @@ Unix test support uses the already-locked `rustix` version for safe signaling
 and Darwin-compatible `waitid(WNOWAIT)`. Neither polling nor TERM grace reaps
 the driver. Once a session is verified, cleanup always issues group KILL while
 the leader remains waitable—even if TERM already exited it. Only then is the
-leader reaped; bounded signal-0 observations must establish group absence.
-EPERM is not accepted as absence. Before verification no permission can have
+leader reaped. Bounded signal-0/metadata observations must then establish
+either group absence or a nonempty, positively observed zombie-only group.
+EPERM alone is neither absence nor proof of death. Metadata-only `ps` reads
+PID/PGID/state, never arguments or environment; unknown, truncated, empty, or
+live-member snapshots do not justify a zombie-only verdict.
+Before verification no permission can have
 been issued, so direct-child-only cleanup cannot race app creation. No
 terminating group signal is sent after leader reap.
 
@@ -60,10 +69,15 @@ A stopped-driver control exercises the outer deadline and graceful cleanup.
 Startup controls pause before session creation and after session verification
 with permission withheld, asserting no app appears. Another control makes the
 driver exit on TERM while its app ignores TERM and HUP. It observes the exited
-but unreaped leader alongside that surviving app, requires group KILL before
-reap, and confirms the group and app disappear.
-Each checks that the stopped child is gone and an independently owned bystander
-remains alive. The harness does not print transcripts or send terminating
+but unreaped leader alongside the app's retained PID and requires group KILL
+before leader reap. It verifies the app/group are absent or positively observed
+as zombies, never still running. A retained orphan zombie is **not** reported
+as reaped: only the owned leader has been reaped by this harness. A separate
+fixture deliberately retains its exited child with WNOWAIT, verifies PID
+existence and zombie classification, then actually reaps that owned fixture.
+Stopped-reader controls still require their driver-reaped child to be gone;
+all watchdog controls preserve an independently owned bystander.
+The harness does not print transcripts or send terminating
 signals to reaped PIDs; signal 0 is used only to observe the fixture child's
 absence.
 
