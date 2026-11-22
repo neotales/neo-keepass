@@ -274,3 +274,29 @@ terminal-password **12**. Combined workspace tests passed **839**, with **11
 existing ignored**; workspace/all-targets Clippy exited zero with advisory
 warnings. Formatting and whitespace checks passed. These remain Linux-only
 results, not native macOS/Windows or panic/signal-lifecycle clearance.
+
+The return-error boundary also owns the successfully initialized Unix Terminal
+outside the UI callback. It locks the App while that Terminal is still alive,
+then explicitly drops it, before the mode/screen cleanup stages. This ordering
+matters because Ratatui's destructor may itself write a cursor-show command.
+Initialization errors use a separate no-terminal branch; cleanup performed
+internally by a failed initializer is not claimed to be controlled here.
+
+The real-Terminal drop-order regression uses a fixed viewport and a recording
+Crossterm writer, hides the cursor, then injects a UI error. It observes the
+credential-drop probe at the actual destructor's cursor-restoration write and
+checks the emitted cursor-show bytes, returned primary error, invalid session
+and unchanged fixture. The old `and_then` lifetime reproduces
+`credentials alive at cursor-restoration write`. Merely checking the later
+explicit teardown callbacks would miss this defect. This covers returned
+errors, not panic-hook/unwind or external-signal ordering, and does not claim
+that cursor output itself is bounded or that Drop errors can be propagated.
+
+Drop-order follow-up validation used the same Rust 1.98.1 commands, timeout
+bounds and low-disk settings above, with task-owned
+`TMPDIR="$PWD/target/terminal-drop-order/tmp"` and logs under
+`target/terminal-drop-order/logs`. Workspace tests: **840 passed, 11 existing
+ignored**. Focused TUI units **45**, UI PTY **15**, CLI **64**, color **10**,
+terminal-password **12** all passed. Workspace/all-targets Clippy exited zero
+with existing advisory warnings; formatting and whitespace checks passed.
+Native validation and the explicit panic/signal/split-terminal limits remain.

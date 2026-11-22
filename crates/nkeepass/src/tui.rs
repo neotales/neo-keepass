@@ -2592,6 +2592,30 @@ fn app_result_before_teardown(
 }
 
 #[cfg(unix)]
+fn run_initialized_terminal<T>(
+    app: &mut App,
+    initialized: io::Result<T>,
+    run: impl FnOnce(&mut T, &mut App) -> io::Result<()>,
+) -> io::Result<()> {
+    match initialized {
+        Ok(mut terminal) => {
+            // Keep ownership OUTSIDE the callback: Terminal::drop can write a
+            // cursor-restoration command. Escaping errors must lock the App
+            // while this terminal is still alive, before even that first write.
+            let result = app_result_before_teardown(app, |app| run(&mut terminal, app));
+            drop(terminal);
+            result
+        }
+        Err(error) => {
+            // No successfully initialized terminal to own/drop on this path.
+            // Lock before the caller's explicit mode/screen teardown.
+            app.lock_vault();
+            Err(error)
+        }
+    }
+}
+
+#[cfg(unix)]
 fn run_terminal(app: &mut App, path: &Path) -> io::Result<()> {
     use std::io::IsTerminal;
     // Match Crossterm's existing mode-descriptor selection, without changing
@@ -2607,8 +2631,8 @@ fn run_terminal(app: &mut App, path: &Path) -> io::Result<()> {
     let mut modes = terminal_password::QuietTerminal::new(terminal)?;
     // Ratatui's panic hook also restores its QUIET snapshot, before unwinding
     // reaches modes. It cannot replay input under the original echo/ISIG bits.
-    let result = app_result_before_teardown(app, |app| {
-        ratatui::try_init().and_then(|mut terminal| run_ui(&mut terminal, app, path))
+    let result = run_initialized_terminal(app, ratatui::try_init(), |terminal, app| {
+        run_ui(terminal, app, path)
     });
     restore_terminal_with(
         result,
@@ -2883,6 +2907,103 @@ mod tests {
             assert!(app.save(&path).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), original);
         }
+    }
+
+    // Private ownership/drop order: a real Ratatui Terminal restores its hidden
+    // cursor in Drop, before the explicit backend/screen teardown callbacks.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "disposable real-terminal drop-order fixture"
+    )]
+    fn app_error_destroys_credentials_before_terminal_drop_writes_cursor() -> std::io::Result<()> {
+        use std::cell::{Cell, RefCell};
+        use std::io;
+        use std::rc::Rc;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering::SeqCst},
+        };
+        struct CursorWriter {
+            armed: Rc<Cell<bool>>,
+            dropped: Arc<AtomicBool>,
+            closed_at_write: Rc<Cell<Option<bool>>>,
+            bytes: Rc<RefCell<Vec<u8>>>,
+        }
+        impl io::Write for CursorWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.armed.get() {
+                    self.closed_at_write.set(Some(
+                        self.closed_at_write.get().unwrap_or(true) && self.dropped.load(SeqCst),
+                    ));
+                    self.bytes.borrow_mut().extend_from_slice(bytes);
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (directory, mut app, dropped) = lifecycle_fixture();
+        let path = directory.path().join("lifecycle.kdbx");
+        let original = std::fs::read(&path)?;
+        let armed = Rc::new(Cell::new(false));
+        let closed_at_write = Rc::new(Cell::new(None));
+        let bytes = Rc::new(RefCell::new(Vec::new()));
+        let writer = CursorWriter {
+            armed: Rc::clone(&armed),
+            dropped: Arc::clone(&dropped),
+            closed_at_write: Rc::clone(&closed_at_write),
+            bytes: Rc::clone(&bytes),
+        };
+        // Fixed viewport avoids real terminal queries; this is the production
+        // Crossterm writer and Ratatui destructor, not a fake Drop implementation.
+        let terminal = ratatui::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(writer),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(super::Rect::new(0, 0, 40, 12)),
+            },
+        )?;
+        let result = super::run_initialized_terminal(&mut app, Ok(terminal), |terminal, app| {
+            assert!(app.credentials.is_some());
+            terminal.hide_cursor()?;
+            armed.set(true);
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "synthetic draw/read error",
+            ))
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(
+            closed_at_write.get(),
+            Some(true),
+            "credentials alive at cursor-restoration write"
+        );
+        assert_eq!(bytes.borrow().as_slice(), b"\x1b[?25h");
+        assert!(app.credentials.is_none());
+        assert!(app.locked);
+        assert!(app.service.root_group(app.session).is_err());
+        assert_eq!(std::fs::read(&path)?, original);
+
+        let (_directory, mut app, dropped) = lifecycle_fixture();
+        let ran = Cell::new(false);
+        let result = super::run_initialized_terminal::<()>(
+            &mut app,
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "synthetic initialization error",
+            )),
+            |(), _| {
+                ran.set(true);
+                Ok(())
+            },
+        );
+        assert!(!ran.get());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(dropped.load(SeqCst));
+        assert!(app.service.root_group(app.session).is_err());
+        Ok(())
     }
 
     #[test]
