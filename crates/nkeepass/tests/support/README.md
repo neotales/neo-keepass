@@ -185,3 +185,53 @@ divergence is invisible because both compile.
 The `Scenario` list is the contract. A scenario this repository has not mapped
 is a scenario that is not being tested here, and the test that would have
 noticed is the one that stops compiling.
+
+## Combined CLI, credential-lifetime and terminal integration
+
+The reviewed terminal series was cherry-picked onto `7a2a8ac` (which already
+includes CLI ergonomics and App-owned credential lifetime), in this order:
+
+| Reviewed source | Integrated commit |
+| --- | --- |
+| `f71da9b` | `88eff1e` |
+| `5d8cae4` | `f17f723` |
+| `1395784` | `dd0c7c9` |
+| `e1d4eb6` | `1083c69` |
+
+The only conflict was the first patch's launch/cleanup block. Both platform
+branches retain `run_ui(terminal, &mut app, path)` without an outer credential
+borrow. Credentials move into App; App's save, decision and lock paths remain
+unchanged. `run_ui` and launch still call `app.lock_vault()` on their respective
+normal/error-return cleanup paths. Windows retains its existing password and
+Ratatui lifecycle. CLI/completion sources, CLI tests, dependency files and
+workflows are unchanged from the integration base.
+
+Combined Linux validation at `1083c69` used the existing target cache without
+deleting shared artifacts, with task-owned temporary resources and logs:
+
+```sh
+mkdir -p target/terminal-integration-1083c69/tmp target/terminal-integration-1083c69/logs
+export TMPDIR="$PWD/target/terminal-integration-1083c69/tmp"
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+cargo +1.98.1 fmt --all -- --check
+git diff --check
+timeout --kill-after=10s 900s cargo +1.98.1 test --workspace --locked --offline
+timeout --kill-after=10s 900s cargo +1.98.1 clippy --workspace --all-targets --locked --offline
+timeout --kill-after=10s 180s cargo +1.98.1 test --locked --offline -p terminal-password
+timeout --kill-after=10s 180s cargo +1.98.1 test --locked --offline -p nkeepass --test tui_ui --test cli --test color_output
+timeout --kill-after=10s 180s cargo +1.98.1 test --locked --offline -p nkeepass --bin nkp tui::tests
+timeout --kill-after=10s 180s cargo +1.98.1 test --locked --offline -p nkeepass --bin nkp bash_
+```
+
+All commands exited zero. Workspace tests: **838 passed, 11 existing ignored**.
+Focused runs: terminal-password **12**, CLI **64**, color **10**, UI PTY **15**,
+TUI units **43**, Bash/Readline **6**. The TUI units include credential destruction
+at lock, failed-save/cancel/discard decisions, save/reopen and unwind coverage.
+Clippy retains advisory warnings; no warning-clean claim is made.
+
+Native macOS/Windows execution of this combined tree is still required. Native
+fish/Nushell/zsh/PowerShell coverage was not added. Full-screen external-signal
+cleanup, split-terminal routing/admission, and panic-hook failure behavior remain
+the previously documented limits. No remote, credential, release or workflow
+operations were performed. The pre-existing untracked `.opencode/` and `0` were
+left untouched.
