@@ -79,6 +79,21 @@ def check_restored(slave, initial_attributes):
     check(restored == initial_attributes, "terminal attributes not restored (changed: " + (",".join(changed) or "shape") + ")")
 
 
+def write_pty(master, data, deadline):
+    pending = memoryview(data)
+    while pending:
+        remaining = deadline - time.monotonic()
+        check(remaining > 0, "PTY write deadline exceeded")
+        try:
+            if not select.select([], [master], [], min(remaining, 0.03))[1]:
+                continue
+            written = os.write(master, pending[:65536])
+            check(written > 0, "PTY write made no progress")
+            pending = pending[written:]
+        except (BlockingIOError, InterruptedError):
+            continue
+
+
 def run(binary, vault, mode):
     master, slave = pty.openpty()
     process = None
@@ -93,7 +108,7 @@ def run(binary, vault, mode):
         check(foreground == os.getpgrp(), "driver terminal is not foreground")
 
     transcript = bytearray()
-    screen = Screen(lambda response: os.write(master, response))
+    screen = Screen(lambda response: send(response))
     deadline = time.monotonic() + 20
     state = "startup"
 
@@ -102,6 +117,8 @@ def run(binary, vault, mode):
         if select.select([master], [], [], 0.03)[0]:
             try:
                 chunk = os.read(master, 65536)
+            except (BlockingIOError, InterruptedError):
+                return
             except OSError as error:
                 if error.errno != errno.EIO:
                     raise
@@ -119,13 +136,24 @@ def run(binary, vault, mode):
             pump()
 
     def send(keys):
-        os.write(master, keys)
+        write_pty(master, keys, deadline)
+
+    def watchdog_termination(_signal, _frame):
+        raise AssertionError("PTY driver watchdog termination")
 
     try:
+        signal.signal(signal.SIGTERM, watchdog_termination)
+        terminal_operation("make PTY master nonblocking", os.set_blocking, master, False)
         terminal_operation("set window size", fcntl.ioctl, slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
         initial_attributes = terminal_operation("read initial attributes", termios.tcgetattr, slave)
         own_terminal()
         command = [binary, "tui", vault]
+        if mode.startswith("stopped-"):
+            command = [sys.executable, "-c", """
+import os, signal, tty
+tty.setraw(0)
+os.kill(os.getpid(), signal.SIGSTOP)
+"""]
         if mode.startswith("terminal-lifetime"):
             # A fast disposable child proves the harness owns the living
             # controlling session. A second probe deliberately leaves ECHO
@@ -144,6 +172,27 @@ if sys.argv[1] == "terminal-lifetime-unrestored":
             env=dict(os.environ, TERM="xterm-256color"),
             close_fds=True, cwd=os.path.dirname(vault),
         )
+        if mode.startswith("stopped-"):
+            with open(os.path.join(os.path.dirname(vault), "stopped-child.pid"), "w") as marker:
+                marker.write(str(process.pid))
+            stop_deadline = time.monotonic() + 1
+            while True:
+                waited, status = os.waitpid(process.pid, os.WNOHANG | os.WUNTRACED)
+                if waited == process.pid:
+                    check(os.WIFSTOPPED(status), "negative-control child exited instead of stopping")
+                    break
+                check(time.monotonic() < stop_deadline, "negative-control child did not stop")
+                time.sleep(0.01)
+            if mode == "stopped-driver":
+                os.kill(os.getpid(), signal.SIGSTOP)
+                raise AssertionError("stopped driver resumed without watchdog termination")
+            deadline = time.monotonic() + 0.4
+            if mode == "stopped-key-writes":
+                send(b"x" * (8 * 1024 * 1024))
+            else:
+                for _ in range(1_000_000):
+                    screen.feed(b"\x1b[6n")
+            raise AssertionError("stopped child unexpectedly accepted all PTY input")
         if mode.startswith("terminal-lifetime"):
             state = "terminal lifetime probe exit"
             while process.poll() is None:

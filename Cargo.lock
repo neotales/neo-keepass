@@ -1465,6 +1465,7 @@ dependencies = [
  "known-folders",
  "neotales-age",
  "neotales-keepass",
+ "nix",
  "ratatui",
  "rpassword",
  "serde",

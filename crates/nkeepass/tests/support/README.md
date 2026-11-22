@@ -35,6 +35,27 @@ inheritance and post-exit inspection; negative controls leave ECHO changed and
 probe a nonterminal descriptor, ensuring restoration/ioctl failures still fail
 with sanitized stage/errno diagnostics rather than captured terminal data.
 
+All master reads/writes are nonblocking. Key sends and cursor-position replies
+share a partial-write loop bounded by the case's absolute deadline (20 seconds
+for UI cases). Rust separately bounds each Python driver's lifetime to 45
+seconds, captures at most 64 KiB per stream from regular files rather than
+waiting for pipe EOF, and allows at most three more seconds for cleanup.
+Unix-only test support uses the already-locked `nix` version for safe signaling.
+It signals a group only while its driver is an unreaped child and its session
+and group IDs both match that child's PID. TERM/CONT lets a stopped driver
+execute cleanup and reap its app; a bounded grace is followed by KILL if needed.
+A driver that has not established its isolated session is killed directly,
+never through the inherited group. No group is signaled after the driver is
+reaped.
+
+Negative controls stop a raw-mode child without reading: both large key sends
+and cursor replies must hit their write deadline, not the outer watchdog.
+A stopped-driver control exercises the outer deadline and graceful cleanup.
+Each checks that the stopped child is gone and an independently owned bystander
+remains alive. The harness does not print transcripts or send terminating
+signals to reaped PIDs; signal 0 is used only to observe the fixture child's
+absence.
+
 This is UI coverage, not proof of terminal admission, signal safety, or
 Crossterm event-reader identity. No split-terminal or signal machinery is
 changed here. Linux was exercised; Windows and macOS runtime behavior is
