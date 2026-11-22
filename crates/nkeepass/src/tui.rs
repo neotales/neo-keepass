@@ -2551,16 +2551,8 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
 /// then reinstates exact prior modes. No primary-screen clearing is performed.
 pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
     #[cfg(unix)]
-    let mut password = {
-        use std::io::Write;
-        let mut terminal = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
-        let result =
-            terminal_password::read_controlling("Vault password: ", Duration::from_secs(300));
-        let newline = terminal.write_all(b"\n");
-        let password = result?;
-        newline?;
-        password
-    };
+    let mut password =
+        terminal_password::read_controlling("Vault password: ", Duration::from_secs(300))?;
     #[cfg(not(unix))]
     let mut password = Zeroizing::new(rpassword::prompt_password("Vault password: ")?);
     let mut credentials = KdbxCredentials::password(&password)

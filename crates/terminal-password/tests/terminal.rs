@@ -291,6 +291,143 @@ impl Drop for Worker {
 }
 
 #[test]
+fn stalled_prompt_worker() {
+    let Ok(scenario) = std::env::var("TERMINAL_PASSWORD_STALLED_PROMPT") else {
+        return;
+    };
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let stdin = std::io::stdin();
+    nix::unistd::setsid().unwrap();
+    // SAFETY: isolated child, live PTY stdin; acquire it as controlling terminal.
+    assert_eq!(
+        unsafe { nix::libc::ioctl(stdin.as_raw_fd(), nix::libc::TIOCSCTTY, 0) },
+        0
+    );
+    let original = tcgetattr(&stdin).unwrap();
+    let input_flags = fcntl(&stdin, FcntlArg::F_GETFL).unwrap();
+    let stdout_flags = fcntl(std::io::stdout(), FcntlArg::F_GETFL).unwrap();
+    // Saturate output before calling the public API. The parent NEVER drains
+    // the master; diagnostics use a separate pipe, not this blocked terminal.
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+        .open("/dev/tty")
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "could not saturate PTY output"
+        );
+        match nix::unistd::write(&output, &[b'.'; 4096]) {
+            Ok(count) => assert!(count > 0),
+            Err(nix::errno::Errno::EAGAIN) => break,
+            Err(error) => panic!("prefill PTY failed: {error}"),
+        }
+    }
+    drop(output);
+    let timeout = if scenario == "cancel" {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_millis(300)
+    };
+    let started = Instant::now();
+    let result = terminal_password::read_controlling(&".".repeat(8 * 1024 * 1024), timeout);
+    let elapsed = started.elapsed();
+    assert_eq!(
+        tcgetattr(&stdin).unwrap(),
+        original,
+        "stalled prompt must restore every mode"
+    );
+    assert_eq!(fcntl(&stdin, FcntlArg::F_GETFL).unwrap(), input_flags);
+    assert_eq!(
+        fcntl(std::io::stdout(), FcntlArg::F_GETFL).unwrap(),
+        stdout_flags,
+        "prompt changed inherited stdout OFD"
+    );
+    assert_eq!(
+        result.unwrap_err().kind(),
+        if scenario == "cancel" {
+            std::io::ErrorKind::Interrupted
+        } else {
+            assert!(elapsed >= Duration::from_millis(250));
+            std::io::ErrorKind::TimedOut
+        }
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "prompt exceeded bounded return: {elapsed:?}"
+    );
+}
+
+#[test]
+fn stalled_prompt_timeout_and_signal_cancel_restore_exact_modes_without_writer_threads() {
+    for scenario in ["timeout", "cancel"] {
+        let pty = openpty(None, None).unwrap();
+        let mut child = Worker(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "stalled_prompt_worker", "--nocapture"])
+                .env("TERMINAL_PASSWORD_STALLED_PROMPT", scenario)
+                .env("RUST_BACKTRACE", "0")
+                .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        if scenario == "cancel" {
+            while tcgetattr(&pty.slave)
+                .unwrap()
+                .local_flags
+                .contains(LocalFlags::ECHO)
+            {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "prompt exited before cancellation"
+                );
+                assert!(Instant::now() < deadline, "prompt never entered quiet mode");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap()),
+                nix::sys::signal::Signal::SIGTERM,
+            )
+            .unwrap();
+        }
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                let mut diagnostic = String::new();
+                child
+                    .stdout
+                    .take()
+                    .unwrap()
+                    .read_to_string(&mut diagnostic)
+                    .unwrap();
+                child
+                    .stderr
+                    .take()
+                    .unwrap()
+                    .read_to_string(&mut diagnostic)
+                    .unwrap();
+                assert!(status.success(), "stalled prompt {scenario}: {diagnostic}");
+                break;
+            }
+            // Worker guard kills/reaps on a blocked-writer regression.
+            assert!(
+                Instant::now() < deadline,
+                "stalled prompt {scenario} exceeded outer bound"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The worker verifies modes before session-leader exit: Darwin revokes
+        // the PTY at that exit, so a parent-side ioctl afterwards is invalid.
+        drop(pty.master);
+    }
+}
+
+#[test]
 fn worker() {
     let Ok(scenario) = std::env::var("TERMINAL_PASSWORD_TEST") else {
         return;

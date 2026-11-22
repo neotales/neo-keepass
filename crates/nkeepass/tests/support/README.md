@@ -129,7 +129,7 @@ architecture remain separate work. Native macOS/Windows validation of this
 production patch is still required; Linux green is not native clearance.
 
 Prompt visibility is now the input-readiness boundary: the reader installs
-quiet mode and its guard before writing/flushing the prompt. The PTY sends its
+quiet mode and its guard before writing the prompt. The PTY sends its
 synthetic password immediately on visibility, with no ECHO-state wait. A private
 readiness/error regression verifies quiet flags and exact cleanup on prompt
 write failure. Normal/error-return teardown separately attempts backend mode
@@ -138,6 +138,14 @@ stage verify ordering, all attempts, and retention of primary/cleanup errors.
 The screen-exit command is checked byte-for-byte to exclude primary-screen
 clearing. Full-screen external-signal cleanup and split-terminal admission are
 still not solved by these changes.
+
+Prompt readiness includes bounded output: a separate nonblocking terminal
+description writes the unbuffered prompt under the input deadline and scoped
+signal cancellation. Interrupted writes do not auto-restart past cancellation;
+would-block readiness waits are bounded. No inherited stdout flags, trailing
+blocking newline write, or background writer is used. The terminal-password
+stalled-output PTY regression withholds all master reads and verifies timeout,
+signal cancellation, exact modes and unchanged inherited descriptor flags.
 
 This is UI coverage, not proof of terminal admission, signal safety, or
 Crossterm event-reader identity. No split-terminal or signal machinery is

@@ -9,28 +9,29 @@ static READER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Read from the Unix controlling terminal, with the same ownership, deadline,
 /// cancellation and quiet input-flush contract as [`read`]. This preserves
 /// interactive callers' `/dev/tty` selection rather than consuming piped stdin.
-/// The prompt is written and flushed only after the quiet input mode and its
-/// restoration guard are installed. Prompt I/O errors also restore the mode.
+/// The unbuffered prompt is written only after quiet mode and its restoration
+/// guard are installed. Nonblocking writes share the input deadline and scoped
+/// signal cancellation. No output drain/flush waits for the terminal consumer.
+/// Prompt timeout, cancellation and I/O errors also restore the mode.
 #[cfg(unix)]
 pub fn read_controlling(prompt: &str, timeout: Duration) -> io::Result<Zeroizing<String>> {
-    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("invalid input timeout"))?;
     let _exclusive = READER
         .try_lock()
         .map_err(|_| io::Error::other("terminal input is already in use"))?;
     let terminal = std::fs::OpenOptions::new().read(true).open("/dev/tty")?;
     // Independent output description: writes must not contaminate the input
     // description's Darwin file-status history.
-    let mut output = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
-    platform::read_from_ready(
-        &terminal,
-        Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| io::Error::other("invalid input timeout"))?,
-        || {
-            output.write_all(prompt.as_bytes())?;
-            output.flush()
-        },
-    )
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+        .open("/dev/tty")?;
+    platform::read_from_ready(&terminal, deadline, || {
+        platform::write_prompt(&output, prompt.as_bytes(), deadline)
+    })
 }
 
 /// Exclusive Unix terminal-mode ownership around a raw-mode frontend.
@@ -123,6 +124,63 @@ mod platform {
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
     extern "C" fn interrupt(_: i32) {
         INTERRUPTED.store(true, Ordering::Relaxed);
+    }
+
+    fn remaining(deadline: Instant) -> io::Result<Duration> {
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(timed_out)
+    }
+
+    pub(super) fn write_prompt(
+        output: &impl AsFd,
+        mut bytes: &[u8],
+        deadline: Instant,
+    ) -> io::Result<()> {
+        while !bytes.is_empty() {
+            remaining(deadline)?;
+            // The caller opens an independent O_NONBLOCK description. Readiness
+            // alone cannot bound a write; no retry here may silently block or
+            // restart EINTR without rechecking cancellation and the deadline.
+            match nix::unistd::write(output, &bytes[..bytes.len().min(4096)]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "terminal prompt write made no progress",
+                    ));
+                }
+                Ok(count) => {
+                    bytes = &bytes[count..];
+                    continue;
+                }
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(nix::errno::Errno::EAGAIN) => {}
+                Err(error) => return Err(error.into()),
+            }
+            let mut fds = [PollFd::new(output.as_fd(), PollFlags::POLLOUT)];
+            let timeout =
+                PollTimeout::try_from(remaining(deadline)?.min(Duration::from_millis(100)))
+                    .unwrap_or(PollTimeout::MAX);
+            match poll(&mut fds, timeout) {
+                Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Err(error.into()),
+                _ => {}
+            }
+            let events = fds[0]
+                .revents()
+                .ok_or_else(|| io::Error::other("invalid terminal output readiness event"))?;
+            if events.intersects(PollFlags::POLLNVAL | PollFlags::POLLHUP | PollFlags::POLLERR) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "terminal prompt output failed",
+                ));
+            }
+        }
+        remaining(deadline).map(|_| ())
     }
 
     // sigaction saves/restores complete dispositions, including masks/flags.
@@ -275,15 +333,11 @@ mod platform {
         };
         tcsetattr(stdin, SetArg::TCSANOW, &mode)?;
         let outcome = (|| {
+            remaining(deadline)?;
             ready()?;
             let mut bytes = Zeroizing::new(Vec::new());
             loop {
-                if INTERRUPTED.load(Ordering::Relaxed) {
-                    return Err(cancelled());
-                }
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .ok_or_else(timed_out)?;
+                let remaining = remaining(deadline)?;
                 let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
                 let timeout = PollTimeout::try_from(remaining.min(Duration::from_millis(100)))
                     .unwrap_or(PollTimeout::MAX);
@@ -352,24 +406,25 @@ mod platform {
         fn prompt_readiness_is_quiet_and_prompt_error_restores_modes() {
             let pty = openpty(None, None).unwrap();
             let original = tcgetattr(&pty.slave).unwrap();
-            let outcome =
-                read_from_ready(&pty.slave, Instant::now() + Duration::from_secs(1), || {
-                    let active = tcgetattr(&pty.slave)?;
-                    assert!(
-                        !active.local_flags.intersects(
-                            LocalFlags::ECHO
-                                | LocalFlags::ECHONL
-                                | LocalFlags::ISIG
-                                | LocalFlags::ICANON
-                        ),
-                        "prompt published before quiet mode"
-                    );
-                    Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "synthetic prompt failure",
-                    ))
-                });
-            assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+            let read_only = std::fs::OpenOptions::new()
+                .read(true)
+                .open(nix::unistd::ttyname(&pty.slave).unwrap())
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let outcome = read_from_ready(&pty.slave, deadline, || {
+                let active = tcgetattr(&pty.slave)?;
+                assert!(
+                    !active.local_flags.intersects(
+                        LocalFlags::ECHO
+                            | LocalFlags::ECHONL
+                            | LocalFlags::ISIG
+                            | LocalFlags::ICANON
+                    ),
+                    "prompt published before quiet mode"
+                );
+                write_prompt(&read_only, b"synthetic prompt", deadline)
+            });
+            assert_eq!(outcome.unwrap_err().raw_os_error(), Some(nix::libc::EBADF));
             assert_eq!(tcgetattr(&pty.slave).unwrap(), original);
         }
 

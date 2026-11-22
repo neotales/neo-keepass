@@ -38,10 +38,17 @@ reader. Windows TUI startup remains on its existing rpassword/Ratatui lifecycle.
 
 `read_controlling` uses the same reader, cancellation handlers, deadline and
 staged restoration as `read`, but opens `/dev/tty` instead of stdin. This keeps
-the TUI password prompt's existing terminal selection. It writes and flushes
+the TUI password prompt's existing terminal selection. It writes
 the supplied prompt only after quiet mode and its restoration guard are active:
 prompt visibility is readiness to send a password, not a request to wait for
-echo to turn off. Prompt-output failure also runs staged restoration.
+echo to turn off. Prompt output uses a separately opened `O_NONBLOCK` terminal
+description, never changes inherited stdout's open-file-description flags, and
+shares the input's absolute deadline and scoped signal cancellation. Writes are
+bounded chunks; interrupted/would-block retries recheck cancellation/deadline
+and wait for readiness in at most 100 ms slices. There is no output-drain wait,
+buffered flush, or background writer. Prompt timeout, cancellation and output
+failure all run staged exact-mode restoration. No unbounded trailing-newline
+write is attempted after return (in particular after timeout/cancellation).
 The TUI prompt now has a
 five-minute deadline; Enter submits and Ctrl-C, Ctrl-D or Escape cancels. Queued
 password tails are intentionally discarded, not fed to the TUI as commands.
@@ -77,6 +84,12 @@ host**. Native Windows validation is a release gate, not an inferred pass.
 
 The short-duration tests exercise the same deadline loop as the CLI's fixed
 60-second timeout without making every test wait a minute.
+Stalled-prompt subprocess tests saturate a synthetic PTY without draining its
+master, then call `read_controlling` with a large synthetic prompt. They require
+deadline timeout and signal cancellation, exact modes before session-leader
+exit, unchanged inherited input/stdout status flags and bounded process exit.
+The parent kills/reaps any regressed blocking writer; no test reader/writer
+thread is detached. Removing `O_NONBLOCK` reproduces the stalled-writer failure.
 
 ## Canonical restoration on macOS and BSD
 
