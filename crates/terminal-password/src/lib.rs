@@ -77,6 +77,9 @@ impl QuietTerminal {
 /// changes. The internal lock excludes other calls to this function only; it
 /// does not coordinate external signal-action installers. Likewise, no other
 /// consumer may read terminal stdin or change its terminal modes concurrently.
+/// Submission is provisional until terminal modes and prior signal actions
+/// have been restored. Cancellation recorded by the scoped handlers through
+/// that handoff discards the value instead of returning a secret.
 ///
 /// # Errors
 /// Refuses nonterminal or concurrent input, cancellation, expired deadlines,
@@ -300,6 +303,18 @@ mod platform {
         deadline: Instant,
         ready: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<Zeroizing<String>> {
+        read_from_handoff(stdin, deadline, ready, || Ok(()))
+    }
+
+    // Private deterministic handoff seam; production supplies a no-op. Keeping
+    // this after mode restoration exercises signals in the actual late window,
+    // not merely a signal already observed by the input loop.
+    fn read_from_handoff(
+        stdin: &impl AsFd,
+        deadline: Instant,
+        ready: impl FnOnce() -> io::Result<()>,
+        before_signal_restore: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Zeroizing<String>> {
         INTERRUPTED.store(false, Ordering::Relaxed);
         let mut signals = Signals(Vec::new());
         let handler = SigAction::new(
@@ -388,8 +403,17 @@ mod platform {
             }
         })();
         restore.restore()?;
+        before_signal_restore()?;
         signals.restore()?;
-        outcome
+        let value = outcome?;
+        // The last read/Enter is not the cancellation handoff. A scoped handler
+        // can run during terminal cleanup or signal-action restoration. Check
+        // AFTER all prior actions are back, while the public reader lock is
+        // still held; a competing reader cannot clear this cancellation flag.
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            return Err(cancelled()); // value is zeroized on this path.
+        }
+        Ok(value)
     }
 
     #[cfg(test)]
@@ -404,6 +428,7 @@ mod platform {
         // the real quiet-mode guard and a failed prompt restores exact modes.
         #[test]
         fn prompt_readiness_is_quiet_and_prompt_error_restores_modes() {
+            let _exclusive = READER.lock().unwrap();
             let pty = openpty(None, None).unwrap();
             let original = tcgetattr(&pty.slave).unwrap();
             let read_only = std::fs::OpenOptions::new()
@@ -426,6 +451,81 @@ mod platform {
             });
             assert_eq!(outcome.unwrap_err().raw_os_error(), Some(nix::libc::EBADF));
             assert_eq!(tcgetattr(&pty.slave).unwrap(), original);
+        }
+
+        // Private late-handoff branch is otherwise timing-dependent. Deliver
+        // a real signal after Enter/cleanup and exercise the public lock too.
+        #[test]
+        fn accepted_enter_cannot_return_a_secret_after_handoff_cancellation() {
+            use std::sync::atomic::AtomicUsize;
+            static PREVIOUS_CALLS: AtomicUsize = AtomicUsize::new(0);
+            extern "C" fn previous_handler(_: i32) {
+                PREVIOUS_CALLS.fetch_add(1, Ordering::Relaxed);
+            }
+            let _exclusive = READER.lock().unwrap();
+            let mut mask = SigSet::empty();
+            mask.add(Signal::SIGUSR1);
+            let previous = SigAction::new(
+                SigHandler::Handler(previous_handler),
+                SaFlags::SA_RESTART,
+                mask,
+            );
+            // SAFETY: reader lock serializes this test with other in-process
+            // signal owners in this module. Handler only updates an atomic.
+            let saved = unsafe { sigaction(Signal::SIGTERM, &previous).unwrap() };
+            let _restore_previous = Signals(vec![(Signal::SIGTERM, saved)]);
+            for late_signal in [false, true] {
+                PREVIOUS_CALLS.store(0, Ordering::Relaxed);
+                let pty = openpty(None, None).unwrap();
+                let original = tcgetattr(&pty.slave).unwrap();
+                let mut master = std::fs::File::from(pty.master);
+                let result = read_from_handoff(
+                    &pty.slave,
+                    Instant::now() + Duration::from_secs(1),
+                    || master.write_all(b"synthetic-value\n"),
+                    || {
+                        assert_eq!(tcgetattr(&pty.slave)?, original);
+                        if late_signal {
+                            nix::sys::signal::raise(Signal::SIGTERM)?;
+                            assert!(INTERRUPTED.load(Ordering::Relaxed));
+                        }
+                        // A concurrent API call must refuse before resetting the
+                        // flag or changing the currently installed dispositions.
+                        let competing = std::thread::spawn(|| {
+                            [
+                                crate::read(Duration::ZERO),
+                                crate::read_controlling("", Duration::ZERO),
+                            ]
+                        })
+                        .join()
+                        .unwrap();
+                        for refusal in competing {
+                            assert_eq!(
+                                refusal.unwrap_err().to_string(),
+                                "terminal input is already in use"
+                            );
+                        }
+                        assert_eq!(INTERRUPTED.load(Ordering::Relaxed), late_signal);
+                        assert_eq!(PREVIOUS_CALLS.load(Ordering::Relaxed), 0);
+                        Ok(())
+                    },
+                );
+                if late_signal {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+                } else {
+                    assert_eq!(&*result.unwrap(), "synthetic-value");
+                }
+                assert_eq!(tcgetattr(&pty.slave).unwrap(), original);
+                // Reinstalling the same action returns its complete current
+                // disposition; verify handler, flags and mask, not just SIG_DFL.
+                // SAFETY: same exclusive ownership and atomic handler as above.
+                let restored = unsafe { sigaction(Signal::SIGTERM, &previous).unwrap() };
+                assert_eq!(restored.handler(), previous.handler());
+                assert_eq!(restored.flags(), previous.flags());
+                assert_eq!(restored.mask(), previous.mask());
+                nix::sys::signal::raise(Signal::SIGTERM).unwrap();
+                assert_eq!(PREVIOUS_CALLS.load(Ordering::Relaxed), 1);
+            }
         }
 
         fn available(fd: &OwnedFd) -> io::Result<usize> {

@@ -34,6 +34,24 @@ reader. Windows TUI startup remains on its existing rpassword/Ratatui lifecycle.
   process termination, including SIGKILL and forced Windows process termination,
   cannot run cleanup.
 
+Submission on Unix remains provisional through terminal cleanup. After restoring
+the exact modes and all saved signal actions, the reader checks its scoped
+cancellation flag again while still holding the public reader lock. A signal
+recorded during the Enter-to-cleanup window returns `Interrupted`, dropping the
+zeroizing value rather than handing a secret to the caller. This final atomic
+check is the cancellation handoff; later signals follow the restored actions.
+The caller's existing obligation to exclude independent signal-action installers
+still applies. Concurrent public readers are refused before they can reset the
+flag or install handlers.
+
+The deterministic late-handoff PTY test submits synthetic input, raises a real
+SIGTERM after input acceptance and exact mode cleanup but before signal-action
+restoration, and requires cancellation rather than a returned value. It checks
+the no-signal success control, a competing (joined) caller's refusal, full prior
+handler/mask/flags restoration, and delivery to that prior handler afterwards.
+Removing the final cancellation check reproduces secret-return success in the
+cancelled case. This is scoped prompt cleanup, not a full-screen signal design.
+
 ## Unix TUI lifecycle
 
 `read_controlling` uses the same reader, cancellation handlers, deadline and
