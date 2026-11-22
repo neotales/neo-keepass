@@ -301,7 +301,7 @@ fn stalled_prompt_worker() {
     nix::unistd::setsid().unwrap();
     // SAFETY: isolated child, live PTY stdin; acquire it as controlling terminal.
     assert_eq!(
-        unsafe { nix::libc::ioctl(stdin.as_raw_fd(), nix::libc::TIOCSCTTY, 0) },
+        unsafe { nix::libc::ioctl(stdin.as_raw_fd(), nix::libc::TIOCSCTTY as _, 0,) },
         0
     );
     let original = tcgetattr(&stdin).unwrap();
