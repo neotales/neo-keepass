@@ -1,6 +1,6 @@
-//! Explicit interactive frontend. Secret text is held only in a zeroizing,
-//! time-limited widget buffer; terminal scrollback and screenshots remain outside
-//! the application's control.
+//! Explicit interactive frontend. Live input/reveal buffers are zeroizing;
+//! credentials are owned until lock/exit. This is not whole-heap erasure:
+//! model/rendering copies, terminal scrollback, and screenshots may persist.
 
 use std::fs::File;
 use std::io;
@@ -171,19 +171,11 @@ fn needs_decision(dirty: bool, uncommitted_edit: bool) -> bool {
     dirty || uncommitted_edit
 }
 
-fn save_service(
-    service: &mut VaultService,
-    path: &Path,
-    credentials: &mut KdbxCredentials,
-) -> Result<(), String> {
-    service
-        .save(path, credentials)
-        .map_err(|error| clean(error.message()))
-}
-
 struct App {
     service: VaultService,
     session: nkeepass::SessionId,
+    // No outer launch/run_ui borrow may keep these alive after lock.
+    credentials: Option<KdbxCredentials>,
     hits: Vec<SearchHit>,
     groups: Vec<UiGroup>,
     tree_parent: GroupRef,
@@ -1073,6 +1065,65 @@ fn deletion_confirmed(input: &str) -> bool {
 }
 
 impl App {
+    fn save(&mut self, path: &Path) -> Result<(), String> {
+        let credentials = self.credentials.as_mut().ok_or("Vault locked")?;
+        self.service
+            .save(path, credentials)
+            .map_err(|error| clean(error.message()))
+    }
+
+    // The real decision path is shared with lifecycle tests: failed saves and
+    // cancelled decisions must keep the unlocked credentials for retry.
+    fn resolve_pending_decision(&mut self, input: DecisionInput, path: &Path) -> DecisionEffect {
+        let Some(pending) = self.pending_decision else {
+            return DecisionEffect::None;
+        };
+        let input = if input == DecisionInput::SaveSucceeded
+            && self.edit_mode
+            && self.input_mode
+            && !self.input.is_empty()
+        {
+            self.status =
+                "Finish or cancel the pending edit before saving; press c to return to it".into();
+            DecisionInput::SaveFailed
+        } else if input == DecisionInput::SaveSucceeded {
+            match self.save(path) {
+                Ok(()) => {
+                    self.dirty = false;
+                    self.status = "Saved".into();
+                    DecisionInput::SaveSucceeded
+                }
+                Err(error) => {
+                    self.status = format!("Save failed: {error}. Choose save, discard, or cancel");
+                    DecisionInput::SaveFailed
+                }
+            }
+        } else if input == DecisionInput::Discard {
+            self.dirty = false;
+            discard_input_draft(
+                &mut self.input,
+                &mut self.field_to_reveal,
+                &mut self.input_mode,
+                &mut self.edit_mode,
+            );
+            self.edit_field.clear();
+            DecisionInput::Discard
+        } else {
+            DecisionInput::Cancel
+        };
+        let (next, effect) = reduce_decision(Some(pending), self.dirty, input);
+        self.pending_decision = next;
+        match effect {
+            DecisionEffect::Lock => self.lock_vault(),
+            DecisionEffect::None if next.is_none() => {
+                self.last_activity = Instant::now();
+                self.status = "Decision cancelled; returned to the vault".into();
+            }
+            DecisionEffect::Exit | DecisionEffect::None => {}
+        }
+        effect
+    }
+
     fn move_attachment(&mut self, forward: bool) {
         let Some(reference) = &self.entry else { return };
         let Ok(items) = self.service.attachment_metadata(reference) else {
@@ -1410,6 +1461,9 @@ impl App {
     }
 
     fn lock_vault(&mut self) {
+        // Drop immediately, before clipboard/terminal operations can fail.
+        // KdbxCredentials::drop zeroizes its owned password buffer.
+        drop(self.credentials.take());
         self.clear_reveal();
         let had_clipboard_lease = self.clipboard.has_lease();
         if had_clipboard_lease {
@@ -1443,10 +1497,11 @@ impl App {
         self.detail.clear();
         self.fields.clear();
         self.locked = true;
+        self.pending_decision = None;
         self.status = if clipboard_warning {
             "Vault locked; clipboard may still contain the password. Clear it manually. Press q to exit.".into()
         } else {
-            "Vault locked after 5 minutes idle. Press q to exit.".into()
+            "Vault locked. Press q to exit; restart TUI to unlock again.".into()
         };
     }
 }
@@ -2044,12 +2099,7 @@ fn draw_target_dialog(
     clippy::too_many_lines,
     reason = "keeps the compact reducer and terminal lifecycle together"
 )]
-fn run_ui(
-    terminal: &mut DefaultTerminal,
-    app: &mut App,
-    credentials: &mut KdbxCredentials,
-    path: &Path,
-) -> io::Result<()> {
+fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Result<()> {
     let mut reveal_was_drawn = false;
     loop {
         let was_revealed = reveal_was_drawn;
@@ -2121,60 +2171,15 @@ fn run_ui(
             }
             continue;
         }
-        if let Some(pending) = app.pending_decision {
+        if app.pending_decision.is_some() {
             let input = match key.code {
                 KeyCode::Char('s') => DecisionInput::SaveSucceeded,
                 KeyCode::Char('d') => DecisionInput::Discard,
                 KeyCode::Char('c') | KeyCode::Esc => DecisionInput::Cancel,
                 _ => continue,
             };
-            let effect = if input == DecisionInput::SaveSucceeded
-                && app.edit_mode
-                && app.input_mode
-                && !app.input.is_empty()
-            {
-                app.status =
-                    "Finish or cancel the pending edit before saving; press c to return to it"
-                        .into();
-                DecisionInput::SaveFailed
-            } else if input == DecisionInput::SaveSucceeded {
-                match app.service.save(path, credentials) {
-                    Ok(()) => {
-                        app.dirty = false;
-                        app.status = "Saved".into();
-                        DecisionInput::SaveSucceeded
-                    }
-                    Err(error) => {
-                        app.status = format!(
-                            "Save failed: {}. Choose save, discard, or cancel",
-                            clean(error.message())
-                        );
-                        DecisionInput::SaveFailed
-                    }
-                }
-            } else if input == DecisionInput::Discard {
-                app.dirty = false;
-                discard_input_draft(
-                    &mut app.input,
-                    &mut app.field_to_reveal,
-                    &mut app.input_mode,
-                    &mut app.edit_mode,
-                );
-                app.edit_field.clear();
-                DecisionInput::Discard
-            } else {
-                DecisionInput::Cancel
-            };
-            let (next, effect) = reduce_decision(Some(pending), app.dirty, effect);
-            app.pending_decision = next;
-            match effect {
-                DecisionEffect::Exit => break,
-                DecisionEffect::Lock => app.lock_vault(),
-                DecisionEffect::None if next.is_none() => {
-                    app.last_activity = Instant::now();
-                    app.status = "Decision cancelled; returned to the vault".into();
-                }
-                DecisionEffect::None => {}
+            if app.resolve_pending_decision(input, path) == DecisionEffect::Exit {
+                break;
             }
             continue;
         }
@@ -2386,7 +2391,7 @@ fn run_ui(
         } else if app.entry.is_none() {
             match key.code {
                 KeyCode::Char('n') => app.next_page(),
-                KeyCode::Char('s') => match save_service(&mut app.service, path, credentials) {
+                KeyCode::Char('s') => match app.save(path) {
                     Ok(()) => {
                         app.dirty = false;
                         app.status = "Saved".into();
@@ -2524,7 +2529,7 @@ fn run_ui(
                 KeyCode::Up | KeyCode::Char('k') => {
                     move_field_selection(&mut app.selected_field, app.fields.len(), false);
                 }
-                KeyCode::Char('s') => match save_service(&mut app.service, path, credentials) {
+                KeyCode::Char('s') => match app.save(path) {
                     Ok(()) => {
                         app.dirty = false;
                         app.status = "Saved".into();
@@ -2535,14 +2540,7 @@ fn run_ui(
             }
         }
     }
-    app.clear_reveal();
-    clear_input(&mut app.input);
-    clear_input(&mut app.field_to_reveal);
-    app.edit_field.clear();
-    app.query.zeroize();
-    app.query_before_input.zeroize();
-    let _ = app.clipboard.release();
-    let _ = app.service.lock(app.session);
+    app.lock_vault();
     Ok(())
 }
 
@@ -2558,23 +2556,17 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
     let session = service
         .open(path, &mut credentials, &KDBX_LIMITS)
         .map_err(|_| io::Error::other("cannot unlock vault"))?;
-    let mut app = new_app(service, session, aliases)?;
+    let mut app = new_app(service, session, credentials, aliases)?;
     app.refresh();
-    let result = ratatui::run(|terminal| run_ui(terminal, &mut app, &mut credentials, path));
-    app.clear_reveal();
-    app.query.zeroize();
-    app.query_before_input.zeroize();
-    clear_input(&mut app.input);
-    clear_input(&mut app.field_to_reveal);
-    app.edit_field.clear();
-    let _ = app.clipboard.release();
-    let _ = app.service.lock(app.session);
+    let result = ratatui::run(|terminal| run_ui(terminal, &mut app, path));
+    app.lock_vault();
     result
 }
 
 fn new_app(
     service: VaultService,
     session: nkeepass::SessionId,
+    credentials: KdbxCredentials,
     aliases: Vec<String>,
 ) -> io::Result<App> {
     let tree_parent = service
@@ -2583,6 +2575,7 @@ fn new_app(
     Ok(App {
         service,
         session,
+        credentials: Some(credentials),
         hits: Vec::new(),
         groups: Vec::new(),
         tree_parent,
@@ -2628,6 +2621,248 @@ fn new_app(
 mod tests {
     use super::clean;
 
+    // Private lifecycle ownership is not observable through a terminal transcript.
+    // The provider observes destruction safely, without inspecting freed memory.
+    struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl neotales_keepass::CredentialProvider for DropProbe {
+        fn key_component(&mut self) -> Result<[u8; 32], neotales_keepass::KdbxError> {
+            Ok([0x42; 32])
+        }
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[allow(
+        clippy::unwrap_used,
+        reason = "disposable credential lifecycle fixture"
+    )]
+    fn lifecycle_fixture() -> (
+        tempfile::TempDir,
+        super::App,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use neotales_keepass::{KdbxCredentials, KdbxWriteOptions};
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut credentials = KdbxCredentials::with_provider(
+            Some("disposable-lifecycle-password"),
+            Box::new(DropProbe(Arc::clone(&dropped))),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lifecycle.kdbx");
+        let mut service = super::VaultService::default();
+        service
+            .create(
+                &path,
+                &mut credentials,
+                KdbxWriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let session = service
+            .open(&path, &mut credentials, &super::KDBX_LIMITS)
+            .unwrap();
+        let app = super::new_app(service, session, credentials, Vec::new()).unwrap();
+        (directory, app, dropped)
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "disposable credential lifecycle fixture"
+    )]
+    fn lock_destroys_owned_credentials_before_app_exit() {
+        let (directory, mut app, dropped) = lifecycle_fixture();
+        let path = directory.path().join("lifecycle.kdbx");
+        let original = std::fs::read(&path).unwrap();
+        let old_root = app.tree_parent.clone();
+        app.last_activity = super::Instant::now().checked_sub(super::IDLE_LOCK).unwrap();
+        app.tick();
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(app.locked);
+        assert!(app.credentials.is_none());
+        assert!(app.service.tree_page(&old_root, None).is_err());
+        assert!(app.save(&path).is_err());
+        let absent = directory.path().join("must-not-be-created.kdbx");
+        assert!(app.save(&absent).is_err());
+        assert!(!absent.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        app.lock_vault(); // Repeated lock cannot restore credentials.
+        assert!(app.save(&path).is_err());
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "disposable credential lifecycle fixture"
+    )]
+    fn dirty_lock_cancel_failed_save_and_discard_preserve_lifecycle() {
+        // Private pending-decision I/O path, including an unfinished masked edit.
+        use super::{DecisionEffect as Effect, DecisionInput as Input, PendingDecision as Pending};
+        use std::sync::atomic::Ordering::SeqCst;
+
+        for pending in [Pending::Lock, Pending::Exit] {
+            let (directory, mut app, dropped) = lifecycle_fixture();
+            let path = directory.path().join("lifecycle.kdbx");
+            let original = std::fs::read(&path).unwrap();
+            app.service.add_group(&app.tree_parent, "unsaved").unwrap();
+            app.dirty = true;
+            app.last_activity = super::Instant::now().checked_sub(super::IDLE_LOCK).unwrap();
+            app.tick();
+            assert_eq!(app.pending_decision, Some(Pending::Lock));
+            assert!(!dropped.load(SeqCst));
+            assert!(!app.locked);
+            app.pending_decision = Some(pending);
+            assert_eq!(
+                app.resolve_pending_decision(Input::Cancel, &path),
+                Effect::None
+            );
+            assert!(app.dirty);
+            assert!(app.credentials.is_some());
+            assert!(!dropped.load(SeqCst));
+            assert!(app.pending_decision.is_none());
+
+            app.pending_decision = Some(pending);
+            app.input_mode = true;
+            app.edit_mode = true;
+            app.input.push_str("unfinished-disposable-edit");
+            assert_eq!(
+                app.resolve_pending_decision(Input::SaveSucceeded, &path),
+                Effect::None
+            );
+            assert_eq!(app.pending_decision, Some(pending));
+            assert!(app.dirty);
+            assert!(!app.input.is_empty());
+            assert!(!dropped.load(SeqCst));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            super::discard_input_draft(
+                &mut app.input,
+                &mut app.field_to_reveal,
+                &mut app.input_mode,
+                &mut app.edit_mode,
+            );
+            // An absent parent fails staging without modifying the real fixture.
+            let bad_path = directory.path().join("absent").join("vault.kdbx");
+            assert_eq!(
+                app.resolve_pending_decision(Input::SaveSucceeded, &bad_path),
+                Effect::None
+            );
+            assert_eq!(app.pending_decision, Some(pending));
+            assert!(app.dirty);
+            assert!(!dropped.load(SeqCst));
+            let expected = if pending == Pending::Lock {
+                Effect::Lock
+            } else {
+                Effect::Exit
+            };
+            assert_eq!(
+                app.resolve_pending_decision(Input::Discard, &path),
+                expected
+            );
+            assert!(!app.dirty);
+            if pending == Pending::Lock {
+                assert!(app.locked);
+                assert!(dropped.load(SeqCst));
+                assert!(app.save(&path).is_err());
+            }
+            drop(app);
+            assert!(dropped.load(SeqCst));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "disposable credential lifecycle fixture"
+    )]
+    fn dirty_decision_save_persists_before_lock_or_exit_and_requires_fresh_unlock() {
+        // Private pending-decision path with actual encrypted save/reopen.
+        use super::{DecisionEffect as Effect, DecisionInput as Input, PendingDecision as Pending};
+        use std::sync::atomic::Ordering::SeqCst;
+
+        for pending in [Pending::Lock, Pending::Exit] {
+            let (directory, mut app, dropped) = lifecycle_fixture();
+            let path = directory.path().join("lifecycle.kdbx");
+            app.service.add_group(&app.tree_parent, "saved").unwrap();
+            app.dirty = true;
+            app.pending_decision = Some(pending);
+            let bad_path = directory.path().join("absent").join("vault.kdbx");
+            assert_eq!(
+                app.resolve_pending_decision(Input::SaveSucceeded, &bad_path),
+                Effect::None
+            );
+            assert_eq!(app.pending_decision, Some(pending));
+            assert!(app.dirty);
+            assert!(!dropped.load(SeqCst));
+            let expected = if pending == Pending::Lock {
+                Effect::Lock
+            } else {
+                Effect::Exit
+            };
+            assert_eq!(
+                app.resolve_pending_decision(Input::SaveSucceeded, &path),
+                expected
+            );
+            assert!(!app.dirty);
+            assert!(app.pending_decision.is_none());
+            if pending == Pending::Lock {
+                assert!(dropped.load(SeqCst));
+                assert!(app.save(&path).is_err());
+            }
+            drop(app);
+            assert!(dropped.load(SeqCst));
+            // Fresh credentials only: no lock-screen re-unlock or cached retry.
+            let mut credentials = neotales_keepass::KdbxCredentials::with_provider(
+                Some("disposable-lifecycle-password"),
+                Box::new(DropProbe(std::sync::Arc::new(
+                    std::sync::atomic::AtomicBool::new(false),
+                ))),
+            )
+            .unwrap();
+            let mut reopened = super::VaultService::default();
+            let session = reopened
+                .open(&path, &mut credentials, &super::KDBX_LIMITS)
+                .unwrap();
+            let root = reopened.root_group(session).unwrap();
+            let page = reopened.tree_page(&root, None).unwrap();
+            assert_eq!(page.groups.len(), 1);
+            assert_eq!(page.groups[0].label(), "saved");
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "exercise credential destruction during unwind"
+    )]
+    fn dropping_unlocked_app_destroys_credentials_on_return_or_unwind() {
+        // Private ownership boundary; no terminal admission/signal claim.
+        let (_directory, app, dropped) = lifecycle_fixture();
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        drop(app);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        let (_directory, app, dropped) = lifecycle_fixture();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _app = app;
+            panic!("disposable lifecycle unwind");
+        }));
+        assert!(result.is_err());
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     // Private projection branches need exact cells, not an escape-sequence transcript.
     #[allow(clippy::unwrap_used, reason = "disposable UI fixture")]
     fn app_fixture() -> (tempfile::TempDir, super::App) {
@@ -2667,7 +2902,7 @@ mod tests {
         let session = service
             .open(&path, &mut credentials, &nkeepass::KDBX_LIMITS)
             .unwrap();
-        let mut app = super::new_app(service, session, Vec::new()).unwrap();
+        let mut app = super::new_app(service, session, credentials, Vec::new()).unwrap();
         app.refresh();
         (directory, app)
     }
@@ -3173,8 +3408,9 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
+    #[allow(clippy::unwrap_used, reason = "disposable tree save/reopen fixture")]
     fn tree_mutation_can_be_saved_without_opening_an_entry() {
-        use super::{KDBX_LIMITS, VaultService, save_service};
+        use super::{KDBX_LIMITS, VaultService};
         use neotales_keepass::{KdbxCredentials, KdbxWriteOptions};
 
         let temp = tempfile::tempdir().unwrap();
@@ -3198,9 +3434,11 @@ mod tests {
         let root = service.root_group(session).unwrap();
         service.add_group(&root, "created-in-tree").unwrap();
 
-        save_service(&mut service, &path, &mut credentials).unwrap();
+        let mut app = super::new_app(service, session, credentials, Vec::new()).unwrap();
+        app.save(&path).unwrap();
 
         let mut reopened = VaultService::default();
+        let mut credentials = KdbxCredentials::password("tree-save-test").unwrap();
         let session = reopened
             .open(&path, &mut credentials, &KDBX_LIMITS)
             .unwrap();

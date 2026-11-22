@@ -89,6 +89,29 @@ Split-terminal/Crossterm input identity and signal/input-boundary risks remain
 unresolved. Startup behavior, including Windows startup, is unchanged; the
 UI PTY checks have been run on Linux, not Windows or macOS.
 
+### Lock and secret lifetime
+
+The unlocked UI owns the credentials needed for explicit saves. After five
+minutes idle, a clean vault locks immediately. Unsaved changes or an unfinished
+edit instead require a save/discard/cancel decision; until resolved, the vault
+and its credentials remain unlocked in memory. Cancel returns to that same
+unlocked session. A failed save keeps the decision and credentials available for
+retry; a successful save completes the requested lock or exit.
+
+Lock drops the database session and credentials (whose owned master-password
+buffer is zeroized on drop), clears the UI's live input/reveal buffers, and
+attempts clipboard release. No saves are permitted after lock. There is no
+in-place re-unlock or cached-password retry: press `q`, then run `nkp tui PATH`
+again and supply credentials afresh. Clipboard warnings remain actionable on
+the lock screen; acknowledging one does not erase an external clipboard copy.
+
+This is owned-buffer lifetime reduction, not whole-process memory erasure.
+Ordinary heap allocations, previous reallocations, database/model copies,
+library temporaries, terminal rendering/frame buffers, terminal-emulator
+scrollback, clipboard managers, swap, crash dumps, and screenshots are not
+covered by a blanket zeroization guarantee. Normal drop/unwind cleanup does
+not run on every forced termination.
+
 ## `config`
 
 ### `config ls`
