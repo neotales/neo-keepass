@@ -4,6 +4,44 @@ Every route accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may precede
 the command. Password flags are available only on credential routes. See
 [vault credentials](credentials.md) for the exact route matrix.
 
+## Human output color
+
+Place the root option before the command: `nkp --color=auto COMMAND`.
+`--color=auto|always|never` controls color on human help and diagnostics;
+`--no-color` is an alias for `--color=never`. `--color=basic` and
+`--color=truecolor` are also available; unsupported truecolor capability falls
+back to basic, and Windows currently uses plain output because safe virtual
+terminal support is not detected. The default `auto` colors only when that
+output stream is a TTY and `TERM` is not `dumb`. Auto uses truecolor only when
+`COLORTERM` is `truecolor` or `24bit`, otherwise basic.
+
+An explicit CLI setting wins over environment variables. Without one, a
+nonempty (including non-Unicode) `NO_COLOR` disables color; an empty value is
+absent. Otherwise `FORCE_COLOR=0` disables,
+`FORCE_COLOR=1`, `true`, or empty enables basic, `2` enables basic, and `3`
+requests truecolor. Invalid `FORCE_COLOR` values are ignored. Explicit
+`--color=auto` uses terminal capability and ignores both environment overrides.
+`--color=always` can color human output redirected to a pager; `TERM=dumb` and
+unsupported Windows terminals remain plain.
+
+Color affects only human help and diagnostic labels. A color policy is accepted
+but ignored by machine/raw routes to preserve their exact bytes: data output,
+JSON, null-delimited and shell formats, completion scripts, files, and
+child-process output are never styled, even when color is forced.
+Diagnostics for data routes (including `show`, `otp`, all interchange forms,
+and `secrets env/environment`) are also always plain. This is intentional:
+forcing presentation color never rejects an otherwise valid data command.
+Help remains human output even when requested for a data route; styling is
+inserted after wrapping, so disabling it leaves exactly the same layout.
+
+For `exec/x`, the first `--` **after the exec route** starts child argv; a
+preceding exec value option must be complete before it. A root `-V` / `--vault`
+value spelled `--` remains a vault selector, not the child boundary.
+Child switches are never normalized or completed
+as nkp options. The intentionally limited POSIX `sh` helper has no access to
+the full command line: integrations must pass `true` as its optional seventh
+`AFTER_SEPARATOR` argument for every child slot, not just the first.
+
 ## `tui`
 
 ```text
@@ -118,8 +156,9 @@ Each binding selects an entry and maps one field to a child environment
 variable. At least one `--key` binding is required, and each binding needs
 exactly one matching `--env NAME`. Repeat the binding sequence for more
 values. Omit `--field` to select the `Password` field. Set `--field otp` to
-pass a TOTP code instead; HOTP is refused. The `--` separator marks the child
-command and its arguments.
+pass a TOTP code instead; HOTP is refused. The first `--` after `exec` / `x`
+marks the child command and its arguments, after root option values have been
+consumed.
 
 See [vault credentials](credentials.md) for accepted password sources and
 their precedence. The child receives a fixed allowlist of environment

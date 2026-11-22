@@ -3235,6 +3235,175 @@ fn shortcut_help_shows_the_full_secrets_summary() {
     }
 }
 
+#[test]
+fn common_selector_shortcuts_are_advertised_with_legacy_key_forms() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (shortcut, nested) in [("show", "show"), ("ensure", "ensure"), ("otp", "otp")] {
+        for route in [vec![shortcut, "--help"], vec!["secrets", nested, "--help"]] {
+            let output = cli(tmp.path(), &route);
+            assert!(
+                output.status.success(),
+                "{route:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let help = String::from_utf8(output.stdout).unwrap();
+            let expected_usage = format!("Usage: nkp {} PATH", route[..route.len() - 1].join(" "));
+            assert!(
+                help.contains(&expected_usage),
+                "{route:?} omitted positional selector synopsis:\n{help}"
+            );
+            assert!(
+                help.contains("--key PATH"),
+                "{route:?} omitted the compatible --key form:\n{help}"
+            );
+        }
+    }
+}
+
+#[test]
+fn grouped_routes_reject_a_positional_and_flag_selector_before_vault_lookup() {
+    let home = tempfile::tempdir().expect("isolated home");
+    for args in [
+        &["group", "add", "Root/Group", "--key", "Root/Group"][..],
+        &["files", "ls", "Root/Entry", "-k", "Root/Entry"][..],
+        &["field", "get", "Root/Entry", "--key", "Root/Entry"][..],
+    ] {
+        let output = cli(home.path(), args);
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+        assert!(
+            stderr.contains("entry key specified more than once"),
+            "{args:?} did not reject duplicate selector before vault lookup: {stderr:?}"
+        );
+    }
+}
+
+#[test]
+fn positional_group_file_and_field_selectors_work_in_a_disposable_vault() {
+    use nkp_cli::{CliFixture, MASTER_PASSWORD};
+
+    let fixture = CliFixture::new(false);
+    let vault = fixture.vault().to_str().expect("vault path");
+    let run = |args: &[&str]| {
+        let mut command = nkp_cli::command(Path::new(env!("CARGO_BIN_EXE_nkp")), &fixture);
+        command
+            .args(["--vault", vault, "--password-env", "FIXTURE_PASSWORD"])
+            .args(args)
+            .env("FIXTURE_PASSWORD", MASTER_PASSWORD)
+            .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
+            .env("XDG_DATA_HOME", fixture.directory().join("data"))
+            .env("HOME", fixture.directory());
+        command.output().expect("run CLI")
+    };
+
+    let output = run(&["group", "add", "AuditGroup"]);
+    assert!(
+        output.status.success(),
+        "group add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(&["groups", "add", "--", "-dash-group"]);
+    assert!(
+        output.status.success(),
+        "dash-leading group add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(&["group", "ls"]);
+    assert!(output.status.success());
+    let groups = String::from_utf8(output.stdout).expect("group paths");
+    assert!(groups.lines().any(|line| line.ends_with("AuditGroup")));
+    assert!(groups.lines().any(|line| line.ends_with("-dash-group")));
+
+    let output = run(&["ensure", "--", "-dash-entry"]);
+    assert!(
+        output.status.success(),
+        "dash-leading entry ensure failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(&["show", "--", "-dash-entry"]);
+    assert!(
+        output.status.success(),
+        "dash-leading entry show failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let input = fixture.directory().join("new-attachment.bin");
+    let destination = fixture.directory().join("attachment-copy.bin");
+    std::fs::write(&input, b"positional attachment bytes").expect("write attachment input");
+    let output = run(&[
+        "files",
+        "add",
+        "fixture-login",
+        "--field",
+        "audit.bin",
+        "--file",
+        input.to_str().expect("input path"),
+    ]);
+    assert!(
+        output.status.success(),
+        "files add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(&["files", "ls", "fixture-login"]);
+    assert!(output.status.success());
+    let attachments = String::from_utf8(output.stdout).expect("attachment listing");
+    assert!(attachments.contains("audit.bin"));
+    let output = run(&[
+        "files",
+        "get",
+        "fixture-login",
+        "--field",
+        "audit.bin",
+        "--output",
+        destination.to_str().expect("destination path"),
+    ]);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read(&destination).expect("read attachment copy"),
+        b"positional attachment bytes"
+    );
+    let output = run(&[
+        "files",
+        "add",
+        "fixture-login",
+        "--name",
+        "not-an-attachment-selector",
+        "--file",
+        input.to_str().expect("input path"),
+    ]);
+    assert!(
+        !output.status.success(),
+        "files add unexpectedly treated --name as an attachment selector"
+    );
+
+    let output = run(&["field", "ls", "fixture-login"]);
+    assert!(output.status.success());
+    let fields = String::from_utf8(output.stdout).expect("field listing");
+    assert!(fields.contains("Private custom field"));
+    let output = run(&[
+        "field",
+        "get",
+        "fixture-login",
+        "--field",
+        "Private custom field",
+    ]);
+    assert!(output.status.success());
+    assert!(output.stdout == nkp_cli::CUSTOM_FIELD.as_bytes());
+    let output = run(&[
+        "field",
+        "get",
+        "fixture-login",
+        "--field",
+        "Private custom field",
+        "--format",
+        "dotenv",
+        "--name",
+        "AUDIT_CUSTOM_FIELD",
+    ]);
+    assert!(output.status.success());
+    assert!(output.stdout.starts_with(b"AUDIT_CUSTOM_FIELD="));
+}
+
 fn help_summary(help: &str) -> &str {
     let after_usage = help
         .split_once("Usage:")
@@ -3463,7 +3632,7 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
             "Usage: nkp secrets search [--] QUERY",
         ),
         (&["secrets", "env"], "--name NAME"),
-        (&["secrets", "show"], "Usage: nkp secrets show --key PATH"),
+        (&["secrets", "show"], "Usage: nkp secrets show PATH"),
         (&["secrets", "get", "many"], "--format FORMAT"),
         (&["get", "many"], "--field FIELD"),
         (&["secrets", "set"], "--stdin"),
@@ -3480,7 +3649,10 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
         (&["files", "add"], "--field FIELD"),
         (&["files", "get"], "--output PATH"),
         (&["files", "rm"], "--yes"),
-        (&["field", "ls"], "Usage: nkp field ls --key PATH"),
+        (
+            &["field", "ls"],
+            "Usage: nkp field ls (ENTRY | --key ENTRY)",
+        ),
         (&["field", "get"], "--field FIELD"),
         (&["field", "set"], "--stdin"),
         (&["field", "rm"], "--yes"),
@@ -3652,11 +3824,11 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
         (&["x", "--help"][..], "Usage: nkp x [--key PATH"),
         (
             &["attachments", "ls", "--help"][..],
-            "Usage: nkp attachments ls --key PATH",
+            "Usage: nkp attachments ls (PATH | --key PATH)",
         ),
         (
             &["custom-field", "get", "--help"][..],
-            "Usage: nkp custom-field get --key PATH --field FIELD [OPTIONS]",
+            "Usage: nkp custom-field get (ENTRY | --key ENTRY) --field FIELD [OPTIONS]",
         ),
         (
             &["secrets", "list", "--help"][..],
@@ -3706,6 +3878,34 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
             );
         }
     }
+}
+
+#[test]
+fn root_owned_double_dash_values_do_not_hide_route_help() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (args, usage) in [
+        (vec!["-V", "--", "x", "--help"], "Usage: nkp x [--key PATH"),
+        (
+            vec!["-V", "--", "get", "many", "--help"],
+            "Usage: nkp get many PATH",
+        ),
+        (
+            vec!["--vault", "--", "secrets", "get", "many", "--help"],
+            "Usage: nkp secrets get many PATH",
+        ),
+    ] {
+        let output = cli(tmp.path(), &args);
+        assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        assert!(String::from_utf8_lossy(&output.stdout).contains(usage));
+        assert!(output.stderr.is_empty());
+    }
+    let output = cli(tmp.path(), &["-V", "--", "x", "--", "/bin/echo", "--help"]);
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "child help must not trigger nkp help"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("exec requires at least one --key"));
 }
 
 #[test]

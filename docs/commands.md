@@ -29,6 +29,9 @@ invocation, options, output, and failures, open the linked reference page.
 | `group rm` | `group remove` | [Groups](reference/entries.md#groups) |
 | `secrets ls` | `secrets list` | [Secrets commands](reference/secrets.md#list-and-search) |
 | `secrets env` | `secrets environment` | [Secrets commands](reference/secrets.md#read-selected-values) |
+| `secrets show` | Root `show` | [Secrets commands](reference/secrets.md#secrets-show) |
+| `secrets ensure` | Root `ensure` | [Secrets commands](reference/secrets.md#secrets-ensure) |
+| `secrets otp` | Root `otp` | [Secrets commands](reference/secrets.md#secrets-otp) |
 | `secrets rm` | `secrets remove` | [Secrets commands](reference/secrets.md#secrets-rm) |
 | Root `ls` | Root `list` | [Root shortcuts](reference/system.md#root-shortcuts) |
 | Root `rm` | Root `remove` | [Root shortcuts](reference/system.md#root-shortcuts) |
@@ -50,11 +53,13 @@ internal dispatch action names, not public command routes.
 `__complete` is a private protocol used by generated shell completion, not a
 public command.
 
-Entry selection accepts `--key PATH` or `-k PATH`; `get`, `set`, and `rm` /
-`remove` also accept the path or alias as their first positional argument.
-Do not supply both. `PATH` may be an entry path or configured entry alias.
-For a selector beginning with `-`, place `--` after options immediately
-before the selector, such as `nkp get --field Password -- -DashEntry`.
+Entry selection accepts `--key PATH` or `-k PATH`; `get`, `set`, `rm` /
+`remove`, `show`, `ensure`, `otp`, `field`, and `files` routes also accept the
+entry path or alias positionally. `group add` and `group rm` accept a group
+path positionally. Do not supply both forms. `PATH` may be an entry path or
+configured entry alias (group routes take group paths). For a selector
+beginning with `-`, place `--` after options immediately before it, such as
+`nkp show -- -DashEntry`.
 `--field` also accepts `-F`; `--file` accepts `-f`.
 `set` additionally accepts repeatable `--field NAME=VALUE`. Its `--value-file`
 and `--value-stdin` sources alias `--file` and `--stdin`.

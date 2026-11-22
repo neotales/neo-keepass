@@ -66,10 +66,16 @@ const fn help_command(
     }
 }
 
-const GLOBAL_OPTIONS: &[HelpOption] = &[HelpOption {
-    label: "-V, --vault PATH",
-    summary: "Select a vault or configured alias before the command.",
-}];
+const GLOBAL_OPTIONS: &[HelpOption] = &[
+    HelpOption {
+        label: "-V, --vault PATH",
+        summary: "Select a vault or configured alias before the command.",
+    },
+    HelpOption {
+        label: "--color MODE, --no-color",
+        summary: "Style human help and diagnostics: auto, always, never, basic, or truecolor.",
+    },
+];
 const GLOBAL_CREDENTIAL_OPTIONS: &[HelpOption] = &[
     HelpOption {
         label: "--password-env NAME",
@@ -121,7 +127,7 @@ const CREDENTIAL_OPTIONS: &[HelpOption] = &[
 ];
 const KEY_OPTION: HelpOption = HelpOption {
     label: "-k, --key PATH",
-    summary: "Select an entry by path or entry alias; get, set, and rm also accept it positionally.",
+    summary: "Select an entry or group by path; get, set, rm, show, ensure, otp, group, field, and attachment routes also accept it positionally.",
 };
 const FIELD_OPTION: HelpOption = HelpOption {
     label: "-F, --field FIELD",
@@ -526,7 +532,7 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "show",
-        "show --key PATH",
+        "show PATH",
         "Show redacted descriptors for one entry.",
         SHOW_OPTIONS,
         NO_COMMANDS,
@@ -554,14 +560,14 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "ensure",
-        "ensure --key PATH [OPTIONS]",
+        "ensure PATH [OPTIONS]",
         "Create a missing entry and its parent groups; keep existing entries.",
         ENSURE_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "otp",
-        "otp --key PATH [OPTIONS]",
+        "otp PATH [OPTIONS]",
         "Generate a TOTP code; never disclose the seed. HOTP is refused.",
         OTP_OPTIONS,
         NO_COMMANDS,
@@ -614,21 +620,21 @@ const AUTOMATION_COMMANDS: &[HelpCommand] = &[
 const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
     help_command(
         "ls|list",
-        "ls --key PATH",
+        "ls (PATH | --key PATH)",
         "List attachment metadata for one entry.",
         ATTACHMENT_LS_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "add|import",
-        "add --key PATH --field NAME [OPTIONS]",
+        "add (ENTRY | --key ENTRY) --field NAME [OPTIONS]",
         "Add an attachment from explicit input.",
         ATTACHMENT_ADD_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "get|export",
-        "get --key PATH --field NAME --output PATH",
+        "get (ENTRY | --key ENTRY) --field NAME --output PATH",
         "Write one attachment to a private output file.",
         &[
             KEY_OPTION,
@@ -642,7 +648,7 @@ const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "rm|remove",
-        "rm --key PATH --field NAME --yes",
+        "rm (ENTRY | --key ENTRY) --field NAME --yes",
         "Remove one attachment.",
         ATTACHMENT_RM_OPTIONS,
         NO_COMMANDS,
@@ -651,28 +657,28 @@ const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
 const FIELD_COMMANDS: &[HelpCommand] = &[
     help_command(
         "ls|list",
-        "ls --key PATH",
+        "ls (ENTRY | --key ENTRY)",
         "List custom-field names for one entry.",
         SHOW_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "get|reveal",
-        "get --key PATH --field FIELD [OPTIONS]",
+        "get (ENTRY | --key ENTRY) --field FIELD [OPTIONS]",
         "Reveal one custom field.",
         GET_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "set|edit",
-        "set --key PATH --field FIELD [OPTIONS]",
+        "set (ENTRY | --key ENTRY) --field FIELD [OPTIONS]",
         "Set one custom field from explicit input.",
         SET_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "rm|remove",
-        "rm --key PATH --field FIELD",
+        "rm (ENTRY | --key ENTRY) --field FIELD --yes",
         "Remove one custom field.",
         RM_OPTIONS,
         NO_COMMANDS,
@@ -764,8 +770,8 @@ const EXEC_OPTIONS: &[HelpOption] = &[
 ];
 const NO_COMMANDS: &[HelpCommand] = &[];
 const GROUP_KEY_OPTION: HelpOption = HelpOption {
-    label: "--key PATH",
-    summary: "Select a group path, with or without the root name.",
+    label: "-k, --key PATH",
+    summary: "Select a group path, with or without the root name; add and rm also accept it positionally.",
 };
 const GROUP_ADD_OPTIONS: &[HelpOption] = &[GROUP_KEY_OPTION, DRY_RUN_OPTION];
 const GROUP_RM_OPTIONS: &[HelpOption] = &[GROUP_KEY_OPTION, YES_OPTION, DRY_RUN_OPTION];
@@ -779,14 +785,14 @@ const GROUP_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "add|create|ensure",
-        "add --key PATH [--dry-run]",
+        "add (PATH | --key PATH) [--dry-run]",
         "Create missing groups; keep existing groups.",
         GROUP_ADD_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "rm|remove",
-        "rm --key PATH --yes [--dry-run]",
+        "rm (PATH | --key PATH) (--yes | --dry-run)",
         "Remove a group and its contents; never remove the root.",
         GROUP_RM_OPTIONS,
         NO_COMMANDS,
@@ -907,7 +913,7 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "show",
-        "show [OPTIONS]",
+        "show PATH [OPTIONS]",
         "Shortcut for secrets show.",
         SHOW_OPTIONS,
         NO_COMMANDS,
@@ -928,14 +934,14 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "ensure",
-        "ensure [OPTIONS]",
+        "ensure PATH [OPTIONS]",
         "Shortcut for secrets ensure.",
         ENSURE_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "otp",
-        "otp [OPTIONS]",
+        "otp PATH [OPTIONS]",
         "Shortcut for secrets otp.",
         OTP_OPTIONS,
         NO_COMMANDS,
@@ -1893,11 +1899,10 @@ fn write_selected_entry(selected: &nkeepass::SelectedEntry, path: &str) -> Resul
 /// Whether a command accepts a bare positional word.
 ///
 /// Every command shares one option parser, so the positional policy is a
-/// parameter of it rather than a second parser. Naming the three cases keeps
-/// the walk commands' `--`-terminated glob distinct from `init`'s target path;
-/// folding them into one "allow a word" flag would have made the search glob
-/// double as a file path, which is exactly the sort of silent meaning-shift
-/// this CLI's precedence rules exist to prevent.
+/// parameter of it rather than a second parser. Naming the cases keeps
+/// walk-command globs, target paths, entry/group selectors, and repeatable
+/// bundle paths distinct; folding them into one "allow a word" flag would
+/// silently change what a bare argument means.
 #[derive(Clone, Copy)]
 enum Positional {
     /// No bare positional is accepted.
@@ -1906,7 +1911,7 @@ enum Positional {
     Glob,
     /// One bare target path, as `init PATH` takes.
     Path,
-    /// One entry selector for get, set, or remove.
+    /// One entry or group selector on a route with an unambiguous key role.
     Key,
     /// Set additionally accepts repeatable field assignments.
     SetKey,
@@ -1923,7 +1928,24 @@ impl Positional {
         if action == "set" {
             return Self::SetKey;
         }
-        if matches!(action, "get" | "rm") {
+        if matches!(
+            action,
+            "get"
+                | "rm"
+                | "show"
+                | "ensure"
+                | "otp"
+                | "group-add"
+                | "group-rm"
+                | "field-ls"
+                | "field-get"
+                | "field-set"
+                | "field-rm"
+                | "attachment-ls"
+                | "attachment-get"
+                | "attachment-add"
+                | "attachment-rm"
+        ) {
             return Self::Key;
         }
         if matches!(action, "ls" | "search") {
@@ -3845,6 +3867,11 @@ fn validate_new_options(action: &str, opts: &Options<'_>) -> Result<()> {
 )]
 fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
     validate_new_options(action, opts)?;
+    if opts.allow_plaintext {
+        return Err(err(
+            "--allow-plaintext is only valid for KeePass XML export",
+        ));
+    }
     if action == "get-many" {
         if opts.requested_paths.is_empty() || opts.requested_paths.len() > 256 {
             return Err(err("get many requires 1 to 256 explicit paths"));
@@ -4094,6 +4121,7 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
             if opts.output.is_none()
                 || opts.key.is_some()
                 || opts.field.is_some()
+                || opts.name.is_some()
                 || opts.file.is_some()
                 || opts.stdin
                 || opts.yes
@@ -4103,8 +4131,15 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 || opts.glob.is_some()
                 || opts.strategy.is_some()
                 || opts.is_output
+                || (opts.allow_plaintext && opts.format != Some("keepass-xml"))
             {
-                return Err(err("invalid export option"));
+                return Err(
+                    if opts.allow_plaintext && opts.format != Some("keepass-xml") {
+                        err("--allow-plaintext is only valid with --format keepass-xml")
+                    } else {
+                        err("invalid export option")
+                    },
+                );
             }
         }
         "sync" => {
@@ -5226,6 +5261,11 @@ fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
     let common_options = options(&common, Positional::Forbidden)?;
     validate_new_options("env", &common_options)?;
     reject_age_options(&common_options)?;
+    if common_options.allow_plaintext {
+        return Err(err(
+            "--allow-plaintext is only valid for KeePass XML export",
+        ));
+    }
     // `secrets env` has no value-file, mutation, or interchange options. Check
     // this allowlist before resolving a vault or reading credentials.
     if common_options.key.is_some()
@@ -5379,6 +5419,11 @@ fn write_environment(
 fn validate_init_options(opts: &Options<'_>) -> Result<()> {
     validate_new_options("init", opts)?;
     reject_age_options(opts)?;
+    if opts.allow_plaintext {
+        return Err(err(
+            "--allow-plaintext is only valid for KeePass XML export",
+        ));
+    }
     if opts.key.is_some()
         || opts.field.is_some()
         || opts.name.is_some()
@@ -6297,6 +6342,9 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     let command = args
         .get(sep + 1)
         .ok_or_else(|| err("exec requires a command"))?;
+    // The first separator belongs to exec, even when an option is missing its
+    // value. Never consume the separator (or child argv) as that value.
+    let cli_args = &args[..sep];
     let mut keys = Vec::new();
     let mut fields: Vec<Option<&str>> = Vec::new();
     let mut env_names = Vec::new();
@@ -6310,7 +6358,7 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
         match args[i].as_str() {
             "--key" => {
                 i += 1;
-                keys.push(take_arg(args, i)?.to_owned());
+                keys.push(take_arg(cli_args, i)?.to_owned());
                 // Every key has a field slot, so `--key/--field/--env` stay
                 // positionally paired. Pushing `None` here rather than only when
                 // `--field` is present is what keeps the two vectors the same
@@ -6329,27 +6377,27 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
                 if slot.is_some() {
                     return Err(err("invalid or duplicate option"));
                 }
-                *slot = Some(take_arg(args, i)?);
+                *slot = Some(take_arg(cli_args, i)?);
             }
             "--env" => {
                 i += 1;
-                env_names.push(take_arg(args, i)?.to_owned());
+                env_names.push(take_arg(cli_args, i)?.to_owned());
             }
             "--password" if password_arg.is_none() => {
                 i += 1;
-                password_arg = Some(take_arg(args, i)?);
+                password_arg = Some(take_arg(cli_args, i)?);
             }
             "--password-env" if password_env.is_none() => {
                 i += 1;
-                password_env = Some(take_arg(args, i)?);
+                password_env = Some(take_arg(cli_args, i)?);
             }
             "--password-file" if password_file.is_none() => {
                 i += 1;
-                password_file = Some(take_arg(args, i)?);
+                password_file = Some(take_arg(cli_args, i)?);
             }
             "--key-file" if key_file.is_none() => {
                 i += 1;
-                key_file = Some(take_arg(args, i)?);
+                key_file = Some(take_arg(cli_args, i)?);
             }
             "--password-stdin" if !password_stdin => password_stdin = true,
             _ => return Err(err("invalid exec option")),
@@ -6626,8 +6674,10 @@ fn find_help_command<'a>(commands: &'a [HelpCommand], name: &str) -> Option<&'a 
 /// Returns the command route for a help request, without mistaking option
 /// values for switches or scanning into an exec child's argument list.
 fn help_request(args: &[String]) -> Option<Vec<String>> {
-    let mut i = 0;
-    let mut route_tokens = Vec::new();
+    // Consume root option values before applying any route-local terminator.
+    // In particular, -V may own a literal -- before an exec/get-many route.
+    let (mut i, route) = parsed_command_route(args);
+    let mut route_tokens: Vec<String> = Vec::new();
     let mut expecting_value = false;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -6651,7 +6701,6 @@ fn help_request(args: &[String]) -> Option<Vec<String>> {
             {
                 return None;
             }
-            let route = resolve_help_route(&route_tokens);
             if (!route_tokens.is_empty() && route.is_empty())
                 || (route_tokens
                     .first()
@@ -6731,6 +6780,21 @@ fn resolve_help_route(tokens: &[String]) -> Vec<String> {
     route
 }
 
+/// Route descent is contiguous, just like dispatch: `get many` reserves a
+/// subcommand, but `get --field Password many` selects the entry named many.
+/// Global value options own exactly one token before route parsing starts.
+fn parsed_command_route(args: &[String]) -> (usize, Vec<String>) {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--vault" | "-V" | "--password-env" => index = (index + 2).min(args.len()),
+            "--password-stdin" => index += 1,
+            _ => break,
+        }
+    }
+    (index, resolve_help_route(&args[index..]))
+}
+
 fn program_basename(argv0: &OsStr) -> String {
     Path::new(argv0)
         .file_name()
@@ -6794,14 +6858,19 @@ fn uses_credentials(route: &[String]) -> bool {
 }
 
 fn render_help(program: &str, route: &[String], width: usize) -> String {
+    render_help_with_style(program, route, width, 0)
+}
+
+fn render_help_with_style(program: &str, route: &[String], width: usize, style: u8) -> String {
     let mut output = String::new();
     let command = command_path(ROOT_COMMANDS, route);
+    let usage_label = "Usage:";
     if route.is_empty() {
         let _ = writeln!(output, "{program} - {HELP_TITLE}");
         output.push('\n');
         write_paragraph(
             &mut output,
-            &format!("Usage: {program} [GLOBAL OPTIONS] COMMAND"),
+            &format!("{usage_label} {program} [GLOBAL OPTIONS] COMMAND"),
             width,
             "",
         );
@@ -6824,7 +6893,12 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
         };
         let _ = writeln!(output, "{program} {}", route.join(" "));
         output.push('\n');
-        write_paragraph(&mut output, &format!("Usage: {program} {usage}"), width, "");
+        write_paragraph(
+            &mut output,
+            &format!("{usage_label} {program} {usage}"),
+            width,
+            "",
+        );
         output.push('\n');
         let summary = if route.len() == 1 {
             shortcut_summary(command).unwrap_or(command.summary)
@@ -6898,7 +6972,12 @@ fn render_help(program: &str, route: &[String], width: usize) -> String {
         width,
         "  ",
     );
-    output
+    // Wrap plain text first. Escape bytes must never affect column accounting.
+    match style {
+        1 => output.replacen("\nUsage:", "\n\x1b[1;36mUsage:\x1b[0m", 1),
+        2 => output.replacen("\nUsage:", "\n\x1b[1;38;2;80;190;255mUsage:\x1b[0m", 1),
+        _ => output,
+    }
 }
 
 fn shortcut_summary(command: &HelpCommand) -> Option<&'static str> {
@@ -7004,7 +7083,26 @@ fn write_paragraph(output: &mut String, text: &str, width: usize, indent: &str) 
 }
 
 fn print_help(program: &str, route: &[String]) {
-    print!("{}", render_help(program, route, HELP_WIDTH));
+    let style = COLOR_STYLE.load(std::sync::atomic::Ordering::Relaxed);
+    print!(
+        "{}",
+        render_help_with_style(&sanitize_terminal_text(program), route, HELP_WIDTH, style)
+    );
+}
+
+static COLOR_STYLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn sanitize_terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn with_root_credentials<'a>(
@@ -7399,10 +7497,267 @@ fn main() {
         eprintln!("nkp: arguments must be valid UTF-8");
         std::process::exit(2);
     };
+    let (command_args, color) = match extract_root_color_options(&command_args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("nkp: {}", error.0);
+            std::process::exit(error.1);
+        }
+    };
+    COLOR_STYLE.store(
+        color.style(
+            io::stdout().is_terminal(),
+            env::var("TERM").ok().as_deref(),
+            env::var("COLORTERM").ok().as_deref(),
+        ),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let command_args = normalize_cli_aliases(&command_args);
     if let Err(error) = run(&command_args, &program) {
-        eprintln!("nkp: {}", error.0);
+        let machine = machine_diagnostic_route(&command_args);
+        let style = if machine {
+            0
+        } else {
+            color.style(
+                io::stderr().is_terminal(),
+                env::var("TERM").ok().as_deref(),
+                env::var("COLORTERM").ok().as_deref(),
+            )
+        };
+        if style == 1 {
+            eprintln!("\x1b[1;31mnkp:\x1b[0m {}", error.0);
+        } else if style == 2 {
+            eprintln!("\x1b[1;38;2;255;90;90mnkp:\x1b[0m {}", error.0);
+        } else {
+            eprintln!("nkp: {}", error.0);
+        }
         std::process::exit(error.1);
+    }
+}
+
+/// Returns whether a command's diagnostics must remain plain because its route is data-oriented.
+fn machine_diagnostic_route(args: &[String]) -> bool {
+    let (index, route) = parsed_command_route(args);
+    // Private protocol and version switch deliberately are not help nodes.
+    if args
+        .get(index)
+        .is_some_and(|token| matches!(token.as_str(), "__complete" | "--version"))
+    {
+        return true;
+    }
+    let mut commands = ROOT_COMMANDS;
+    let mut canonical = Vec::new();
+    for token in &route {
+        let Some(node) = find_help_command(commands, token) else {
+            break;
+        };
+        canonical.push(aliases(node.names).next().unwrap_or(""));
+        commands = node.children;
+    }
+    let Some(&command) = canonical.first() else {
+        return false;
+    };
+    let action = canonical.get(1).copied().unwrap_or("");
+    if matches!(
+        command,
+        "completion"
+            | "__complete"
+            | "version"
+            | "exec"
+            | "x"
+            | "tui"
+            | "get"
+            | "ls"
+            | "list"
+            | "search"
+            | "show"
+            | "otp"
+            | "env"
+            | "import"
+            | "export"
+            | "sync"
+            | "config"
+            | "automation"
+    ) || matches!(
+        command,
+        "group" | "groups" | "field" | "custom-field" | "files" | "attachment" | "attachments"
+    ) {
+        return true;
+    }
+    if (command == "secrets"
+        && matches!(
+            action,
+            "get"
+                | "ls"
+                | "list"
+                | "search"
+                | "show"
+                | "otp"
+                | "env"
+                | "environment"
+                | "import"
+                | "export"
+                | "sync"
+        ))
+        || (command == "alias" && matches!(action, "resolve" | "ls" | "list"))
+    {
+        return true;
+    }
+    let accepts_json = command == "init"
+        || command == "config"
+        || command == "context" && matches!(action, "ls" | "list" | "show")
+        || command == "secrets" && matches!(action, "ls" | "list");
+    let mut cursor = index + 1;
+    while cursor < args.len() {
+        let token = args[cursor].as_str();
+        if token == "--" {
+            break;
+        }
+        if token == "--json" && accepts_json {
+            return true;
+        }
+        if takes_option_value(token) {
+            cursor += 2;
+        } else {
+            cursor += 1;
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColorOption {
+    Auto,
+    Always,
+    Never,
+    Basic,
+    Truecolor,
+}
+
+impl ColorOption {
+    fn style(self, tty: bool, term: Option<&str>, colorterm: Option<&str>) -> u8 {
+        self.style_with_terminal_support(tty, term, colorterm, !cfg!(windows))
+    }
+
+    fn style_with_terminal_support(
+        self,
+        tty: bool,
+        term: Option<&str>,
+        colorterm: Option<&str>,
+        terminal_supports_ansi: bool,
+    ) -> u8 {
+        if !terminal_supports_ansi || self == Self::Never || term == Some("dumb") {
+            return 0;
+        }
+        match self {
+            Self::Never => 0,
+            Self::Basic => 1,
+            Self::Truecolor => {
+                if matches!(colorterm, Some("truecolor" | "24bit")) {
+                    2
+                } else {
+                    1
+                }
+            }
+            Self::Always => {
+                if matches!(colorterm, Some("truecolor" | "24bit")) {
+                    2
+                } else {
+                    1
+                }
+            }
+            Self::Auto if tty => {
+                if matches!(colorterm, Some("truecolor" | "24bit")) {
+                    2
+                } else {
+                    1
+                }
+            }
+            Self::Auto => 0,
+        }
+    }
+}
+
+/// Extracts presentation switches while leaving option values and child arguments intact.
+fn extract_root_color_options(args: &[String]) -> Result<(Vec<String>, ColorOption)> {
+    let mut output = Vec::with_capacity(args.len());
+    let mut explicit = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let value = if let Some(value) = arg.strip_prefix("--color=") {
+            Some(value)
+        } else if arg == "--color" {
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| err("--color requires a value"))?;
+            if value == "--" {
+                return Err(err("--color requires a value before --"));
+            }
+            i += 1;
+            Some(value.as_str())
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            if explicit.is_some() {
+                return Err(err("duplicate color option"));
+            }
+            explicit = Some(match value {
+                "auto" => ColorOption::Auto,
+                "always" => ColorOption::Always,
+                "never" => ColorOption::Never,
+                "basic" => ColorOption::Basic,
+                "truecolor" => ColorOption::Truecolor,
+                _ => return Err(err("invalid --color value")),
+            });
+            i += 1;
+            continue;
+        }
+        if arg == "--no-color" {
+            if explicit.is_some() {
+                return Err(err("duplicate color option"));
+            }
+            explicit = Some(ColorOption::Never);
+            i += 1;
+            continue;
+        }
+        match arg {
+            "--vault" | "-V" | "--password-env" => {
+                output.push(args[i].clone());
+                if let Some(value) = args.get(i + 1) {
+                    output.push(value.clone());
+                }
+                i = (i + 2).min(args.len());
+            }
+            "--password-stdin" => {
+                output.push(args[i].clone());
+                i += 1;
+            }
+            _ => {
+                output.extend_from_slice(&args[i..]);
+                break;
+            }
+        }
+    }
+    let env_choice = if let Some(no_color) = env::var_os("NO_COLOR") {
+        if !no_color.is_empty() {
+            Some(ColorOption::Never)
+        } else {
+            force_color_option()
+        }
+    } else {
+        force_color_option()
+    };
+    Ok((output, explicit.or(env_choice).unwrap_or(ColorOption::Auto)))
+}
+
+fn force_color_option() -> Option<ColorOption> {
+    match env::var("FORCE_COLOR").ok()?.as_str() {
+        "0" => Some(ColorOption::Never),
+        "" | "1" | "true" | "2" => Some(ColorOption::Basic),
+        "3" => Some(ColorOption::Truecolor),
+        _ => None,
     }
 }
 
@@ -7410,10 +7765,21 @@ fn main() {
 /// arguments belonging to an `exec` child after the `--` boundary.
 fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
     let mut normalized = Vec::with_capacity(args.len());
+    let (route_index, route) = parsed_command_route(args);
+    let exec_route = route
+        .first()
+        .is_some_and(|route| matches!(route.as_str(), "exec" | "x"));
     let mut after_separator = false;
     let mut expects_value = false;
-    for arg in args {
+    for (index, arg) in args.iter().enumerate() {
         if after_separator {
+            normalized.push(arg.clone());
+            continue;
+        }
+        // Exec's first separator is local to its route. A root -V/--vault
+        // value spelled -- is still data, as it is in global parsing.
+        if arg == "--" && ((exec_route && index > route_index) || !expects_value) {
+            after_separator = true;
             normalized.push(arg.clone());
             continue;
         }
@@ -7422,12 +7788,8 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
             expects_value = false;
             continue;
         }
-        if arg == "--" {
-            after_separator = true;
-            normalized.push(arg.clone());
-            continue;
-        }
-        expects_value = takes_option_value(arg);
+        expects_value = takes_option_value(arg)
+            || (index < route_index && matches!(arg.as_str(), "-V" | "--vault"));
         let replacement = match arg.as_str() {
             "-k" => Some("--key"),
             "-f" => Some("--file"),
@@ -7442,6 +7804,125 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_policy_honors_tty_depth_and_safety() {
+        let style = |color: ColorOption, tty: bool, term: Option<&str>, colorterm: Option<&str>| {
+            color.style_with_terminal_support(tty, term, colorterm, true)
+        };
+        assert_eq!(
+            style(ColorOption::Auto, false, Some("xterm-256color"), None),
+            0
+        );
+        assert_eq!(
+            style(ColorOption::Auto, true, Some("dumb"), Some("truecolor")),
+            0
+        );
+        assert_eq!(style(ColorOption::Auto, true, Some("xterm"), None), 1);
+        assert_eq!(
+            style(ColorOption::Auto, true, Some("xterm"), Some("24bit")),
+            2
+        );
+        assert_eq!(style(ColorOption::Always, false, Some("xterm"), None), 1);
+        assert_eq!(
+            style(ColorOption::Always, false, Some("dumb"), Some("truecolor")),
+            0
+        );
+        assert_eq!(style(ColorOption::Truecolor, false, Some("xterm"), None), 1);
+        assert_eq!(
+            style(ColorOption::Never, true, Some("xterm"), Some("truecolor")),
+            0
+        );
+        assert_eq!(
+            ColorOption::Always.style_with_terminal_support(
+                false,
+                Some("xterm"),
+                Some("truecolor"),
+                false
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn color_switch_extraction_respects_values_and_separator() {
+        let args = ["show", "--key", "--color", "--", "--color=always"].map(str::to_owned);
+        let (remaining, color) = extract_root_color_options(&args).unwrap();
+        assert_eq!(remaining, args);
+        assert_eq!(color, ColorOption::Auto);
+
+        let args = ["--color=always", "show"].map(str::to_owned);
+        let (remaining, color) = extract_root_color_options(&args).unwrap();
+        assert_eq!(remaining, ["show"]);
+        assert_eq!(color, ColorOption::Always);
+
+        let args = ["show", "--color", "invalid"].map(str::to_owned);
+        let (remaining, color) = extract_root_color_options(&args).unwrap();
+        assert_eq!(remaining, args);
+        assert_eq!(color, ColorOption::Auto);
+
+        let args = ["--color", "invalid"].map(str::to_owned);
+        assert!(extract_root_color_options(&args).is_err());
+        let args = ["--color", "--", "show"].map(str::to_owned);
+        assert!(extract_root_color_options(&args).is_err());
+
+        let args = ["--vault", "--no-color", "show"].map(str::to_owned);
+        let (remaining, color) = extract_root_color_options(&args).unwrap();
+        assert_eq!(remaining, args);
+        assert_eq!(color, ColorOption::Auto);
+
+        let args = ["alias", "set", "demo", "--no-color"].map(str::to_owned);
+        let (remaining, color) = extract_root_color_options(&args).unwrap();
+        assert_eq!(remaining, args);
+        assert_eq!(color, ColorOption::Auto);
+
+        let args = ["__complete", "entries", "--color=bogus"].map(str::to_owned);
+        let (remaining, color) = extract_root_color_options(&args).unwrap();
+        assert_eq!(remaining, args);
+        assert_eq!(color, ColorOption::Auto);
+
+        let args = ["exec", "nkp", "--", "--no-color"].map(str::to_owned);
+        let (remaining, color) = extract_root_color_options(&args).unwrap();
+        assert_eq!(remaining, args);
+        assert_eq!(color, ColorOption::Auto);
+    }
+
+    #[test]
+    fn help_styles_only_usage_and_sanitizes_program_name() {
+        let help = render_help_with_style("nkp Usage:", &[], HELP_WIDTH, 1);
+        assert!(help.contains("\x1b[1;36mUsage:\x1b[0m nkp Usage: [GLOBAL OPTIONS] COMMAND"));
+        assert_eq!(sanitize_terminal_text("nkp\u{1b}[31m"), "nkp\u{fffd}[31m");
+        // Private formatter: layout must not depend on invisible SGR bytes.
+        for width in [24, 40, 88] {
+            for route in [vec![], vec!["get".to_owned(), "many".to_owned()]] {
+                let plain = render_help("nkp", &route, width);
+                for (style, sgr) in [(1, "\x1b[1;36m"), (2, "\x1b[1;38;2;80;190;255m")] {
+                    let styled = render_help_with_style("nkp", &route, width, style);
+                    assert_eq!(styled.replace(sgr, "").replace("\x1b[0m", ""), plain);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn machine_diagnostic_detection_uses_route_and_option_ownership() {
+        let args = ["alias", "resolve", "demo"].map(str::to_owned);
+        assert!(machine_diagnostic_route(&args));
+        let args = ["alias", "ls"].map(str::to_owned);
+        assert!(machine_diagnostic_route(&args));
+        let args = ["context", "ls"].map(str::to_owned);
+        assert!(!machine_diagnostic_route(&args));
+        let args = ["context", "ls", "--json"].map(str::to_owned);
+        assert!(machine_diagnostic_route(&args));
+        let args = ["alias", "set", "completion", "--json"].map(str::to_owned);
+        assert!(!machine_diagnostic_route(&args));
+        let args = ["show", "--key", "--json"].map(str::to_owned);
+        assert!(machine_diagnostic_route(&args));
+        let args = ["exec", "child", "--json"].map(str::to_owned);
+        assert!(machine_diagnostic_route(&args));
+        let args = ["show", "--", "--json"].map(str::to_owned);
+        assert!(machine_diagnostic_route(&args));
+    }
 
     #[test]
     fn binding_collision_checks_follow_format_namespaces() {
@@ -7518,6 +7999,97 @@ mod tests {
     }
 
     #[test]
+    fn exec_normalization_starts_its_separator_search_after_owned_root_values() {
+        // Critical argv parser regression: -V owns --; only the later --,
+        // after x and its binding options, belongs to exec.
+        let args = [
+            "-V",
+            "--",
+            "x",
+            "-k",
+            "test",
+            "--env",
+            "OUT",
+            "--",
+            "/bin/echo",
+            "-k",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            normalize_cli_aliases(&args),
+            [
+                "-V",
+                "--",
+                "x",
+                "--key",
+                "test",
+                "--env",
+                "OUT",
+                "--",
+                "/bin/echo",
+                "-k"
+            ]
+            .map(str::to_owned)
+        );
+        let args = [
+            "--vault",
+            "-k",
+            "x",
+            "-k",
+            "test",
+            "--env",
+            "OUT",
+            "--",
+            "/bin/echo",
+            "-k",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            normalize_cli_aliases(&args),
+            [
+                "--vault",
+                "-k",
+                "x",
+                "--key",
+                "test",
+                "--env",
+                "OUT",
+                "--",
+                "/bin/echo",
+                "-k"
+            ]
+            .map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn help_consumes_root_owned_separator_values_before_local_boundaries() {
+        // Critical help parser: a root vault value is not exec's separator.
+        for (args, expected) in [
+            (vec!["-V", "--", "x", "--help"], Some(vec!["x"])),
+            (
+                vec!["-V", "--", "get", "many", "--help"],
+                Some(vec!["get", "many"]),
+            ),
+            (
+                vec!["--vault", "--", "secrets", "get", "many", "-h"],
+                Some(vec!["secrets", "get", "many"]),
+            ),
+            (vec!["-V", "--", "x", "--", "child", "--help"], None),
+            (
+                vec!["-V", "--", "x", "--key", "--", "child", "--help"],
+                None,
+            ),
+        ] {
+            let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(
+                help_request(&args),
+                expected.map(|route| route.into_iter().map(str::to_owned).collect())
+            );
+        }
+    }
+
+    #[test]
     fn entry_key_can_be_positional_before_or_after_options_and_preserves_paths() {
         for action in ["get", "set", "rm"] {
             for args in [
@@ -7550,6 +8122,48 @@ mod tests {
                 .expect("normalized short selector")
                 .key
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn grouped_route_selectors_are_positional_without_changing_nested_selectors() {
+        for action in [
+            "group-add",
+            "group-rm",
+            "field-ls",
+            "field-get",
+            "field-set",
+            "field-rm",
+            "attachment-ls",
+            "attachment-get",
+            "attachment-add",
+            "attachment-rm",
+        ] {
+            assert!(
+                matches!(Positional::for_action(action), Positional::Key),
+                "{action}"
+            );
+            let values = vec!["--dry-run".to_owned(), "Root/Group/Entry".to_owned()];
+            let parsed = options(&values, Positional::for_action(action)).expect("selector");
+            assert_eq!(parsed.key, Some("Root/Group/Entry"), "{action}");
+        }
+        for action in ["group-rm", "field-get", "attachment-get"] {
+            let values = vec![
+                "Root/Group/Entry".to_owned(),
+                "--key".to_owned(),
+                "Other".to_owned(),
+            ];
+            assert!(
+                options(&values, Positional::for_action(action)).is_err(),
+                "{action}"
+            );
+        }
+        let dash_path = vec!["--".to_owned(), "-Dash/Entry".to_owned()];
+        assert_eq!(
+            options(&dash_path, Positional::for_action("field-get"))
+                .expect("literal selector")
+                .key,
+            Some("-Dash/Entry")
         );
     }
 

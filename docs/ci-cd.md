@@ -41,6 +41,42 @@ Triggered on push to `main`/`dev`, pull requests, and manual dispatch.
 exercise Unix permissions and terminal password prompts. `windows_private.rs`
 instead runs native Windows init, backup, mutation, and ACL checks.
 
+### Required follow-up: native fish and Nushell behavior lane
+
+The existing filtered zsh/PowerShell syntax lane does **not** run the native
+fish/Nushell behavioral tests. An ordinary local package run reports their
+unavailable interpreters but cannot validate them. CI automation ownership must
+add a Linux lane (or extend the interpreter lane) with both interpreters
+installed at explicitly pinned, validated versions. That workflow change is
+not part of the CLI correction; do not infer coverage from the tests existing.
+
+Required commands after installation, from an isolated checkout:
+
+```sh
+export NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS=1
+cargo +1.98.1 test --locked -p nkeepass --bin nkp \
+  completion::tests::fish_native_color_prefix_forwards_vault_and_stops_child_completion \
+  -- --exact --nocapture
+cargo +1.98.1 test --locked -p nkeepass --bin nkp \
+  completion::tests::nushell_native_vault_completers_decode_escaped_quotes \
+  -- --exact --nocapture
+```
+
+Each command must execute its named test and report exactly one passing test;
+an empty filtered run is failure. Preserve cargo's exit status through any
+logging pipeline (`pipefail`), make unavailable interpreters fail, and bound
+the execution step as well as the job. Do not use `continue-on-error`.
+The fish test executes generated completion with `complete -C`, checks vault
+forwarding after color flags, and requires no suggestions or metadata query
+for exec child argv. The Nushell test sources the **whole** generated script
+(including the referenced vault-alias completer) and executes quoted-vault
+decoding for both doubled single quotes and escaped double quotes. They use
+synthetic paths/metadata, never real credentials or network access.
+The missing-interpreter gate was exercised locally with `native_ -- --nocapture`:
+with `NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS=1`, cargo exited 101 and both tests
+explicitly failed for unavailable interpreters. This proves the gate is
+fail-closed, not that either native shell behavior has been validated.
+
 **Workflow run blocks:** `scripts/check-workflows.sh` (run in the `lint` job)
 fails any `run:` block that uses a backslash line continuation outside a
 block scalar — YAML plain scalars fold the newline into a space, turning a

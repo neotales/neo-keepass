@@ -1100,6 +1100,9 @@ fn metadata_subcommands_aliases_and_otp_are_non_disclosing_except_otp() {
     for args in [
         vec!["search", "LOGIN", auth[0], auth[1]],
         vec!["show", "--key", "LOGIN", auth[0], auth[1]],
+        vec!["show", "LOGIN", auth[0], auth[1]],
+        vec!["show", auth[0], auth[1], "--", "LOGIN"],
+        vec!["secrets", "show", "LOGIN", auth[0], auth[1]],
         vec!["secrets", "list", auth[0], auth[1]],
         vec!["field", "ls", "--key", "LOGIN", auth[0], auth[1]],
         vec!["attachment", "list", "--key", "LOGIN", auth[0], auth[1]],
@@ -1108,6 +1111,25 @@ fn metadata_subcommands_aliases_and_otp_are_non_disclosing_except_otp() {
         success(&metadata);
         assert_markers_absent(&metadata);
     }
+
+    let duplicate_selector = run(
+        &fixture,
+        &["show", "LOGIN", "--key", "LOGIN", auth[0], auth[1]],
+    );
+    assert!(!duplicate_selector.status.success());
+    assert_eq!(
+        duplicate_selector.stderr,
+        b"nkp: entry key specified more than once; use either a positional key or --key\n"
+    );
+
+    let ensured = run(&fixture, &["ensure", "LOGIN", auth[0], auth[1]]);
+    success(&ensured);
+    assert!(ensured.stdout.is_empty());
+    assert!(ensured.stderr.is_empty());
+    let nested_ensured = run(&fixture, &["secrets", "ensure", "LOGIN", auth[0], auth[1]]);
+    success(&nested_ensured);
+    assert!(nested_ensured.stdout.is_empty());
+    assert!(nested_ensured.stderr.is_empty());
 
     let otp = run(
         &fixture,
@@ -1130,6 +1152,14 @@ fn metadata_subcommands_aliases_and_otp_are_non_disclosing_except_otp() {
             .windows(OTP_SEED.len())
             .any(|window| window == OTP_SEED.as_bytes())
     );
+    let positional_otp = run(&fixture, &["otp", "LOGIN", auth[0], auth[1]]);
+    let positional_otp_code = success(&positional_otp);
+    assert_eq!(positional_otp_code.len(), 6);
+    assert!(positional_otp_code.iter().all(u8::is_ascii_digit));
+    let nested_positional_otp = run(&fixture, &["secrets", "otp", "LOGIN", auth[0], auth[1]]);
+    let nested_positional_otp_code = success(&nested_positional_otp);
+    assert_eq!(nested_positional_otp_code.len(), 6);
+    assert!(nested_positional_otp_code.iter().all(u8::is_ascii_digit));
     assert!(
         !combined
             .windows(b"secret=".len())

@@ -28,7 +28,9 @@ nkp automation export --output PATH
 Writes an interchange snapshot to a private, no-clobber output file.
 `--output` is required. It refuses an existing destination. Export writes
 plaintext JSON; age encryption and decryption options are unsupported and are
-rejected. `--name NAME` is accepted but has no effect.
+rejected. `--name NAME` and `--allow-plaintext` are rejected; the latter is
+only an acknowledgement for explicit KeePass XML export:
+`--format keepass-xml --allow-plaintext`.
 
 ## `sync`
 

@@ -142,6 +142,106 @@ fn automation_age_options_fail_before_vault_or_output_access() {
     }
 }
 
+#[test]
+fn plaintext_acknowledgement_and_export_name_are_not_silently_ignored() {
+    let home = tempfile::tempdir().unwrap();
+    let vault = home.path().join("missing-vault.kdbx");
+    let output = home.path().join("must-not-be-created.json");
+    let output_path = output.to_str().unwrap();
+    let actions: [(&[&str], &str); 7] = [
+        (
+            &["ls", "--allow-plaintext"],
+            "--allow-plaintext is only valid for KeePass XML export",
+        ),
+        (
+            &["get", "Demo/mail", "--allow-plaintext"],
+            "--allow-plaintext is only valid for KeePass XML export",
+        ),
+        (
+            &[
+                "env",
+                "--key",
+                "Demo/mail",
+                "--name",
+                "TOKEN",
+                "--allow-plaintext",
+            ],
+            "--allow-plaintext is only valid for KeePass XML export",
+        ),
+        (
+            &["files", "ls", "-k", "Demo/mail", "--allow-plaintext"],
+            "--allow-plaintext is only valid for KeePass XML export",
+        ),
+        (
+            &[
+                "import",
+                "--file",
+                "missing-input.json",
+                "--allow-plaintext",
+            ],
+            "invalid import option",
+        ),
+        (
+            &["sync", "--file", "missing-input.json", "--allow-plaintext"],
+            "invalid sync option",
+        ),
+        (
+            &["init", "--allow-plaintext"],
+            "--allow-plaintext is only valid for KeePass XML export",
+        ),
+    ];
+    for (action, expected_error) in actions {
+        let result = run(&vault, home.path(), action);
+        assert!(
+            !result.status.success(),
+            "unexpected success for {action:?}"
+        );
+        assert!(
+            result.stdout.is_empty(),
+            "unexpected stdout for {action:?}: {:?}",
+            result.stdout
+        );
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            format!("nkp: {expected_error}\n"),
+            "wrong refusal for {action:?}"
+        );
+    }
+
+    let export_name = run(
+        &vault,
+        home.path(),
+        &["export", "--output", output_path, "--name", "IGNORED"],
+    );
+    assert!(!export_name.status.success());
+    assert!(export_name.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(export_name.stderr).unwrap(),
+        "nkp: invalid export option\n"
+    );
+    assert!(!output.exists());
+
+    let json_export_ack = run(
+        &vault,
+        home.path(),
+        &[
+            "export",
+            "--output",
+            output_path,
+            "--allow-plaintext",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    );
+    assert!(!json_export_ack.status.success());
+    assert!(json_export_ack.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(json_export_ack.stderr).unwrap(),
+        "nkp: --allow-plaintext is only valid with --format keepass-xml\n"
+    );
+    assert!(!output.exists());
+}
+
 fn assert_success_without(output: &Output, forbidden: &[&str]) -> serde_json::Value {
     assert!(
         output.status.success(),

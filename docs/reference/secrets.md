@@ -1,9 +1,10 @@
 # Secrets and entry commands
 
 Every command below operates on the selected vault. Use `--key PATH` (or
-`-k PATH`) to select an entry. `get`, `set`, and `rm`/`remove` also accept
-the entry path or alias as their first positional argument. Do not provide
-both forms. A key can be a slash-separated entry path or an entry alias.
+`-k PATH`) to select an entry. `get`, `set`, `rm`/`remove`, `field`, and
+`files` routes also accept the entry path or alias positionally where they
+operate on one entry. Do not provide both forms. A key can be a slash-separated
+entry path or an entry alias.
 Use `--field FIELD` where a command reads or changes one field.
 Field selection uses `--field FIELD` first. Without it, an entry alias's
 bound field is used; if the alias has no field binding, the command uses
@@ -16,6 +17,36 @@ Entry path segments match ASCII case-insensitively. You may include or omit
 the root group name. The CLI rejects `.` and `..`, empty segments, and
 ambiguous matches. If a selector is also an entry alias name but resolves to
 a different existing entry path, the CLI refuses it as ambiguous.
+
+## Common short workflows
+
+These Bash and PowerShell examples use the same single-quoted path spelling.
+They assume the intended vault is selected and normal password prompting is
+available. `ensure` creates the entry if it is missing; `show` only lists
+redacted metadata, and `otp` emits a one-time code only when that entry has a
+TOTP field.
+
+```bash
+nkp show 'Services/mail'
+nkp ensure 'Services/mail'
+nkp otp 'Services/mail'
+```
+
+```powershell
+nkp show 'Services/mail'
+nkp ensure 'Services/mail'
+nkp otp 'Services/mail'
+```
+
+`show`, `ensure`, and `otp` also keep their explicit `-k` / `--key PATH`
+forms. Do not supply both a positional path and `--key`. Use `-- PATH` if a
+selector begins with `-`, for example `nkp show -- -example`.
+
+The `field` and `files` routes take their entry selector positionally or with
+`-k` / `--key`. A custom-field name and an attachment name both use
+`--field`; `--name` is only an output-variable name for supported named
+formats, not a field or attachment selector. For example:
+`nkp field get 'Services/mail' --field Token`.
 
 ## List and search
 
@@ -41,11 +72,11 @@ Searches bounded, allowlisted entry metadata. A leading-dash query can follow
 ### `secrets show`
 
 ```text
-nkp secrets show --key PATH
+nkp secrets show PATH
 ```
 
-Prints redacted descriptors for one entry. Required option: `--key`. It does
-not reveal field values.
+Prints redacted descriptors for one entry. `--key PATH` and `-k PATH` remain
+supported alternatives. It does not reveal field values.
 
 ### `secrets env`
 
@@ -173,11 +204,12 @@ suppress output.
 ### `secrets otp`
 
 ```text
-nkp secrets otp --key PATH [--format FORMAT] [--name NAME] [--is-output]
+nkp secrets otp PATH [--format FORMAT] [--name NAME] [--is-output]
 ```
 
 Generates and prints a TOTP code. It does not reveal the seed and refuses
-HOTP entries. `--format` defaults to `text`; the other formats are `json`,
+HOTP entries. `--key PATH` and `-k PATH` remain supported alternatives.
+`--format` defaults to `text`; the other formats are `json`,
 `null`, and the named formats listed for `secrets get`. Named formats require
 `--name`. `--is-output` requires `azure-devops`.
 
@@ -321,11 +353,12 @@ vault; malformed input or credential failures prevent the update.
 ### `secrets ensure`
 
 ```text
-nkp secrets ensure --key PATH [--chars N] [-U] [-L] [-D] [-S] [--dry-run]
+nkp secrets ensure PATH [--chars N] [-U] [-L] [-D] [-S] [--dry-run]
 ```
 
 Creates a missing entry and its parent groups, but keeps an existing entry
 unchanged. A new entry receives a generated 16-character password by default.
+`--key PATH` and `-k PATH` remain supported alternatives.
 `--chars N` / `-c N` / the retained `--size N` choose its length (up to 4096).
 With no class flags, uppercase, lowercase, digits and ASCII punctuation are
 all required. Explicit `--upper` / `-U`, `--lower` / `-L`, `--digits` / `-D`
