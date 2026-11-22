@@ -235,3 +235,42 @@ cleanup, split-terminal routing/admission, and panic-hook failure behavior remai
 the previously documented limits. No remote, credential, release or workflow
 operations were performed. The pre-existing untracked `.opencode/` and `0` were
 left untouched.
+
+### Escaping errors versus recoverable saves
+
+An error returning from `run_ui` now locks the App before terminal teardown
+starts, not only after the terminal wrapper returns. Unix Ratatui initialization
+errors use the same boundary. The Windows callback also locks on escaping UI
+errors before handing control back to its existing Ratatui wrapper. Credentials
+are dropped, the session is invalidated and live input/reveal state is cleared
+before a backend restore or screen-exit write can block.
+
+Recoverable save errors do not cross this boundary: they stay inside `run_ui`
+and leave credentials available for retry, cancellation or discard. Successful
+UI completion still locks normally; outer launch cleanup remains idempotent.
+This changes returned-error ordering, not panic-hook, external-signal or
+split-terminal guarantees.
+
+The deterministic lifecycle fault test injects an escaping UI/initialization
+error and checks credential destruction, session invalidation and cleared input
+inside the **first** teardown operation. All teardown stages can then fail
+without losing the primary error or restoring vault access. Unsaved fixture
+bytes remain unchanged. Removing the early lock reproduces
+`credentials survived until teardown`; existing failed-save retry/decision
+and PTY save-failure tests remain required alongside it.
+
+Follow-up Linux validation used the same low-disk exports and timeout bounds
+listed above, with `TMPDIR="$PWD/target/app-error-teardown/tmp"` and logs in
+`target/app-error-teardown/logs`. The focused commands were:
+
+```sh
+timeout --kill-after=10s 180s cargo +1.98.1 test --locked --offline -p nkeepass --bin nkp tui::tests
+timeout --kill-after=10s 180s cargo +1.98.1 test --locked --offline -p nkeepass --test tui_ui --test cli --test color_output
+timeout --kill-after=10s 180s cargo +1.98.1 test --locked --offline -p terminal-password
+```
+
+All exited zero: TUI units **44**, UI PTY **15**, CLI **64**, color **10**,
+terminal-password **12**. Combined workspace tests passed **839**, with **11
+existing ignored**; workspace/all-targets Clippy exited zero with advisory
+warnings. Formatting and whitespace checks passed. These remain Linux-only
+results, not native macOS/Windows or panic/signal-lifecycle clearance.

@@ -2549,6 +2549,8 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
 /// Starts the explicitly selected TUI command.
 /// Unix restoration discards queued typeahead while echo/signals are disabled,
 /// then reinstates exact prior modes. No primary-screen clearing is performed.
+/// Escaping UI errors lock the App before potentially blocking terminal teardown;
+/// recoverable save failures retain the unlocked App for an explicit retry.
 pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
     #[cfg(unix)]
     let mut password =
@@ -2566,15 +2568,31 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
     let mut app = new_app(service, session, credentials, aliases)?;
     app.refresh();
     #[cfg(unix)]
-    let result = run_terminal(|terminal| run_ui(terminal, &mut app, path));
+    let result = run_terminal(&mut app, path);
     #[cfg(not(unix))]
-    let result = ratatui::run(|terminal| run_ui(terminal, &mut app, path));
+    let result = ratatui::run(|terminal| {
+        app_result_before_teardown(&mut app, |app| run_ui(terminal, app, path))
+    });
     app.lock_vault();
     result
 }
 
+fn app_result_before_teardown(
+    app: &mut App,
+    run: impl FnOnce(&mut App) -> io::Result<()>,
+) -> io::Result<()> {
+    let result = run(app);
+    // Normal run_ui completion already locks the vault. Escaping errors must
+    // do so too, before screen writes or mode restoration can block/fail.
+    // Recoverable save errors stay inside run_ui and never cross this boundary.
+    if result.is_err() {
+        app.lock_vault();
+    }
+    result
+}
+
 #[cfg(unix)]
-fn run_terminal(run: impl FnOnce(&mut DefaultTerminal) -> io::Result<()>) -> io::Result<()> {
+fn run_terminal(app: &mut App, path: &Path) -> io::Result<()> {
     use std::io::IsTerminal;
     // Match Crossterm's existing mode-descriptor selection, without changing
     // split-terminal admission or installing a second signal architecture.
@@ -2589,7 +2607,9 @@ fn run_terminal(run: impl FnOnce(&mut DefaultTerminal) -> io::Result<()>) -> io:
     let mut modes = terminal_password::QuietTerminal::new(terminal)?;
     // Ratatui's panic hook also restores its QUIET snapshot, before unwinding
     // reaches modes. It cannot replay input under the original echo/ISIG bits.
-    let result = ratatui::try_init().and_then(|mut terminal| run(&mut terminal));
+    let result = app_result_before_teardown(app, |app| {
+        ratatui::try_init().and_then(|mut terminal| run_ui(&mut terminal, app, path))
+    });
     restore_terminal_with(
         result,
         crossterm::terminal::disable_raw_mode,
@@ -2805,6 +2825,64 @@ mod tests {
             .unwrap();
         let app = super::new_app(service, session, credentials, Vec::new()).unwrap();
         (directory, app, dropped)
+    }
+
+    // Private return/teardown ordering is not visible in a PTY transcript.
+    // Inject an escaping UI/init error and observe ownership at the FIRST
+    // teardown operation, without actually blocking a terminal or timing it.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "disposable lifecycle/teardown fault fixture"
+    )]
+    fn escaping_app_errors_lock_credentials_and_session_before_terminal_teardown() {
+        use std::cell::RefCell;
+        use std::io;
+        use std::sync::atomic::Ordering::SeqCst;
+        for primary in ["UI read/draw failure", "terminal initialization failure"] {
+            let (directory, mut app, dropped) = lifecycle_fixture();
+            let path = directory.path().join("lifecycle.kdbx");
+            let original = std::fs::read(&path).unwrap();
+            app.service.add_group(&app.tree_parent, "unsaved").unwrap();
+            app.dirty = true;
+            app.input.push_str("synthetic-live-draft");
+            let result = super::app_result_before_teardown(&mut app, |app| {
+                assert!(app.credentials.is_some());
+                assert!(!dropped.load(SeqCst));
+                assert!(app.service.root_group(app.session).is_ok());
+                Err(io::Error::new(io::ErrorKind::ConnectionReset, primary))
+            });
+            let calls = RefCell::new(Vec::new());
+            let teardown = |stage| {
+                // Even a stuck FIRST teardown call can no longer retain an
+                // unlocked App. Later cleanup failures cannot resurrect it.
+                assert!(dropped.load(SeqCst), "credentials survived until teardown");
+                assert!(app.credentials.is_none());
+                assert!(app.locked);
+                assert!(app.service.root_group(app.session).is_err());
+                assert!(app.input.is_empty());
+                calls.borrow_mut().push(stage);
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, stage))
+            };
+            let result = super::restore_terminal_with(
+                result,
+                || teardown("backend modes"),
+                || teardown("screen exit"),
+                || teardown("exact modes"),
+            );
+            assert_eq!(
+                *calls.borrow(),
+                ["backend modes", "screen exit", "exact modes"]
+            );
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            for diagnostic in [primary, "backend modes", "screen exit", "exact modes"] {
+                assert!(error.to_string().contains(diagnostic));
+            }
+            assert!(app.save(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
     }
 
     #[test]
