@@ -1102,6 +1102,23 @@ fn completion_protocol_covers_static_and_authenticated_metadata_safely() {
     );
     assert!(!String::from_utf8_lossy(&files.stdout).contains("root-vault.kdbx"));
 
+    let cwd_files = command(binary, &fixture)
+        .env_clear()
+        .args(["__complete", "vault-files", "root"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(cwd_files.status.success());
+    let canonical_root_vault = fixture
+        .directory()
+        .join("root-vault.kdbx")
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        cwd_files.stdout,
+        format!("{}\n", canonical_root_vault.display()).as_bytes()
+    );
+
     let authenticated = |kind: &str, prefix: &str| {
         command(binary, &fixture)
             .env("XDG_CONFIG_HOME", &config_home)
@@ -3463,49 +3480,50 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
     let command_rows = help_section(&help, "COMMANDS");
     let labels: Vec<_> = command_rows
         .iter()
-        .filter(|row| !row[..DESCRIPTION_COLUMN].trim().is_empty())
+        .filter(|row| {
+            row.len() > DESCRIPTION_COLUMN && !row[..DESCRIPTION_COLUMN].trim().is_empty()
+        })
         .map(|row| row[..DESCRIPTION_COLUMN].trim().replace(", ", "|"))
         .collect();
     assert_eq!(
         labels,
         [
-            "tui",
-            "init",
-            "context",
-            "alias",
-            "secrets",
-            "automation",
-            "files|attachment|attachments",
-            "group|groups",
-            "field|custom-field",
-            "config",
+            "list|ls",
+            "show",
+            "get",
+            "set",
+            "ensure",
+            "otp",
+            "rm|remove",
             "exec|x",
+            "env",
+            "search",
+            "use",
             "inject",
             "trust",
             "untrust",
             "shell",
-            "completion",
-            "version",
-            "get",
-            "list|ls",
-            "search",
-            "show",
-            "set",
-            "rm|remove",
-            "ensure",
-            "otp",
+            "tui",
+            "init",
+            "context",
+            "alias",
+            "files|attachment|attachments",
+            "field|custom-field",
+            "group|groups",
             "import",
             "export",
             "sync",
-            "env",
-            "use",
+            "secrets",
+            "automation",
+            "config",
+            "completion",
+            "version",
         ],
         "root commands and accepted shortcuts should match the dispatcher:\n{help}"
     );
-    for row in command_rows
-        .iter()
-        .filter(|row| !row[..DESCRIPTION_COLUMN].trim().is_empty())
-    {
+    for row in command_rows.iter().filter(|row| {
+        row.len() > DESCRIPTION_COLUMN && !row[..DESCRIPTION_COLUMN].trim().is_empty()
+    }) {
         assert!(
             row.starts_with("  "),
             "command row is not indented: {row:?}"
@@ -3610,6 +3628,10 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
             &["ls|list", "get|reveal", "set|edit", "rm|remove"],
         ),
         (&["config"], &["ls|list", "get|show", "set", "rm|remove"]),
+        (
+            &["shell"],
+            &["init", "completions|completion", "load", "unload", "status"],
+        ),
     ];
     for (path, expected) in groups {
         for flag in ["--help", "-h"] {
@@ -3620,7 +3642,12 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
             let options = help_section(&help, "OPTIONS").join("\n");
             let global_options = help_section(&help, "GLOBAL OPTIONS").join("\n");
             assert!(!options.contains("--vault PATH"));
-            assert!(global_options.contains("--vault PATH"));
+            let expects_vault = !matches!(path[0], "context" | "alias" | "config" | "shell");
+            assert_eq!(
+                global_options.contains("--vault PATH"),
+                expects_vault,
+                "unexpected --vault visibility for {path:?}:\n{help}"
+            );
             assert!(options.contains("--help"));
             assert!(
                 !options.contains("--password-env"),
@@ -3650,52 +3677,83 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
         }
     }
 
-    let leaves: &[(&[&str], &str)] = &[
-        (&["context", "show"], "Usage: nkp context show"),
-        (&["context", "set"], "Usage: nkp context set ALIAS PATH"),
-        (&["context", "use"], "Usage: nkp context use ALIAS"),
-        (&["context", "rm"], "Usage: nkp context rm ALIAS"),
-        (&["context", "ls"], "Usage: nkp context ls"),
-        (&["alias", "ls"], "Usage: nkp alias ls"),
-        (&["alias", "set"], "--kind vault|entry"),
-        (&["alias", "rm"], "Usage: nkp alias rm NAME"),
-        (&["alias", "resolve"], "Usage: nkp alias resolve NAME"),
-        (&["secrets", "ls"], "--password-env NAME"),
+    let leaves: &[(&[&str], &str, bool)] = &[
+        (&["context", "show"], "Usage: nkp context show", true),
+        (
+            &["context", "set"],
+            "Usage: nkp context set ALIAS PATH",
+            false,
+        ),
+        (
+            &["context", "use"],
+            "Usage: nkp context use <ALIAS|PATH>",
+            false,
+        ),
+        (&["context", "rm"], "Usage: nkp context rm ALIAS", false),
+        (&["context", "ls"], "Usage: nkp context ls", false),
+        (&["alias", "ls"], "Usage: nkp alias ls", false),
+        (&["alias", "set"], "--kind vault|entry", false),
+        (&["alias", "rm"], "Usage: nkp alias rm NAME", false),
+        (
+            &["alias", "resolve"],
+            "Usage: nkp alias resolve NAME",
+            false,
+        ),
+        (&["secrets", "ls"], "--password-env NAME", true),
         (
             &["secrets", "search"],
             "Usage: nkp secrets search [--] QUERY",
+            true,
         ),
-        (&["secrets", "env"], "--name NAME"),
-        (&["secrets", "show"], "Usage: nkp secrets show PATH"),
-        (&["secrets", "get", "many"], "--format FORMAT"),
-        (&["get", "many"], "--field FIELD"),
-        (&["secrets", "set"], "--stdin"),
-        (&["secrets", "rm"], "--yes"),
-        (&["secrets", "ensure"], "--size N"),
-        (&["secrets", "otp"], "--is-output"),
-        (&["secrets", "import"], "--replace"),
-        (&["secrets", "export"], "--output PATH"),
-        (&["secrets", "sync"], "--strategy newest|source"),
-        (&["automation", "import"], "--replace"),
-        (&["automation", "export"], "--output PATH"),
-        (&["automation", "sync"], "--strategy newest|source"),
-        (&["files", "ls"], "--key PATH"),
-        (&["files", "add"], "--field FIELD"),
-        (&["files", "get"], "--output PATH"),
-        (&["files", "rm"], "--yes"),
+        (&["secrets", "env"], "--name NAME", true),
+        (&["secrets", "show"], "Usage: nkp secrets show PATH", true),
+        (&["secrets", "get", "many"], "--format FORMAT", true),
+        (&["get", "many"], "--field FIELD", true),
+        (&["secrets", "set"], "--stdin", true),
+        (&["secrets", "rm"], "--yes", true),
+        (&["secrets", "ensure"], "--size N", true),
+        (&["secrets", "otp"], "--is-output", true),
+        (&["secrets", "import"], "--replace", true),
+        (&["secrets", "export"], "--output PATH", true),
+        (
+            &["secrets", "sync"],
+            "--strategy newest|source|target",
+            true,
+        ),
+        (&["automation", "import"], "--replace", true),
+        (&["automation", "export"], "--output PATH", true),
+        (
+            &["automation", "sync"],
+            "--strategy newest|source|target",
+            true,
+        ),
+        (&["files", "ls"], "--key ENTRY", true),
+        (&["files", "add"], "--field NAME", true),
+        (&["files", "get"], "--output PATH", true),
+        (&["files", "rm"], "--yes", true),
         (
             &["field", "ls"],
             "Usage: nkp field ls (ENTRY | --key ENTRY)",
+            true,
         ),
-        (&["field", "get"], "--field FIELD"),
-        (&["field", "set"], "--stdin"),
-        (&["field", "rm"], "--yes"),
-        (&["config", "ls"], "--json"),
-        (&["config", "get"], "Usage: nkp config get KEY"),
-        (&["config", "set"], "Usage: nkp config set KEY VALUE"),
-        (&["config", "rm"], "Usage: nkp config rm KEY"),
+        (&["field", "get"], "--field FIELD", true),
+        (&["field", "set"], "--stdin", true),
+        (&["field", "rm"], "--yes", true),
+        (&["config", "ls"], "--json", false),
+        (&["config", "get"], "Usage: nkp config get KEY", false),
+        (&["config", "set"], "Usage: nkp config set KEY VALUE", false),
+        (&["config", "rm"], "Usage: nkp config rm KEY", false),
+        (&["shell", "init"], "Usage: nkp shell init SHELL", false),
+        (
+            &["shell", "completions"],
+            "Usage: nkp shell completions SHELL",
+            false,
+        ),
+        (&["shell", "load"], "--password-env NAME", false),
+        (&["shell", "unload"], "--shell SHELL", false),
+        (&["shell", "status"], "--json", false),
     ];
-    for (path, expected) in leaves {
+    for (path, expected, expects_vault) in leaves {
         for flag in ["--help", "-h"] {
             let mut args = path.to_vec();
             args.push(flag);
@@ -3711,9 +3769,10 @@ fn every_command_tier_has_its_own_help_and_direct_children() {
                 "{args:?} omitted {expected:?}:\n{help}"
             );
             assert!(help.contains("OPTIONS:"), "{args:?} has no OPTIONS section");
-            assert!(
+            assert_eq!(
                 help.contains("--vault PATH"),
-                "{args:?} omitted global options"
+                *expects_vault,
+                "{args:?} global --vault mismatch:\n{help}"
             );
             assert!(
                 !help.contains("COMMANDS:"),
@@ -3814,9 +3873,15 @@ fn help_shows_only_options_allowed_by_the_selected_command() {
     let exec_options = help_section(&exec_help, "OPTIONS").join("\n");
     let normalized_exec_help = exec_help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(normalized_exec_help.contains(&expected_help(
-        "Usage: nkp exec [--key PATH [--field FIELD] --env NAME]... [OPTIONS] -- COMMAND [ARG ...]"
+        "Usage: nkp exec (-B NAME=ENTRY | -k PATH [-F FIELD] --env NAME | --env-file FILE)... [OPTIONS] -- COMMAND [ARG ...]"
     )));
-    for option in ["--key PATH", "--field FIELD", "--env NAME"] {
+    for option in [
+        "--key PATH",
+        "--field FIELD",
+        "--env NAME",
+        "--bind NAME=ENTRY",
+        "--env-file FILE",
+    ] {
         assert!(
             exec_options.contains(option),
             "exec help omitted {option}:\n{exec_help}"
@@ -3855,10 +3920,10 @@ fn rendered_command_help_aligns_wrapped_option_descriptions() {
 fn accepted_root_and_nested_aliases_route_to_their_own_help() {
     let tmp = tempfile::tempdir().unwrap();
     for (args, usage) in [
-        (&["x", "--help"][..], "Usage: nkp x [--key PATH"),
+        (&["x", "--help"][..], "Usage: nkp x (-B NAME=ENTRY"),
         (
             &["attachments", "ls", "--help"][..],
-            "Usage: nkp attachments ls (PATH | --key PATH)",
+            "Usage: nkp attachments ls (ENTRY | --key ENTRY)",
         ),
         (
             &["custom-field", "get", "--help"][..],
@@ -3870,7 +3935,7 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
         ),
         (
             &["secrets", "environment", "--help"][..],
-            "Usage: nkp secrets environment [--key PATH",
+            "Usage: nkp secrets environment (-k PATH",
         ),
         (
             &["config", "show", "--help"][..],
@@ -3878,10 +3943,13 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
         ),
         (&["get", "--help"][..], "Usage: nkp get [PATH] [OPTIONS]"),
         (&["set", "--help"][..], "Usage: nkp set [PATH] [OPTIONS]"),
-        (&["rm", "--help"][..], "Usage: nkp rm [PATH] [OPTIONS]"),
+        (
+            &["rm", "--help"][..],
+            "Usage: nkp rm (PATH | -k PATH | --key PATH) (-y | --yes)",
+        ),
         (
             &["remove", "--help"][..],
-            "Usage: nkp remove [PATH] [OPTIONS]",
+            "Usage: nkp remove (PATH | -k PATH | --key PATH) (-y | --yes)",
         ),
         (
             &["secrets", "get", "--help"][..],
@@ -3893,11 +3961,11 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
         ),
         (
             &["secrets", "rm", "--help"][..],
-            "Usage: nkp secrets rm [PATH] [OPTIONS]",
+            "Usage: nkp secrets rm (PATH | -k PATH | --key PATH) (-y | --yes)",
         ),
         (
             &["secrets", "remove", "--help"][..],
-            "Usage: nkp secrets remove [PATH] [OPTIONS]",
+            "Usage: nkp secrets remove (PATH | -k PATH | --key PATH) (-y | --yes)",
         ),
     ] {
         for flag in ["--help", "-h"] {
@@ -3906,8 +3974,9 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
             let output = cli(tmp.path(), &with_flag);
             assert!(output.status.success(), "{with_flag:?}");
             let help = String::from_utf8(output.stdout).unwrap();
+            let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
-                help.contains(&expected_help(usage)),
+                normalized.contains(&expected_help(usage)),
                 "{with_flag:?}:\n{help}"
             );
         }
@@ -3918,7 +3987,10 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
 fn root_owned_double_dash_values_do_not_hide_route_help() {
     let tmp = tempfile::tempdir().unwrap();
     for (args, usage) in [
-        (vec!["-V", "--", "x", "--help"], "Usage: nkp x [--key PATH"),
+        (
+            vec!["-V", "--", "x", "--help"],
+            "Usage: nkp x (-B NAME=ENTRY",
+        ),
         (
             vec!["-V", "--", "get", "many", "--help"],
             "Usage: nkp get many PATH",

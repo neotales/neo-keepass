@@ -11,6 +11,7 @@ in command arguments.
 ## Do a specific task
 
 - [Choose or change the active vault](how-to/vault-selection.md)
+- [Integrate with your shell and inject secrets](how-to/shell-integration.md)
 - [Choose a password or key-file source](reference/credentials.md)
 - [Encrypt a field with age or decrypt age input](how-to/age.md)
 - [Exchange vault data with automation files](how-to/automation.md)

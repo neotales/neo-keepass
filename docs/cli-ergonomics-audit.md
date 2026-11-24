@@ -437,7 +437,7 @@ listing, confirmation, output name, or clipboard sink.
 
 ### P1 — Help, completion and documentation must agree
 
-- [ ] Drive route aliases, option names/arity/repeatability/defaults, valid enum
+- [x] Drive route aliases, option names/arity/repeatability/defaults, valid enum
   values and binding/operand completion from one command schema or one checked contract.
   Help should show “Usage, common example, command options, credentials” without
   duplicated password rows or unconditional warnings on unrelated commands. Keep
@@ -447,7 +447,7 @@ listing, confirmation, output name, or clipboard sink.
   Match actual initiated route, particularly `get --field Password many -h` vs
   `get many -h`; unknown actions/options shouldn't disguise themselves as valid
   subcommand help. Handle `exec -- CHILD --help` without interception.
-- [ ] Fix actual baseline help issues: root `rm` wrongly offers `--field` and says
+- [x] Fix actual baseline help issues: root `rm` wrongly offers `--field` and says
   it removes a field; `field rm` synopsis omits mandatory `--yes`. `field get`
   inherits unsupported age/output/clipboard flags; `field set` inherits wrong
   generator/assignment/env/stdin alias and age/specific metadata/binary flags;
@@ -461,7 +461,7 @@ listing, confirmation, output name, or clipboard sink.
   env/get/interchange; `completion SHELL` should enumerate shells. Remove fake
   options represented as help labels (e.g. “Path keys”) from option inventory;
   keep as explanatory notes. Avoid a global `-V` legend on non-consuming routes.
-- [ ] Fix static and dynamic completion, not just root command words.
+- [x] Fix static and dynamic completion, not just root command words.
   Bash/POSIX omit valid init JSON/generated-master, import/export XML flags
   and often route shorts/help; Bash misses `tui` and `exec --field`, POSIX
   root vocabulary is much shorter. Context `--json` and several nested options
@@ -485,7 +485,7 @@ listing, confirmation, output name, or clipboard sink.
   files in explicit path completion rather than broadening search roots. No
   new vault unlock, prompt, broader traversal, or environment name enumeration
   without explicit opt-in.
-- [ ] Fix shipped docs alongside new help:
+- [x] Fix shipped docs alongside new help:
   - [Credentials](reference/credentials.md) and [system](reference/system.md):
     replace contradictory short-form claims, list exact `--` and root-prefix
     rules, add `files` to credential prose, correct `exec` prefix placement.

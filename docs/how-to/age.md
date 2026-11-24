@@ -10,8 +10,7 @@ Put one or more public age or SSH recipient keys in a local text file, one key
 per line. Do not put private identities in that file. Then run:
 
 ```sh
-nkp secrets get --key 'Services/Example' --field Password \
-  --age-encrypt --age-recipient @recipients.txt --output password.age
+nkp get 'Services/Example' --age-encrypt -r @recipients.txt -o password.age
 ```
 
 The CLI prompts for the vault password. On success, `password.age` contains
@@ -30,8 +29,7 @@ seconds. The CLI validates returned keys before encrypting.
 Choose a native age identity or an unencrypted SSH private key file:
 
 ```sh
-nkp secrets set --key 'Services/Example' --field Password \
-  --age-decrypt --age-identity identity.txt --file password.age
+nkp set 'Services/Example' --age-decrypt -i identity.txt -f password.age
 ```
 
 The command decrypts armored or binary age input, updates the selected field,

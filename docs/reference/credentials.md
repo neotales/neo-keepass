@@ -16,10 +16,15 @@ An absolute path selects a vault. A relative value selects a configured vault
 alias. `init` is the exception: its relative path is resolved from the current
 directory.
 
-The short forms are `-h` for `--help`, `-V` for `--vault`, `-r` for
-`--age-recipient`, and `-i` for `--age-identity`. No other public flags have
-short forms. `--version` is accepted at the root instead of a command. Neither
-`version` nor `--version` accepts a preceding `--vault` option.
+Short flags normalized across CLI routes are `-h` (`--help`), `-V` (`--vault`),
+`-k` (`--key`), `-f` (`--file`), `-F` (`--field`), `-n` (`--name`),
+`-o` (`--output`), `-y` (`--yes`), `-B` (`--bind` on `exec`/`x`), `-b` (`--bin`),
+`-c` (`--chars` / `--size`), `-U` (`--upper`), `-L` (`--lower`), `-D`
+(`--digits`), `-S` (`--symbols`), `-r` (`--age-recipient`), and `-i`
+(`--age-identity`). `--version` is accepted at the root instead of a command.
+Neither `version`, `--version`, `tui`, `use`, `alias`, `config`, `completion`,
+`trust`, `untrust`, `shell`, nor `context` subcommands other than `context show`
+accept a preceding `-V` / `--vault` option.
 
 ## Choose one password source
 
@@ -84,15 +89,17 @@ The password options appear only on routes that open or create a vault.
 
 - `init`
 - `exec` and its alias `x`
+- `inject` and `shell load`
 - Root shortcuts `get` (including `get many`), `ls`, `list`, `search`, `show`, `set`, `rm`,
   `remove`, `ensure`, `otp`, `import`, `export`, `sync`, and `env`
-- Subcommands under `secrets`, `automation`, `attachment`, `attachments`,
+- Subcommands under `secrets`, `automation`, `files`, `attachment`, `attachments`,
   `group`, `groups`, `field`, and `custom-field`
 
 Those same routes also accept `--password-file PATH`, `--key-file PATH`, and
 `--password VALUE`. The options are available for every valid operation under
-the listed groups. They are not accepted on `tui`, `context`, `alias`,
-`config`, `completion`, or `version`. The TUI has its own unlock interaction.
+the listed groups. They are not accepted on `tui`, `context`, `alias`, `use`,
+`config`, `completion`, `trust`, `untrust`, `shell init|completions|unload|status`,
+or `version`. The TUI has its own unlock interaction.
 
 The `--vault PATH` option selects the vault and is accepted independently of
 these password options. The [vault-selection guide](../how-to/vault-selection.md)
@@ -108,9 +115,10 @@ complete accepted flag set.
 | --- | --- |
 | `init` | `--password-env NAME`, `--password-stdin`, `--password-file PATH`, `--key-file PATH`, `--password VALUE` |
 | `exec` and `x` | Same five credential flags |
+| `inject` and `shell load` | Same five credential flags |
 | Root `get` (including `get many`), `ls`, `list`, `search`, `show`, `set`, `rm`, `remove`, `ensure`, `otp`, `import`, `export`, `sync`, `env` | Same five credential flags |
-| Any valid subcommand of `secrets`, `automation`, `attachment`, `attachments`, `group`, `groups`, `field`, or `custom-field` | Same five credential flags |
-| `tui`, `context`, `alias`, `config`, `completion`, `version` | No credential flags |
+| Any valid subcommand of `secrets`, `automation`, `files`, `attachment`, `attachments`, `group`, `groups`, `field`, or `custom-field` | Same five credential flags |
+| `tui`, `context`, `alias`, `use`, `config`, `completion`, `trust`, `untrust`, `shell init|completions|unload|status`, `version` | No credential flags |
 
 Root `--password-env NAME` and `--password-stdin` may appear before the
 command or after the full command route. For nested commands, put them after
@@ -118,11 +126,11 @@ the subcommand. `--password-file`, `--key-file`, and `--password` must appear
 after the full route. For `exec`, place credential flags after `exec` and
 before `-- COMMAND`.
 
-`-r` and `--age-recipient` are accepted only by `get` routes when
-`--age-encrypt` is set. `-i` and `--age-identity` are accepted only by `set`
-routes when `--age-decrypt` is set. These age options do not work on `field
-get` or `field set`, even though generated help currently lists inherited
-flags there. See the [age how-to](../how-to/age.md).
+`-r` and `--age-recipient` are accepted only by root/`secrets` `get` routes when
+`--age-encrypt` is set. `-i` and `--age-identity` are accepted only by
+root/`secrets` `set` routes when `--age-decrypt` is set. These age options are
+not accepted by `field get` or `field set` and are omitted from their help. See
+the [age how-to](../how-to/age.md).
 
 ## Where `--` ends option parsing
 

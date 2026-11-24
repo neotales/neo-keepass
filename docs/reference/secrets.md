@@ -43,10 +43,10 @@ forms. Do not supply both a positional path and `--key`. Use `-- PATH` if a
 selector begins with `-`, for example `nkp show -- -example`.
 
 The `field` and `files` routes take their entry selector positionally or with
-`-k` / `--key`. A custom-field name and an attachment name both use
-`--field`; `--name` is only an output-variable name for supported named
-formats, not a field or attachment selector. For example:
-`nkp field get 'Services/mail' --field Token`.
+`-k` / `--key`, and their field or attachment name as the second positional
+argument or with `-F` / `--field`. `--name` / `-n` names an output variable on
+supported named formats (and `secrets env`), not a field or attachment selector.
+For example: `nkp field get 'Services/mail' Token`.
 
 ## List and search
 
@@ -81,24 +81,27 @@ supported alternatives. It does not reveal field values.
 ### `secrets env`
 
 ```text
-nkp secrets env --key PATH [--field FIELD] --name NAME
-  [--key PATH [--field FIELD] --name NAME]...
+nkp secrets env (-k PATH [-F FIELD] (-n NAME | --env NAME))...
   [--format FORMAT] [--is-output]
 ```
 
-Each binding starts with `--key PATH`, may select a field with `--field`,
-then must end with `--name NAME`. Repeat the sequence for additional values.
-The field is required unless the key is an entry alias that already binds a
-field. Use the field name `otp` to emit a TOTP code; HOTP is refused.
-`secrets env`, its `environment` alias, and root `env` reject
-`--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and
-`-i` / `--age-identity` before unlocking or writing output.
-Env output is plaintext; use `secrets get many --age-encrypt` for an encrypted bundle.
+Each binding starts with `-k` / `--key PATH`, may select a field with `-F` /
+`--field`, then must end with `-n` / `--name NAME` (or compatibility `--env NAME`).
+Repeat the sequence for additional values. The field defaults to an entry alias's
+bound field when omitted, and is otherwise required (`Password` is not assumed
+without an explicit `-F` or field-bound alias). Use `-F otp` to emit a TOTP code;
+HOTP is refused.
+`secrets env`, its `environment` alias, and root `env` refuse unsupported flags
+such as `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`,
+`-i` / `--age-identity`, `--dry-run`, `--clipboard`, `--output`, `--replace`,
+`--yes`, and generator flags before unlocking or writing output.
+Env output is plaintext; use `get many --age-encrypt` for an encrypted bundle.
 
 The default format is `shell`. Supported formats are `shell`, `dotenv`,
 `pwsh`, `powershell`, `github-actions`, `azure-devops`, `json`, and `null`.
 Named formats validate variable names and values before writing output.
-`--is-output` applies only to `azure-devops`. Output goes to stdout and
+`--is-output` is valid only with `azure-devops` (optional modifier to add
+`;isOutput=true`; `azure-devops` does not require it). Output goes to stdout and
 contains the selected values. Treat it as plaintext secret output.
 
 With `--format json`, `env` prints a JSON object whose property names are the
@@ -120,7 +123,8 @@ Reveals one selected field. `--field` defaults to `Password`. The default
 format is `text`. Supported formats are `text`, `json`, `null`, `dotenv`,
 `shell`, `pwsh`, `powershell`, `github-actions`, and `azure-devops`.
 Named formats require `--name NAME`. `--is-output` is valid only with
-`azure-devops`.
+`azure-devops` (optional modifier to add `;isOutput=true`; `azure-devops`
+does not require it).
 
 `--age-encrypt` requires one or more recipients via repeated `-r` or
 `--age-recipient`. Age encryption requires the `text` format, which is also
@@ -211,7 +215,7 @@ Generates and prints a TOTP code. It does not reveal the seed and refuses
 HOTP entries. `--key PATH` and `-k PATH` remain supported alternatives.
 `--format` defaults to `text`; the other formats are `json`,
 `null`, and the named formats listed for `secrets get`. Named formats require
-`--name`. `--is-output` requires `azure-devops`.
+`-n` / `--name`. `--is-output` is optional and requires `azure-devops`.
 
 ## Change entries and fields
 
@@ -374,11 +378,11 @@ generating a password or saving.
 ### `secrets rm`
 
 ```text
-nkp secrets rm [PATH] [--key PATH] --yes
+nkp secrets rm (PATH | -k PATH | --key PATH) (-y | --yes)
 ```
 
 Removes an entry. This command refuses `--field`; it does not delete a field.
-`--yes` is required unconditionally. The command does not prompt. To remove a
+`-y` / `--yes` is required unconditionally. The command does not prompt. To remove a
 custom field, use `field rm`.
 
 ## Interchange commands
@@ -389,40 +393,44 @@ subcommands. The shared credential flags also apply.
 ### `secrets import`
 
 ```text
-nkp secrets import (--file PATH | --stdin) [--replace] [--dry-run]
+nkp secrets import (SRC | -f SRC | --file SRC | --stdin)
+  [--format json|keepass-xml] [--replace] [--dry-run]
 ```
 
-Reads an interchange snapshot. Exactly one input source is required.
-`--replace` permits replacing a non-empty vault. `--dry-run` validates and
-reports without saving. `secrets import` and root `import` reject
-`--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and `-i` /
-`--age-identity`. Import does not decrypt the input.
+Reads an interchange snapshot (`json` by default, or `keepass-xml`). Exactly one
+input source is required. `--replace` permits replacing a non-empty vault.
+`--dry-run` validates and reports without saving. `secrets import` and root
+`import` reject `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and
+`-i` / `--age-identity`. Import does not decrypt the input.
 
 ### `secrets export`
 
 ```text
-nkp secrets export --output PATH
+nkp secrets export (DEST | -o DEST | --output DEST)
+  [--format json|keepass-xml] [--allow-plaintext]
 ```
 
-Writes an interchange snapshot to a private, no-clobber file. `--output` is
-required, and an existing destination is not overwritten.
-`secrets export` and root `export` reject `--name NAME`, `--age-encrypt`,
-`--age-decrypt`, `-r` / `--age-recipient`, and `-i` / `--age-identity`. Export
-remains plaintext JSON; these options do not encrypt it.
+Writes an interchange snapshot to a private, no-clobber file (positional `DEST`
+or `-o` / `--output DEST`; existing files are refused). Default `--format` is
+plaintext `json`; `--format keepass-xml` requires `--allow-plaintext` to
+acknowledge plaintext XML output. `secrets export` and root `export` reject
+`--name NAME`, `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`, and
+`-i` / `--age-identity`.
 
 ### `secrets sync`
 
 ```text
-nkp secrets sync (--file PATH | --stdin)
-  [--strategy newest|source] [--dry-run]
+nkp secrets sync (SRC | -f SRC | --file SRC | --stdin)
+  [--strategy newest|source|target] [--dry-run]
 ```
 
 Synchronizes an interchange snapshot with the vault. Exactly one input source
-is required. `--strategy` defaults to `newest`; `source` is the other
-accepted value. `--dry-run` reports without saving. `secrets sync`
-and root `sync` reject `--age-encrypt`, `--age-decrypt`, `-r` / `--age-recipient`,
-and `-i` / `--age-identity`. Sync does not encrypt or decrypt the
-interchange data.
+is required. `--strategy` defaults to `newest`; `source` (prefer imported
+snapshot on conflict) and `target` (keep vault value on conflict while adding
+missing items) are the other accepted values. `--dry-run` reports without saving.
+`secrets sync` and root `sync` reject `--age-encrypt`, `--age-decrypt`,
+`-r` / `--age-recipient`, and `-i` / `--age-identity`. Sync does not encrypt or
+decrypt the interchange data.
 
 ## Output formats and credentials
 

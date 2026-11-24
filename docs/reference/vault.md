@@ -2,9 +2,10 @@
 
 These commands select a vault and manage names for vaults or entries. Vault
 selection follows the precedence in [choose the active vault](../how-to/vault-selection.md).
-Every route accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may precede
-the command. Credential flags apply to `init` as listed in
-[vault credentials](credentials.md).
+Every route accepts `-h` or `--help`. `-V PATH` or `--vault PATH` is accepted
+before `init` and `context show`; other `context`, `use`, and `alias` commands
+do not open a vault and reject `-V` / `--vault`. Credential flags apply to
+`init` as listed in [vault credentials](credentials.md).
 
 ## `init`
 
@@ -135,13 +136,14 @@ NIST or FIPS certification.
 `--age-recipient`, and `-i` / `--age-identity` before creating any files.
 These flags do not configure its automatic password backup or vault encryption.
 
-## `context`
+## `context` and `use`
 
 ```text
 nkp context ls [--json]
 nkp context list [--json]
 nkp context show [--json]
-nkp context use ALIAS
+nkp context use <ALIAS|PATH>
+nkp use <ALIAS|PATH>
 nkp context set ALIAS ABSOLUTE_PATH
 nkp context rm ALIAS
 nkp context remove ALIAS
@@ -162,8 +164,9 @@ through an argument, environment variable, or configured default. On Windows
 path comparisons normalize separators but retain case, since directories may
 be case-sensitive. Case variants may therefore appear more than once on
 case-insensitive volumes. Displayed spelling is unchanged. This lexical policy
-does not resolve symlinks or hard links. `use` selects a configured vault
-alias. `set` creates or updates an alias. `rm` (also `remove`) removes an alias
+does not resolve symlinks or hard links. `use` (and root `nkp use`) selects a
+configured vault alias or a normalized absolute vault path. `set` creates or
+updates an alias. `rm` (also `remove`) removes an alias
 and clears it as current if needed.
 Other subcommands have no command-specific options.
 
@@ -171,14 +174,14 @@ Other subcommands have no command-specific options.
 
 ```text
 nkp alias ls
-nkp alias set NAME TARGET [--kind vault|entry] [--field FIELD]
+nkp alias set NAME TARGET [--kind vault|entry] [-F FIELD | --field FIELD]
 nkp alias resolve NAME
 nkp alias rm NAME
 ```
 
 `ls` lists aliases. `set` creates or replaces one. If `--kind` is omitted,
-the command infers the target kind. Use `--field` to bind an entry alias to a
-field. `resolve` prints the configured target. `rm` removes the alias.
+the command infers the target kind. Use `-F` / `--field` to bind an entry alias
+to a field. `resolve` prints the configured target. `rm` removes the alias.
 
 Names use ASCII letters, digits, hyphens, or underscores and are at most 128
 bytes. Entry paths use slash-separated group and entry names, reject empty,
