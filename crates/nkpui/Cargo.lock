@@ -2510,6 +2510,7 @@ dependencies = [
  "neotales-keepass",
  "ratatui",
  "rpassword",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "tempfile",
