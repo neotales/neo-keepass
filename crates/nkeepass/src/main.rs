@@ -154,11 +154,11 @@ const FORMAT_OPTION: HelpOption = HelpOption {
     summary: "Choose text, JSON, null, or a supported named output format.",
 };
 const NAME_OPTION: HelpOption = HelpOption {
-    label: "--name NAME",
+    label: "-n, --name NAME",
     summary: "Name the output variable for a named format.",
 };
 const YES_OPTION: HelpOption = HelpOption {
-    label: "--yes",
+    label: "-y, --yes",
     summary: "Confirm a destructive operation without prompting.",
 };
 
@@ -183,8 +183,8 @@ const CONTEXT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "use",
-        "use ALIAS",
-        "Select a configured vault alias.",
+        "use ALIAS_OR_PATH",
+        "Select a configured vault alias or absolute vault path.",
         NO_OPTIONS,
         NO_COMMANDS,
     ),
@@ -302,7 +302,7 @@ const GET_OPTIONS: &[HelpOption] = &[
         summary: "Age/SSH key, @FILE, gh:USER, or HTTPS source; repeatable.",
     },
     HelpOption {
-        label: "--output PATH",
+        label: "-o, --output PATH",
         summary: "Write encrypted output to a private, no-clobber file.",
     },
 ];
@@ -325,7 +325,7 @@ const GET_MANY_OPTIONS: &[HelpOption] = &[
         summary: "Age/SSH key, @FILE, gh:USER, or HTTPS source; repeatable.",
     },
     HelpOption {
-        label: "--output PATH",
+        label: "-o, --output PATH",
         summary: "Write encrypted output to a private, no-clobber file.",
     },
     HelpOption {
@@ -458,18 +458,18 @@ const IMPORT_OPTIONS: &[HelpOption] = &[
     },
     DRY_RUN_OPTION,
     HelpOption {
-        label: "--format keepass-xml",
-        summary: "Import KeePass XML instead of the default JSON snapshot.",
+        label: "--format json|keepass-xml",
+        summary: "Import JSON snapshot (default) or KeePass XML.",
     },
 ];
 const EXPORT_OPTIONS: &[HelpOption] = &[
     HelpOption {
-        label: "--output PATH",
+        label: "-o, --output PATH",
         summary: "Write the interchange snapshot to this private output file.",
     },
     HelpOption {
-        label: "--format keepass-xml",
-        summary: "Export KeePass XML instead of the default JSON snapshot.",
+        label: "--format json|keepass-xml",
+        summary: "Export JSON snapshot (default) or KeePass XML.",
     },
     HelpOption {
         label: "--allow-plaintext",
@@ -495,7 +495,7 @@ const ENV_OPTIONS: &[HelpOption] = &[
         summary: "Select the field for the current binding; otp emits a code.",
     },
     HelpOption {
-        label: "--name NAME",
+        label: "-n, --name NAME",
         summary: "Finish a binding with its output variable name.",
     },
     FORMAT_OPTION,
@@ -504,10 +504,20 @@ const ENV_OPTIONS: &[HelpOption] = &[
         summary: "Mark Azure DevOps output as an output variable.",
     },
 ];
+const ATTACHMENT_NAME_OPTION: HelpOption = HelpOption {
+    label: "-n, --name NAME",
+    summary: "Select the attachment name (alternative to positional NAME or --field).",
+};
 const ATTACHMENT_LS_OPTIONS: &[HelpOption] = &[KEY_OPTION];
-const ATTACHMENT_ADD_OPTIONS: &[HelpOption] =
-    &[KEY_OPTION, FIELD_OPTION, FILE_OPTION, STDIN_OPTION];
-const ATTACHMENT_RM_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, YES_OPTION];
+const ATTACHMENT_ADD_OPTIONS: &[HelpOption] = &[
+    KEY_OPTION,
+    ATTACHMENT_NAME_OPTION,
+    FIELD_OPTION,
+    FILE_OPTION,
+    STDIN_OPTION,
+];
+const ATTACHMENT_RM_OPTIONS: &[HelpOption] =
+    &[KEY_OPTION, ATTACHMENT_NAME_OPTION, FIELD_OPTION, YES_OPTION];
 const SECRETS_COMMANDS: &[HelpCommand] = &[
     help_command(
         "ls|list",
@@ -574,21 +584,21 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "import",
-        "import (--file PATH|--stdin) [OPTIONS]",
+        "import (SRC | --file SRC | --stdin) [OPTIONS]",
         "Import a bounded interchange snapshot.",
         IMPORT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "export",
-        "export --output PATH [OPTIONS]",
+        "export (DEST | -o DEST | --output DEST) [OPTIONS]",
         "Write a private interchange snapshot.",
         EXPORT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "sync",
-        "sync (--file PATH|--stdin) [OPTIONS]",
+        "sync (SRC | --file SRC | --stdin) [OPTIONS]",
         "Synchronize a bounded interchange snapshot.",
         SYNC_OPTIONS,
         NO_COMMANDS,
@@ -597,21 +607,21 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
 const AUTOMATION_COMMANDS: &[HelpCommand] = &[
     help_command(
         "import",
-        "import (--file PATH|--stdin) [OPTIONS]",
+        "import (SRC | --file SRC | --stdin) [OPTIONS]",
         "Import a bounded interchange snapshot.",
         IMPORT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "export",
-        "export --output PATH [OPTIONS]",
+        "export (DEST | -o DEST | --output DEST) [OPTIONS]",
         "Write a private interchange snapshot.",
         EXPORT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "sync",
-        "sync (--file PATH|--stdin) [OPTIONS]",
+        "sync (SRC | --file SRC | --stdin) [OPTIONS]",
         "Synchronize a bounded interchange snapshot.",
         SYNC_OPTIONS,
         NO_COMMANDS,
@@ -627,20 +637,21 @@ const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "add|import",
-        "add (ENTRY | --key ENTRY) --field NAME [OPTIONS]",
+        "add (ENTRY | --key ENTRY) (NAME | --name NAME | --field NAME) [OPTIONS]",
         "Add an attachment from explicit input.",
         ATTACHMENT_ADD_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "get|export",
-        "get (ENTRY | --key ENTRY) --field NAME --output PATH",
+        "get (ENTRY | --key ENTRY) (NAME | --name NAME | --field NAME) (-o PATH | --output PATH)",
         "Write one attachment to a private output file.",
         &[
             KEY_OPTION,
+            ATTACHMENT_NAME_OPTION,
             FIELD_OPTION,
             HelpOption {
-                label: "--output PATH",
+                label: "-o, --output PATH",
                 summary: "Private output destination; existing files are not overwritten.",
             },
         ],
@@ -648,7 +659,7 @@ const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "rm|remove",
-        "rm (ENTRY | --key ENTRY) --field NAME --yes",
+        "rm (ENTRY | --key ENTRY) (NAME | --name NAME | --field NAME) (-y | --yes)",
         "Remove one attachment.",
         ATTACHMENT_RM_OPTIONS,
         NO_COMMANDS,
@@ -664,21 +675,21 @@ const FIELD_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "get|reveal",
-        "get (ENTRY | --key ENTRY) --field FIELD [OPTIONS]",
+        "get (ENTRY | --key ENTRY) (FIELD | --field FIELD) [OPTIONS]",
         "Reveal one custom field.",
         GET_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "set|edit",
-        "set (ENTRY | --key ENTRY) --field FIELD [OPTIONS]",
+        "set (ENTRY | --key ENTRY) (FIELD | --field FIELD) [OPTIONS]",
         "Set one custom field from explicit input.",
         SET_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "rm|remove",
-        "rm (ENTRY | --key ENTRY) --field FIELD --yes",
+        "rm (ENTRY | --key ENTRY) (FIELD | --field FIELD) (-y | --yes)",
         "Remove one custom field.",
         RM_OPTIONS,
         NO_COMMANDS,
@@ -735,6 +746,10 @@ const INIT_OPTIONS: &[HelpOption] = &[
     },
 ];
 const EXEC_OPTIONS: &[HelpOption] = &[
+    HelpOption {
+        label: "-B, --bind NAME=ENTRY",
+        summary: "Bind a literal entry's Password into the child environment (repeatable).",
+    },
     HelpOption {
         label: "--key PATH",
         summary: "Entry to bind into the child environment (repeatable).",
@@ -948,21 +963,21 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command(
         "import",
-        "import [OPTIONS]",
+        "import (SRC | --file SRC | --stdin) [OPTIONS]",
         "Shortcut for secrets import.",
         IMPORT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "export",
-        "export [OPTIONS]",
+        "export (DEST | -o DEST | --output DEST) [OPTIONS]",
         "Shortcut for secrets export.",
         EXPORT_OPTIONS,
         NO_COMMANDS,
     ),
     help_command(
         "sync",
-        "sync [OPTIONS]",
+        "sync (SRC | --file SRC | --stdin) [OPTIONS]",
         "Shortcut for secrets sync.",
         SYNC_OPTIONS,
         NO_COMMANDS,
@@ -972,6 +987,13 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         "env [--key PATH [--field FIELD] --name NAME]... [OPTIONS]",
         "Emit selected values in a named format.",
         ENV_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "use",
+        "use ALIAS_OR_PATH",
+        "Select a configured vault alias or absolute vault path.",
+        NO_OPTIONS,
         NO_COMMANDS,
     ),
 ];
@@ -1671,13 +1693,21 @@ fn set_context_alias(config: &mut Config, name: &str, target: &str) -> Result<()
     Ok(())
 }
 
-fn use_context_alias(config: &mut Config, name: &str) -> Result<()> {
-    match config.aliases.get(name) {
+fn use_context_alias(config: &mut Config, target: &str) -> Result<()> {
+    if Path::new(target).is_absolute() {
+        let path = vault_path(target)?;
+        config.current = Some(normalized_vault_text(&path));
+        return Ok(());
+    }
+    match config.aliases.get(target) {
         Some(Alias {
             kind: Kind::Vault, ..
         }) => {
-            config.current = Some(name.to_owned());
+            config.current = Some(target.to_owned());
             Ok(())
+        }
+        _ if target.contains('/') || target.contains('\\') || target.contains('.') => {
+            Err(err("vault path must be absolute and normalized"))
         }
         _ => Err(err("vault alias not found")),
     }
@@ -1961,10 +1991,18 @@ enum Positional {
     Glob,
     /// One bare target path, as `init PATH` takes.
     Path,
+    /// One output destination path, as `export DEST` takes.
+    Output,
+    /// One input file path, as `import SRC` and `sync SRC` take.
+    File,
     /// One entry or group selector on a route with an unambiguous key role.
     Key,
     /// Set additionally accepts repeatable field assignments.
     SetKey,
+    /// One entry selector followed by one custom-field name.
+    KeyAndField,
+    /// One entry selector followed by one attachment name.
+    KeyAndAttachment,
     /// Multiple explicit entry paths for the reserved get-many subcommand.
     Many,
 }
@@ -1978,6 +2016,21 @@ impl Positional {
         if action == "set" {
             return Self::SetKey;
         }
+        if matches!(action, "field-get" | "field-set" | "field-rm") {
+            return Self::KeyAndField;
+        }
+        if matches!(
+            action,
+            "attachment-add" | "attachment-get" | "attachment-rm"
+        ) {
+            return Self::KeyAndAttachment;
+        }
+        if action == "export" {
+            return Self::Output;
+        }
+        if matches!(action, "import" | "sync") {
+            return Self::File;
+        }
         if matches!(
             action,
             "get"
@@ -1988,13 +2041,7 @@ impl Positional {
                 | "group-add"
                 | "group-rm"
                 | "field-ls"
-                | "field-get"
-                | "field-set"
-                | "field-rm"
                 | "attachment-ls"
-                | "attachment-get"
-                | "attachment-add"
-                | "attachment-rm"
         ) {
             return Self::Key;
         }
@@ -2059,40 +2106,83 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
     options_from_refs(&refs, positional)
 }
 
+fn assign_positional<'a>(
+    opts: &mut Options<'a>,
+    positional: Positional,
+    word: &'a str,
+    positional_index: &mut usize,
+) -> Result<()> {
+    match positional {
+        Positional::Many => opts.requested_paths.push(word),
+        Positional::Glob if opts.glob.is_none() => opts.glob = Some(word),
+        Positional::Path if opts.path.is_none() => opts.path = Some(word),
+        Positional::Output if opts.output.is_none() => opts.output = Some(word),
+        Positional::Output => {
+            return Err(err(
+                "output path specified more than once; use either a positional destination or --output",
+            ));
+        }
+        Positional::File if opts.file.is_none() => opts.file = Some(word),
+        Positional::File => {
+            return Err(err(
+                "input file specified more than once; use either a positional file or --file",
+            ));
+        }
+        Positional::Key | Positional::SetKey if opts.key.is_none() => opts.key = Some(word),
+        Positional::Key | Positional::SetKey => {
+            return Err(err(
+                "entry key specified more than once; use either a positional key or --key",
+            ));
+        }
+        Positional::KeyAndField => match *positional_index {
+            0 if opts.key.is_none() => opts.key = Some(word),
+            0 => {
+                return Err(err(
+                    "entry key specified more than once; use either a positional key or --key",
+                ));
+            }
+            1 if opts.field.is_none() => opts.field = Some(word),
+            1 => {
+                return Err(err(
+                    "field specified more than once; use either a positional field or --field",
+                ));
+            }
+            _ => return Err(err("invalid or duplicate option")),
+        },
+        Positional::KeyAndAttachment => match *positional_index {
+            0 if opts.key.is_none() => opts.key = Some(word),
+            0 => {
+                return Err(err(
+                    "entry key specified more than once; use either a positional key or --key",
+                ));
+            }
+            1 if opts.field.is_none() && opts.name.is_none() => opts.field = Some(word),
+            1 => {
+                return Err(err(
+                    "attachment name specified more than once; use positional NAME, --name, or --field",
+                ));
+            }
+            _ => return Err(err("invalid or duplicate option")),
+        },
+        _ => return Err(err("invalid or duplicate option")),
+    }
+    *positional_index += 1;
+    Ok(())
+}
+
 fn options_from_refs<'a>(args: &[&'a str], positional: Positional) -> Result<Options<'a>> {
     let mut opts = Options::default();
+    let mut positional_index = 0usize;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i];
-        if matches!(
-            positional,
-            Positional::Glob | Positional::Key | Positional::SetKey | Positional::Many
-        ) && arg == "--"
-        {
+        if !matches!(positional, Positional::Forbidden) && arg == "--" {
             i += 1;
-            if matches!(positional, Positional::Many) {
-                opts.requested_paths.extend_from_slice(&args[i..]);
-                break;
-            }
-            if i < args.len() {
-                if matches!(positional, Positional::Glob) && opts.glob.is_some() {
-                    return Err(err("invalid or duplicate option"));
-                }
-                if matches!(positional, Positional::Glob) {
-                    opts.glob = Some(args[i]);
-                } else if opts.key.is_none() {
-                    opts.key = Some(args[i]);
-                } else {
-                    return Err(err(
-                        "entry key specified more than once; use either a positional key or --key",
-                    ));
-                }
+            while i < args.len() {
+                assign_positional(&mut opts, positional, args[i], &mut positional_index)?;
                 i += 1;
-                if i < args.len() {
-                    return Err(err("invalid or duplicate option"));
-                }
             }
-            continue;
+            break;
         }
         let value = if !matches!(arg, "--kind" | "--env") && takes_option_value(arg) {
             i += 1;
@@ -2180,18 +2270,9 @@ fn options_from_refs<'a>(args: &[&'a str], positional: Positional) -> Result<Opt
             "--generate-master-password" if !opts.generate_master_password => {
                 opts.generate_master_password = true;
             }
-            word if !word.starts_with('-') => match positional {
-                Positional::Many => opts.requested_paths.push(word),
-                Positional::Glob if opts.glob.is_none() => opts.glob = Some(word),
-                Positional::Path if opts.path.is_none() => opts.path = Some(word),
-                Positional::Key | Positional::SetKey if opts.key.is_none() => opts.key = Some(word),
-                Positional::Key | Positional::SetKey => {
-                    return Err(err(
-                        "entry key specified more than once; use either a positional key or --key",
-                    ));
-                }
-                _ => return Err(err("invalid or duplicate option")),
-            },
+            word if !word.starts_with('-') => {
+                assign_positional(&mut opts, positional, word, &mut positional_index)?;
+            }
             _ => return Err(err("invalid or duplicate option")),
         }
         opts.value_alias |= matches!(arg, "--value-file" | "--value-stdin");
@@ -3972,10 +4053,7 @@ fn service_automation_operation(
         let (result, changed) = match action {
             "import" => {
                 let input = automation_input(opts, interchange::VAULT_LIMITS.max_bytes)?;
-                if let Some(format) = opts.format {
-                    if format != "keepass-xml" {
-                        return Err(err("unsupported import format"));
-                    }
+                if opts.format == Some("keepass-xml") {
                     service
                         .import_keepass_xml(
                             &input,
@@ -3994,6 +4072,11 @@ fn service_automation_operation(
                         !opts.dry_run,
                     )
                 } else {
+                    if let Some(format) = opts.format
+                        && format != "json"
+                    {
+                        return Err(err("unsupported import format"));
+                    }
                     let report = service
                         .import_snapshot(
                             &input,
@@ -4026,7 +4109,9 @@ fn service_automation_operation(
             }
             "export" => {
                 let xml = opts.format == Some("keepass-xml");
-                if opts.format.is_some() && !xml {
+                if let Some(format) = opts.format
+                    && !matches!(format, "json" | "keepass-xml")
+                {
                     return Err(err("unsupported export format"));
                 }
                 if xml && !opts.allow_plaintext {
@@ -4272,9 +4357,17 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
             allow_age_identity: true,
             ..AllowedOptions::none()
         },
-        "field-set" | "attachment-add" => AllowedOptions {
+        "field-set" => AllowedOptions {
             allow_key: true,
             allow_field: true,
+            allow_file: true,
+            allow_stdin: true,
+            ..AllowedOptions::none()
+        },
+        "attachment-add" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_name: true,
             allow_file: true,
             allow_stdin: true,
             ..AllowedOptions::none()
@@ -4282,6 +4375,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
         "attachment-get" => AllowedOptions {
             allow_key: true,
             allow_field: true,
+            allow_name: true,
             allow_output: true,
             ..AllowedOptions::none()
         },
@@ -4290,9 +4384,16 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
             allow_yes: true,
             ..AllowedOptions::none()
         },
-        "field-rm" | "attachment-rm" => AllowedOptions {
+        "field-rm" => AllowedOptions {
             allow_key: true,
             allow_field: true,
+            allow_yes: true,
+            ..AllowedOptions::none()
+        },
+        "attachment-rm" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_name: true,
             allow_yes: true,
             ..AllowedOptions::none()
         },
@@ -4456,17 +4557,29 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
             if opts.key.is_none() || (opts.file.is_none() && !opts.stdin) {
                 return Err(err("invalid operation option"));
             }
+            if opts.field.is_some() && opts.name.is_some() {
+                return Err(err(
+                    "attachment name specified more than once; use positional NAME, --name, or --field",
+                ));
+            }
             let name = opts
                 .field
-                .ok_or_else(|| err("--field attachment name required"))?;
+                .or(opts.name)
+                .ok_or_else(|| err("attachment name required"))?;
             if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) {
                 return Err(err("invalid attachment name"));
             }
         }
         "attachment-get" => {
             opts.key.ok_or_else(|| err("--key required"))?;
+            if opts.field.is_some() && opts.name.is_some() {
+                return Err(err(
+                    "attachment name specified more than once; use positional NAME, --name, or --field",
+                ));
+            }
             opts.field
-                .ok_or_else(|| err("--field attachment name required"))?;
+                .or(opts.name)
+                .ok_or_else(|| err("attachment name required"))?;
             opts.output.ok_or_else(|| err("--output required"))?;
         }
         "rm" => {
@@ -4487,8 +4600,14 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
         }
         "attachment-rm" => {
             opts.key.ok_or_else(|| err("--key required"))?;
+            if opts.field.is_some() && opts.name.is_some() {
+                return Err(err(
+                    "attachment name specified more than once; use positional NAME, --name, or --field",
+                ));
+            }
             opts.field
-                .ok_or_else(|| err("--field attachment name required"))?;
+                .or(opts.name)
+                .ok_or_else(|| err("attachment name required"))?;
             if !opts.yes {
                 return Err(err("removal requires --yes"));
             }
@@ -4541,7 +4660,7 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 return Err(err("invalid import option"));
             }
             if let Some(format) = opts.format
-                && format != "keepass-xml"
+                && !matches!(format, "json" | "keepass-xml")
             {
                 return Err(err("unsupported import format"));
             }
@@ -4564,7 +4683,9 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 return Err(err("invalid export option"));
             }
             let xml = opts.format == Some("keepass-xml");
-            if opts.format.is_some() && !xml {
+            if let Some(format) = opts.format
+                && !matches!(format, "json" | "keepass-xml")
+            {
                 return Err(err("unsupported export format"));
             }
             if opts.allow_plaintext && !xml {
@@ -5024,7 +5145,8 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         let name = if action == "attachment-get" {
             Some(
                 opts.field
-                    .ok_or_else(|| err("--field attachment name required"))?,
+                    .or(opts.name)
+                    .ok_or_else(|| err("attachment name required"))?,
             )
         } else {
             None
@@ -5463,7 +5585,8 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         let selector = selector.ok_or_else(|| err("--key required"))?;
         let name = opts
             .field
-            .ok_or_else(|| err("--field attachment name required"))?;
+            .or(opts.name)
+            .ok_or_else(|| err("attachment name required"))?;
         if action == "attachment-add"
             && (name.is_empty() || name.contains('/') || name.chars().any(char::is_control))
         {
@@ -6777,6 +6900,8 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     let mut keys = Vec::new();
     let mut fields: Vec<Option<&str>> = Vec::new();
     let mut env_names = Vec::new();
+    let mut used_compact = false;
+    let mut used_legacy = false;
     let mut password_arg = None;
     let mut password_env = None;
     let mut password_file = None;
@@ -6785,7 +6910,28 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     let mut i = 0;
     while i < sep {
         match args[i].as_str() {
+            "--bind" => {
+                used_compact = true;
+                if used_legacy {
+                    return Err(err("cannot mix --bind with --key/--field/--env"));
+                }
+                i += 1;
+                let spec = take_arg(cli_args, i)?;
+                let (name, entry) = spec
+                    .split_once('=')
+                    .ok_or_else(|| err("--bind requires NAME=ENTRY"))?;
+                if entry.is_empty() {
+                    return Err(err("--bind requires NAME=ENTRY"));
+                }
+                env_names.push(name.to_owned());
+                keys.push(entry.to_owned());
+                fields.push(None);
+            }
             "--key" => {
+                used_legacy = true;
+                if used_compact {
+                    return Err(err("cannot mix --bind with --key/--field/--env"));
+                }
                 i += 1;
                 keys.push(take_arg(cli_args, i)?.to_owned());
                 // Every key has a field slot, so `--key/--field/--env` stay
@@ -6799,6 +6945,10 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
             // `secrets env`. Reusing that shape is deliberate: two commands that
             // bind the same values should not spell the binding differently.
             "--field" => {
+                used_legacy = true;
+                if used_compact {
+                    return Err(err("cannot mix --bind with --key/--field/--env"));
+                }
                 i += 1;
                 let slot = fields
                     .last_mut()
@@ -6809,6 +6959,10 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
                 *slot = Some(take_arg(cli_args, i)?);
             }
             "--env" => {
+                used_legacy = true;
+                if used_compact {
+                    return Err(err("cannot mix --bind with --key/--field/--env"));
+                }
                 i += 1;
                 env_names.push(take_arg(cli_args, i)?.to_owned());
             }
@@ -6839,7 +6993,7 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
         i += 1;
     }
     if keys.is_empty() {
-        return Err(err("exec requires at least one --key"));
+        return Err(err("exec requires at least one --key or --bind"));
     }
     if keys.len() != env_names.len() {
         return Err(err("exec requires one --env name for each --key"));
@@ -7191,6 +7345,9 @@ fn takes_option_value(option: &str) -> bool {
         "-k" | "-f"
             | "-b"
             | "-F"
+            | "-n"
+            | "-o"
+            | "-B"
             | "--key"
             | "--field"
             | "--username"
@@ -7222,6 +7379,7 @@ fn takes_option_value(option: &str) -> bool {
             | "--parallelism"
             | "--kind"
             | "--env"
+            | "--bind"
     )
 }
 
@@ -7645,6 +7803,22 @@ fn run(args: &[String], program: &str) -> Result<()> {
     let command = take_arg(args, at)?;
     let command_args = with_root_credentials(command, &args[at + 1..], &root_credentials)?;
     let rest = command_args.as_ref();
+    if vault.is_some() {
+        match command {
+            "tui" => {
+                return Err(err(
+                    "--vault is not supported for tui; pass the vault path directly: nkp tui PATH",
+                ));
+            }
+            "completion" | "version" | "--version" | "use" | "alias" | "config" => {
+                return Err(err("this command does not accept --vault"));
+            }
+            "context" if rest.first().map(String::as_str) != Some("show") => {
+                return Err(err("this command does not accept --vault"));
+            }
+            _ => {}
+        }
+    }
     // The help request is resolved before dispatch and configuration loading.
     // Its command tree supplies the route and the per-command option inventory;
     // it skips option values, honors the `--` boundary, and exempts the private
@@ -7792,8 +7966,13 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     .map_err(|_| err("cannot write output"))
                 }
             }
-            Some("use") if rest.len() == 2 => {
-                use_context_alias(&mut config, &rest[1])?;
+            Some("use") => {
+                let target = match &rest[1..] {
+                    [target] if !target.starts_with('-') => target.as_str(),
+                    [sep, target] if sep == "--" => target.as_str(),
+                    _ => return Err(err("invalid context command; see --help")),
+                };
+                use_context_alias(&mut config, target)?;
                 save_config(&config)
             }
             Some("rm" | "remove") if rest.len() == 2 => {
@@ -7941,6 +8120,15 @@ fn run(args: &[String], program: &str) -> Result<()> {
                 _ => return Err(err("unknown operation")),
             };
             operation(action, &rest[1..], vault, &config)
+        }
+        "use" => {
+            let target = match rest {
+                [target] if !target.starts_with('-') => target.as_str(),
+                [sep, target] if sep == "--" => target.as_str(),
+                _ => return Err(err("usage: nkp use ALIAS_OR_PATH")),
+            };
+            use_context_alias(&mut config, target)?;
+            save_config(&config)
         }
         "exec" | "x" => exec_command(rest, vault, &config),
         _ => Err(err("unknown command; see --help")),
@@ -8257,6 +8445,10 @@ fn normalize_cli_aliases(args: &[String]) -> Vec<String> {
             "-k" => Some("--key"),
             "-f" => Some("--file"),
             "-F" => Some("--field"),
+            "-n" => Some("--name"),
+            "-o" => Some("--output"),
+            "-y" => Some("--yes"),
+            "-B" => Some("--bind"),
             _ => None,
         };
         normalized.push(replacement.unwrap_or(arg).to_owned());
@@ -8602,10 +8794,16 @@ mod tests {
             "attachment-add",
             "attachment-rm",
         ] {
-            assert!(
-                matches!(Positional::for_action(action), Positional::Key),
-                "{action}"
-            );
+            let expected_positional = match action {
+                "field-get" | "field-set" | "field-rm" => {
+                    matches!(Positional::for_action(action), Positional::KeyAndField)
+                }
+                "attachment-get" | "attachment-add" | "attachment-rm" => {
+                    matches!(Positional::for_action(action), Positional::KeyAndAttachment)
+                }
+                _ => matches!(Positional::for_action(action), Positional::Key),
+            };
+            assert!(expected_positional, "{action}");
             let values = vec!["--dry-run".to_owned(), "Root/Group/Entry".to_owned()];
             let parsed = options(&values, Positional::for_action(action)).expect("selector");
             assert_eq!(parsed.key, Some("Root/Group/Entry"), "{action}");

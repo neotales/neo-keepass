@@ -120,9 +120,11 @@ impl Fixture {
 }
 
 fn run(fixture: &Fixture, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .isolate_application_environment()
-        .args(["--vault", fixture.vault.to_str().unwrap()])
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    if args.first() != Some(&"alias") {
+        command.args(["--vault", fixture.vault.to_str().unwrap()]);
+    }
+    command
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
         .env("XDG_DATA_HOME", fixture.directory.path().join("data"))

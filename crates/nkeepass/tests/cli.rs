@@ -506,7 +506,18 @@ fn context_alias_persistence_and_precedence() {
             .status
             .success()
     );
-    assert!(!cli(tmp.path(), &["context", "use", vault]).status.success());
+    assert!(
+        !cli(tmp.path(), &["context", "use", "./relative.kdbx"])
+            .status
+            .success()
+    );
+    assert!(cli(tmp.path(), &["context", "use", vault]).status.success());
+    let abs_show = cli(tmp.path(), &["context", "show", "--json"]);
+    assert!(abs_show.status.success());
+    let abs_json: serde_json::Value = serde_json::from_slice(&abs_show.stdout).unwrap();
+    assert_eq!(abs_json["source"], "context");
+    assert_eq!(abs_json["path"], vault);
+    assert!(abs_json["alias"].is_null());
     assert!(
         cli(tmp.path(), &["alias", "remove", "mail"])
             .status
@@ -1391,9 +1402,11 @@ fn shortcuts_fields_attachments_and_exec() {
     );
     let vault = vault.to_str().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_nkp"))
-            .isolate_application_environment()
-            .args(["--vault", vault])
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+        if args.first() != Some(&"alias") {
+            command.args(["--vault", vault]);
+        }
+        command
             .args(args)
             .env("XDG_CONFIG_HOME", tmp.path())
             .env("TEST_VAULT_PASSWORD", "test-password")
@@ -3177,6 +3190,7 @@ fn help_is_answered_at_every_command_depth() {
         "x",
         "completion",
         "version",
+        "use",
     ];
     for word in words {
         let output = cli(tmp.path(), &[word, "--help"]);
@@ -3367,13 +3381,28 @@ fn positional_group_file_and_field_selectors_work_in_a_disposable_vault() {
         "add",
         "fixture-login",
         "--name",
-        "not-an-attachment-selector",
+        "named-attachment.bin",
+        "--file",
+        input.to_str().expect("input path"),
+    ]);
+    assert!(
+        output.status.success(),
+        "files add with --name failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(&[
+        "files",
+        "add",
+        "fixture-login",
+        "named-attachment.bin",
+        "--name",
+        "named-attachment.bin",
         "--file",
         input.to_str().expect("input path"),
     ]);
     assert!(
         !output.status.success(),
-        "files add unexpectedly treated --name as an attachment selector"
+        "files add unexpectedly accepted duplicate positional and --name attachment selector"
     );
 
     let output = run(&["field", "ls", "fixture-login"]);
@@ -3465,6 +3494,7 @@ fn root_help_is_aligned_scannable_and_points_to_details() {
             "export",
             "sync",
             "env",
+            "use",
         ],
         "root commands and accepted shortcuts should match the dispatcher:\n{help}"
     );
@@ -3828,7 +3858,7 @@ fn accepted_root_and_nested_aliases_route_to_their_own_help() {
         ),
         (
             &["custom-field", "get", "--help"][..],
-            "Usage: nkp custom-field get (ENTRY | --key ENTRY) --field FIELD [OPTIONS]",
+            "Usage: nkp custom-field get (ENTRY | --key ENTRY) (FIELD | --field FIELD) [OPTIONS]",
         ),
         (
             &["secrets", "list", "--help"][..],
@@ -4426,4 +4456,758 @@ fn exec_with_a_key_file_passes_no_nkeepass_variable_to_the_child() {
         );
     }
     assert_no_secrets(&output);
+}
+
+#[test]
+fn p1_a_positional_files_field_and_short_name_output_yes_shortcuts() {
+    use nkp_cli::{CliFixture, MASTER_PASSWORD};
+
+    let fixture = CliFixture::new(false);
+    let vault = fixture.vault().to_str().expect("vault path");
+    let run = |args: &[&str]| {
+        let mut command = nkp_cli::command(Path::new(env!("CARGO_BIN_EXE_nkp")), &fixture);
+        command
+            .current_dir(fixture.directory())
+            .args(["--vault", vault, "--password-env", "FIXTURE_PASSWORD"])
+            .args(args)
+            .env("FIXTURE_PASSWORD", MASTER_PASSWORD)
+            .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
+            .env("XDG_DATA_HOME", fixture.directory().join("data"))
+            .env("HOME", fixture.directory());
+        command.output().expect("run CLI")
+    };
+
+    // Positional files add/get/rm + -n/--name + -o + -y.
+    let src_file = fixture.directory().join("upload.bin");
+    std::fs::write(&src_file, b"p1a-attachment-bytes").unwrap();
+    let add_pos = run(&[
+        "files",
+        "add",
+        "fixture-login",
+        "p1a.bin",
+        "-f",
+        src_file.to_str().unwrap(),
+    ]);
+    assert!(
+        add_pos.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_pos.stderr)
+    );
+
+    let out_pos = fixture.directory().join("downloaded-pos.bin");
+    let get_pos = run(&[
+        "attachment",
+        "get",
+        "fixture-login",
+        "p1a.bin",
+        "-o",
+        out_pos.to_str().unwrap(),
+    ]);
+    assert!(
+        get_pos.status.success(),
+        "{}",
+        String::from_utf8_lossy(&get_pos.stderr)
+    );
+    assert_eq!(std::fs::read(&out_pos).unwrap(), b"p1a-attachment-bytes");
+
+    let out_named = fixture.directory().join("downloaded-named.bin");
+    let get_named = run(&[
+        "attachments",
+        "get",
+        "-k",
+        "fixture-login",
+        "-n",
+        "p1a.bin",
+        "-o",
+        out_named.to_str().unwrap(),
+    ]);
+    assert!(
+        get_named.status.success(),
+        "{}",
+        String::from_utf8_lossy(&get_named.stderr)
+    );
+    assert_eq!(std::fs::read(&out_named).unwrap(), b"p1a-attachment-bytes");
+
+    // Never infer a destination file or write implicitly to CWD.
+    let missing_out = run(&["files", "get", "fixture-login", "p1a.bin"]);
+    assert!(!missing_out.status.success());
+    assert!(!fixture.directory().join("p1a.bin").exists());
+
+    // Duplicate attachment name forms are rejected even when identical.
+    for dup_args in [
+        &[
+            "files",
+            "add",
+            "fixture-login",
+            "p1a.bin",
+            "-n",
+            "p1a.bin",
+            "-f",
+            src_file.to_str().unwrap(),
+        ][..],
+        &[
+            "files",
+            "add",
+            "fixture-login",
+            "p1a.bin",
+            "-F",
+            "p1a.bin",
+            "-f",
+            src_file.to_str().unwrap(),
+        ][..],
+        &[
+            "files",
+            "get",
+            "fixture-login",
+            "p1a.bin",
+            "-n",
+            "p1a.bin",
+            "-o",
+            out_pos.to_str().unwrap(),
+        ][..],
+        &[
+            "files",
+            "get",
+            "fixture-login",
+            "-n",
+            "p1a.bin",
+            "-F",
+            "p1a.bin",
+            "-o",
+            out_pos.to_str().unwrap(),
+        ][..],
+        &[
+            "files",
+            "rm",
+            "fixture-login",
+            "p1a.bin",
+            "-n",
+            "p1a.bin",
+            "-y",
+        ][..],
+        &["files", "rm", "-k", "fixture-login", "p1a.bin", "-y"][..],
+    ] {
+        let rejected = run(dup_args);
+        assert!(
+            !rejected.status.success(),
+            "duplicate attachment selector accepted: {dup_args:?}"
+        );
+    }
+
+    let rm_pos = run(&["files", "rm", "fixture-login", "p1a.bin", "-y"]);
+    assert!(
+        rm_pos.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rm_pos.stderr)
+    );
+
+    // Positional field set/get/rm + -n on named field get + duplicate rejection.
+    let field_val_file = fixture.directory().join("field-val.txt");
+    std::fs::write(&field_val_file, "p1a-custom-secret").unwrap();
+    let fset = run(&[
+        "field",
+        "set",
+        "fixture-login",
+        "ApiToken",
+        "-f",
+        field_val_file.to_str().unwrap(),
+    ]);
+    assert!(
+        fset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fset.stderr)
+    );
+
+    let fget = run(&["custom-field", "get", "fixture-login", "ApiToken"]);
+    assert!(fget.status.success());
+    assert_eq!(fget.stdout, b"p1a-custom-secret");
+
+    let fget_named = run(&[
+        "field",
+        "get",
+        "fixture-login",
+        "ApiToken",
+        "--format",
+        "dotenv",
+        "-n",
+        "API_TOKEN",
+    ]);
+    assert!(
+        fget_named.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fget_named.stderr)
+    );
+    assert_eq!(fget_named.stdout, b"API_TOKEN=\"p1a-custom-secret\"\n");
+
+    for dup_args in [
+        &[
+            "field",
+            "get",
+            "fixture-login",
+            "ApiToken",
+            "-F",
+            "ApiToken",
+        ][..],
+        &[
+            "field",
+            "set",
+            "fixture-login",
+            "ApiToken",
+            "-F",
+            "ApiToken",
+            "-f",
+            field_val_file.to_str().unwrap(),
+        ][..],
+        &[
+            "field",
+            "rm",
+            "fixture-login",
+            "ApiToken",
+            "-F",
+            "ApiToken",
+            "-y",
+        ][..],
+        &["field", "get", "-k", "fixture-login", "ApiToken"][..],
+    ] {
+        let rejected = run(dup_args);
+        assert!(
+            !rejected.status.success(),
+            "duplicate field selector accepted: {dup_args:?}"
+        );
+    }
+
+    let frm = run(&["field", "rm", "fixture-login", "ApiToken", "-y"]);
+    assert!(frm.status.success());
+
+    // -n on single get, env, and otp.
+    let single_get_n = run(&[
+        "get",
+        "fixture-login",
+        "--format",
+        "dotenv",
+        "-n",
+        "LOGIN_PW",
+    ]);
+    assert!(single_get_n.status.success());
+    assert!(single_get_n.stdout.starts_with(b"LOGIN_PW="));
+
+    let env_n = run(&[
+        "env",
+        "-k",
+        "fixture-login",
+        "-F",
+        "Password",
+        "-n",
+        "ENV_PW",
+        "--format",
+        "dotenv",
+    ]);
+    assert!(
+        env_n.status.success(),
+        "{}",
+        String::from_utf8_lossy(&env_n.stderr)
+    );
+    assert!(env_n.stdout.starts_with(b"ENV_PW="));
+
+    let otp_n = run(&[
+        "otp",
+        "fixture-login",
+        "--format",
+        "dotenv",
+        "-n",
+        "OTP_CODE",
+    ]);
+    assert!(
+        otp_n.status.success(),
+        "{}",
+        String::from_utf8_lossy(&otp_n.stderr)
+    );
+    assert!(otp_n.stdout.starts_with(b"OTP_CODE="));
+
+    // -y on rm and group rm.
+    assert!(run(&["ensure", "TempEntry"]).status.success());
+    assert!(run(&["rm", "TempEntry", "-y"]).status.success());
+    assert!(run(&["group", "add", "TempGroup"]).status.success());
+    assert!(run(&["group", "rm", "TempGroup", "-y"]).status.success());
+
+    // -o on get and get many with --age-encrypt, and rejected where --output is disallowed.
+    let age_key = neotales_age::AgeKey::generate().unwrap();
+    let get_out = fixture.directory().join("single.age");
+    let get_o = run(&[
+        "get",
+        "fixture-login",
+        "--age-encrypt",
+        "-r",
+        &age_key.public_key,
+        "-o",
+        get_out.to_str().unwrap(),
+    ]);
+    assert!(
+        get_o.status.success(),
+        "{}",
+        String::from_utf8_lossy(&get_o.stderr)
+    );
+    assert!(get_out.exists());
+
+    let many_out = fixture.directory().join("many.age");
+    let many_o = run(&[
+        "get",
+        "many",
+        "fixture-login",
+        "--age-encrypt",
+        "-r",
+        &age_key.public_key,
+        "-o",
+        many_out.to_str().unwrap(),
+    ]);
+    assert!(
+        many_o.status.success(),
+        "{}",
+        String::from_utf8_lossy(&many_o.stderr)
+    );
+    assert!(many_out.exists());
+
+    for disallowed in [
+        &[
+            "env",
+            "-k",
+            "fixture-login",
+            "-F",
+            "Password",
+            "-n",
+            "V",
+            "-o",
+            "nope",
+        ][..],
+        &["ls", "-o", "nope"][..],
+        &[
+            "field",
+            "get",
+            "fixture-login",
+            "Private custom field",
+            "-o",
+            "nope",
+        ][..],
+        &["import", "nope.json", "-o", "nope"][..],
+        &["get", "fixture-login", "-y"][..],
+        &["ensure", "TempEntry2", "-y"][..],
+        &["get", "fixture-login", "-f", "json"][..],
+    ] {
+        let out = run(disallowed);
+        assert!(
+            !out.status.success(),
+            "disallowed shortcut accepted: {disallowed:?}"
+        );
+    }
+}
+
+#[test]
+fn p1_a_positional_interchange_and_format_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault_path = dir.path().join("source.kdbx");
+    let target_vault_path = dir.path().join("target.kdbx");
+    let vault = vault_path.to_str().unwrap();
+    let target_vault = target_vault_path.to_str().unwrap();
+    let run_with_vault = |v: &str, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .current_dir(dir.path())
+            .args(["--vault", v, "--password-env", "FIXTURE_PASSWORD"])
+            .args(args)
+            .env("FIXTURE_PASSWORD", "synthetic-interchange-pw")
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("HOME", dir.path())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run CLI")
+    };
+    assert!(
+        run_with_vault(vault, &["init", "--iterations", "64"])
+            .status
+            .success()
+    );
+    assert!(
+        run_with_vault(vault, &["ensure", "Demo/mail"])
+            .status
+            .success()
+    );
+    assert!(
+        run_with_vault(target_vault, &["init", "--iterations", "64"])
+            .status
+            .success()
+    );
+    let run = |args: &[&str]| run_with_vault(vault, args);
+
+    // export DEST + --format json
+    let snapshot_a = dir.path().join("snapshot-a.json");
+    let snapshot_b = dir.path().join("snapshot-b.json");
+    let exp_pos = run(&["export", snapshot_a.to_str().unwrap()]);
+    assert!(
+        exp_pos.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exp_pos.stderr)
+    );
+    let exp_json = run(&[
+        "secrets",
+        "export",
+        snapshot_b.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert!(
+        exp_json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exp_json.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&snapshot_a).unwrap(),
+        std::fs::read(&snapshot_b).unwrap()
+    );
+
+    // export -o DEST works, and duplicate positional + -o/--output fails.
+    let snapshot_o = dir.path().join("snapshot-o.json");
+    assert!(
+        run(&["automation", "export", "-o", snapshot_o.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    // Extension does NOT guess XML format.
+    let snapshot_xml_ext = dir.path().join("not-xml.xml");
+    let exp_xml_ext = run(&["export", snapshot_xml_ext.to_str().unwrap()]);
+    assert!(exp_xml_ext.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot_xml_ext).unwrap()).unwrap();
+    assert!(parsed.is_object());
+
+    // import SRC + --format json + dry-run; sync SRC + sync rejects --format json.
+    let imp_pos = run_with_vault(
+        target_vault,
+        &[
+            "import",
+            snapshot_a.to_str().unwrap(),
+            "--format",
+            "json",
+            "--replace",
+            "--dry-run",
+        ],
+    );
+    assert!(
+        imp_pos.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imp_pos.stderr)
+    );
+    let sync_pos = run_with_vault(
+        target_vault,
+        &["sync", snapshot_a.to_str().unwrap(), "--dry-run"],
+    );
+    assert!(
+        sync_pos.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sync_pos.stderr)
+    );
+    let sync_format = run_with_vault(
+        target_vault,
+        &[
+            "sync",
+            snapshot_a.to_str().unwrap(),
+            "--format",
+            "json",
+            "--dry-run",
+        ],
+    );
+    assert!(!sync_format.status.success());
+
+    // Duplicate slots and magic '-' are rejected.
+    for bad in [
+        &[
+            "export",
+            snapshot_a.to_str().unwrap(),
+            "-o",
+            snapshot_a.to_str().unwrap(),
+        ][..],
+        &[
+            "export",
+            snapshot_a.to_str().unwrap(),
+            "--output",
+            snapshot_a.to_str().unwrap(),
+        ][..],
+        &[
+            "import",
+            snapshot_a.to_str().unwrap(),
+            "-f",
+            snapshot_a.to_str().unwrap(),
+        ][..],
+        &["import", snapshot_a.to_str().unwrap(), "--stdin"][..],
+        &[
+            "sync",
+            snapshot_a.to_str().unwrap(),
+            "-f",
+            snapshot_a.to_str().unwrap(),
+        ][..],
+        &["sync", "--stdin", snapshot_a.to_str().unwrap()][..],
+        &["export", "-"][..],
+        &["import", "-"][..],
+        &["sync", "-"][..],
+    ] {
+        let out = run(bad);
+        assert!(!out.status.success(), "unexpectedly accepted {bad:?}");
+    }
+}
+
+#[test]
+fn p1_a_exec_compact_bind_and_child_argv_isolation() {
+    use nkp_cli::{CliFixture, ENTRY_TITLE, MASTER_PASSWORD, assert_no_secrets};
+
+    let fixture = CliFixture::new(false);
+    let vault = fixture.vault().to_str().expect("vault path");
+    let (child, child_args) = child_reporting_script_value();
+    let bound_spec = format!("SCRIPT_VALUE={ENTRY_TITLE}");
+    let mut args = vec![
+        "--vault",
+        vault,
+        "--password-env",
+        "FIXTURE_PASSWORD",
+        "x",
+        "-B",
+        bound_spec.as_str(),
+        "--",
+        child,
+    ];
+    args.extend(child_args.iter().map(String::as_str));
+    let ok = nkp_cli::command(Path::new(env!("CARGO_BIN_EXE_nkp")), &fixture)
+        .args(&args)
+        .env("FIXTURE_PASSWORD", MASTER_PASSWORD)
+        .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
+        .output()
+        .unwrap();
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_no_secrets(&ok);
+
+    // Verify child argv after `--` is never normalized (-B, -o, -y, -n stay literal).
+    #[cfg(unix)]
+    {
+        let argv_echo = nkp_cli::command(Path::new(env!("CARGO_BIN_EXE_nkp")), &fixture)
+            .args([
+                "--vault",
+                vault,
+                "--password-env",
+                "FIXTURE_PASSWORD",
+                "x",
+                "-B",
+                &format!("BOUND_SECRET={ENTRY_TITLE}"),
+                "--",
+                "/bin/sh",
+                "-c",
+                "printf '%s|%s|%s|%s|%s' \"$1\" \"$2\" \"$3\" \"$4\" \"$BOUND_SECRET\"",
+                "sh",
+                "-B",
+                "-o",
+                "-y",
+                "-n",
+            ])
+            .env("FIXTURE_PASSWORD", MASTER_PASSWORD)
+            .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
+            .output()
+            .unwrap();
+        assert!(argv_echo.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&argv_echo.stdout),
+            format!("-B|-o|-y|-n|{}", nkp_cli::ENTRY_PASSWORD)
+        );
+    }
+
+    // Reject mixing -B/--bind with legacy --key/--field/--env, invalid names, and reserved vars.
+    for bad in [
+        &[
+            "x",
+            "-B",
+            "A=fixture-login",
+            "--key",
+            "fixture-login",
+            "--env",
+            "B",
+            "--",
+            "true",
+        ][..],
+        &[
+            "exec",
+            "--key",
+            "fixture-login",
+            "--env",
+            "A",
+            "--bind",
+            "B=fixture-login",
+            "--",
+            "true",
+        ][..],
+        &[
+            "x",
+            "-B",
+            "A=fixture-login",
+            "--field",
+            "Password",
+            "--",
+            "true",
+        ][..],
+        &["x", "-B", "NO_EQUALS", "--", "true"][..],
+        &["x", "-B", "=fixture-login", "--", "true"][..],
+        &["x", "-B", "TOKEN=", "--", "true"][..],
+        &["x", "-B", "1BAD=fixture-login", "--", "true"][..],
+        &[
+            "x",
+            "-B",
+            "NEO_KEEPASS_PASSWORD=fixture-login",
+            "--",
+            "true",
+        ][..],
+        &["x", "-B", "NKP_PASSWORD=fixture-login", "--", "true"][..],
+        &["x", "-B", "FIXTURE_PASSWORD=fixture-login", "--", "true"][..],
+        &[
+            "x",
+            "-B",
+            "DUP=fixture-login",
+            "-B",
+            "DUP=fixture-login",
+            "--",
+            "true",
+        ][..],
+    ] {
+        let out = nkp_cli::command(Path::new(env!("CARGO_BIN_EXE_nkp")), &fixture)
+            .args(["--vault", vault, "--password-env", "FIXTURE_PASSWORD"])
+            .args(bad)
+            .env("FIXTURE_PASSWORD", MASTER_PASSWORD)
+            .env("XDG_CONFIG_HOME", fixture.directory().join("config"))
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "unexpectedly accepted {bad:?}");
+    }
+}
+
+#[test]
+fn p1_a_use_shorthand_non_consuming_vault_rejection_and_init_separator() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault_a = tmp.path().join("alpha.kdbx");
+    let vault_b = tmp.path().join("beta.kdbx");
+    let vault_a_str = vault_a.to_str().unwrap();
+    let vault_b_str = vault_b.to_str().unwrap();
+
+    assert!(
+        cli(tmp.path(), &["context", "set", "alpha", vault_a_str])
+            .status
+            .success()
+    );
+    assert!(cli(tmp.path(), &["use", "alpha"]).status.success());
+    let show_alias = cli(tmp.path(), &["context", "show", "--json"]);
+    let show_alias_json: serde_json::Value = serde_json::from_slice(&show_alias.stdout).unwrap();
+    assert_eq!(show_alias_json["source"], "context");
+    assert_eq!(show_alias_json["alias"], "alpha");
+    assert_eq!(show_alias_json["path"], vault_a_str);
+
+    // Absolute normalized path in `nkp use` and `nkp context use`.
+    assert!(cli(tmp.path(), &["use", vault_b_str]).status.success());
+    let show_path = cli(tmp.path(), &["context", "show", "--json"]);
+    let show_path_json: serde_json::Value = serde_json::from_slice(&show_path.stdout).unwrap();
+    assert_eq!(show_path_json["source"], "context");
+    assert!(show_path_json["alias"].is_null());
+    assert_eq!(show_path_json["path"], vault_b_str);
+
+    // Reject CWD-relative and unnormalized paths, and credentials on `use`.
+    for bad in [
+        &["use", "./relative.kdbx"][..],
+        &["use", "dir/relative.kdbx"][..],
+        &["use", "/tmp/../escape.kdbx"][..],
+        &["context", "use", "./relative.kdbx"][..],
+        &["--password-env", "PW", "use", "alpha"][..],
+    ] {
+        let out = cli(tmp.path(), bad);
+        assert!(!out.status.success(), "unexpectedly accepted {bad:?}");
+    }
+
+    // Reject -V/--vault on non-consuming routes.
+    for non_consuming in [
+        &["-V", vault_a_str, "context", "ls"][..],
+        &["-V", vault_a_str, "context", "use", "alpha"][..],
+        &["-V", vault_a_str, "context", "set", "gamma", vault_b_str][..],
+        &["-V", vault_a_str, "context", "rm", "alpha"][..],
+        &["-V", vault_a_str, "use", "alpha"][..],
+        &["-V", vault_a_str, "alias", "ls"][..],
+        &["-V", vault_a_str, "config", "ls"][..],
+        &["-V", vault_a_str, "completion", "bash"][..],
+        &["-V", vault_a_str, "version"][..],
+    ] {
+        let out = cli(tmp.path(), non_consuming);
+        assert!(
+            !out.status.success(),
+            "non-consuming route accepted -V: {non_consuming:?}"
+        );
+    }
+    let tui_with_v = cli(tmp.path(), &["-V", vault_a_str, "tui", vault_b_str]);
+    assert!(!tui_with_v.status.success());
+    assert!(
+        String::from_utf8_lossy(&tui_with_v.stderr).contains("nkp tui PATH"),
+        "tui -V diagnostic did not point to nkp tui PATH: {}",
+        String::from_utf8_lossy(&tui_with_v.stderr)
+    );
+
+    // -V still works on `context show`.
+    let show_v = cli(
+        tmp.path(),
+        &["-V", vault_a_str, "context", "show", "--json"],
+    );
+    assert!(show_v.status.success());
+
+    // `init -- -dash.kdbx` creates a dash-leading literal vault file.
+    let init_dash = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .current_dir(tmp.path())
+        .args([
+            "init",
+            "--iterations",
+            "64",
+            "--password-env",
+            "INIT_PW",
+            "--",
+            "-dash.kdbx",
+        ])
+        .env("XDG_CONFIG_HOME", tmp.path().join("init-config"))
+        .env("XDG_DATA_HOME", tmp.path().join("init-data"))
+        .env("INIT_PW", "synthetic-init-pass")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        init_dash.status.success(),
+        "init -- -dash.kdbx failed: {}",
+        String::from_utf8_lossy(&init_dash.stderr)
+    );
+    assert!(tmp.path().join("-dash.kdbx").exists());
+
+    // Duplicate target path with `init --` is rejected.
+    let dup_init = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .current_dir(tmp.path())
+        .args([
+            "-V",
+            vault_a_str,
+            "init",
+            "--iterations",
+            "64",
+            "--password-env",
+            "INIT_PW",
+            "--",
+            "-other.kdbx",
+        ])
+        .env("XDG_CONFIG_HOME", tmp.path().join("init-config"))
+        .env("XDG_DATA_HOME", tmp.path().join("init-data"))
+        .env("INIT_PW", "synthetic-init-pass")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!dup_init.status.success());
 }

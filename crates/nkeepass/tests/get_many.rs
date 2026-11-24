@@ -92,10 +92,11 @@ impl Fixture {
                 "NEO_KEEPASS_CONFIG_DIR",
                 self.directory.path().join("config"),
             )
-            .env("NEO_KEEPASS_PASSWORD", MASTER)
-            .args(["--vault", self.vault.to_str().unwrap()])
-            .args(args)
-            .stdin(Stdio::null());
+            .env("NEO_KEEPASS_PASSWORD", MASTER);
+        if !matches!(args.first().copied(), Some("alias" | "completion")) {
+            cmd.args(["--vault", self.vault.to_str().unwrap()]);
+        }
+        cmd.args(args).stdin(Stdio::null());
         #[cfg(windows)]
         if let Some(root) = std::env::var_os("SystemRoot") {
             cmd.env("SystemRoot", root);

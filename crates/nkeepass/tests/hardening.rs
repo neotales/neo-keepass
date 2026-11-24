@@ -51,9 +51,11 @@ fn run(fixture: &Fixture, args: &[&str]) -> Output {
     // `NKEEPASS_TEST_PASSWORD` for the rest; both are the same value, so neither
     // test has to know which spelling the helper prefers.
 
-    Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .isolate_application_environment()
-        .args(["--vault", fixture.vault.to_str().unwrap()])
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    if args.first() != Some(&"alias") {
+        command.args(["--vault", fixture.vault.to_str().unwrap()]);
+    }
+    command
         .args(args)
         .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
         .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
