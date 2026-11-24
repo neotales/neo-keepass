@@ -134,6 +134,33 @@ impl AppState {
         }
     }
 
+    /// Records user interaction using `tx.clock()` and schedules the next wakeup.
+    pub fn note_activity(&mut self, tx: &mut Tx) {
+        let now = tx.clock();
+        self.clock_secs = now;
+        self.controller.record_activity(now);
+        self.schedule_wakeup(tx);
+    }
+
+    /// Schedules the earliest timer wakeup needed while unlocked (idle lock or 1s TOTP tick).
+    pub fn schedule_wakeup(&self, tx: &mut Tx) {
+        if !self.controller.is_unlocked() {
+            return;
+        }
+        let idle_due = self.controller.idle_lock_deadline();
+        let has_otp = self
+            .controller
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.metadata.has_otp());
+        let due = if has_otp {
+            idle_due.min(tx.clock() + 1.0)
+        } else {
+            idle_due
+        };
+        tx.wake_at(due);
+    }
+
     /// Polls background unlock completions, idle timeout, and live TOTP updates.
     pub fn poll_frame(&mut self, secs: f64, tx: &mut Tx) -> bool {
         self.clock_secs = secs;
@@ -171,6 +198,7 @@ impl AppState {
                     changed = true;
                 }
             }
+            self.schedule_wakeup(tx);
         }
 
         changed
@@ -250,8 +278,8 @@ fn header_bar(k: &Kit, state: &AppState) -> El {
             } else {
                 ButtonVariant::Ghost
             })
-            .on_press(|s: &mut AppState| {
-                s.controller.record_activity(s.clock_secs);
+            .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                s.note_activity(tx);
                 s.controller.active_tab = WorkspaceTab::Browser;
             })
             .build(k);
@@ -263,8 +291,8 @@ fn header_bar(k: &Kit, state: &AppState) -> El {
             } else {
                 ButtonVariant::Ghost
             })
-            .on_press(|s: &mut AppState| {
-                s.controller.record_activity(s.clock_secs);
+            .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                s.note_activity(tx);
                 s.controller.active_tab = WorkspaceTab::Inject;
             })
             .build(k);
@@ -418,8 +446,8 @@ fn group_sidebar(k: &Kit, state: &AppState) -> El {
             } else {
                 ButtonVariant::Ghost
             })
-            .on_press(move |s: &mut AppState| {
-                s.controller.record_activity(s.clock_secs);
+            .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                s.note_activity(tx);
                 s.controller.navigate_breadcrumb(idx);
             })
             .build(k);
@@ -434,8 +462,8 @@ fn group_sidebar(k: &Kit, state: &AppState) -> El {
         let btn = Button::new(group.label().to_owned())
             .control_size(ControlSize::Regular)
             .variant(ButtonVariant::GhostMuted)
-            .on_press(move |s: &mut AppState| {
-                s.controller.record_activity(s.clock_secs);
+            .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                s.note_activity(tx);
                 s.controller.open_child_group(idx);
             })
             .build(k);
@@ -459,8 +487,8 @@ fn entry_list_pane(k: &Kit, state: &AppState) -> El {
         .placeholder("Search title, user, URL, path…")
         .width(None)
         .on_edit(|s: &mut AppState| &mut s.search_edit)
-        .on_change(|s: &mut AppState, _| {
-            s.controller.record_activity(s.clock_secs);
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
             let query = s.search_edit.text.clone();
             s.controller.set_search_query(query, current_unix_seconds());
         })
@@ -492,8 +520,8 @@ fn entry_list_pane(k: &Kit, state: &AppState) -> El {
                 .focusable(true)
                 .hover(k.c.hover)
                 .press(k.c.pressed)
-                .on_press(move |s: &mut AppState| {
-                    s.controller.record_activity(s.clock_secs);
+                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                    s.note_activity(tx);
                     s.controller.select_entry(idx, current_unix_seconds());
                 })
                 .child(
@@ -559,10 +587,22 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
                 .color(k.c.text_muted),
         )
         .child(Divider::horizontal().build(k))
-        .child(metadata_row(k, "UserName", &detail.username))
-        .child(metadata_row(k, "URL", &detail.url))
+        .child(standard_field_row(
+            k,
+            detail,
+            "UserName",
+            "UserName",
+            &detail.username,
+        ))
+        .child(standard_field_row(k, detail, "URL", "URL", &detail.url))
         .child(password_row(k, detail))
-        .child(metadata_row(k, "Notes", &detail.notes));
+        .child(standard_field_row(
+            k,
+            detail,
+            "Notes",
+            "Notes",
+            &detail.notes,
+        ));
 
     if let Some(totp) = &detail.totp {
         pane = pane.child(totp_row(k, totp));
@@ -598,8 +638,8 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
 
         let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
             .control_size(ControlSize::Small)
-            .on_press(move |s: &mut AppState| {
-                s.controller.record_activity(s.clock_secs);
+            .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                s.note_activity(tx);
                 s.controller.toggle_reveal_custom_field(idx);
             })
             .build(k);
@@ -608,7 +648,7 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
         let copy_btn = Button::new("Copy")
             .control_size(ControlSize::Small)
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
-                s.controller.record_activity(s.clock_secs);
+                s.note_activity(tx);
                 match s.controller.custom_field_for_copy(idx) {
                     Ok(secret) => s.copy_secret(&secret, &field_name, tx),
                     Err(err) => s.controller.browser_status = Some(err),
@@ -642,6 +682,70 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
         );
     }
     pane
+}
+
+fn standard_field_row(
+    k: &Kit,
+    detail: &EntryDetailState,
+    label: &'static str,
+    field_key: &'static str,
+    unprotected_value: &str,
+) -> El {
+    if !detail.protected_standard_fields.contains_key(field_key) {
+        return metadata_row(k, label, unprotected_value);
+    }
+
+    let revealed = detail.revealed_standard_fields.get(field_key);
+    let value_el = if let Some(secret) = revealed {
+        text(secret.as_str().to_owned())
+            .font(k.ty.mono)
+            .color(k.c.text_base)
+            .secure()
+            .revealed(true)
+    } else {
+        text("••••••••••••")
+            .font(k.ty.mono)
+            .color(k.c.text_muted)
+            .secure()
+    };
+
+    let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
+        .control_size(ControlSize::Small)
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            s.controller.toggle_reveal_standard_field(field_key);
+        })
+        .build(k);
+
+    let copy_btn = Button::new("Copy (30s)")
+        .control_size(ControlSize::Small)
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            match s.controller.standard_field_for_copy(field_key) {
+                Ok(secret) => s.copy_secret(&secret, label, tx),
+                Err(err) => s.controller.browser_status = Some(err),
+            }
+        })
+        .build(k);
+
+    row()
+        .key(format!("std-protected-{field_key}"))
+        .w_full()
+        .padding(8.0)
+        .radius(k.radius.md)
+        .fill(k.c.layer_01)
+        .justify_between()
+        .center_y()
+        .gap(8.0)
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text(label).font(k.ty.small_medium).color(k.c.text_muted))
+                .child(value_el),
+        )
+        .child(row().gap(6.0).child(reveal_btn).child(copy_btn))
 }
 
 fn metadata_row(k: &Kit, label: &str, value: &str) -> El {
@@ -679,8 +783,8 @@ fn password_row(k: &Kit, detail: &EntryDetailState) -> El {
 
     let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
         .control_size(ControlSize::Small)
-        .on_press(|s: &mut AppState| {
-            s.controller.record_activity(s.clock_secs);
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
             s.controller.toggle_reveal_password();
         })
         .build(k);
@@ -689,7 +793,7 @@ fn password_row(k: &Kit, detail: &EntryDetailState) -> El {
         .control_size(ControlSize::Small)
         .variant(ButtonVariant::Contrast)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-            s.controller.record_activity(s.clock_secs);
+            s.note_activity(tx);
             match s.controller.password_for_copy() {
                 Ok(secret) => s.copy_secret(&secret, "Password", tx),
                 Err(err) => s.controller.browser_status = Some(err),
@@ -725,7 +829,7 @@ fn totp_row(k: &Kit, totp: &TotpDisplay) -> El {
     let copy_btn = Button::new("Copy TOTP")
         .control_size(ControlSize::Small)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-            s.controller.record_activity(s.clock_secs);
+            s.note_activity(tx);
             if let Some(code) = s
                 .controller
                 .detail
@@ -781,8 +885,8 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
                 } else {
                     ButtonVariant::Neutral
                 })
-                .on_press(|s: &mut AppState| {
-                    s.controller.record_activity(s.clock_secs);
+                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                    s.note_activity(tx);
                     s.controller.set_inject_mode(InjectMode::Template);
                 })
                 .build(k),
@@ -795,8 +899,8 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
                 } else {
                     ButtonVariant::Neutral
                 })
-                .on_press(|s: &mut AppState| {
-                    s.controller.record_activity(s.clock_secs);
+                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                    s.note_activity(tx);
                     s.controller.set_inject_mode(InjectMode::EnvFile);
                 })
                 .build(k),
@@ -810,8 +914,8 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
         .scroll_bar(true)
         .width(None)
         .on_edit(|s: &mut AppState| &mut s.inject_edit)
-        .on_change(|s: &mut AppState, _| {
-            s.controller.record_activity(s.clock_secs);
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
             let input = s.inject_edit.text.clone();
             s.controller.set_inject_input(input);
         })
@@ -820,8 +924,8 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
     let render_btn = Button::new("Render from Active Vault")
         .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Submit)
-        .on_press(|s: &mut AppState| {
-            s.controller.record_activity(s.clock_secs);
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
             if let Err(err) = s.controller.render_inject(current_unix_seconds()) {
                 s.controller.inject_status = Some(err.to_string());
             }
@@ -889,8 +993,12 @@ fn inject_refs_card(k: &Kit, state: &AppState) -> El {
     } else {
         for (idx, uri) in state.controller.extracted_refs.iter().enumerate() {
             let field = uri.field.as_deref().unwrap_or("Password");
+            let prefix = uri
+                .vault_alias
+                .as_deref()
+                .map_or_else(String::new, |alias| format!("@{alias}/"));
             refs_box = refs_box.child(
-                text(format!("• {}  (#{field})", uri.entry_path))
+                text(format!("• {prefix}{}  (#{field})", uri.entry_path))
                     .key(format!("inject-ref-{idx}"))
                     .font(k.ty.mono)
                     .color(k.c.text_base),
@@ -922,8 +1030,8 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
         "Reveal Output"
     })
     .control_size(ControlSize::Small)
-    .on_press(|s: &mut AppState| {
-        s.controller.record_activity(s.clock_secs);
+    .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+        s.note_activity(tx);
         s.controller.inject_output_revealed = !s.controller.inject_output_revealed;
     })
     .build(k);
@@ -932,7 +1040,7 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
         .control_size(ControlSize::Small)
         .variant(ButtonVariant::Contrast)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-            s.controller.record_activity(s.clock_secs);
+            s.note_activity(tx);
             if let Some(rendered) = s.controller.rendered_output.clone() {
                 s.copy_secret(&rendered, "rendered output", tx);
             }
@@ -944,15 +1052,16 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
         .placeholder("/path/to/rendered.env (no-clobber)")
         .width(None)
         .on_edit(|s: &mut AppState| &mut s.save_path_edit)
-        .on_change(|s: &mut AppState, _| {
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
             s.controller.inject_save_path = s.save_path_edit.text.clone();
         })
         .build(k);
 
     let save_btn = Button::new("Save Private File")
         .control_size(ControlSize::Regular)
-        .on_press(|s: &mut AppState| {
-            s.controller.record_activity(s.clock_secs);
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
             let _ = s.controller.save_inject_output();
         })
         .build(k);

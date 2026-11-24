@@ -92,6 +92,10 @@ pub struct EntryDetailState {
     pub url: String,
     /// Non-protected notes text, if unprotected and present.
     pub notes: String,
+    /// Standard text fields (`UserName`, `URL`, `Notes`) marked `protected` by the vault.
+    pub protected_standard_fields: BTreeMap<&'static str, bool>,
+    /// Explicitly revealed protected standard field buffers, cleared on switch or lock.
+    pub revealed_standard_fields: BTreeMap<&'static str, Zeroizing<String>>,
     /// Explicitly revealed password buffer, cleared on entry switch or lock.
     pub revealed_password: Option<Zeroizing<String>>,
     /// Explicitly revealed custom field values keyed by custom-field index.
@@ -245,6 +249,14 @@ pub fn current_unix_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+fn ensure_regular_file(path: &Path, label: &str) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|_| format!("cannot access {label}"))?;
+    if !meta.is_file() {
+        return Err(format!("{label} is not a regular file"));
+    }
+    Ok(())
+}
+
 /// Executes blocking KDBX credential parsing + [`VaultService::open`] for a worker thread.
 ///
 /// The master password is taken in a [`Zeroizing`] buffer and cleared once moved
@@ -255,8 +267,15 @@ pub fn open_vault_blocking(
     password: &Zeroizing<String>,
     key_file_path: Option<&Path>,
 ) -> UnlockOutcome {
+    if let Err(err) = ensure_regular_file(vault_path, "vault file") {
+        return UnlockOutcome { result: Err(err) };
+    }
+
     let mut providers: Vec<Box<dyn CredentialProvider + Send>> = Vec::new();
     if let Some(key_path) = key_file_path {
+        if let Err(err) = ensure_regular_file(key_path, "key file") {
+            return UnlockOutcome { result: Err(err) };
+        }
         let Ok(file) = File::open(key_path) else {
             return UnlockOutcome {
                 result: Err(String::from("cannot open key file")),
@@ -409,11 +428,15 @@ impl VaultController {
         }
     }
 
+    /// Returns the runtime clock deadline (in seconds) when the active session should idle-lock.
+    #[must_use]
+    pub fn idle_lock_deadline(&self) -> f64 {
+        self.last_activity_secs + IDLE_LOCK_SECS
+    }
+
     /// Checks whether the idle timeout ([`IDLE_LOCK_SECS`]) has elapsed and locks if so.
     pub fn check_idle_timeout(&mut self, now_secs: f64) -> LockCleanup {
-        if self.phase == VaultPhase::Unlocked
-            && now_secs - self.last_activity_secs >= IDLE_LOCK_SECS
-        {
+        if self.phase == VaultPhase::Unlocked && now_secs >= self.idle_lock_deadline() {
             let cleanup = self.lock();
             if cleanup.locked_active_session {
                 self.lock_status = Some(String::from("Locked after inactivity timeout"));
@@ -548,9 +571,16 @@ impl VaultController {
                 .is_some_and(nkeepass::FieldMetadata::protected)
         };
 
+        let mut protected_standard_fields = BTreeMap::new();
+        for std_name in ["UserName", "URL", "Notes"] {
+            if is_protected(std_name) {
+                protected_standard_fields.insert(std_name, true);
+            }
+        }
+
         let read_unprotected = |name: &str| -> String {
-            if is_protected(name) {
-                return String::from("[Protected — click Reveal]");
+            if protected_standard_fields.contains_key(name) {
+                return String::new();
             }
             match self.service.reveal_field(&entry_ref, name) {
                 Ok(bytes) => String::from_utf8_lossy(bytes.as_slice()).into_owned(),
@@ -575,6 +605,8 @@ impl VaultController {
             username,
             url,
             notes,
+            protected_standard_fields,
+            revealed_standard_fields: BTreeMap::new(),
             revealed_password: None,
             revealed_custom_fields: BTreeMap::new(),
             totp,
@@ -655,6 +687,53 @@ impl VaultController {
             .map_err(|err| err.message().to_owned())?;
         let text = std::str::from_utf8(secret.as_slice())
             .map_err(|_| String::from("password is not valid UTF-8"))?;
+        Ok(Zeroizing::new(text.to_owned()))
+    }
+
+    /// Toggles explicit reveal for a protected standard field (`UserName`, `URL`, `Notes`).
+    pub fn toggle_reveal_standard_field(&mut self, field_name: &'static str) {
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
+        if detail.revealed_standard_fields.remove(field_name).is_some() {
+            return;
+        }
+        match self.service.reveal_field(&detail.entry_ref, field_name) {
+            Ok(secret) => match std::str::from_utf8(secret.as_slice()) {
+                Ok(text) => {
+                    detail
+                        .revealed_standard_fields
+                        .insert(field_name, Zeroizing::new(text.to_owned()));
+                }
+                Err(_) => {
+                    self.browser_status = Some(String::from("field is not valid UTF-8"));
+                }
+            },
+            Err(err) => {
+                self.browser_status = Some(err.message().to_owned());
+            }
+        }
+    }
+
+    /// Reveals a protected standard field briefly for copying via Rune's secret clipboard.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed status diagnostic if missing, locked, or non-UTF-8.
+    pub fn standard_field_for_copy(&self, field_name: &str) -> Result<Zeroizing<String>, String> {
+        let detail = self
+            .detail
+            .as_ref()
+            .ok_or_else(|| String::from("no entry selected"))?;
+        if let Some(revealed) = detail.revealed_standard_fields.get(field_name) {
+            return Ok(revealed.clone());
+        }
+        let secret = self
+            .service
+            .reveal_field(&detail.entry_ref, field_name)
+            .map_err(|err| err.message().to_owned())?;
+        let text = std::str::from_utf8(secret.as_slice())
+            .map_err(|_| String::from("field is not valid UTF-8"))?;
         Ok(Zeroizing::new(text.to_owned()))
     }
 
@@ -751,10 +830,16 @@ impl VaultController {
             InjectMode::EnvFile => match parse_env_file(&self.inject_input) {
                 Ok(lines) => {
                     for line in &lines {
-                        if let EnvValueKind::Template(tmpl) = &line.value
-                            && let Ok(refs) = extract_references(tmpl)
-                        {
-                            self.extracted_refs.extend(refs);
+                        if let EnvValueKind::Template(tmpl) = &line.value {
+                            match extract_references(tmpl) {
+                                Ok(refs) => self.extracted_refs.extend(refs),
+                                Err(err) => {
+                                    self.extracted_refs.clear();
+                                    self.parsed_env_lines.clear();
+                                    self.inject_preview_error = Some(err.to_string());
+                                    return;
+                                }
+                            }
                         }
                     }
                     self.parsed_env_lines = lines;
@@ -789,7 +874,7 @@ impl VaultController {
                 for (name, value) in resolved {
                     rendered.push_str(&name);
                     rendered.push('=');
-                    rendered.push_str(&value);
+                    push_dotenv_double_quoted(&mut rendered, &value);
                     rendered.push('\n');
                 }
                 rendered
@@ -826,6 +911,19 @@ impl VaultController {
         self.inject_status = Some(String::from("Saved private output (no-clobber)"));
         Ok(())
     }
+}
+
+fn push_dotenv_double_quoted(out: &mut Zeroizing<String>, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
 }
 
 #[cfg(test)]
@@ -873,7 +971,21 @@ mod tests {
             protected: true,
             protect_in_memory: true,
         });
+        prod.fields.push(neotales_keepass::Field {
+            key: String::from("ComplexSecret"),
+            value: ProtectedValue::from_text("line1 # comment\n\"quoted\" \\ slash"),
+            protected: true,
+            protect_in_memory: true,
+        });
+        let mut protected_note = Entry::new("ProtectedNoteEntry");
+        protected_note.fields.push(neotales_keepass::Field {
+            key: String::from("Notes"),
+            value: ProtectedValue::from_text("classified note body"),
+            protected: true,
+            protect_in_memory: true,
+        });
         group.entries.push(prod);
+        group.entries.push(protected_note);
         db.root.groups.push(group);
 
         let mut creds =
@@ -911,7 +1023,7 @@ mod tests {
 
         // Navigate into Infra group and inspect entry detail.
         ctrl.open_child_group(0);
-        assert_eq!(ctrl.entries.len(), 1);
+        assert_eq!(ctrl.entries.len(), 2);
         assert_eq!(ctrl.entries[0].title(), "ProdAPI");
         let detail = ctrl
             .detail
@@ -936,6 +1048,27 @@ mod tests {
         assert_eq!(
             detail.revealed_custom_fields.get(&1).map(|z| z.as_str()),
             Some("sign-key-xyz")
+        );
+
+        // Selecting ProtectedNoteEntry marks Notes as protected and allows explicit reveal.
+        ctrl.select_entry(1, 1_700_000_000);
+        let note_detail = ctrl
+            .detail
+            .as_ref()
+            .ok_or_else(|| String::from("protected note detail missing"))?;
+        assert!(note_detail.protected_standard_fields.contains_key("Notes"));
+        assert!(note_detail.notes.is_empty());
+        ctrl.toggle_reveal_standard_field("Notes");
+        let note_detail = ctrl
+            .detail
+            .as_ref()
+            .ok_or_else(|| String::from("protected note detail missing after reveal"))?;
+        assert_eq!(
+            note_detail
+                .revealed_standard_fields
+                .get("Notes")
+                .map(|z| z.as_str()),
+            Some("classified note body")
         );
 
         // Search works from anywhere in unlocked session.
@@ -968,23 +1101,27 @@ mod tests {
 
         ctrl.set_inject_mode(InjectMode::EnvFile);
         ctrl.set_inject_input(String::from(
-            "export API_TOKEN=nkp://Infra/ProdAPI#Password\nSIGN=nkp://Infra/ProdAPI#SigningKey\n",
+            "export API_TOKEN=nkp://Infra/ProdAPI#Password\nCOMPLEX=nkp://Infra/ProdAPI#ComplexSecret\n",
         ));
         assert!(ctrl.inject_preview_error.is_none());
         assert_eq!(ctrl.extracted_refs.len(), 2);
 
         ctrl.render_inject(1_700_000_000)
             .map_err(|err| format!("render_inject failed: {err}"))?;
+        let expected_env = "API_TOKEN=\"s3cr3t-api-token\"\nCOMPLEX=\"line1 # comment\\n\\\"quoted\\\" \\\\ slash\"\n";
         assert_eq!(
             ctrl.rendered_output.as_deref().map(String::as_str),
-            Some("API_TOKEN=s3cr3t-api-token\nSIGN=sign-key-xyz\n")
+            Some(expected_env)
         );
+        // Rendered .env output must remain valid and round-trip through parse_env_file.
+        let reparsed = parse_env_file(expected_env).map_err(|err| err.to_string())?;
+        assert_eq!(reparsed.len(), 2);
 
         let out_file = dir.path().join("rendered.env");
         ctrl.inject_save_path = out_file.to_string_lossy().into_owned();
         ctrl.save_inject_output().map_err(str::to_owned)?;
         let disk = std::fs::read_to_string(&out_file).map_err(|err| err.to_string())?;
-        assert_eq!(disk, "API_TOKEN=s3cr3t-api-token\nSIGN=sign-key-xyz\n");
+        assert_eq!(disk, expected_env);
 
         // Second save refuses to clobber existing private file.
         assert!(ctrl.save_inject_output().is_err());
@@ -998,6 +1135,20 @@ mod tests {
             ctrl.render_inject(1_700_000_000),
             Err(TemplateError::VaultLocked)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn regular_file_guard_and_env_preview_error() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let outcome = open_vault_blocking(dir.path(), &Zeroizing::new(String::from("pw")), None);
+        assert!(matches!(outcome.result, Err(ref msg) if msg.contains("not a regular file")));
+
+        let mut ctrl = VaultController::new();
+        ctrl.set_inject_mode(InjectMode::EnvFile);
+        ctrl.set_inject_input(String::from("BAD=nkp://invalid/../path\n"));
+        assert!(ctrl.inject_preview_error.is_some());
+        assert!(ctrl.extracted_refs.is_empty());
         Ok(())
     }
 }
