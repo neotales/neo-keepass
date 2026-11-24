@@ -1732,12 +1732,70 @@ fn active_vault<'a>(
     Ok((data_vault()?, "data-directory"))
 }
 
-fn json<T: Serialize>(value: &T) -> Result<()> {
-    let mut text = serde_json::to_vec(value).map_err(|_| err("cannot encode output"))?;
+struct TtyJsonFormatter;
+
+impl serde_json::ser::Formatter for TtyJsonFormatter {
+    fn write_string_fragment<W: ?Sized + Write>(
+        &mut self,
+        writer: &mut W,
+        fragment: &str,
+    ) -> io::Result<()> {
+        let mut start = 0;
+        for (idx, ch) in fragment.char_indices() {
+            if matches!(ch, '\u{007f}' | '\u{0080}'..='\u{009f}') {
+                if start < idx {
+                    writer.write_all(&fragment.as_bytes()[start..idx])?;
+                }
+                write!(writer, "\\u{:04x}", ch as u32)?;
+                start = idx + ch.len_utf8();
+            }
+        }
+        if start < fragment.len() {
+            writer.write_all(&fragment.as_bytes()[start..])?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_tty_raw_bytes(bytes: &[u8]) -> Result<()> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Err(err(
+            "raw output contains non-UTF-8 or terminal-control bytes; redirect stdout to a file or pipe",
+        ));
+    };
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err(err(
+            "raw output contains terminal-control bytes; redirect stdout to a file or pipe",
+        ));
+    }
+    Ok(())
+}
+
+fn write_json_for_sink<T: Serialize>(
+    output: &mut impl Write,
+    value: &T,
+    stdout_is_tty: bool,
+) -> Result<()> {
+    let mut text = Vec::new();
+    if stdout_is_tty {
+        let mut serializer = serde_json::Serializer::with_formatter(&mut text, TtyJsonFormatter);
+        value
+            .serialize(&mut serializer)
+            .map_err(|_| err("cannot encode output"))?;
+    } else {
+        serde_json::to_writer(&mut text, value).map_err(|_| err("cannot encode output"))?;
+    }
     text.push(b'\n');
-    io::stdout()
+    output
         .write_all(&text)
         .map_err(|_| err("cannot write output"))
+}
+
+fn json<T: Serialize>(value: &T) -> Result<()> {
+    write_json_for_sink(&mut io::stdout().lock(), value, io::stdout().is_terminal())
 }
 
 #[derive(Serialize)]
@@ -1750,20 +1808,12 @@ struct SearchJsonRow<'a> {
 }
 
 fn write_search_hit(hit: &SearchHit) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-    serde_json::to_writer(
-        &mut stdout,
-        &SearchJsonRow {
-            field_names: hit.field_names(),
-            path: hit.path(),
-            tags: hit.tags(),
-            title: hit.title(),
-        },
-    )
-    .map_err(|_| err("cannot encode output"))?;
-    stdout
-        .write_all(b"\n")
-        .map_err(|_| err("cannot write output"))
+    json(&SearchJsonRow {
+        field_names: hit.field_names(),
+        path: hit.path(),
+        tags: hit.tags(),
+        title: hit.title(),
+    })
 }
 
 /// Writes one text line, reporting a failed write rather than panicking.
@@ -2000,13 +2050,20 @@ struct Options<'a> {
     age_decrypt: bool,
     age_recipients: Vec<&'a str>,
     age_identity: Option<&'a str>,
+    json: bool,
+    generate_master_password: bool,
 }
 
 fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    options_from_refs(&refs, positional)
+}
+
+fn options_from_refs<'a>(args: &[&'a str], positional: Positional) -> Result<Options<'a>> {
     let mut opts = Options::default();
     let mut i = 0;
     while i < args.len() {
-        let arg = args[i].as_str();
+        let arg = args[i];
         if matches!(
             positional,
             Positional::Glob | Positional::Key | Positional::SetKey | Positional::Many
@@ -2014,8 +2071,7 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
         {
             i += 1;
             if matches!(positional, Positional::Many) {
-                opts.requested_paths
-                    .extend(args[i..].iter().map(String::as_str));
+                opts.requested_paths.extend_from_slice(&args[i..]);
                 break;
             }
             if i < args.len() {
@@ -2023,9 +2079,9 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
                     return Err(err("invalid or duplicate option"));
                 }
                 if matches!(positional, Positional::Glob) {
-                    opts.glob = Some(args[i].as_str());
+                    opts.glob = Some(args[i]);
                 } else if opts.key.is_none() {
-                    opts.key = Some(args[i].as_str());
+                    opts.key = Some(args[i]);
                 } else {
                     return Err(err(
                         "entry key specified more than once; use either a positional key or --key",
@@ -2038,41 +2094,13 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             }
             continue;
         }
-        let value = if matches!(
-            arg,
-            "--key"
-                | "--field"
-                | "--value"
-                | "--value-env"
-                | "--value-file"
-                | "--username"
-                | "--url"
-                | "--notes"
-                | "--bin"
-                | "-b"
-                | "--name"
-                | "--file"
-                | "--output"
-                | "--password"
-                | "--password-env"
-                | "--password-file"
-                | "--key-file"
-                | "--size"
-                | "--chars"
-                | "-c"
-                | "--format"
-                | "--strategy"
-                | "--kdf"
-                | "--memory"
-                | "--iterations"
-                | "--parallelism"
-                | "--age-recipient"
-                | "-r"
-                | "--age-identity"
-                | "-i"
-        ) {
+        let value = if !matches!(arg, "--kind" | "--env") && takes_option_value(arg) {
             i += 1;
-            Some(take_arg(args, i)?)
+            Some(
+                args.get(i)
+                    .copied()
+                    .ok_or_else(|| err("missing argument; see --help"))?,
+            )
         } else {
             None
         };
@@ -2148,6 +2176,10 @@ fn options(args: &[String], positional: Positional) -> Result<Options<'_>> {
             "--age-identity" | "-i" if opts.age_identity.is_none() => {
                 opts.age_identity = value;
             }
+            "--json" if !opts.json => opts.json = true,
+            "--generate-master-password" if !opts.generate_master_password => {
+                opts.generate_master_password = true;
+            }
             word if !word.starts_with('-') => match positional {
                 Positional::Many => opts.requested_paths.push(word),
                 Positional::Glob if opts.glob.is_none() => opts.glob = Some(word),
@@ -2207,6 +2239,240 @@ fn validate_shared_options(opts: &Options<'_>) -> Result<()> {
     }
     if opts.password_env.is_some_and(|name| !valid_name(name)) {
         return Err(err("invalid environment variable name"));
+    }
+    Ok(())
+}
+
+/// Explicit per-route allowlist for non-credential options parsed by [`options`].
+/// Every field defaults to `false` so adding a new CLI flag fails closed on every
+/// route until that route explicitly opts in.
+#[derive(Clone, Copy, Default)]
+struct AllowedOptions {
+    allow_key: bool,
+    allow_requested_paths: bool,
+    allow_field: bool,
+    allow_assignments: bool,
+    allow_literal_input: bool,
+    allow_value_env: bool,
+    allow_value_aliases: bool,
+    allow_chars_alias: bool,
+    allow_generate: bool,
+    allow_generation_policy: bool,
+    allow_username: bool,
+    allow_url: bool,
+    allow_notes: bool,
+    allow_bins: bool,
+    allow_name: bool,
+    allow_file: bool,
+    allow_output: bool,
+    allow_stdin: bool,
+    allow_yes: bool,
+    allow_dry_run: bool,
+    allow_replace: bool,
+    allow_allow_plaintext: bool,
+    allow_size: bool,
+    allow_glob: bool,
+    allow_format: bool,
+    allow_is_output: bool,
+    allow_clipboard: bool,
+    allow_strategy: bool,
+    allow_path: bool,
+    allow_kdf: bool,
+    allow_age_encrypt: bool,
+    allow_age_decrypt: bool,
+    allow_age_recipients: bool,
+    allow_age_identity: bool,
+    allow_json: bool,
+    allow_generate_master_password: bool,
+}
+
+impl AllowedOptions {
+    const fn none() -> Self {
+        Self {
+            allow_key: false,
+            allow_requested_paths: false,
+            allow_field: false,
+            allow_assignments: false,
+            allow_literal_input: false,
+            allow_value_env: false,
+            allow_value_aliases: false,
+            allow_chars_alias: false,
+            allow_generate: false,
+            allow_generation_policy: false,
+            allow_username: false,
+            allow_url: false,
+            allow_notes: false,
+            allow_bins: false,
+            allow_name: false,
+            allow_file: false,
+            allow_output: false,
+            allow_stdin: false,
+            allow_yes: false,
+            allow_dry_run: false,
+            allow_replace: false,
+            allow_allow_plaintext: false,
+            allow_size: false,
+            allow_glob: false,
+            allow_format: false,
+            allow_is_output: false,
+            allow_clipboard: false,
+            allow_strategy: false,
+            allow_path: false,
+            allow_kdf: false,
+            allow_age_encrypt: false,
+            allow_age_decrypt: false,
+            allow_age_recipients: false,
+            allow_age_identity: false,
+            allow_json: false,
+            allow_generate_master_password: false,
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "exhaustive destructuring ensures no Options field can be silently ignored"
+)]
+fn validate_allowed_options(
+    opts: &Options<'_>,
+    allowed: &AllowedOptions,
+    rejection: &'static str,
+    allow_plaintext_error: Option<&'static str>,
+    age_error: &'static str,
+) -> Result<()> {
+    let Options {
+        key,
+        requested_paths,
+        field,
+        assignment_inputs,
+        literal_input,
+        value_env,
+        value_alias,
+        chars_alias,
+        generate,
+        generation_policy,
+        username,
+        url,
+        notes,
+        bins,
+        name,
+        file,
+        output,
+        password: _,
+        password_env: _,
+        password_file: _,
+        key_file: _,
+        password_stdin: _,
+        stdin,
+        yes,
+        dry_run,
+        replace,
+        allow_plaintext,
+        size,
+        glob,
+        format,
+        is_output,
+        clipboard,
+        strategy,
+        path,
+        kdf,
+        memory,
+        iterations,
+        parallelism,
+        age_encrypt,
+        age_decrypt,
+        age_recipients,
+        age_identity,
+        json,
+        generate_master_password,
+    } = opts;
+    let AllowedOptions {
+        allow_key,
+        allow_requested_paths,
+        allow_field,
+        allow_assignments,
+        allow_literal_input,
+        allow_value_env,
+        allow_value_aliases,
+        allow_chars_alias,
+        allow_generate,
+        allow_generation_policy,
+        allow_username,
+        allow_url,
+        allow_notes,
+        allow_bins,
+        allow_name,
+        allow_file,
+        allow_output,
+        allow_stdin,
+        allow_yes,
+        allow_dry_run,
+        allow_replace,
+        allow_allow_plaintext,
+        allow_size,
+        allow_glob,
+        allow_format,
+        allow_is_output,
+        allow_clipboard,
+        allow_strategy,
+        allow_path,
+        allow_kdf,
+        allow_age_encrypt,
+        allow_age_decrypt,
+        allow_age_recipients,
+        allow_age_identity,
+        allow_json,
+        allow_generate_master_password,
+    } = *allowed;
+
+    if *allow_plaintext && !allow_allow_plaintext {
+        return Err(err(allow_plaintext_error.unwrap_or(rejection)));
+    }
+    let any_age_allowed =
+        allow_age_encrypt || allow_age_decrypt || allow_age_recipients || allow_age_identity;
+    let has_any_age =
+        *age_encrypt || *age_decrypt || !age_recipients.is_empty() || age_identity.is_some();
+    if has_any_age && !any_age_allowed {
+        return Err(err(age_error));
+    }
+    if (!allow_key && key.is_some())
+        || (!allow_requested_paths && !requested_paths.is_empty())
+        || (!allow_field && field.is_some())
+        || (!allow_assignments && !assignment_inputs.is_empty())
+        || (!allow_literal_input && literal_input.is_some())
+        || (!allow_value_env && value_env.is_some())
+        || (!allow_value_aliases && *value_alias)
+        || (!allow_chars_alias && *chars_alias)
+        || (!allow_generate && *generate)
+        || (!allow_generation_policy && generation_policy.selected())
+        || (!allow_username && username.is_some())
+        || (!allow_url && url.is_some())
+        || (!allow_notes && notes.is_some())
+        || (!allow_bins && !bins.is_empty())
+        || (!allow_name && name.is_some())
+        || (!allow_file && file.is_some())
+        || (!allow_output && output.is_some())
+        || (!allow_stdin && *stdin)
+        || (!allow_yes && *yes)
+        || (!allow_dry_run && *dry_run)
+        || (!allow_replace && *replace)
+        || (!allow_size && size.is_some())
+        || (!allow_glob && glob.is_some())
+        || (!allow_format && format.is_some())
+        || (!allow_is_output && *is_output)
+        || (!allow_clipboard && *clipboard)
+        || (!allow_strategy && strategy.is_some())
+        || (!allow_path && path.is_some())
+        || (!allow_kdf
+            && (kdf.is_some() || memory.is_some() || iterations.is_some() || parallelism.is_some()))
+        || (!allow_age_encrypt && *age_encrypt)
+        || (!allow_age_decrypt && *age_decrypt)
+        || (!allow_age_recipients && !age_recipients.is_empty())
+        || (!allow_age_identity && age_identity.is_some())
+        || (!allow_json && *json)
+        || (!allow_generate_master_password && *generate_master_password)
+    {
+        return Err(err(rejection));
     }
     Ok(())
 }
@@ -3540,36 +3806,65 @@ fn emit_azure_devops_value(
 }
 
 fn emit_value(value: &[u8], format: &str, name: Option<&str>, is_output: bool) -> Result<()> {
-    write_value(&mut io::stdout().lock(), value, format, name, is_output)
+    write_value_for_sink(
+        &mut io::stdout().lock(),
+        value,
+        format,
+        name,
+        is_output,
+        io::stdout().is_terminal(),
+    )
 }
 
-fn write_value(
+fn write_value_for_sink(
     output: &mut impl Write,
     value: &[u8],
     format: &str,
     name: Option<&str>,
     is_output: bool,
+    stdout_is_tty: bool,
 ) -> Result<()> {
     if is_output && format != "azure-devops" {
         return Err(err("--is-output requires the azure-devops format"));
     }
     match format {
-        "text" => output
-            .write_all(value)
-            .map_err(|_| err("cannot write value")),
-        "null" => output
-            .write_all(value)
-            .and_then(|()| output.write_all(b"\0"))
-            .map_err(|_| err("cannot write value")),
+        "text" => {
+            if stdout_is_tty {
+                validate_tty_raw_bytes(value)?;
+            }
+            output
+                .write_all(value)
+                .map_err(|_| err("cannot write value"))
+        }
+        "null" => {
+            if stdout_is_tty {
+                validate_tty_raw_bytes(value)?;
+            }
+            output
+                .write_all(value)
+                .and_then(|()| output.write_all(b"\0"))
+                .map_err(|_| err("cannot write value"))
+        }
         "json" => {
             let text = std::str::from_utf8(value).map_err(|_| err("value is not UTF-8"))?;
-            let mut serializer = serde_json::Serializer::new(&mut *output);
-            let mut map = serializer
-                .serialize_map(Some(1))
-                .map_err(|_| err("cannot encode output"))?;
-            map.serialize_entry("value", text)
-                .map_err(|_| err("cannot encode output"))?;
-            map.end().map_err(|_| err("cannot encode output"))?;
+            if stdout_is_tty {
+                let mut serializer =
+                    serde_json::Serializer::with_formatter(&mut *output, TtyJsonFormatter);
+                let mut map = serializer
+                    .serialize_map(Some(1))
+                    .map_err(|_| err("cannot encode output"))?;
+                map.serialize_entry("value", text)
+                    .map_err(|_| err("cannot encode output"))?;
+                map.end().map_err(|_| err("cannot encode output"))?;
+            } else {
+                let mut serializer = serde_json::Serializer::new(&mut *output);
+                let mut map = serializer
+                    .serialize_map(Some(1))
+                    .map_err(|_| err("cannot encode output"))?;
+                map.serialize_entry("value", text)
+                    .map_err(|_| err("cannot encode output"))?;
+                map.end().map_err(|_| err("cannot encode output"))?;
+            }
             output
                 .write_all(b"\n")
                 .map_err(|_| err("cannot write value"))
@@ -3861,48 +4156,40 @@ fn validate_new_options(action: &str, opts: &Options<'_>) -> Result<()> {
     Ok(())
 }
 
+fn validate_output_format_options(opts: &Options<'_>) -> Result<&'static str> {
+    let format = match opts.format.unwrap_or("text") {
+        "text" => "text",
+        "json" => "json",
+        "null" => "null",
+        "dotenv" => "dotenv",
+        "shell" => "shell",
+        "pwsh" => "pwsh",
+        "powershell" => "powershell",
+        "github-actions" => "github-actions",
+        "azure-devops" => "azure-devops",
+        _ => return Err(err("invalid output format")),
+    };
+    if is_named_format(format) && opts.name.is_none() {
+        return Err(err("--name required for formatted output"));
+    }
+    if !is_named_format(format) && opts.name.is_some() {
+        return Err(err("--name requires a named output format"));
+    }
+    if !opts.name.is_none_or(valid_env_name) {
+        return Err(err("invalid output name"));
+    }
+    if opts.is_output && format != "azure-devops" {
+        return Err(err("--is-output requires the azure-devops format"));
+    }
+    Ok(format)
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "the explicit per-action option matrix is easier to audit in one place"
+    reason = "the explicit per-action option allowlist is easier to audit in one place"
 )]
 fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
     validate_new_options(action, opts)?;
-    if opts.allow_plaintext {
-        return Err(err(
-            "--allow-plaintext is only valid for KeePass XML export",
-        ));
-    }
-    if action == "get-many" {
-        if opts.requested_paths.is_empty() || opts.requested_paths.len() > 256 {
-            return Err(err("get many requires 1 to 256 explicit paths"));
-        }
-        let mut seen = BTreeSet::new();
-        if opts.requested_paths.iter().any(|path| !seen.insert(*path)) {
-            return Err(err("get many paths must be unique"));
-        }
-        if opts
-            .requested_paths
-            .iter()
-            .map(|path| path.len())
-            .sum::<usize>()
-            > 64 * 1024
-        {
-            return Err(err("get many paths exceed size limit"));
-        }
-        let format = opts.format.unwrap_or("text");
-        if is_named_format(format) {
-            validate_binding_names(format, opts.requested_paths.iter().copied())?;
-        }
-        if !is_named_format(format) && !matches!(format, "text" | "json" | "null") {
-            return Err(err("invalid output format"));
-        }
-        if opts.is_output && format != "azure-devops" {
-            return Err(err("--is-output requires the azure-devops format"));
-        }
-        if opts.allow_plaintext {
-            return Err(err("invalid get many option"));
-        }
-    }
     if opts.clipboard && action != "get" {
         return Err(err("--clipboard is only valid for get"));
     }
@@ -3914,171 +4201,302 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
     {
         return Err(err("set-only option used with another command"));
     }
-    let value_input = opts.file.is_some() || opts.stdin;
-    let has_age_options = opts.age_encrypt
-        || opts.age_decrypt
-        || !opts.age_recipients.is_empty()
-        || opts.age_identity.is_some();
-    if has_age_options && !matches!(action, "get" | "get-many" | "set") {
-        return Err(err("age options are only valid for get, get many, and set"));
+    if vault_creation_options(opts) {
+        return Err(err("invalid operation option"));
     }
-    let invalid = match action {
-        "ls" | "search" | "group-ls" => {
-            opts.key.is_some()
-                || opts.field.is_some()
-                || opts.name.is_some()
-                || opts.file.is_some()
-                || opts.output.is_some()
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || opts.stdin
-        }
-        "show" => {
-            opts.key.is_none()
-                || opts.field.is_some()
-                || opts.name.is_some()
-                || opts.file.is_some()
-                || opts.output.is_some()
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || opts.stdin
-        }
-        "get" | "get-many" | "field-get" => {
-            opts.file.is_some()
-                || (opts.output.is_some() && !opts.age_encrypt)
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.strategy.is_some()
-                || opts.stdin
-                || opts.age_decrypt
-                || opts.age_identity.is_some()
-                || (!opts.age_encrypt && !opts.age_recipients.is_empty())
-                || (opts.age_encrypt && opts.age_recipients.is_empty())
-                || (action == "get-many" && (opts.key.is_some() || opts.name.is_some()))
-        }
-        "set" | "field-set" | "attachment-add" => {
-            opts.key.is_none()
-                || opts.name.is_some()
-                || opts.output.is_some()
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || (opts.size.is_some() && !opts.generate)
-                || opts.glob.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || (action != "set"
-                    && !value_input
-                    && opts.bins.is_empty()
-                    && opts.username.is_none()
-                    && opts.url.is_none()
-                    && opts.notes.is_none())
-                || opts.age_encrypt
-                || !opts.age_recipients.is_empty()
-                || (!opts.age_decrypt && opts.age_identity.is_some())
-                || (opts.age_identity.is_some() && action != "set")
-        }
-        "rm" | "field-rm" | "attachment-rm" => {
-            opts.name.is_some()
-                || opts.file.is_some()
-                || opts.output.is_some()
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || opts.stdin
-                || (action == "rm" && opts.field.is_some())
-        }
-        "ensure" => {
-            opts.field.is_some()
-                || opts.name.is_some()
-                || opts.file.is_some()
-                || opts.output.is_some()
-                || opts.yes
-                || opts.replace
-                || opts.glob.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || opts.stdin
-        }
-        "group-add" | "group-rm" => {
-            opts.key.is_none()
-                || opts.field.is_some()
-                || opts.name.is_some()
-                || opts.file.is_some()
-                || opts.output.is_some()
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || opts.stdin
-                || (action == "group-add" && opts.yes)
-        }
-        "field-ls" | "attachment-ls" => {
-            opts.field.is_some()
-                || opts.name.is_some()
-                || opts.file.is_some()
-                || opts.output.is_some()
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || opts.stdin
-        }
-        "attachment-get" => {
-            opts.file.is_some()
-                || opts.name.is_some()
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.format.is_some()
-                || opts.is_output
-                || opts.strategy.is_some()
-                || opts.stdin
-        }
-        "otp" => {
-            opts.field.is_some()
-                || opts.file.is_some()
-                || opts.output.is_some()
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.strategy.is_some()
-                || opts.stdin
-        }
+    let allowed = match action {
+        "ls" | "search" => AllowedOptions {
+            allow_glob: true,
+            ..AllowedOptions::none()
+        },
+        "group-ls" => AllowedOptions::none(),
+        "show" | "field-ls" | "attachment-ls" => AllowedOptions {
+            allow_key: true,
+            ..AllowedOptions::none()
+        },
+        "get" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_format: true,
+            allow_name: true,
+            allow_is_output: true,
+            allow_clipboard: true,
+            allow_age_encrypt: true,
+            allow_age_recipients: true,
+            allow_output: true,
+            ..AllowedOptions::none()
+        },
+        "get-many" => AllowedOptions {
+            allow_requested_paths: true,
+            allow_field: true,
+            allow_format: true,
+            allow_is_output: true,
+            allow_age_encrypt: true,
+            allow_age_recipients: true,
+            allow_output: true,
+            ..AllowedOptions::none()
+        },
+        "field-get" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_format: true,
+            allow_name: true,
+            allow_is_output: true,
+            ..AllowedOptions::none()
+        },
+        "otp" => AllowedOptions {
+            allow_key: true,
+            allow_format: true,
+            allow_name: true,
+            allow_is_output: true,
+            ..AllowedOptions::none()
+        },
+        "set" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_assignments: true,
+            allow_literal_input: true,
+            allow_value_env: true,
+            allow_value_aliases: true,
+            allow_chars_alias: true,
+            allow_generate: true,
+            allow_generation_policy: true,
+            allow_size: true,
+            allow_username: true,
+            allow_url: true,
+            allow_notes: true,
+            allow_bins: true,
+            allow_file: true,
+            allow_stdin: true,
+            allow_age_decrypt: true,
+            allow_age_identity: true,
+            ..AllowedOptions::none()
+        },
+        "field-set" | "attachment-add" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_file: true,
+            allow_stdin: true,
+            ..AllowedOptions::none()
+        },
+        "attachment-get" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_output: true,
+            ..AllowedOptions::none()
+        },
+        "rm" => AllowedOptions {
+            allow_key: true,
+            allow_yes: true,
+            ..AllowedOptions::none()
+        },
+        "field-rm" | "attachment-rm" => AllowedOptions {
+            allow_key: true,
+            allow_field: true,
+            allow_yes: true,
+            ..AllowedOptions::none()
+        },
+        "ensure" => AllowedOptions {
+            allow_key: true,
+            allow_size: true,
+            allow_chars_alias: true,
+            allow_generation_policy: true,
+            allow_dry_run: true,
+            ..AllowedOptions::none()
+        },
+        "group-add" => AllowedOptions {
+            allow_key: true,
+            allow_dry_run: true,
+            ..AllowedOptions::none()
+        },
+        "group-rm" => AllowedOptions {
+            allow_key: true,
+            allow_yes: true,
+            allow_dry_run: true,
+            ..AllowedOptions::none()
+        },
         _ => return Err(err("unknown operation")),
     };
-    if invalid || vault_creation_options(opts) {
-        return Err(err("invalid operation option"));
+    validate_allowed_options(
+        opts,
+        &allowed,
+        "invalid operation option",
+        Some("--allow-plaintext is only valid for KeePass XML export"),
+        "age options are only valid for get, get many, and set",
+    )?;
+
+    match action {
+        "ls" => {
+            if opts
+                .glob
+                .is_some_and(|pattern| pattern.len() > nkeepass::MAX_LIST_PATTERN_BYTES)
+            {
+                return Err(err(format!(
+                    "glob pattern is {} bytes; the limit is {}",
+                    opts.glob.map_or(0, str::len),
+                    nkeepass::MAX_LIST_PATTERN_BYTES
+                )));
+            }
+        }
+        "search" => {
+            let query = opts.glob.ok_or_else(|| err("search query required"))?;
+            if query.is_empty() || query.len() > MAX_SEARCH_QUERY_BYTES {
+                return Err(err("invalid search query"));
+            }
+        }
+        "show" | "group-add" | "group-rm" => {
+            if opts.key.is_none() {
+                return Err(err("invalid operation option"));
+            }
+            if action == "group-rm" && !opts.yes && !opts.dry_run {
+                return Err(err("removal requires --yes"));
+            }
+        }
+        "get" => {
+            if (opts.output.is_some() && !opts.age_encrypt)
+                || (!opts.age_encrypt && !opts.age_recipients.is_empty())
+                || (opts.age_encrypt && opts.age_recipients.is_empty())
+            {
+                return Err(err("invalid operation option"));
+            }
+            opts.key.ok_or_else(|| err("--key required"))?;
+            let format = validate_output_format_options(opts)?;
+            if opts.age_encrypt && (format != "text" || opts.name.is_some() || opts.is_output) {
+                return Err(err("age encryption requires plain get output"));
+            }
+            if opts.clipboard
+                && (format != "text"
+                    || opts.name.is_some()
+                    || opts.is_output
+                    || opts.output.is_some()
+                    || opts.age_encrypt)
+            {
+                return Err(err("--clipboard requires plain get output"));
+            }
+        }
+        "get-many" => {
+            if opts.requested_paths.is_empty() || opts.requested_paths.len() > 256 {
+                return Err(err("get many requires 1 to 256 explicit paths"));
+            }
+            let mut seen = BTreeSet::new();
+            if opts.requested_paths.iter().any(|path| !seen.insert(*path)) {
+                return Err(err("get many paths must be unique"));
+            }
+            if opts
+                .requested_paths
+                .iter()
+                .map(|path| path.len())
+                .sum::<usize>()
+                > 64 * 1024
+            {
+                return Err(err("get many paths exceed size limit"));
+            }
+            if (opts.output.is_some() && !opts.age_encrypt)
+                || (!opts.age_encrypt && !opts.age_recipients.is_empty())
+                || (opts.age_encrypt && opts.age_recipients.is_empty())
+            {
+                return Err(err("invalid operation option"));
+            }
+            let format = opts.format.unwrap_or("text");
+            if is_named_format(format) {
+                validate_binding_names(format, opts.requested_paths.iter().copied())?;
+            }
+            if !is_named_format(format) && !matches!(format, "text" | "json" | "null") {
+                return Err(err("invalid output format"));
+            }
+            if opts.is_output && format != "azure-devops" {
+                return Err(err("--is-output requires the azure-devops format"));
+            }
+        }
+        "field-get" => {
+            opts.key.ok_or_else(|| err("--key required"))?;
+            let field = opts.field.ok_or_else(|| err("--field required"))?;
+            if matches!(field, "Password" | "Title" | "UserName" | "URL" | "Notes") {
+                return Err(err("custom field required"));
+            }
+            validate_output_format_options(opts)?;
+        }
+        "otp" => {
+            opts.key.ok_or_else(|| err("--key required"))?;
+            validate_output_format_options(opts)?;
+        }
+        "set" => {
+            if opts.key.is_none() || (!opts.age_decrypt && opts.age_identity.is_some()) {
+                return Err(err("invalid operation option"));
+            }
+            let has_input = opts.file.is_some()
+                || opts.stdin
+                || opts.literal_input.is_some()
+                || opts.value_env.is_some();
+            if opts.field.is_some()
+                && !has_input
+                && !opts.generate
+                && !opts.assignment_inputs.is_empty()
+            {
+                return Err(err(
+                    "legacy --field NAME requires a value source when combined with assignments",
+                ));
+            }
+            if opts.age_decrypt && !has_input {
+                return Err(err("age decryption requires an explicit value source"));
+            }
+        }
+        "field-set" => {
+            if opts.key.is_none() || (opts.file.is_none() && !opts.stdin) {
+                return Err(err("invalid operation option"));
+            }
+            let field = opts.field.unwrap_or("Password");
+            if opts.field.is_none()
+                || matches!(field, "Password" | "Title" | "UserName" | "URL" | "Notes")
+            {
+                return Err(err("custom field required"));
+            }
+        }
+        "attachment-add" => {
+            if opts.key.is_none() || (opts.file.is_none() && !opts.stdin) {
+                return Err(err("invalid operation option"));
+            }
+            let name = opts
+                .field
+                .ok_or_else(|| err("--field attachment name required"))?;
+            if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) {
+                return Err(err("invalid attachment name"));
+            }
+        }
+        "attachment-get" => {
+            opts.key.ok_or_else(|| err("--key required"))?;
+            opts.field
+                .ok_or_else(|| err("--field attachment name required"))?;
+            opts.output.ok_or_else(|| err("--output required"))?;
+        }
+        "rm" => {
+            opts.key.ok_or_else(|| err("--key required"))?;
+            if !opts.yes {
+                return Err(err("removal requires --yes"));
+            }
+        }
+        "field-rm" => {
+            opts.key.ok_or_else(|| err("--key required"))?;
+            let field = opts.field.ok_or_else(|| err("--field required"))?;
+            if matches!(field, "Password" | "Title" | "UserName" | "URL" | "Notes") {
+                return Err(err("custom field required"));
+            }
+            if !opts.yes {
+                return Err(err("removal requires --yes"));
+            }
+        }
+        "attachment-rm" => {
+            opts.key.ok_or_else(|| err("--key required"))?;
+            opts.field
+                .ok_or_else(|| err("--field attachment name required"))?;
+            if !opts.yes {
+                return Err(err("removal requires --yes"));
+            }
+        }
+        "ensure" | "field-ls" | "attachment-ls" => {
+            opts.key.ok_or_else(|| err("--key required"))?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -4099,64 +4517,90 @@ fn validate_automation_options(action: &str, opts: &Options<'_>) -> Result<()> {
     validate_new_options(action, opts)?;
     reject_age_options(opts)
         .map_err(|_| err("age options are not supported for automation commands"))?;
-    let unexpected = opts.field.is_some()
-        || opts.name.is_some()
-        || opts.output.is_some()
-        || opts.yes
-        || opts.size.is_some()
-        || opts.glob.is_some()
-        || opts.is_output;
+    if vault_creation_options(opts) {
+        return Err(err("invalid operation option"));
+    }
     match action {
         "import" => {
-            if opts.key.is_some()
-                || unexpected
-                || opts.allow_plaintext
-                || opts.strategy.is_some()
-                || usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1
-            {
+            let allowed = AllowedOptions {
+                allow_file: true,
+                allow_stdin: true,
+                allow_replace: true,
+                allow_dry_run: true,
+                allow_format: true,
+                ..AllowedOptions::none()
+            };
+            validate_allowed_options(
+                opts,
+                &allowed,
+                "invalid import option",
+                None,
+                "age options are not supported for automation commands",
+            )?;
+            if usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1 {
                 return Err(err("invalid import option"));
+            }
+            if let Some(format) = opts.format
+                && format != "keepass-xml"
+            {
+                return Err(err("unsupported import format"));
             }
         }
         "export" => {
-            if opts.output.is_none()
-                || opts.key.is_some()
-                || opts.field.is_some()
-                || opts.name.is_some()
-                || opts.file.is_some()
-                || opts.stdin
-                || opts.yes
-                || opts.dry_run
-                || opts.replace
-                || opts.size.is_some()
-                || opts.glob.is_some()
-                || opts.strategy.is_some()
-                || opts.is_output
-                || (opts.allow_plaintext && opts.format != Some("keepass-xml"))
-            {
-                return Err(
-                    if opts.allow_plaintext && opts.format != Some("keepass-xml") {
-                        err("--allow-plaintext is only valid with --format keepass-xml")
-                    } else {
-                        err("invalid export option")
-                    },
-                );
+            let allowed = AllowedOptions {
+                allow_output: true,
+                allow_format: true,
+                allow_allow_plaintext: true,
+                ..AllowedOptions::none()
+            };
+            validate_allowed_options(
+                opts,
+                &allowed,
+                "invalid export option",
+                None,
+                "age options are not supported for automation commands",
+            )?;
+            if opts.output.is_none() {
+                return Err(err("invalid export option"));
+            }
+            let xml = opts.format == Some("keepass-xml");
+            if opts.format.is_some() && !xml {
+                return Err(err("unsupported export format"));
+            }
+            if opts.allow_plaintext && !xml {
+                return Err(err(
+                    "--allow-plaintext is only valid with --format keepass-xml",
+                ));
+            }
+            if xml && !opts.allow_plaintext {
+                return Err(err(
+                    "KeePass XML export is plaintext; pass --allow-plaintext to confirm",
+                ));
             }
         }
         "sync" => {
-            if opts.key.is_some()
-                || unexpected
-                || opts.replace
-                || opts.format.is_some()
-                || opts.allow_plaintext
-                || usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1
-            {
+            let allowed = AllowedOptions {
+                allow_file: true,
+                allow_stdin: true,
+                allow_strategy: true,
+                allow_dry_run: true,
+                ..AllowedOptions::none()
+            };
+            validate_allowed_options(
+                opts,
+                &allowed,
+                "invalid sync option",
+                None,
+                "age options are not supported for automation commands",
+            )?;
+            if usize::from(opts.file.is_some()) + usize::from(opts.stdin) != 1 {
                 return Err(err("invalid sync option"));
             }
+            if let Some(strategy) = opts.strategy {
+                nkeepass::SyncStrategy::parse(strategy).map_err(|error| err(error.message()))?;
+            }
         }
-        _ => {}
-    }
-    if vault_creation_options(opts) {
-        return Err(err("invalid operation option"));
+        _ => return Err(err("unknown operation")),
     }
     Ok(())
 }
@@ -4237,12 +4681,13 @@ fn get_many(
         let mut bundle = BundleBuffer(Zeroizing::new(Vec::with_capacity(
             worst_encoded.min(64 * 1024 * 1024),
         )));
-        write_environment(
+        write_environment_for_sink(
             &mut bundle,
             &bindings,
             opts.format.unwrap_or("text"),
             opts.is_output,
             true,
+            !opts.age_encrypt && io::stdout().is_terminal(),
         )?;
         if opts.age_encrypt {
             let recipients = age_recipients(&opts.age_recipients)?;
@@ -5210,17 +5655,18 @@ struct EnvBinding<'a> {
 
 struct EnvOptions<'a> {
     bindings: Vec<EnvBinding<'a>>,
-    format: String,
-    common: Vec<String>,
+    format: &'a str,
+    common: Options<'a>,
 }
 
 fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
     let mut bindings = Vec::new();
     let mut current: Option<(&str, Option<&str>)> = None;
-    let mut common = Vec::new();
+    let mut common_refs: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = args[i].as_str();
+        match arg {
             "--key" => {
                 if current.is_some() {
                     return Err(err("--key must start a value binding"));
@@ -5230,7 +5676,7 @@ fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
             }
             "--field" if current.is_none() => return Err(err("--key required before --field")),
             "--name" if current.is_none() => return Err(err("--name requires a value binding")),
-            "--field" if current.is_some() => {
+            "--field" => {
                 i += 1;
                 let (key, field) = current.ok_or_else(|| err("--key required before --field"))?;
                 if field.is_some() {
@@ -5238,14 +5684,18 @@ fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
                 }
                 current = Some((key, Some(take_arg(args, i)?)));
             }
-            "--name" if current.is_some() => {
+            "--name" => {
                 i += 1;
                 let name = take_arg(args, i)?;
                 let (key, field) = current.take().ok_or_else(|| err("invalid value binding"))?;
                 bindings.push(EnvBinding { key, field, name });
             }
             _ => {
-                common.push(args[i].clone());
+                common_refs.push(arg);
+                if takes_option_value(arg) {
+                    i += 1;
+                    common_refs.push(take_arg(args, i)?);
+                }
             }
         }
         i += 1;
@@ -5258,45 +5708,25 @@ fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
             "secrets env requires at least one --key/--field/--name binding",
         ));
     }
-    let common_options = options(&common, Positional::Forbidden)?;
+    let common_options = options_from_refs(&common_refs, Positional::Forbidden)?;
     validate_new_options("env", &common_options)?;
     reject_age_options(&common_options)?;
-    if common_options.allow_plaintext {
-        return Err(err(
-            "--allow-plaintext is only valid for KeePass XML export",
-        ));
-    }
-    // `secrets env` has no value-file, mutation, or interchange options. Check
-    // this allowlist before resolving a vault or reading credentials.
-    if common_options.key.is_some()
-        || common_options.field.is_some()
-        || common_options.name.is_some()
-        || common_options.file.is_some()
-        || common_options.output.is_some()
-        || common_options.yes
-        || common_options.dry_run
-        || common_options.replace
-        || common_options.size.is_some()
-        || common_options.glob.is_some()
-        || common_options.stdin
-        || common_options.strategy.is_some()
-        || vault_creation_options(&common_options)
-    {
-        return Err(err("invalid operation option"));
-    }
-    let common_refs = common.iter().map(String::as_str).collect::<Vec<_>>();
-    let format = match common_refs
-        .iter()
-        .position(|argument| *argument == "--format")
-    {
-        Some(index) => common_refs
-            .get(index + 1)
-            .copied()
-            .ok_or_else(|| err("--format requires a value"))?
-            .to_owned(),
-        None => "shell".to_owned(),
+    // `secrets env` has no value-file, mutation, clipboard, or interchange options.
+    // Validate this allowlist before resolving a vault or reading credentials.
+    let allowed = AllowedOptions {
+        allow_format: true,
+        allow_is_output: true,
+        ..AllowedOptions::none()
     };
-    if !is_named_format(&format) && !matches!(format.as_str(), "json" | "null") {
+    validate_allowed_options(
+        &common_options,
+        &allowed,
+        "invalid operation option",
+        Some("--allow-plaintext is only valid for KeePass XML export"),
+        "age options are not supported for this command",
+    )?;
+    let format = common_options.format.unwrap_or("shell");
+    if !is_named_format(format) && !matches!(format, "json" | "null") {
         return Err(err("invalid output format"));
     }
     if common_options.is_output && format != "azure-devops" {
@@ -5305,7 +5735,7 @@ fn parse_env_options(args: &[String]) -> Result<EnvOptions<'_>> {
     Ok(EnvOptions {
         bindings,
         format,
-        common,
+        common: common_options,
     })
 }
 
@@ -5314,17 +5744,25 @@ fn emit_environment(
     format: &str,
     is_output: bool,
 ) -> Result<()> {
-    write_environment(&mut io::stdout().lock(), bindings, format, is_output, false)
+    write_environment_for_sink(
+        &mut io::stdout().lock(),
+        bindings,
+        format,
+        is_output,
+        false,
+        io::stdout().is_terminal(),
+    )
 }
 
 // Shared key/value formatting for env and get many. The latter supplies paths
 // as names, and changes only text/null framing, not quoting or name validation.
-fn write_environment(
+fn write_environment_for_sink(
     output: &mut impl Write,
     bindings: &[(String, SecretBytes)],
     format: &str,
     is_output: bool,
     values_only: bool,
+    stdout_is_tty: bool,
 ) -> Result<()> {
     if is_output && format != "azure-devops" {
         return Err(err("--is-output requires the azure-devops format"));
@@ -5350,15 +5788,34 @@ fn write_environment(
                     if name.as_bytes().contains(&0) || value.as_slice().contains(&0) {
                         return Err(err("null output cannot contain NUL in names or values"));
                     }
+                    if stdout_is_tty {
+                        if !values_only {
+                            validate_tty_raw_bytes(name.as_bytes())?;
+                        }
+                        validate_tty_raw_bytes(value.as_slice())?;
+                    }
                 }
             }
-            "text" if values_only => {}
+            "text" if values_only => {
+                if stdout_is_tty {
+                    for (_, value) in bindings {
+                        validate_tty_raw_bytes(value.as_slice())?;
+                    }
+                }
+            }
             _ => return Err(err("invalid output format")),
         }
     }
     if is_named_format(format) {
         for (name, value) in bindings {
-            write_value(output, value.as_slice(), format, Some(name), is_output)?;
+            write_value_for_sink(
+                output,
+                value.as_slice(),
+                format,
+                Some(name),
+                is_output,
+                stdout_is_tty,
+            )?;
         }
         return Ok(());
     }
@@ -5392,17 +5849,32 @@ fn write_environment(
             Ok(())
         }
         "json" => {
-            let mut serializer = serde_json::Serializer::new(&mut *output);
-            let mut map = serializer
-                .serialize_map(Some(bindings.len()))
-                .map_err(|_| err("cannot encode output"))?;
-            for (name, value) in bindings {
-                let text =
-                    std::str::from_utf8(value.as_slice()).map_err(|_| err("value is not UTF-8"))?;
-                map.serialize_entry(name, text)
+            if stdout_is_tty {
+                let mut serializer =
+                    serde_json::Serializer::with_formatter(&mut *output, TtyJsonFormatter);
+                let mut map = serializer
+                    .serialize_map(Some(bindings.len()))
                     .map_err(|_| err("cannot encode output"))?;
+                for (name, value) in bindings {
+                    let text = std::str::from_utf8(value.as_slice())
+                        .map_err(|_| err("value is not UTF-8"))?;
+                    map.serialize_entry(name, text)
+                        .map_err(|_| err("cannot encode output"))?;
+                }
+                map.end().map_err(|_| err("cannot encode output"))?;
+            } else {
+                let mut serializer = serde_json::Serializer::new(&mut *output);
+                let mut map = serializer
+                    .serialize_map(Some(bindings.len()))
+                    .map_err(|_| err("cannot encode output"))?;
+                for (name, value) in bindings {
+                    let text = std::str::from_utf8(value.as_slice())
+                        .map_err(|_| err("value is not UTF-8"))?;
+                    map.serialize_entry(name, text)
+                        .map_err(|_| err("cannot encode output"))?;
+                }
+                map.end().map_err(|_| err("cannot encode output"))?;
             }
-            map.end().map_err(|_| err("cannot encode output"))?;
             output
                 .write_all(b"\n")
                 .map_err(|_| err("cannot write output"))
@@ -5419,27 +5891,21 @@ fn write_environment(
 fn validate_init_options(opts: &Options<'_>) -> Result<()> {
     validate_new_options("init", opts)?;
     reject_age_options(opts)?;
-    if opts.allow_plaintext {
-        return Err(err(
-            "--allow-plaintext is only valid for KeePass XML export",
-        ));
-    }
-    if opts.key.is_some()
-        || opts.field.is_some()
-        || opts.name.is_some()
-        || opts.file.is_some()
-        || opts.output.is_some()
-        || opts.yes
-        || opts.dry_run
-        || opts.replace
-        || opts.glob.is_some()
-        || opts.format.is_some()
-        || opts.is_output
-        || opts.strategy.is_some()
-        || opts.stdin
-    {
-        return Err(err("invalid operation option"));
-    }
+    let allowed = AllowedOptions {
+        allow_path: true,
+        allow_size: true,
+        allow_kdf: true,
+        allow_json: true,
+        allow_generate_master_password: true,
+        ..AllowedOptions::none()
+    };
+    validate_allowed_options(
+        opts,
+        &allowed,
+        "invalid operation option",
+        Some("--allow-plaintext is only valid for KeePass XML export"),
+        "age options are not supported for this command",
+    )?;
     if opts
         .size
         .is_some_and(|size| size == 0 || size > MAX_GENERATED_PASSWORD)
@@ -5539,57 +6005,10 @@ fn kdf_parameters(write: &KdbxWriteOptions) -> serde_json::Value {
     reason = "the create-then-adopt ordering is the point, so it stays in one place"
 )]
 fn init_command(args: &[String], vault: Option<&str>, config: &mut Config) -> Result<()> {
-    // Filtering must not leave an extra, unwiped copy of --password VALUE.
-    let mut filtered = Zeroizing::new(Vec::with_capacity(args.len()));
-    let (mut as_json, mut generate_master) = (false, false);
-    let mut value_follows = false;
-    for arg in args {
-        if value_follows {
-            filtered.push(arg.clone());
-            value_follows = false;
-            continue;
-        }
-        match arg.as_str() {
-            "--json" if !as_json => as_json = true,
-            "--generate-master-password" if !generate_master => generate_master = true,
-            "--json" | "--generate-master-password" => {
-                return Err(err("invalid or duplicate option"));
-            }
-            _ => {
-                value_follows = matches!(
-                    arg.as_str(),
-                    "--key"
-                        | "--field"
-                        | "--username"
-                        | "--url"
-                        | "--notes"
-                        | "--bin"
-                        | "-b"
-                        | "--name"
-                        | "--file"
-                        | "--output"
-                        | "--password"
-                        | "--password-env"
-                        | "--password-file"
-                        | "--key-file"
-                        | "--size"
-                        | "--format"
-                        | "--strategy"
-                        | "--kdf"
-                        | "--memory"
-                        | "--iterations"
-                        | "--parallelism"
-                        | "--age-recipient"
-                        | "-r"
-                        | "--age-identity"
-                        | "-i"
-                );
-                filtered.push(arg.clone());
-            }
-        }
-    }
-    let opts = options(&filtered, Positional::Path)?;
+    let opts = options(args, Positional::Path)?;
     validate_init_options(&opts)?;
+    let as_json = opts.json;
+    let generate_master = opts.generate_master_password;
     let write = init_write_options(&opts)?;
     if generate_master
         && (opts.password.is_some()
@@ -6023,8 +6442,9 @@ fn warn_otp_expiring(name: &str, timestamp: u64, period: u64) {
     if let Some(remaining) = otp_seconds_remaining(timestamp, period)
         && remaining <= OTP_EXPIRY_WARNING_SECONDS
     {
+        let safe_name = sanitize_terminal_text(name);
         eprintln!(
-            "nkp: warning: the code bound to {name} expires in {remaining}s; \
+            "nkp: warning: the code bound to {safe_name} expires in {remaining}s; \
              a server that started its window early may already reject it"
         );
     }
@@ -6208,28 +6628,32 @@ fn config_list(config: &Config, glob: Option<&str>, as_json: bool) -> Result<()>
     Ok(())
 }
 
+fn list_aliases(config: &Config) -> Result<()> {
+    // Built before writing so one hostile record does not leave benign ones
+    // already on stdout.
+    let records = config
+        .aliases
+        .iter()
+        .map(|(name, alias)| {
+            check_alias_metadata(name, alias)?;
+            Ok(serde_json::json!({
+                "name": name,
+                "kind": alias.kind,
+                "target": alias.target,
+                "field": alias.field,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for record in records {
+        json(&record)?;
+    }
+    Ok(())
+}
+
 /// `config get` -- one key's value, in the shape a caller can use it in.
 fn config_get(config: &Config, key: ConfigKey) -> Result<()> {
     if key == ConfigKey::Aliases {
-        // Built for the same reason as a listing: one hostile record must not
-        // leave the benign ones already on stdout.
-        let records = config
-            .aliases
-            .iter()
-            .map(|(name, alias)| {
-                check_alias_metadata(name, alias)?;
-                Ok(serde_json::json!({
-                    "name": name,
-                    "kind": alias.kind,
-                    "target": alias.target,
-                    "field": alias.field,
-                }))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        for record in records {
-            json(&record)?;
-        }
-        return Ok(());
+        return list_aliases(config);
     }
     let value = config.value(key).ok_or_else(|| err(CONFIG_KEY_NOT_SET))?;
     check_config_value(value)?;
@@ -6284,10 +6708,15 @@ fn env_command(args: &[String], vault: Option<&str>, config: &Config) -> Result<
             return Err(err("--field required"));
         }
     }
+    if is_named_format(opts.format) {
+        validate_binding_names(
+            opts.format,
+            opts.bindings.iter().map(|binding| binding.name),
+        )?;
+    }
     let (path, _) = active_vault(vault, config)?;
-    let credential_options = options(&opts.common, Positional::Forbidden)?;
-    let is_output = credential_options.is_output;
-    let mut credentials = credentials(&credential_options)?;
+    let is_output = opts.common.is_output;
+    let mut credentials = credentials(&opts.common)?;
     let mut service = VaultService::default();
     let session = service
         .open(&path, &mut credentials, &KDBX_LIMITS)
@@ -6400,6 +6829,11 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
                 key_file = Some(take_arg(cli_args, i)?);
             }
             "--password-stdin" if !password_stdin => password_stdin = true,
+            "--allow-plaintext" => {
+                return Err(err(
+                    "--allow-plaintext is only valid for KeePass XML export",
+                ));
+            }
             _ => return Err(err("invalid exec option")),
         }
         i += 1;
@@ -6410,17 +6844,7 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     if keys.len() != env_names.len() {
         return Err(err("exec requires one --env name for each --key"));
     }
-    let mut seen = BTreeSet::new();
-    for name in &env_names {
-        if is_default_password_env_name(name) || password_env == Some(name.as_str()) {
-            return Err(err(
-                "exec environment name is reserved for the master password",
-            ));
-        }
-        if !valid_env_name(name) || !seen.insert(name.clone()) {
-            return Err(err("invalid or duplicate exec environment name"));
-        }
-    }
+    validate_exec_env_names_for_platform(&env_names, password_env, cfg!(windows))?;
     let opts = Options {
         password: password_arg,
         password_env,
@@ -6430,6 +6854,11 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
         ..Options::default()
     };
     validate_shared_options(&opts)?;
+    for name in &env_names {
+        if env::var_os(name).is_some() {
+            return Err(err("exec environment name already exists"));
+        }
+    }
     let (path, _) = active_vault(vault, config)?;
     let mut credentials = credentials(&opts)?;
     let mut service = VaultService::default();
@@ -6443,9 +6872,6 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     // Pinned once for the whole invocation; see `otp_now`.
     let timestamp = otp_now()?;
     for ((key, field), name) in keys.iter().zip(&fields).zip(&env_names) {
-        if env::var_os(name).is_some() {
-            return Err(err("exec environment name already exists"));
-        }
         let entry = resolve_service_selector(&service, session, key, config)?;
         let value: Zeroizing<String> = match field {
             // `exec` binds the password by default. A named field, and the `otp`
@@ -6619,18 +7045,50 @@ fn valid_env_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn is_default_password_env_name(name: &str) -> bool {
+fn env_name_key_for_platform(name: &str, windows: bool) -> Cow<'_, str> {
+    if windows {
+        Cow::Owned(name.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+fn is_default_password_env_name_for_platform(name: &str, windows: bool) -> bool {
     const RESERVED: [&str; 2] = ["NEO_KEEPASS_PASSWORD", "NKP_PASSWORD"];
-    RESERVED.iter().any(|reserved| {
-        #[cfg(windows)]
+    let key = env_name_key_for_platform(name, windows);
+    RESERVED
+        .iter()
+        .any(|reserved| key.as_ref() == env_name_key_for_platform(reserved, windows).as_ref())
+}
+
+#[cfg(test)]
+fn is_default_password_env_name(name: &str) -> bool {
+    is_default_password_env_name_for_platform(name, cfg!(windows))
+}
+
+fn validate_exec_env_names_for_platform(
+    env_names: &[String],
+    password_env: Option<&str>,
+    windows: bool,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    let password_env_key = password_env.map(|name| env_name_key_for_platform(name, windows));
+    for name in env_names {
+        let key = env_name_key_for_platform(name, windows);
+        if is_default_password_env_name_for_platform(name, windows)
+            || password_env_key
+                .as_ref()
+                .is_some_and(|pw_key| pw_key.as_ref() == key.as_ref())
         {
-            name.eq_ignore_ascii_case(reserved)
+            return Err(err(
+                "exec environment name is reserved for the master password",
+            ));
         }
-        #[cfg(not(windows))]
-        {
-            name == *reserved
+        if !valid_env_name(name) || !seen.insert(key.into_owned()) {
+            return Err(err("invalid or duplicate exec environment name"));
         }
-    })
+    }
+    Ok(())
 }
 
 fn public_secrets_action(action: &str) -> Option<&str> {
@@ -7237,12 +7695,18 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     // Keep the original JSON contract: machine consumers receive
                     // configured vault aliases only. Unaliased selections are
                     // additional human-facing context rows, not alias records.
+                    // Pre-validate all rows so a hostile alias never leaves
+                    // partial records on stdout.
+                    let mut records = Vec::new();
                     for (name, alias) in &config.aliases {
                         if alias.kind == Kind::Vault {
                             check_alias_metadata(name, alias)?;
                             let path = normalized_vault_text(&vault_path(&alias.target)?);
-                            json(&serde_json::json!({"alias": name, "path": path}))?;
+                            records.push(serde_json::json!({"alias": name, "path": path}));
                         }
+                    }
+                    for record in records {
+                        json(&record)?;
                     }
                     return Ok(());
                 }
@@ -7253,6 +7717,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     .transpose()?
                     .map(|path| normalized_vault_text(&path));
                 let mut listed_paths = BTreeSet::new();
+                let mut rows = Vec::new();
                 for (name, alias) in &config.aliases {
                     if alias.kind == Kind::Vault {
                         check_alias_metadata(name, alias)?;
@@ -7262,32 +7727,32 @@ fn run(args: &[String], program: &str) -> Result<()> {
                             .as_deref()
                             .is_some_and(|value| vault_path_key(value) == key);
                         listed_paths.insert(key);
-                        writeln!(
-                            io::stdout(),
+                        rows.push(format!(
                             "{name}\t{path}{}",
                             if current { "\t(current)" } else { "" }
-                        )
-                        .map_err(|_| err("cannot write output"))?;
+                        ));
                     }
                 }
                 if let Some(path) = &current_path
                     && listed_paths.insert(vault_path_key(path))
                 {
-                    writeln!(io::stdout(), "(current)\t{path}")
-                        .map_err(|_| err("cannot write output"))?;
+                    rows.push(format!("(current)\t{path}"));
                 }
                 if let Some(default) = &config.default_vault {
                     let path = normalized_vault_text(&resolve_vault(default, &config)?);
                     if listed_paths.insert(vault_path_key(&path)) {
-                        writeln!(io::stdout(), "(default)\t{path}")
-                            .map_err(|_| err("cannot write output"))?;
+                        rows.push(format!("(default)\t{path}"));
                     }
+                }
+                for row in rows {
+                    print_line(&row)?;
                 }
                 Ok(())
             }
             Some("show") if rest.len() == 1 || (rest.len() == 2 && rest[1] == "--json") => {
                 let (path, source) = active_vault(vault, &config)?;
                 let path = normalized_vault_text(&path);
+                check_config_value(&path)?;
                 let environment = if source == "environment" {
                     match environment_vault("NEO_KEEPASS_VAULT")? {
                         Some(value) => Some(value),
@@ -7310,6 +7775,9 @@ fn run(args: &[String], program: &str) -> Result<()> {
                         .filter(|alias| alias.kind == Kind::Vault)
                         .map(|_| current)
                 });
+                if let Some(name) = alias {
+                    check_config_value(name)?;
+                }
                 if rest.len() == 2 {
                     let legacy_alias = if source == "context" { alias } else { None };
                     json(
@@ -7339,19 +7807,13 @@ fn run(args: &[String], program: &str) -> Result<()> {
             _ => Err(err("invalid context command; see --help")),
         },
         "alias" => match rest.first().map(String::as_str) {
-            Some("list" | "ls") if rest.len() == 1 => {
-                for (name, alias) in &config.aliases {
-                    json(
-                        &serde_json::json!({"name": name, "kind": alias.kind, "target": alias.target, "field": alias.field}),
-                    )?;
-                }
-                Ok(())
-            }
+            Some("list" | "ls") if rest.len() == 1 => list_aliases(&config),
             Some("resolve") if rest.len() == 2 => {
-                let alias = config
+                let (name, alias) = config
                     .aliases
-                    .get(&rest[1])
+                    .get_key_value(&rest[1])
                     .ok_or_else(|| err("alias not found"))?;
+                check_alias_metadata(name, alias)?;
                 json(
                     &serde_json::json!({"kind": alias.kind, "target": alias.target, "field": alias.field}),
                 )
@@ -7500,7 +7962,7 @@ fn main() {
     let (command_args, color) = match extract_root_color_options(&command_args) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprintln!("nkp: {}", error.0);
+            eprintln!("nkp: {}", sanitize_terminal_text(&error.0));
             std::process::exit(error.1);
         }
     };
@@ -7524,12 +7986,13 @@ fn main() {
                 env::var("COLORTERM").ok().as_deref(),
             )
         };
+        let message = sanitize_terminal_text(&error.0);
         if style == 1 {
-            eprintln!("\x1b[1;31mnkp:\x1b[0m {}", error.0);
+            eprintln!("\x1b[1;31mnkp:\x1b[0m {message}");
         } else if style == 2 {
-            eprintln!("\x1b[1;38;2;255;90;90mnkp:\x1b[0m {}", error.0);
+            eprintln!("\x1b[1;38;2;255;90;90mnkp:\x1b[0m {message}");
         } else {
-            eprintln!("nkp: {}", error.0);
+            eprintln!("nkp: {message}");
         }
         std::process::exit(error.1);
     }
@@ -11636,5 +12099,142 @@ mod tests {
             "{escaping:?} should be refused for its parent-directory component"
         );
         assert!(!valid_name("a\nsecret"));
+    }
+
+    #[test]
+    fn env_parser_consumes_option_values_and_rejects_foreign_flags() {
+        let args = [
+            "--key".to_owned(),
+            "Demo/mail".to_owned(),
+            "--field".to_owned(),
+            "UserName".to_owned(),
+            "--name".to_owned(),
+            "DEMO".to_owned(),
+            "--password-env".to_owned(),
+            "--key".to_owned(),
+        ];
+        let parsed = parse_env_options(&args).unwrap();
+        assert_eq!(parsed.common.password_env, Some("--key"));
+        assert_eq!(parsed.bindings.len(), 1);
+        assert_eq!(parsed.bindings[0].key, "Demo/mail");
+        assert_eq!(parsed.bindings[0].field, Some("UserName"));
+        assert_eq!(parsed.bindings[0].name, "DEMO");
+
+        let clipboard = [
+            "--key".to_owned(),
+            "Demo/mail".to_owned(),
+            "--field".to_owned(),
+            "UserName".to_owned(),
+            "--name".to_owned(),
+            "DEMO".to_owned(),
+            "--clipboard".to_owned(),
+        ];
+        assert_eq!(
+            parse_env_options(&clipboard).err().unwrap().0,
+            "invalid operation option"
+        );
+    }
+
+    #[test]
+    fn exec_env_name_collision_respects_platform_case_semantics() {
+        let names = vec!["Foo".to_owned(), "foo".to_owned()];
+        assert!(validate_exec_env_names_for_platform(&names, None, false).is_ok());
+        assert_eq!(
+            validate_exec_env_names_for_platform(&names, None, true)
+                .unwrap_err()
+                .0,
+            "invalid or duplicate exec environment name"
+        );
+
+        let single = vec!["secret_pw".to_owned()];
+        assert!(validate_exec_env_names_for_platform(&single, Some("SECRET_PW"), false).is_ok());
+        assert_eq!(
+            validate_exec_env_names_for_platform(&single, Some("SECRET_PW"), true)
+                .unwrap_err()
+                .0,
+            "exec environment name is reserved for the master password"
+        );
+    }
+
+    #[test]
+    fn tty_raw_and_json_output_preserve_pipes_and_protect_terminals() {
+        let unsafe_c1 = "secret\u{009b}31m\u{007f}end";
+        let mut piped_raw = Vec::new();
+        write_value_for_sink(
+            &mut piped_raw,
+            unsafe_c1.as_bytes(),
+            "text",
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(piped_raw, unsafe_c1.as_bytes());
+
+        let mut tty_raw = Vec::new();
+        let refused = write_value_for_sink(
+            &mut tty_raw,
+            unsafe_c1.as_bytes(),
+            "text",
+            None,
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert!(tty_raw.is_empty());
+        assert!(refused.0.contains("redirect stdout to a file or pipe"));
+
+        let safe_multiline = b"line1\tcol\nline2";
+        let mut tty_null = Vec::new();
+        write_value_for_sink(&mut tty_null, safe_multiline, "null", None, false, true).unwrap();
+        assert_eq!(tty_null, b"line1\tcol\nline2\0");
+
+        let mut piped_json = Vec::new();
+        write_value_for_sink(
+            &mut piped_json,
+            unsafe_c1.as_bytes(),
+            "json",
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(piped_json.windows(2).any(|w| w == [0xc2, 0x9b]));
+        assert!(piped_json.contains(&0x7f));
+
+        let mut tty_json = Vec::new();
+        write_value_for_sink(
+            &mut tty_json,
+            unsafe_c1.as_bytes(),
+            "json",
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(!tty_json.windows(2).any(|w| w == [0xc2, 0x9b]));
+        assert!(!tty_json.contains(&0x7f));
+        let tty_str = std::str::from_utf8(&tty_json).unwrap();
+        assert!(tty_str.contains("\\u009b"));
+        assert!(tty_str.contains("\\u007f"));
+        let decoded: serde_json::Value = serde_json::from_slice(&tty_json).unwrap();
+        assert_eq!(decoded["value"].as_str().unwrap(), unsafe_c1);
+
+        let bindings = vec![
+            ("FIRST".to_owned(), SecretBytes::from_vec(b"safe".to_vec())),
+            (
+                "SECOND".to_owned(),
+                SecretBytes::from_vec(unsafe_c1.as_bytes().to_vec()),
+            ),
+        ];
+        let mut tty_multi_null = Vec::new();
+        assert!(
+            write_environment_for_sink(&mut tty_multi_null, &bindings, "null", false, false, true)
+                .is_err()
+        );
+        assert!(
+            tty_multi_null.is_empty(),
+            "refusal must precede first disclosure"
+        );
     }
 }

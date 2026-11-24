@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use neotales_keepass::{
-    Attachment, Entry, Field, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions,
+    Attachment, Entry, Field, Group, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions,
     KeePassDatabase, ProtectedValue,
 };
 use tempfile::TempDir;
@@ -1268,4 +1268,239 @@ fn password_file_is_safe_for_automation_output_commands() {
             .with_file_name("master.password.tmp")
             .exists()
     );
+}
+
+#[test]
+fn env_accepts_switch_like_password_value_without_splitting_bindings() {
+    let mut database = KeePassDatabase::default();
+    let mut group = Group::new("Demo");
+    let mut entry = Entry::new("mail");
+    entry.username = "demo-user".into();
+    entry.password = ProtectedValue::from_text("demo-pw");
+    group.entries.push(entry);
+    database.root.groups.push(group);
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("switch-pw.kdbx");
+    KdbxFile::save(
+        &database,
+        std::fs::File::create(&vault).unwrap(),
+        &mut KdbxCredentials::password("--key").unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "env",
+            "-k",
+            "Demo/mail",
+            "-F",
+            "UserName",
+            "--name",
+            "DEMO",
+            "--password",
+            "--key",
+        ])
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(success(&output), b"export DEMO='demo-user';\n");
+
+    let env_named_key = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "env",
+            "-k",
+            "Demo/mail",
+            "-F",
+            "UserName",
+            "--name",
+            "DEMO",
+            "--password-env",
+            "--key",
+        ])
+        .env("--key", "--key")
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(success(&env_named_key), b"export DEMO='demo-user';\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tty_protects_raw_and_json_while_pipes_preserve_exact_bytes() {
+    let mut database = KeePassDatabase::default();
+    let c1_and_del = "c1-\u{009b}31m-\u{007f}-secret-SENTINEL";
+    let esc_value = "esc-\u{001b}[31m-secret-SENTINEL";
+    let safe_multiline = "safe\tline1\nline2";
+
+    let mut c1_entry = Entry::new("C1Entry");
+    c1_entry.password = ProtectedValue::from_text(c1_and_del);
+    database.add_entry(c1_entry);
+
+    let mut esc_entry = Entry::new("EscEntry");
+    esc_entry.password = ProtectedValue::from_text(esc_value);
+    database.add_entry(esc_entry);
+
+    let mut safe_entry = Entry::new("SafeMultiline");
+    safe_entry.password = ProtectedValue::from_text(safe_multiline);
+    database.add_entry(safe_entry);
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("tty-raw.kdbx");
+    KdbxFile::save(
+        &database,
+        std::fs::File::create(&vault).unwrap(),
+        &mut KdbxCredentials::password(PASSWORD).unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+
+    // 1) Piped stdout preserves exact raw and wire JSON bytes (including C0/C1/DEL).
+    let piped_raw = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "get",
+            "C1Entry",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ])
+        .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(success(&piped_raw), c1_and_del.as_bytes());
+
+    let piped_json = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "get",
+            "C1Entry",
+            "--format",
+            "json",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ])
+        .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let piped_json_bytes = success(&piped_json);
+    assert!(piped_json_bytes.windows(2).any(|w| w == [0xc2, 0x9b]));
+    assert!(piped_json_bytes.contains(&0x7f));
+
+    // 2) Real PTY stdout checks raw refusal, safe multiline/null preservation,
+    // and TTY-safe JSON escaping.
+    const PTY_DRIVER: &str = r#"
+import errno, json, os, pty, select, subprocess, sys, time
+
+binary, vault, mode = sys.argv[1:]
+master, slave = pty.openpty()
+base_args = [binary, "--vault", vault]
+if mode == "raw_c1_refused":
+    args = base_args + ["--color=always", "get", "C1Entry", "--password-env", "NKEEPASS_TEST_PASSWORD"]
+elif mode == "null_esc_refused":
+    args = base_args + ["get", "EscEntry", "--format", "null", "--password-env", "NKEEPASS_TEST_PASSWORD"]
+elif mode == "many_partial_refused":
+    args = base_args + ["get", "many", "SafeMultiline", "C1Entry", "--password-env", "NKEEPASS_TEST_PASSWORD"]
+elif mode == "safe_null_ok":
+    args = base_args + ["get", "SafeMultiline", "--format", "null", "--password-env", "NKEEPASS_TEST_PASSWORD"]
+elif mode == "json_c1_safe":
+    args = base_args + ["get", "C1Entry", "--format", "json", "--password-env", "NKEEPASS_TEST_PASSWORD"]
+elif mode == "env_json_c1_safe":
+    args = base_args + ["env", "-k", "C1Entry", "-F", "Password", "--name", "VAL", "--format", "json", "--password-env", "NKEEPASS_TEST_PASSWORD"]
+else:
+    raise SystemExit(2)
+
+child = subprocess.Popen(args, stdout=slave, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+os.close(slave)
+pty_bytes = bytearray()
+deadline = time.monotonic() + 20
+while True:
+    remaining = deadline - time.monotonic()
+    assert remaining > 0, "PTY deadline"
+    assert select.select([master], [], [], remaining)[0], "PTY read timeout"
+    try:
+        chunk = os.read(master, 4096)
+    except OSError as error:
+        if error.errno == errno.EIO:
+            break
+        raise
+    if not chunk:
+        break
+    pty_bytes.extend(chunk)
+_, stderr = child.communicate(timeout=20)
+os.close(master)
+
+if mode in ("raw_c1_refused", "null_esc_refused", "many_partial_refused"):
+    assert child.returncode != 0, (mode, child.returncode)
+    assert pty_bytes == b"", (mode, pty_bytes)
+    assert b"SENTINEL" not in stderr, (mode, stderr)
+    assert b"redirect stdout to a file or pipe" in stderr, (mode, stderr)
+elif mode == "safe_null_ok":
+    assert child.returncode == 0, (mode, stderr)
+    # PTY ONLCR may translate \n to \r\n; assert the NUL delimiter itself is intact.
+    assert b"\x00" in pty_bytes and b"safe\tline1" in pty_bytes and b"line2\x00" in pty_bytes, pty_bytes
+elif mode in ("json_c1_safe", "env_json_c1_safe"):
+    assert child.returncode == 0, (mode, stderr)
+    assert b"\xc2\x9b" not in pty_bytes and b"\x7f" not in pty_bytes, pty_bytes
+    assert b"\\u009b" in pty_bytes and b"\\u007f" in pty_bytes, pty_bytes
+    decoded = json.loads(pty_bytes.decode("utf-8"))
+    val = decoded["value"] if mode == "json_c1_safe" else decoded["VAL"]
+    assert val == "c1-\u009b31m-\u007f-secret-SENTINEL", val
+"#;
+
+    for mode in [
+        "raw_c1_refused",
+        "null_esc_refused",
+        "many_partial_refused",
+        "safe_null_ok",
+        "json_c1_safe",
+        "env_json_c1_safe",
+    ] {
+        let status = Command::new("timeout")
+            .args(["--kill-after=2s", "25s", "python3"])
+            .args([
+                "-c",
+                PTY_DRIVER,
+                env!("CARGO_BIN_EXE_nkp"),
+                vault.to_str().unwrap(),
+                mode,
+            ])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", dir.path())
+            .env("NKP_CONFIG_DIR", dir.path().join("config"))
+            .env("NKP_DATA_DIR", dir.path().join("data"))
+            .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+            .env("TERM", "xterm")
+            .stdin(Stdio::null())
+            .status()
+            .expect("run PTY driver");
+        assert!(status.success(), "PTY mode {mode} failed");
+    }
 }

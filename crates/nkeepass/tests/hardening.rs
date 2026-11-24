@@ -1141,3 +1141,268 @@ fn config_write_uses_the_authenticated_account_when_username_is_forged() {
         "config ACL trusted the caller-controlled USERNAME variable"
     );
 }
+
+#[test]
+fn per_route_allowlist_rejects_foreign_flags_and_modes_before_vault_or_credentials() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing-vault.kdbx");
+    let init_target = tmp.path().join("must-not-exist.kdbx");
+    let init_str = init_target.to_str().unwrap();
+
+    let run_missing = |args: &[&str]| -> Output {
+        Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .args(["--vault", missing.to_str().unwrap()])
+            .args(args)
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_PASSWORD")
+            .env_remove("NKP_PASSWORD")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    let run_init = |extra: &[&str]| -> Output {
+        let mut args = vec!["init", init_str];
+        args.extend_from_slice(extra);
+        Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .args(&args)
+            .env("XDG_CONFIG_HOME", tmp.path().join("init-config"))
+            .env("XDG_DATA_HOME", tmp.path().join("init-data"))
+            .env_remove("NEO_KEEPASS_VAULT")
+            .env_remove("NEO_KEEPASS_VAULT_PATH")
+            .env_remove("NEO_KEEPASS_PASSWORD")
+            .env_remove("NKP_PASSWORD")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    // env / secrets env foreign flags (especially --clipboard and --allow-plaintext)
+    for prefix in [vec!["env"], vec!["secrets", "env"]] {
+        for foreign in [
+            vec!["--clipboard"],
+            vec!["--username", "u"],
+            vec!["--url", "https://example.test"],
+            vec!["--notes", "n"],
+            vec!["-b", "a=b"],
+            vec!["--allow-plaintext"],
+            vec!["--kdf", "argon2id"],
+            vec!["--json"],
+            vec!["--generate-master-password"],
+        ] {
+            let mut args = prefix.clone();
+            args.extend(["-k", "Demo/mail", "-F", "UserName", "--name", "DEMO"]);
+            args.extend(foreign);
+            let output = run_missing(&args);
+            assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+            assert!(output.stdout.is_empty(), "{args:?} wrote stdout");
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("password source"),
+                "{args:?} reached credential check: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    // init foreign flags must fail before credential or directory checks
+    for foreign in [
+        vec!["--username", "u"],
+        vec!["--url", "https://example.test"],
+        vec!["--notes", "n"],
+        vec!["-b", "a=b"],
+        vec!["--clipboard"],
+        vec!["--allow-plaintext"],
+        vec!["-c", "24"],
+        vec!["--chars", "24"],
+        vec!["--value", "x"],
+        vec!["--value-env", "X"],
+        vec!["--value-file", "x"],
+        vec!["--value-stdin"],
+        vec!["--age-encrypt"],
+        vec!["--age-decrypt"],
+        vec!["-r", "age1x"],
+        vec!["-i", "id"],
+    ] {
+        let output = run_init(&foreign);
+        assert!(!output.status.success(), "init {foreign:?} succeeded");
+        assert!(output.stdout.is_empty(), "init {foreign:?} wrote stdout");
+        assert!(!init_target.exists(), "init {foreign:?} created a vault");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("password source"),
+            "init {foreign:?} reached credential check: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // interchange routes reject metadata/attachment/clipboard flags before credentials
+    for foreign in [
+        vec!["--username", "u"],
+        vec!["--url", "https://example.test"],
+        vec!["--notes", "n"],
+        vec!["-b", "a=b"],
+        vec!["--clipboard"],
+    ] {
+        for base in [
+            vec!["import", "--file", "missing.json"],
+            vec!["export", "--output", "/tmp/unused.json"],
+            vec!["sync", "--file", "missing.json"],
+            vec!["automation", "export", "--output", "/tmp/unused.json"],
+        ] {
+            let mut args = base;
+            args.extend(foreign.iter().copied());
+            let output = run_missing(&args);
+            assert!(!output.status.success(), "{args:?} succeeded");
+            assert!(output.stdout.is_empty(), "{args:?} wrote stdout");
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("password source"),
+                "{args:?} reached credential check: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    // regular, grouped, and exec routes reject foreign flags & invalid modes before credentials
+    let pre_unlock_rejections: [&[&str]; 14] = [
+        &["ls", "--allow-plaintext"],
+        &["search", "needle", "--clipboard"],
+        &["show", "Demo/mail", "--json"],
+        &["get", "Demo/mail", "--clipboard", "--format", "json"],
+        &[
+            "get",
+            "Demo/mail",
+            "--age-encrypt",
+            "-r",
+            "age1x",
+            "--format",
+            "json",
+        ],
+        &["set", "Demo/mail", "--age-decrypt"],
+        &["rm", "Demo/mail"],
+        &["otp", "Demo/mail", "--format", "shell"],
+        &["field", "get", "Demo/mail", "--field", "Password"],
+        &[
+            "field",
+            "set",
+            "Demo/mail",
+            "--field",
+            "Custom",
+            "--value",
+            "x",
+        ],
+        &["files", "ls", "Demo/mail", "--clipboard"],
+        &["group", "ls", "Demo"],
+        &["group", "rm", "Demo"],
+        &[
+            "x",
+            "-k",
+            "Demo/mail",
+            "--env",
+            "OUT",
+            "--clipboard",
+            "--",
+            "/bin/true",
+        ],
+    ];
+    for args in pre_unlock_rejections {
+        let output = run_missing(args);
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(output.stdout.is_empty(), "{args:?} wrote stdout");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("password source"),
+            "{args:?} reached credential check: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn env_and_exec_consume_option_values_uniformly_and_sanitize_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing.kdbx");
+
+    // `env` must consume `--key` as the value of `--password-env`, not split it
+    // as a new binding switch (which previously failed with "missing argument").
+    let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            missing.to_str().unwrap(),
+            "env",
+            "-k",
+            "Demo/mail",
+            "-F",
+            "UserName",
+            "--name",
+            "DEMO",
+            "--password-env",
+            "--key",
+        ])
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env_remove("--key")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_static_failure(&output, "password environment variable unavailable");
+
+    // `exec` rejects `--password-env` colliding with `--env` before credentials.
+    let exec_collision = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            missing.to_str().unwrap(),
+            "x",
+            "-k",
+            "Demo/mail",
+            "--env",
+            "SHARED_VAR",
+            "--password-env",
+            "SHARED_VAR",
+            "--",
+            "/bin/true",
+        ])
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_static_failure(
+        &exec_collision,
+        "exec environment name is reserved for the master password",
+    );
+
+    // Hostile argv[0] control bytes must never reach stdout or stderr raw.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let help = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .arg0("nkp\u{001b}[2J\u{009b}31m")
+            .arg("--help")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(help.status.success());
+        let help_text = String::from_utf8_lossy(&help.stdout);
+        assert!(
+            !help_text.chars().any(|ch| ch.is_control() && ch != '\n'),
+            "help echoed raw control bytes from argv[0]: {help_text:?}"
+        );
+
+        let err_out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .arg0("nkp\u{001b}[2J\u{009b}31m")
+            .arg("unknown-command")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!err_out.status.success());
+        let err_text = String::from_utf8_lossy(&err_out.stderr);
+        assert!(
+            !err_text.chars().any(|ch| ch.is_control() && ch != '\n'),
+            "stderr echoed raw control bytes: {err_text:?}"
+        );
+    }
+}
