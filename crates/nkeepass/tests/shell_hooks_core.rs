@@ -856,6 +856,7 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     assert!(bash_init.contains("# bash comp"));
     assert!(bash_init.contains("PROMPT_COMMAND"));
     assert!(bash_init.contains("__NKP_ENV_STATE=\"${_nkp_env_state:-}\""));
+    assert!(bash_init.contains("status)\n          __NKP_ENV_STATE=\"${_nkp_env_state:-}\""));
     assert!(bash_init.contains("_nkp_hook --startup"));
     assert!(!bash_init.contains("--password-fd"));
     assert!(!bash_init.contains("\r\n"));

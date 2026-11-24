@@ -1725,6 +1725,20 @@ fn vault_path_key_for_platform(text: &str, windows: bool) -> String {
     }
 }
 
+/// Platform-normalized deduplication key for vault paths (strips `/`->`\` and
+/// folds ASCII case on Windows, matching `fs_safe::path_lookup_key`).
+fn platform_vault_dedup_key_for_platform(text: &str, windows: bool) -> String {
+    if windows {
+        text.replace('/', "\\").to_ascii_lowercase()
+    } else {
+        text.to_owned()
+    }
+}
+
+fn platform_vault_dedup_key(path: &Path) -> String {
+    platform_vault_dedup_key_for_platform(&normalized_vault_text(path), cfg!(windows))
+}
+
 /// Resolves an explicit `init` target to an absolute, lexically normalized
 /// path. `.` components are harmless and removed; `..` is rejected rather than
 /// allowed to escape the invocation directory or masquerade as a normalized
@@ -7509,7 +7523,7 @@ impl<'a> MultiVaultLookup<'a> {
     ) -> std::result::Result<(&VaultService, nkeepass::SessionId), nkeepass::template::TemplateError>
     {
         use nkeepass::template::TemplateError;
-        let key = vault_path_key(&normalized_vault_text(vault_path));
+        let key = platform_vault_dedup_key(vault_path);
         if !self.open_vaults.contains_key(&key) {
             if self.preopen_safe {
                 nkeepass::hook::preopen_vault_fingerprint(vault_path)
@@ -8388,7 +8402,7 @@ fn collect_hook_vault_paths(
     let mut cached_default_vault: Option<PathBuf> = None;
 
     let mut push_path = |path: PathBuf| -> Result<()> {
-        let key = vault_path_key(&normalized_vault_text(&path));
+        let key = platform_vault_dedup_key(&path);
         if seen_keys.insert(key) {
             if paths.len() >= nkeepass::manifest::MAX_VAULTS_PER_HOOK {
                 return Err(err("manifest chain exceeds maximum distinct vault count"));
@@ -8540,16 +8554,17 @@ fn run_hook_with_mode(
                 .map_err(|e| err(e.to_string()))?;
                 return emit_hook_outcome(shell, &outcome);
             }
-            if mode != HookMode::Prompt {
-                let outcome = nkeepass::hook::compute_transition(
-                    &encoded_state,
-                    nkeepass::hook::TransitionAction::Leave,
-                    |name| env::var_os(name),
-                )
-                .map_err(|e| err(e.to_string()))?;
-                emit_hook_outcome(shell, &outcome)?;
+            if mode == HookMode::Prompt {
+                return Err(trust_cli_error(error));
             }
-            return Err(trust_cli_error(error));
+            let warned = nkeepass::hook::compute_warned_digest("trust.json", "store-error");
+            return emit_blocked_or_fail(
+                shell,
+                mode,
+                &encoded_state,
+                &warned,
+                &format!("nkp: {error}"),
+            );
         }
     };
 
@@ -8711,7 +8726,17 @@ fn run_hook_with_mode(
             ) = &binding.source
             {
                 if !nkeepass::template::is_valid_secret_text(lit, true) {
-                    return Err(err("value contains disallowed control or BiDi characters"));
+                    let warned = nkeepass::hook::compute_warned_digest(
+                        &chain_entries[0].path,
+                        &chain_digest,
+                    );
+                    return emit_blocked_or_fail(
+                        shell,
+                        mode,
+                        &encoded_state,
+                        &warned,
+                        "nkp: value contains disallowed control or BiDi characters",
+                    );
                 }
                 out.push((name.clone(), Zeroizing::new(lit.clone())));
             }
@@ -8839,7 +8864,7 @@ fn run_hook_with_mode(
         |name| env::var_os(name),
     ) {
         Ok(outcome) => emit_hook_outcome(shell, &outcome),
-        Err(error @ nkeepass::hook::HookError::UnsafeAmbientVar { .. }) => {
+        Err(error) => {
             if mode == HookMode::Prompt {
                 return Err(err(error.to_string()));
             }
@@ -8853,7 +8878,6 @@ fn run_hook_with_mode(
             eprintln!("nkp: {error}");
             Ok(())
         }
-        Err(error) => Err(err(error.to_string())),
     }
 }
 
@@ -9046,7 +9070,7 @@ fn help_request(args: &[String]) -> Option<Vec<String>> {
         if matches!(arg, "--help" | "-h") {
             if route_tokens
                 .first()
-                .is_some_and(|word| matches!(word.as_str(), "__complete" | "__hook" | "__agent"))
+                .is_some_and(|word| matches!(word.as_str(), "__complete" | "__hook"))
             {
                 return None;
             }
@@ -9120,8 +9144,6 @@ fn takes_option_value(option: &str) -> bool {
             | "--env-file"
             | "--shell"
             | "--cwd"
-            | "--ttl"
-            | "--idle"
     )
 }
 
@@ -9555,7 +9577,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
                 ));
             }
             "completion" | "version" | "--version" | "use" | "alias" | "config" | "trust"
-            | "untrust" | "shell" | "__hook" | "__agent" => {
+            | "untrust" | "shell" | "__hook" => {
                 return Err(err("this command does not accept --vault"));
             }
             "context" if rest.first().map(String::as_str) != Some("show") => {
@@ -9948,12 +9970,10 @@ fn main() {
 fn machine_diagnostic_route(args: &[String]) -> bool {
     let (index, route) = parsed_command_route(args);
     // Private protocol and version switch deliberately are not help nodes.
-    if args.get(index).is_some_and(|token| {
-        matches!(
-            token.as_str(),
-            "__complete" | "__hook" | "__agent" | "--version"
-        )
-    }) {
+    if args
+        .get(index)
+        .is_some_and(|token| matches!(token.as_str(), "__complete" | "__hook" | "--version"))
+    {
         return true;
     }
     let mut commands = ROOT_COMMANDS;
@@ -9974,7 +9994,6 @@ fn machine_diagnostic_route(args: &[String]) -> bool {
         "completion"
             | "__complete"
             | "__hook"
-            | "__agent"
             | "version"
             | "exec"
             | "x"
@@ -10349,7 +10368,6 @@ mod tests {
         assert!(machine_diagnostic_route(&args));
         for plain_route in [
             ["__hook", "bash"].as_slice(),
-            ["__agent"].as_slice(),
             ["inject", "tmpl.txt"].as_slice(),
             ["shell", "init", "bash"].as_slice(),
             ["shell", "completions", "fish"].as_slice(),
@@ -12605,6 +12623,14 @@ mod tests {
         assert_ne!(
             vault_path_key_for_platform("/work/Vault.kdbx", false),
             vault_path_key_for_platform("/work/vault.kdbx", false)
+        );
+        assert_eq!(
+            platform_vault_dedup_key_for_platform("C:/Users/Work/Vault.kdbx", true),
+            platform_vault_dedup_key_for_platform("C:\\Users\\Work\\vault.kdbx", true)
+        );
+        assert_ne!(
+            platform_vault_dedup_key_for_platform("/work/Vault.kdbx", false),
+            platform_vault_dedup_key_for_platform("/work/vault.kdbx", false)
         );
     }
 

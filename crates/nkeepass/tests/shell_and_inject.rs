@@ -872,10 +872,12 @@ if env | grep -q '^__NKP_ENV_STATE='; then
   exit 9
 fi
 
-# Verify non-disclosing shell status while active (pass state only via _nkp_env_state check)
-status_json="$(__NKP_ENV_STATE="${{_nkp_env_state:-}}" "$NKP_BIN" shell status --json)"
+# Verify non-disclosing shell status directly through the `nkp` shell wrapper
+status_json="$(nkp shell status --json)"
 printf '%s\n' "$status_json" | grep -q '"status":"active"'
 printf '%s\n' "$status_json" | grep -q '"API_KEY"'
+printf '%s\n' "$status_json" | grep -q '"LITERAL_VAR"'
+printf '%s\n' "$status_json" | grep -q '"EXISTING"'
 if printf '%s\n' "$status_json" | grep -q '{STRIPE_SECRET}'; then
   echo "SECRET leaked in shell status" >&2
   exit 9
@@ -941,6 +943,119 @@ tick_prompt
     assert!(
         bash_out.status.success(),
         "real bash lifecycle failed (code {:?}):\nstdout:\n{}\nstderr:\n{}",
+        bash_out.status.code(),
+        String::from_utf8_lossy(&bash_out.stdout),
+        String::from_utf8_lossy(&bash_out.stderr),
+    );
+}
+
+#[test]
+fn real_bash_reverts_secrets_when_trust_store_fails_or_is_corrupt() {
+    let fx = TestFixture::new();
+    let proj = fx.dir.path().join("project");
+    let outside = fx.dir.path().join("outside");
+    fs::create_dir(&proj).unwrap();
+    fs::create_dir(&outside).unwrap();
+
+    write_private(
+        &proj.join(".nkp.toml"),
+        &format!(
+            "version = 1\nvault = \"{}\"\nenv_file = \".env\"\n\n[env]\nAPI_KEY = \"projects/myapp/stripe\"\n",
+            fx.vault.to_str().unwrap()
+        ),
+    );
+    write_private(
+        &proj.join(".env"),
+        "LITERAL_VAR=from_dotenv\nEXISTING=overwritten\n",
+    );
+
+    let trust_out = fx
+        .cmd()
+        .current_dir(&proj)
+        .args(["trust"])
+        .output()
+        .unwrap();
+    assert!(trust_out.status.success());
+
+    let trust_json = fx.data_dir.join("nkeepass").join("trust.json");
+    assert!(trust_json.is_file());
+
+    let bash_bin = if Path::new("/usr/bin/bash").exists() {
+        "/usr/bin/bash"
+    } else {
+        "bash"
+    };
+
+    let script = format!(
+        r#"
+set -euo pipefail
+export EXISTING=before
+eval "$("$NKP_BIN" shell init bash)"
+
+tick_prompt() {{
+  if declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a '; then
+    local fn
+    for fn in "${{PROMPT_COMMAND[@]}}"; do
+      true
+      "$fn"
+    done
+  else
+    true
+    eval "${{PROMPT_COMMAND:-}}"
+  fi
+}}
+
+cd "$PROJ_DIR"
+tick_prompt
+[ "$API_KEY" = "{STRIPE_SECRET}" ]
+[ "$LITERAL_VAR" = "from_dotenv" ]
+[ "$EXISTING" = "overwritten" ]
+
+# 1. Unsafe permissions on trust.json (chmod 644) while leaving dir must revert secrets!
+chmod 644 "$TRUST_JSON"
+cd "$OUTSIDE_DIR"
+tick_prompt
+[ "${{API_KEY:-__UNSET__}}" = "__UNSET__" ]
+[ "${{LITERAL_VAR:-__UNSET__}}" = "__UNSET__" ]
+[ "$EXISTING" = "before" ]
+
+# Restore permissions, re-enter and re-activate
+chmod 600 "$TRUST_JSON"
+cd "$PROJ_DIR"
+tick_prompt
+[ "$API_KEY" = "{STRIPE_SECRET}" ]
+[ "$EXISTING" = "overwritten" ]
+
+# 2. Corrupt trust.json on disk must also revert active secrets!
+printf 'not-valid-json\n' > "$TRUST_JSON"
+chmod 600 "$TRUST_JSON"
+cd "$OUTSIDE_DIR"
+tick_prompt
+[ "${{API_KEY:-__UNSET__}}" = "__UNSET__" ]
+[ "${{LITERAL_VAR:-__UNSET__}}" = "__UNSET__" ]
+[ "$EXISTING" = "before" ]
+"#,
+    );
+
+    let bash_out = Command::new(bash_bin)
+        .isolate_application_environment()
+        .args(["--norc", "--noprofile", "-c", &script])
+        .env("HOME", fx.dir.path())
+        .env("XDG_CONFIG_HOME", &fx.config_dir)
+        .env("XDG_DATA_HOME", &fx.data_dir)
+        .env("NKP_PASSWORD", MASTER_PASSWORD)
+        .env("NKP_BIN", env!("CARGO_BIN_EXE_nkp"))
+        .env("PROJ_DIR", &proj)
+        .env("OUTSIDE_DIR", &outside)
+        .env("TRUST_JSON", &trust_json)
+        .current_dir(&outside)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(
+        bash_out.status.success(),
+        "trust-store fail-closed revert test failed (code {:?}):\nstdout:\n{}\nstderr:\n{}",
         bash_out.status.code(),
         String::from_utf8_lossy(&bash_out.stdout),
         String::from_utf8_lossy(&bash_out.stderr),

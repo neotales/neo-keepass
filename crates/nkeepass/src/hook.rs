@@ -1162,6 +1162,10 @@ fn emit_posix_wrapper(invoke: &str, shell_name: &str) -> String {
             return $_nkp_unload_rc
           fi
           ;;
+        status)
+          __NKP_ENV_STATE="${{_nkp_env_state:-}}" {invoke} "$@"
+          return $?
+          ;;
       esac
       {invoke} "$@"
       return $?
@@ -1374,6 +1378,14 @@ fn emit_fish_wrapper(invoke: &str) -> String {
       return 0
     end
     return $_nkp_rc
+  else if test "$_nkp_cmd" = "shell" -a "$_nkp_sub" = "status"
+    set -l _nkp_rc 0
+    begin
+      set -lx __NKP_ENV_STATE "$_nkp_env_state"
+      {invoke} $argv
+      set _nkp_rc $status
+    end
+    return $_nkp_rc
   else if contains -- "$_nkp_cmd" trust untrust unlock lock
     {invoke} $argv
     set -l _nkp_rc $status
@@ -1516,6 +1528,15 @@ fn emit_pwsh_wrapper() -> &'static str {
         return
     } elseif ($cmd -eq 'shell' -and $sub -eq 'unload') {
         _NkpInvokeHook @('--unload') -Explicit
+        return
+    } elseif ($cmd -eq 'shell' -and $sub -eq 'status') {
+        $prevState = [System.Environment]::GetEnvironmentVariable('__NKP_ENV_STATE', 'Process')
+        try {
+            [System.Environment]::SetEnvironmentVariable('__NKP_ENV_STATE', $script:NkpEnvState, 'Process')
+            & $script:NkpExe @args
+        } finally {
+            [System.Environment]::SetEnvironmentVariable('__NKP_ENV_STATE', $prevState, 'Process')
+        }
         return
     }
 
