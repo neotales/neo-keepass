@@ -397,6 +397,9 @@ pub fn is_fast_path_unchanged(
     vaults: &[VaultFingerprint],
     session_id: Option<&str>,
 ) -> bool {
+    if state.session_id.as_deref() != session_id {
+        return false;
+    }
     if let Some(unloaded) = &state.unloaded
         && unloaded == &compute_chain_digest(chain)
     {
@@ -406,7 +409,6 @@ pub fn is_fast_path_unchanged(
         && state.warned.is_none()
         && state.chain == chain
         && state.vaults == vaults
-        && state.session_id.as_deref() == session_id
 }
 
 /// Target environment resolved from a trusted manifest chain.
@@ -878,15 +880,27 @@ fn push_fish_single_quoted(out: &mut String, value: &str) {
 }
 
 fn push_pwsh_single_quoted(out: &mut String, value: &str) {
+    let has_curly = value
+        .chars()
+        .any(|ch| matches!(ch, '\u{2018}'..='\u{201B}'));
+    if has_curly {
+        out.push('(');
+    }
     out.push('\'');
     for ch in value.chars() {
-        if ch == '\'' {
-            out.push_str("''");
-        } else {
-            out.push(ch);
+        match ch {
+            '\'' => out.push_str("''"),
+            '\u{2018}'..='\u{201B}' => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "' + [char]0x{:04X} + '", u32::from(ch));
+            }
+            other => out.push(other),
         }
     }
     out.push('\'');
+    if has_curly {
+        out.push(')');
+    }
 }
 
 #[derive(Serialize)]
@@ -1013,7 +1027,11 @@ fn validate_pinned_bin(bin_path: Option<&Path>) -> Result<Option<String>, HookEr
         return Ok(None);
     };
     let text = path.to_str().ok_or(HookError::InvalidExecutablePath)?;
-    if !is_safe_absolute_path_text(text) || text.contains('\n') {
+    if !is_safe_absolute_path_text(text)
+        || text
+            .chars()
+            .any(|ch| ch == '\n' || ch == '\r' || matches!(ch, '\u{2018}'..='\u{201B}'))
+    {
         return Err(HookError::InvalidExecutablePath);
     }
     Ok(Some(text.to_owned()))
@@ -1041,9 +1059,17 @@ fn emit_posix_wrapper_load(invoke: &str, shell_name: &str) -> String {
             fi
             if [ "$_nkp_end_opts" -eq 0 ]; then
               case "$_nkp_arg" in
-                -V|--vault|--password-env|--password-fd|--color)
+                --)
+                  _nkp_end_opts=1
+                  continue
+                  ;;
+                -V|--vault|--password-env|--key-file|--password-file|--color)
                   _nkp_passthru+=("$_nkp_arg")
                   _nkp_skip=1
+                  continue
+                  ;;
+                -V=*|--vault=*|--password-env=*|--key-file=*|--password-file=*|--color=*)
+                  _nkp_passthru+=("$_nkp_arg")
                   continue
                   ;;
                 -*)
@@ -1095,11 +1121,11 @@ fn emit_posix_wrapper(invoke: &str, shell_name: &str) -> String {
           _nkp_end_opts=1
           continue
           ;;
-        -V|--vault|--password-env|--password-fd|--color)
+        -V|--vault|--password-env|--key-file|--password-file|--color)
           _nkp_skip=1
           continue
           ;;
-        -V=*|--vault=*|--password-env=*|--password-fd=*|--color=*)
+        -V=*|--vault=*|--password-env=*|--key-file=*|--password-file=*|--color=*)
           continue
           ;;
         -*)
@@ -1252,9 +1278,15 @@ fn emit_fish_wrapper_load(invoke: &str) -> String {
       end
       if test $_nkp_end_opts -eq 0
         switch $_nkp_arg
-          case -V --vault --password-env --password-fd --color
+          case --
+            set _nkp_end_opts 1
+            continue
+          case -V --vault --password-env --key-file --password-file --color
             set -a _nkp_passthru $_nkp_arg
             set _nkp_skip 1
+            continue
+          case '-V=*' '--vault=*' '--password-env=*' '--key-file=*' '--password-file=*' '--color=*'
+            set -a _nkp_passthru $_nkp_arg
             continue
           case '-*'
             set -a _nkp_passthru $_nkp_arg
@@ -1267,15 +1299,20 @@ fn emit_fish_wrapper_load(invoke: &str) -> String {
         set _nkp_saw_load 1
       end
     end
-    set -l _nkp_script (env __NKP_ENV_STATE="$_nkp_env_state" {invoke} __hook fish --prompt $_nkp_passthru | string collect)
-    set -l _nkp_pipe $pipestatus
-    if test $_nkp_pipe[1] -eq 0
-      if test -n "$_nkp_script"
-        printf '%s\n' "$_nkp_script" | source
+    set -l _nkp_rc 0
+    set -l _nkp_lines
+    begin
+      set -lx __NKP_ENV_STATE "$_nkp_env_state"
+      set _nkp_lines ({invoke} __hook fish --prompt $_nkp_passthru)
+      set _nkp_rc $status
+    end
+    if test $_nkp_rc -eq 0
+      if test (count $_nkp_lines) -gt 0
+        printf '%s\n' $_nkp_lines | source
       end
       return 0
     end
-    return $_nkp_pipe[1]"#
+    return $_nkp_rc"#
     )
 }
 
@@ -1300,10 +1337,10 @@ fn emit_fish_wrapper(invoke: &str) -> String {
         case --
           set _nkp_end_opts 1
           continue
-        case -V --vault --password-env --password-fd --color
+        case -V --vault --password-env --key-file --password-file --color
           set _nkp_skip 1
           continue
-        case '-V=*' '--vault=*' '--password-env=*' '--password-fd=*' '--color=*'
+        case '-V=*' '--vault=*' '--password-env=*' '--key-file=*' '--password-file=*' '--color=*'
           continue
         case '-*'
           continue
@@ -1323,15 +1360,20 @@ fn emit_fish_wrapper(invoke: &str) -> String {
 
 {load_branch}
   else if test "$_nkp_cmd" = "shell" -a "$_nkp_sub" = "unload"
-    set -l _nkp_script (env __NKP_ENV_STATE="$_nkp_env_state" {invoke} __hook fish --unload | string collect)
-    set -l _nkp_pipe $pipestatus
-    if test $_nkp_pipe[1] -eq 0
-      if test -n "$_nkp_script"
-        printf '%s\n' "$_nkp_script" | source
+    set -l _nkp_rc 0
+    set -l _nkp_lines
+    begin
+      set -lx __NKP_ENV_STATE "$_nkp_env_state"
+      set _nkp_lines ({invoke} __hook fish --unload)
+      set _nkp_rc $status
+    end
+    if test $_nkp_rc -eq 0
+      if test (count $_nkp_lines) -gt 0
+        printf '%s\n' $_nkp_lines | source
       end
       return 0
     end
-    return $_nkp_pipe[1]
+    return $_nkp_rc
   else if contains -- "$_nkp_cmd" trust untrust unlock lock
     {invoke} $argv
     set -l _nkp_rc $status
@@ -1367,10 +1409,15 @@ end
 
 function _nkp_hook
   set -l _nkp_saved_status $status
-  set -l _nkp_script (env __NKP_ENV_STATE="$_nkp_env_state" {invoke} __hook fish $argv | string collect)
-  set -l _nkp_pipe $pipestatus
-  if test $_nkp_pipe[1] -eq 0 -a -n "$_nkp_script"
-    printf '%s\n' "$_nkp_script" | source
+  set -l _nkp_rc 0
+  set -l _nkp_lines
+  begin
+    set -lx __NKP_ENV_STATE "$_nkp_env_state"
+    set _nkp_lines ({invoke} __hook fish $argv)
+    set _nkp_rc $status
+  end
+  if test $_nkp_rc -eq 0 -a (count $_nkp_lines) -gt 0
+    printf '%s\n' $_nkp_lines | source
   end
   return $_nkp_saved_status
 end
@@ -1396,6 +1443,7 @@ fn emit_pwsh_wrapper() -> &'static str {
     $endOpts = $false
     $cmd = ''
     $sub = ''
+    $valOpts = @('-V', '--vault', '--password-env', '--key-file', '--password-file', '--color')
     foreach ($arg in $args) {
         $s = [string]$arg
         if ($skip) {
@@ -1408,7 +1456,7 @@ fn emit_pwsh_wrapper() -> &'static str {
             } elseif ($s -eq '--') {
                 $endOpts = $true
                 continue
-            } elseif ($s -in @('-V', '--vault', '--password-env', '--password-fd', '--color')) {
+            } elseif ($s -in $valOpts) {
                 $skip = $true
                 continue
             } elseif ($s.StartsWith('-')) {
@@ -1446,7 +1494,10 @@ fn emit_pwsh_wrapper() -> &'static str {
                 continue
             }
             if (-not $endOpts) {
-                if ($s -in @('-V', '--vault', '--password-env', '--password-fd', '--color')) {
+                if ($s -eq '--') {
+                    $endOpts = $true
+                    continue
+                } elseif ($s -in $valOpts) {
                     $passthru.Add($s)
                     $skip = $true
                     continue
@@ -1461,10 +1512,10 @@ fn emit_pwsh_wrapper() -> &'static str {
                 $sawLoad = $true
             }
         }
-        _NkpInvokeHook $passthru.ToArray()
+        _NkpInvokeHook $passthru.ToArray() -Explicit
         return
     } elseif ($cmd -eq 'shell' -and $sub -eq 'unload') {
-        _NkpInvokeHook @('--unload')
+        _NkpInvokeHook @('--unload') -Explicit
         return
     }
 
@@ -1482,24 +1533,27 @@ _NkpInvokeHook @('--startup')
 
 fn emit_pwsh_registrations() -> &'static str {
     r#"
-$script:_NkpPrevLocationAction = $ExecutionContext.SessionState.InvokeCommand.LocationChangedAction
-$ExecutionContext.SessionState.InvokeCommand.LocationChangedAction = {
-    param($sender, $eventArgs)
-    if ($null -ne $script:_NkpPrevLocationAction) {
-        & $script:_NkpPrevLocationAction $sender $eventArgs
-    }
-    _NkpInvokeHook
-}.GetNewClosure()
+if (-not (Test-Path variable:script:_NkpHookInstalled)) {
+    $script:_NkpHookInstalled = $true
+    $script:_NkpPrevLocationAction = $ExecutionContext.SessionState.InvokeCommand.LocationChangedAction
+    $ExecutionContext.SessionState.InvokeCommand.LocationChangedAction = {
+        param($sender, $eventArgs)
+        if ($null -ne $script:_NkpPrevLocationAction) {
+            & $script:_NkpPrevLocationAction $sender $eventArgs
+        }
+        _NkpInvokeHook
+    }.GetNewClosure()
 
-if (-not (Test-Path variable:script:_NkpOriginalPrompt)) {
-    $script:_NkpOriginalPrompt = $function:global:prompt
-}
-function global:prompt {
-    _NkpInvokeHook
-    if ($null -ne $script:_NkpOriginalPrompt) {
-        & $script:_NkpOriginalPrompt
-    } else {
-        "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) "
+    if (-not (Test-Path variable:script:_NkpOriginalPrompt)) {
+        $script:_NkpOriginalPrompt = $function:global:prompt
+    }
+    function global:prompt {
+        _NkpInvokeHook
+        if ($null -ne $script:_NkpOriginalPrompt) {
+            & $script:_NkpOriginalPrompt
+        } else {
+            "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) "
+        }
     }
 }
 
@@ -1517,13 +1571,16 @@ fn emit_pwsh_env_hook(bin: Option<&str>) -> String {
     };
 
     let mut out = format!(
-        r"$script:NkpExe = {exe_expr}
+        r#"$script:NkpExe = {exe_expr}
 if (-not (Test-Path variable:script:NkpEnvState)) {{
     $script:NkpEnvState = ''
 }}
 
 function script:_NkpInvokeHook {{
-    param([string[]]$ExtraArgs = @())
+    param(
+        [string[]]$ExtraArgs = @(),
+        [switch]$Explicit
+    )
     $savedOk = $?
     $savedLastExit = $global:LASTEXITCODE
     if ([string]::IsNullOrEmpty($script:NkpExe)) {{
@@ -1561,7 +1618,11 @@ function script:_NkpInvokeHook {{
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($null -eq $proc) {{
-        $global:LASTEXITCODE = $savedLastExit
+        if ($Explicit) {{
+            $global:LASTEXITCODE = 1
+        }} else {{
+            $global:LASTEXITCODE = $savedLastExit
+        }}
         return
     }}
     $stdout = $proc.StandardOutput.ReadToEnd()
@@ -1578,7 +1639,11 @@ function script:_NkpInvokeHook {{
         }}
         if ($null -ne $patch.set) {{
             foreach ($prop in $patch.set.PSObject.Properties) {{
-                [System.Environment]::SetEnvironmentVariable([string]$prop.Name, [string]$prop.Value, 'Process')
+                $val = [string]$prop.Value
+                if ($val.Length -eq 0 -and [System.Environment]::Version.Major -lt 9) {{
+                    [System.Console]::Error.WriteLine("nkp: warning: PowerShell on .NET < 9 cannot set empty env var '$($prop.Name)'; variable unset")
+                }}
+                [System.Environment]::SetEnvironmentVariable([string]$prop.Name, $val, 'Process')
             }}
         }}
         if ($null -ne $patch.state) {{
@@ -1588,16 +1653,69 @@ function script:_NkpInvokeHook {{
         }}
     }}
 
-    $global:LASTEXITCODE = $savedLastExit
-    if (-not $savedOk) {{
-        try {{ Write-Error -Message '' -ErrorAction SilentlyContinue }} catch {{}}
+    if ($Explicit) {{
+        $global:LASTEXITCODE = $hookExit
+    }} else {{
+        $global:LASTEXITCODE = $savedLastExit
+        if (-not $savedOk) {{
+            try {{ Write-Error -Message '' -ErrorAction SilentlyContinue }} catch {{}}
+        }}
     }}
 }}
-"
+"#
     );
     out.push_str(emit_pwsh_registrations());
     out.push_str(emit_pwsh_wrapper());
     out
+}
+
+fn emit_nushell_wrappers(exe_lit: &str) -> String {
+    format!(
+        r#"def --env --wrapped "nkp shell load" [...rest: string] {{
+  if ("-h" in $rest) or ("--help" in $rest) {{
+    run-external {exe_lit} "shell" "load" ...$rest
+    return
+  }}
+  _nkp_apply_hook true "--prompt" ...$rest
+}}
+
+def --env --wrapped "nkp shell unload" [...rest: string] {{
+  if ("-h" in $rest) or ("--help" in $rest) {{
+    run-external {exe_lit} "shell" "unload" ...$rest
+    return
+  }}
+  _nkp_apply_hook true "--unload"
+}}
+
+def --env --wrapped "nkp trust" [...rest: string] {{
+  run-external {exe_lit} "trust" ...$rest
+  if $env.LAST_EXIT_CODE == 0 and not (("-h" in $rest) or ("--help" in $rest)) {{
+    _nkp_apply_hook false
+  }}
+}}
+
+def --env --wrapped "nkp untrust" [...rest: string] {{
+  run-external {exe_lit} "untrust" ...$rest
+  if $env.LAST_EXIT_CODE == 0 and not (("-h" in $rest) or ("--help" in $rest)) {{
+    _nkp_apply_hook false
+  }}
+}}
+
+def --env --wrapped "nkp unlock" [...rest: string] {{
+  run-external {exe_lit} "unlock" ...$rest
+  if $env.LAST_EXIT_CODE == 0 and not (("-h" in $rest) or ("--help" in $rest)) {{
+    _nkp_apply_hook false
+  }}
+}}
+
+def --env --wrapped "nkp lock" [...rest: string] {{
+  run-external {exe_lit} "lock" ...$rest
+  if $env.LAST_EXIT_CODE == 0 and not (("-h" in $rest) or ("--help" in $rest)) {{
+    _nkp_apply_hook false
+  }}
+}}
+"#
+    )
 }
 
 fn emit_nushell_env_hook(bin: Option<&str>) -> String {
@@ -1608,13 +1726,20 @@ fn emit_nushell_env_hook(bin: Option<&str>) -> String {
         }
         None => "\"nkp\"".to_owned(),
     };
+    let wrappers = emit_nushell_wrappers(&exe_lit);
 
     format!(
-        r#"def --env _nkp_apply_hook [...extra_args: string] {{
+        r#"# Nushell closures/hooks lack shared mutable unexported state across `def --env`
+# and `hooks`, so `$env.__NKP_ENV_STATE` lives in `$env` (it holds only MACs and
+# non-secret `prior` values, never vault secrets, and `nkp x` strips it).
+def --env _nkp_apply_hook [explicit: bool, ...extra_args: string] {{
   let prev_state = ($env.__NKP_ENV_STATE? | default "")
   let res = (with-env {{ __NKP_ENV_STATE: $prev_state }} {{
     run-external {exe_lit} "__hook" "nushell" ...$extra_args | complete
   }})
+  if ($res.stderr | is-not-empty) {{
+    print --stderr --no-newline $res.stderr
+  }}
   if $res.exit_code == 0 {{
     let body = ($res.stdout | str trim)
     if ($body | is-not-empty) {{
@@ -1628,28 +1753,23 @@ fn emit_nushell_env_hook(bin: Option<&str>) -> String {
       }}
       load-env {{ __NKP_ENV_STATE: ($patch.state? | default "") }}
     }}
+  }} else if $explicit {{
+    error make --unspanned {{ msg: $"nkp hook failed with exit code ($res.exit_code)" }}
   }}
 }}
 
-def --env "nkp shell load" [...rest: string] {{
-  _nkp_apply_hook "--prompt" ...$rest
-}}
-
-def --env "nkp shell unload" [] {{
-  _nkp_apply_hook "--unload"
-}}
-
+{wrappers}
 $env.config = ($env.config? | default {{}})
 $env.config.hooks = ($env.config.hooks? | default {{}})
 $env.config.hooks.env_change = ($env.config.hooks.env_change? | default {{}})
 $env.config.hooks.env_change.PWD = (
-  ($env.config.hooks.env_change.PWD? | default []) | append {{|before, after| _nkp_apply_hook }}
+  ($env.config.hooks.env_change.PWD? | default []) | append {{|before, after| _nkp_apply_hook false }}
 )
 $env.config.hooks.pre_prompt = (
-  ($env.config.hooks.pre_prompt? | default []) | append {{|| _nkp_apply_hook }}
+  ($env.config.hooks.pre_prompt? | default []) | append {{|| _nkp_apply_hook false }}
 )
 
-_nkp_apply_hook "--startup"
+_nkp_apply_hook false "--startup"
 "#
     )
 }

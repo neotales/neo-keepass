@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -13,10 +13,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs_safe::{
     SafeFsError, has_windows_namespace_prefix, normalize_canonical_path,
-    normalize_path_text_for_platform, path_lookup_key, path_lookup_key_for_platform,
-    safe_read_regular_file_bounded,
+    normalize_path_text_for_platform, open_lock_file_safe, path_lookup_key,
+    path_lookup_key_for_platform, safe_read_regular_file_bounded,
 };
-use crate::manifest::{LoadedManifest, ManifestSourceKind, load_single_manifest_file};
+use crate::manifest::{
+    LoadedManifest, ManifestError, ManifestSourceKind, load_single_manifest_file,
+};
 use crate::private_file;
 use crate::sha256::{constant_time_eq, is_lowercase_hex};
 use crate::template::is_safe_display_text;
@@ -48,6 +50,8 @@ pub enum TrustError {
     CorruptStore,
     /// `trust.json` exceeds [`MAX_TRUST_STORE_BYTES`] or [`MAX_TRUST_ENTRIES`].
     LimitExceeded,
+    /// Manifest loading or validation failed while trusting a manifest.
+    Manifest(ManifestError),
     /// Underlying filesystem or lock I/O error.
     Io,
 }
@@ -66,12 +70,24 @@ impl fmt::Display for TrustError {
             Self::InvalidDigest => f.write_str("invalid SHA-256 digest in trust operation"),
             Self::CorruptStore => f.write_str("trust store is corrupt or unsupported"),
             Self::LimitExceeded => f.write_str("trust store exceeds size or entry limit"),
+            Self::Manifest(err) => err.fmt(f),
             Self::Io => f.write_str("trust store I/O error"),
         }
     }
 }
 
 impl std::error::Error for TrustError {}
+
+impl From<ManifestError> for TrustError {
+    fn from(err: ManifestError) -> Self {
+        match err {
+            ManifestError::UnsafeFile => Self::UnsafeFile,
+            ManifestError::UnsafePath => Self::InvalidPath,
+            ManifestError::TooLarge => Self::LimitExceeded,
+            other => Self::Manifest(other),
+        }
+    }
+}
 
 impl From<SafeFsError> for TrustError {
     fn from(err: SafeFsError) -> Self {
@@ -163,15 +179,18 @@ fn validate_data_dir_path(path: PathBuf) -> Result<PathBuf, TrustError> {
 }
 
 /// Resolves the application data directory (`data_dir()`) matching `nkp` CLI
-/// resolution order (`NEO_KEEPASS_DATA_DIR`, `XDG_DATA_DIR`, `XDG_DATA_HOME`,
-/// or platform home fallback).
+/// resolution order (`NEO_KEEPASS_DATA_DIR`, `NKP_DATA_DIR`, `XDG_DATA_DIR`,
+/// `XDG_DATA_HOME`, or platform home fallback).
 ///
 /// # Errors
 ///
 /// Returns [`TrustError::InvalidPath`] when no valid absolute data directory can
 /// be resolved.
 pub fn default_data_dir() -> Result<PathBuf, TrustError> {
-    if let Some(val) = env::var_os("NEO_KEEPASS_DATA_DIR").filter(|v| !v.is_empty()) {
+    if let Some(val) = env::var_os("NEO_KEEPASS_DATA_DIR")
+        .or_else(|| env::var_os("NKP_DATA_DIR"))
+        .filter(|v| !v.is_empty())
+    {
         return validate_data_dir_path(PathBuf::from(val));
     }
     if let Some(val) = env::var_os("XDG_DATA_DIR").filter(|v| !v.is_empty()) {
@@ -252,13 +271,7 @@ fn verify_existing_store_dir(dir: &Path) -> Result<(), TrustError> {
     }
     #[cfg(windows)]
     {
-        // Verify directory has a non-reparse, owner-only protected DACL via secure_directory
-        // or open-reparse check. On existing directory, re-securing or checking owner is done
-        // before writes; for read, check no reparse point on directory.
-        use std::os::windows::fs::MetadataExt;
-        if meta.file_attributes() & 0x0400 != 0 {
-            return Err(TrustError::UnsafeFile);
-        }
+        crate::fs_safe::verify_windows_dir_no_reparse(dir)?;
     }
     Ok(())
 }
@@ -307,24 +320,7 @@ fn ensure_private_store_dir(dir: &Path) -> Result<(), TrustError> {
 
 fn open_trust_lock(dir: &Path) -> Result<File, TrustError> {
     let lock_path = dir.join(TRUST_LOCK_NAME);
-    if let Ok(meta) = fs::symlink_metadata(&lock_path)
-        && (meta.file_type().is_symlink() || !meta.file_type().is_file())
-    {
-        return Err(TrustError::UnsafeFile);
-    }
-
-    let mut opts = OpenOptions::new();
-    opts.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let file = opts.open(&lock_path).map_err(|_| TrustError::Io)?;
-    let fmeta = file.metadata().map_err(|_| TrustError::Io)?;
-    if !fmeta.file_type().is_file() {
-        return Err(TrustError::UnsafeFile);
-    }
+    let file = open_lock_file_safe(&lock_path)?;
     file.lock().map_err(|_| TrustError::Io)?;
     Ok(file)
 }
@@ -514,7 +510,11 @@ impl TrustStore {
     }
 
     /// Returns `true` iff `path` and `sha256` match an entry in this store.
-    /// Fail-closed: returns `false` on any path or digest validation failure.
+    ///
+    /// Callers must pass a canonical path (such as
+    /// [`crate::manifest::LoadedFile::canonical_path`]); this method performs
+    /// lexical/key normalization only and fails closed on invalid paths or
+    /// digests.
     #[must_use]
     pub fn is_trusted(&self, path: &Path, sha256: &str) -> bool {
         if !is_lowercase_hex(sha256, 64) {
@@ -532,6 +532,9 @@ impl TrustStore {
     /// Returns `true` iff `path`'s normalized key is present in this store
     /// (regardless of digest), used to decide whether an ordinary `.env` is
     /// managed by `nkp`.
+    ///
+    /// Callers must pass a canonical path (such as one produced by
+    /// `fs::canonicalize`); returns `false` on any path validation failure.
     #[must_use]
     pub fn contains_path(&self, path: &Path) -> bool {
         let Ok(key) = path_lookup_key(path) else {
@@ -595,12 +598,7 @@ pub fn trust_manifest_file(
     manifest_path: &Path,
     now_unix: u64,
 ) -> Result<(LoadedManifest, Vec<TrustEntry>), TrustError> {
-    let loaded = load_single_manifest_file(manifest_path).map_err(|err| match err {
-        crate::manifest::ManifestError::UnsafeFile => TrustError::UnsafeFile,
-        crate::manifest::ManifestError::UnsafePath => TrustError::InvalidPath,
-        crate::manifest::ManifestError::TooLarge => TrustError::LimitExceeded,
-        _ => TrustError::Io,
-    })?;
+    let loaded = load_single_manifest_file(manifest_path)?;
 
     let mut records = Vec::new();
     let main_key = path_lookup_key(&loaded.file.canonical_path)?;

@@ -168,6 +168,8 @@ const fn unix_o_nonblock() -> i32 {
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
@@ -278,28 +280,99 @@ pub(crate) fn is_safe_absolute_path_text(raw: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn current_effective_uid_if_observable() -> Option<u32> {
-    use std::os::unix::fs::MetadataExt;
-    // `/proc/self` is owned by the process euid on Linux when procfs is mounted.
-    fs::metadata("/proc/self").ok().map(|m| m.uid())
-}
-
-#[cfg(unix)]
 pub(crate) fn verify_unix_dir_owner_only(meta: &Metadata) -> Result<(), SafeFsError> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
         return Err(SafeFsError::UnsafeFile);
     }
     if meta.permissions().mode() & 0o077 != 0 {
         return Err(SafeFsError::UnsafePermissions);
     }
-    if let Some(euid) = current_effective_uid_if_observable() {
-        use std::os::unix::fs::MetadataExt;
-        if meta.uid() != euid {
+    let euid = rustix::process::geteuid().as_raw();
+    if meta.uid() != euid {
+        return Err(SafeFsError::UnsafePermissions);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn verify_windows_dir_no_reparse(dir: &Path) -> Result<(), SafeFsError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let lmeta = fs::symlink_metadata(dir).map_err(|err| {
+        if err.kind() == io::ErrorKind::NotFound {
+            SafeFsError::NotFound
+        } else {
+            SafeFsError::Io
+        }
+    })?;
+    if lmeta.file_type().is_symlink() || !lmeta.file_type().is_dir() {
+        return Err(SafeFsError::UnsafeFile);
+    }
+    let handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)
+        .map_err(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                SafeFsError::NotFound
+            } else {
+                SafeFsError::UnsafeFile
+            }
+        })?;
+    let fmeta = handle.metadata().map_err(|_| SafeFsError::Io)?;
+    let attrs = fmeta.file_attributes();
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 {
+        return Err(SafeFsError::UnsafeFile);
+    }
+    Ok(())
+}
+
+/// Opens (or creates) `trust.lock` safely without following symlinks or
+/// Windows reparse points, verifying regular-file ownership.
+pub(crate) fn open_lock_file_safe(path: &Path) -> Result<File, SafeFsError> {
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && (meta.file_type().is_symlink() || !meta.file_type().is_file())
+    {
+        return Err(SafeFsError::UnsafeFile);
+    }
+
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+        opts.custom_flags(unix_o_nofollow() | unix_o_nonblock());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    let file = opts.open(path).map_err(|_| SafeFsError::Io)?;
+    let fmeta = file.metadata().map_err(|_| SafeFsError::Io)?;
+    if !fmeta.file_type().is_file() {
+        return Err(SafeFsError::UnsafeFile);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if fmeta.uid() != rustix::process::geteuid().as_raw()
+            || (fmeta.permissions().mode() & 0o077) != 0
+        {
             return Err(SafeFsError::UnsafePermissions);
         }
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let attrs = fmeta.file_attributes();
+        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+            return Err(SafeFsError::UnsafeFile);
+        }
+    }
+    Ok(file)
 }
 
 /// Opens an existing regular file safely without following symlinks/reparse points
@@ -363,9 +436,8 @@ pub(crate) fn safe_open_regular_file(
         } else if mode & 0o002 != 0 {
             return Err(SafeFsError::UnsafePermissions);
         }
-        if let Some(euid) = current_effective_uid_if_observable()
-            && fmeta.uid() != euid
-        {
+        let euid = rustix::process::geteuid().as_raw();
+        if fmeta.uid() != euid {
             return Err(SafeFsError::UnsafePermissions);
         }
     }
@@ -398,15 +470,27 @@ pub(crate) fn safe_read_regular_file_bounded(
 ) -> Result<(PathBuf, Vec<u8>), SafeFsError> {
     let (file, fmeta) = safe_open_regular_file(path, require_owner_only)?;
     let canon = fs::canonicalize(path).map_err(|_| SafeFsError::UnsafePath)?;
+    let cmeta = fs::symlink_metadata(&canon).map_err(|_| SafeFsError::UnsafeFile)?;
+    if cmeta.file_type().is_symlink() || !cmeta.file_type().is_file() {
+        return Err(SafeFsError::UnsafeFile);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let cmeta = fs::symlink_metadata(&canon).map_err(|_| SafeFsError::UnsafeFile)?;
         if cmeta.dev() != fmeta.dev() || cmeta.ino() != fmeta.ino() {
             return Err(SafeFsError::UnsafeFile);
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (cmeta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+            || cmeta.file_size() != fmeta.file_size()
+        {
+            return Err(SafeFsError::UnsafeFile);
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = &fmeta;
 
     let normalized = normalize_canonical_path(&canon)?;

@@ -487,15 +487,18 @@ impl<'a> TomlCursor<'a> {
     }
 
     fn parse_unicode_escape(&mut self, digits: usize) -> Result<char, ManifestError> {
-        if self.pos + digits > self.bytes.len() {
+        let Some(end) = self.pos.checked_add(digits) else {
+            return Err(self.syntax_err());
+        };
+        let Some(hex_bytes) = self.bytes.get(self.pos..end) else {
+            return Err(self.syntax_err());
+        };
+        if !hex_bytes.iter().all(u8::is_ascii_hexdigit) {
             return Err(self.syntax_err());
         }
-        let hex = &self.src[self.pos..self.pos + digits];
-        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(self.syntax_err());
-        }
+        let hex = &self.src[self.pos..end];
         let code = u32::from_str_radix(hex, 16).map_err(|_| self.syntax_err())?;
-        self.pos += digits;
+        self.pos = end;
         char::from_u32(code).ok_or_else(|| self.syntax_err())
     }
 
@@ -1022,16 +1025,19 @@ fn resolve_safe_relative_child(base_dir: &Path, rel: &str) -> Result<PathBuf, Ma
     Ok(cur)
 }
 
-fn load_toml_manifest_from_dir(
+fn load_toml_manifest_with_file(
     dir: &Path,
-    toml_path: &Path,
+    file: LoadedFile,
+    text: &str,
 ) -> Result<LoadedManifest, ManifestError> {
-    let (file, text) = read_loaded_text_file(toml_path)?;
-    let doc = parse_manifest_toml(&text)?;
+    let doc = parse_manifest_toml(text)?;
     let mut env_files = Vec::with_capacity(doc.env_files.len());
     for rel in &doc.env_files {
         let child_path = resolve_safe_relative_child(dir, rel)?;
         let (env_file_meta, env_text) = read_loaded_text_file(&child_path)?;
+        if !env_file_meta.canonical_path.starts_with(dir) {
+            return Err(ManifestError::UnsafeFile);
+        }
         let lines = parse_env_file(&env_text)?;
         env_files.push(LoadedEnvFile {
             file: env_file_meta,
@@ -1044,6 +1050,22 @@ fn load_toml_manifest_from_dir(
         doc: Some(doc),
         env_files,
     })
+}
+
+fn load_toml_manifest_from_dir(
+    dir: &Path,
+    toml_path: &Path,
+) -> Result<LoadedManifest, ManifestError> {
+    let (file, text) = read_loaded_text_file(toml_path)?;
+    let parent = file
+        .canonical_path
+        .parent()
+        .ok_or(ManifestError::UnsafePath)?
+        .to_path_buf();
+    if parent != dir {
+        return Err(ManifestError::UnsafeFile);
+    }
+    load_toml_manifest_with_file(&parent, file, &text)
 }
 
 fn load_env_manifest(
@@ -1073,10 +1095,13 @@ pub fn load_single_manifest_file(path: &Path) -> Result<LoadedManifest, Manifest
         .and_then(|s| s.to_str())
         .ok_or(ManifestError::UnsafePath)?;
     if file_name == ".nkp.toml" {
-        let canon = fs::canonicalize(path).map_err(|_| ManifestError::Io)?;
-        let norm = normalize_canonical_path(&canon)?;
-        let parent = norm.parent().ok_or(ManifestError::UnsafePath)?;
-        load_toml_manifest_from_dir(parent, path)
+        let (file, text) = read_loaded_text_file(path)?;
+        let parent = file
+            .canonical_path
+            .parent()
+            .ok_or(ManifestError::UnsafePath)?
+            .to_path_buf();
+        load_toml_manifest_with_file(&parent, file, &text)
     } else if file_name == ".nkp.env" {
         load_env_manifest(path, ManifestSourceKind::NkpEnv)
     } else {

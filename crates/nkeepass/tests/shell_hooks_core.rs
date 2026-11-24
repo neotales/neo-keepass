@@ -198,6 +198,15 @@ fn manifest_rejects_unknown_duplicate_version_reserved_and_collisions() {
         parse_manifest_toml(&oversized),
         Err(ManifestError::TooLarge)
     );
+    // Regression: multi-byte UTF-8 inside \uXXXX escape must return ParseSyntax, never panic
+    assert_eq!(
+        parse_manifest_toml("version = 1\n[env]\nX = \"\\u123\u{00E9}\"\n"),
+        Err(ManifestError::ParseSyntax { line: 3 })
+    );
+    assert_eq!(
+        parse_manifest_toml("version = 1\n[env]\nX = \"\\U0000123\u{00E9}\"\n"),
+        Err(ManifestError::ParseSyntax { line: 3 })
+    );
 }
 
 #[test]
@@ -416,6 +425,15 @@ fn trust_store_lifecycle_tamper_rejection_and_cross_platform_keys() {
     assert_eq!(untrust_all(&store_dir).unwrap(), 1);
     assert!(list_trusted(&store_dir).unwrap().is_empty());
 
+    // Trusting a bad manifest preserves ManifestError detail
+    let bad_toml = work.path().join("bad").join(".nkp.toml");
+    fs::create_dir_all(bad_toml.parent().unwrap()).unwrap();
+    write_safe_file(&bad_toml, "version = 2\n");
+    assert_eq!(
+        trust_manifest_file(&store_dir, &bad_toml, 1_700_000_000),
+        Err(TrustError::Manifest(ManifestError::UnsupportedVersion))
+    );
+
     // Windows key normalization (H3) & BiDi rejection (M4)
     assert_eq!(
         canonical_key_for_platform(r"\\?\C:\Work\App\.nkp.toml", true).unwrap(),
@@ -573,6 +591,20 @@ fn hook_state_transitions_nested_manual_edits_subshell_and_unload() {
     )
     .unwrap();
     assert!(!tick.emit_patch);
+    let unloaded_state = tick.new_state.unwrap();
+    assert!(is_fast_path_unchanged(
+        &unloaded_state,
+        &chain_a,
+        &target_a.vaults,
+        None
+    ));
+    // Session change invalidates fast-path even when chain was unloaded
+    assert!(!is_fast_path_unchanged(
+        &unloaded_state,
+        &chain_a,
+        &target_a.vaults,
+        Some("sess-123")
+    ));
 
     // `nkp shell load` (force_reload = true) re-activates cleanly
     let reload = compute_transition(
@@ -825,22 +857,43 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     assert!(bash_init.contains("PROMPT_COMMAND"));
     assert!(bash_init.contains("__NKP_ENV_STATE=\"${_nkp_env_state:-}\""));
     assert!(bash_init.contains("_nkp_hook --startup"));
+    assert!(!bash_init.contains("--password-fd"));
     assert!(!bash_init.contains("\r\n"));
 
     let zsh_init = emit_shell_init(HookShell::Zsh, None, true).unwrap();
     assert!(zsh_init.contains("add-zsh-hook chpwd _nkp_hook"));
     assert!(zsh_init.contains("add-zsh-hook precmd _nkp_hook"));
+    assert!(!zsh_init.contains("--password-fd"));
 
     let fish_init = emit_shell_init(HookShell::Fish, None, true).unwrap();
-    assert!(fish_init.contains("$pipestatus"));
+    assert!(fish_init.contains("begin\n    set -lx __NKP_ENV_STATE \"$_nkp_env_state\""));
+    assert!(fish_init.contains("set _nkp_lines (command nkp __hook fish"));
+    assert!(fish_init.contains("set _nkp_rc $status"));
+    assert!(fish_init.contains("printf '%s\\n' $_nkp_lines | source"));
+    assert!(!fish_init.contains("env __NKP_ENV_STATE="));
+    assert!(!fish_init.contains("$pipestatus"));
+    assert!(!fish_init.contains("--password-fd"));
     assert!(fish_init.contains("--on-variable PWD"));
     assert!(fish_init.contains("--on-event fish_prompt"));
+
+    // Reject PowerShell Unicode curly quotes U+2018..=U+201B in pinned bin_path
+    for q in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+        let bad_bin = format!("/usr/local/bin/nkp{q}evil");
+        assert_eq!(
+            emit_shell_init_with_bin(HookShell::Pwsh, None, true, Some(Path::new(&bad_bin))),
+            Err(HookError::InvalidExecutablePath)
+        );
+    }
 
     let pwsh_init = emit_shell_init(HookShell::Pwsh, None, true).unwrap();
     assert!(pwsh_init.contains("(Get-Command nkp -CommandType Application -TotalCount 1).Source"));
     assert!(pwsh_init.contains("$PWD.Provider.Name -eq 'FileSystem'"));
     assert!(pwsh_init.contains("ConvertFrom-Json"));
     assert!(pwsh_init.contains("SetEnvironmentVariable"));
+    assert!(pwsh_init.contains("$script:_NkpHookInstalled"));
+    assert!(pwsh_init.contains("[switch]$Explicit"));
+    assert!(pwsh_init.contains("[System.Environment]::Version.Major -lt 9"));
+    assert!(!pwsh_init.contains("--password-fd"));
     assert!(!pwsh_init.contains("Invoke-Expression"));
 
     let nu_init = emit_shell_init(HookShell::Nushell, None, true).unwrap();
@@ -849,6 +902,11 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     assert!(nu_init.contains("load-env"));
     assert!(nu_init.contains("hooks.env_change.PWD"));
     assert!(nu_init.contains("hooks.pre_prompt"));
+    assert!(nu_init.contains("def --env --wrapped \"nkp shell load\""));
+    assert!(nu_init.contains("def --env --wrapped \"nkp shell unload\""));
+    assert!(nu_init.contains("def --env --wrapped \"nkp trust\""));
+    assert!(nu_init.contains("print --stderr --no-newline $res.stderr"));
+    assert!(nu_init.contains("error make --unspanned"));
 
     // Syntax-check generated Bash scripts if `bash` is available on the host
     if let Ok(output) = std::process::Command::new("bash")
