@@ -960,7 +960,7 @@ mod tests {
         prod.fields.push(neotales_keepass::Field {
             key: String::from("otp"),
             value: ProtectedValue::from_text(
-                "otpauth://totp/Example:deploy?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+                "otpauth://totp/Example:deploy?secret=JBSWY3DPEHPK3PXP&issuer=Example&period=30",
             ),
             protected: true,
             protect_in_memory: true,
@@ -1033,6 +1033,16 @@ mod tests {
         assert_eq!(detail.url, "https://api.example.internal");
         assert!(detail.revealed_password.is_none());
         assert!(detail.totp.is_some());
+
+        ctrl.refresh_selected_totp(1_700_000_000);
+        let refreshed_totp = ctrl
+            .detail
+            .as_ref()
+            .and_then(|d| d.totp.as_ref())
+            .ok_or_else(|| String::from("totp should remain populated after refresh"))?;
+        assert_eq!(refreshed_totp.period, 30);
+        assert_eq!(refreshed_totp.remaining_secs, 10);
+        assert_eq!(refreshed_totp.code.len(), 6);
 
         // Explicit reveal populates Zeroizing password and custom field.
         ctrl.toggle_reveal_password();
