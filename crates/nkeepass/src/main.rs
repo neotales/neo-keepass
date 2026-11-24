@@ -7695,12 +7695,18 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     // Keep the original JSON contract: machine consumers receive
                     // configured vault aliases only. Unaliased selections are
                     // additional human-facing context rows, not alias records.
+                    // Pre-validate all rows so a hostile alias never leaves
+                    // partial records on stdout.
+                    let mut records = Vec::new();
                     for (name, alias) in &config.aliases {
                         if alias.kind == Kind::Vault {
                             check_alias_metadata(name, alias)?;
                             let path = normalized_vault_text(&vault_path(&alias.target)?);
-                            json(&serde_json::json!({"alias": name, "path": path}))?;
+                            records.push(serde_json::json!({"alias": name, "path": path}));
                         }
+                    }
+                    for record in records {
+                        json(&record)?;
                     }
                     return Ok(());
                 }
@@ -7711,6 +7717,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     .transpose()?
                     .map(|path| normalized_vault_text(&path));
                 let mut listed_paths = BTreeSet::new();
+                let mut rows = Vec::new();
                 for (name, alias) in &config.aliases {
                     if alias.kind == Kind::Vault {
                         check_alias_metadata(name, alias)?;
@@ -7720,26 +7727,25 @@ fn run(args: &[String], program: &str) -> Result<()> {
                             .as_deref()
                             .is_some_and(|value| vault_path_key(value) == key);
                         listed_paths.insert(key);
-                        writeln!(
-                            io::stdout(),
+                        rows.push(format!(
                             "{name}\t{path}{}",
                             if current { "\t(current)" } else { "" }
-                        )
-                        .map_err(|_| err("cannot write output"))?;
+                        ));
                     }
                 }
                 if let Some(path) = &current_path
                     && listed_paths.insert(vault_path_key(path))
                 {
-                    writeln!(io::stdout(), "(current)\t{path}")
-                        .map_err(|_| err("cannot write output"))?;
+                    rows.push(format!("(current)\t{path}"));
                 }
                 if let Some(default) = &config.default_vault {
                     let path = normalized_vault_text(&resolve_vault(default, &config)?);
                     if listed_paths.insert(vault_path_key(&path)) {
-                        writeln!(io::stdout(), "(default)\t{path}")
-                            .map_err(|_| err("cannot write output"))?;
+                        rows.push(format!("(default)\t{path}"));
                     }
+                }
+                for row in rows {
+                    print_line(&row)?;
                 }
                 Ok(())
             }
@@ -7769,6 +7775,9 @@ fn run(args: &[String], program: &str) -> Result<()> {
                         .filter(|alias| alias.kind == Kind::Vault)
                         .map(|_| current)
                 });
+                if let Some(name) = alias {
+                    check_config_value(name)?;
+                }
                 if rest.len() == 2 {
                     let legacy_alias = if source == "context" { alias } else { None };
                     json(

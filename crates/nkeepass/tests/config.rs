@@ -948,6 +948,14 @@ fn alias_ls_and_resolve_reject_c1_del_and_esc_controls() {
             ),
             "bad\u{007f}name",
         ),
+        (
+            "esc-target",
+            concat!(
+                r#"{"aliases":{"ok":{"kind":"vault","target":"/tmp/a.kdbx"},"#,
+                r#""demo_esc":{"kind":"entry","target":"Root/bad\u001b[2J"}}}"#,
+            ),
+            "demo_esc",
+        ),
     ] {
         let home = ConfigHome::new();
         home.seed(seeded_json);
@@ -975,6 +983,47 @@ fn alias_ls_and_resolve_reject_c1_del_and_esc_controls() {
             assert!(
                 stderr_text.contains("terminal-control bytes"),
                 "{label}: {args:?} wrong error: {stderr_text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn context_show_and_ls_reject_control_alias_names_without_partial_output() {
+    for (label, alias_json, alias_arg) in [
+        ("esc", r#""bad\u001b[2J""#, "bad\u{001b}[2J"),
+        ("c1", r#""bad\u009b31m""#, "bad\u{009b}31m"),
+    ] {
+        let home = ConfigHome::new();
+        let ok_target = serde_json::to_string(vault()).unwrap();
+        let bad_target = serde_json::to_string(other_vault()).unwrap();
+        let seeded = format!(
+            r#"{{"current":{alias_json},"default_vault":null,"aliases":{{"aaa":{{"kind":"vault","target":{ok_target}}},{alias_json}:{{"kind":"vault","target":{bad_target}}}}}}}"#
+        );
+        home.seed(&seeded);
+
+        for args in [
+            vec!["context", "show"],
+            vec!["context", "show", "--json"],
+            vec!["--vault", alias_arg, "context", "show"],
+            vec!["--vault", alias_arg, "context", "show", "--json"],
+            vec!["context", "ls"],
+            vec!["context", "ls", "--json"],
+        ] {
+            let output = run(&home, &args);
+            assert!(
+                !output.status.success(),
+                "{label}: {args:?} accepted hostile alias name"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{label}: {args:?} emitted partial or raw output: {:?}",
+                output.stdout
+            );
+            let stderr_text = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr_text.chars().any(|ch| ch.is_control() && ch != '\n'),
+                "{label}: {args:?} leaked control bytes in stderr: {stderr_text:?}"
             );
         }
     }

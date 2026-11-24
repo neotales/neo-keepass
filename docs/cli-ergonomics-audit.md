@@ -282,7 +282,9 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   Trust boundaries and wire formats.
   Implemented in [`main.rs`](../crates/nkeepass/src/main.rs) via
   `AllowedOptions` / `validate_allowed_options` across regular, grouped,
-  interchange, `init`, `env`, and `exec` routes before credential/vault access.
+  interchange, `init`, and `env` routes before credential/vault access;
+  `exec_command` enforces its own closed `match args[i].as_str()` allowlist
+  over `args[..sep]` before credential/vault access.
 - [x] **One token reader for help, normal commands, env, exec, and completion
   metadata; no cross-routing by option-value accident.** Today `env` extracts
   binding flags by scanning arbitrary tokens and then scans for `--format`
