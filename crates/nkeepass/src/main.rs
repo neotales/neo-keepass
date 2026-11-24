@@ -763,6 +763,10 @@ const EXEC_OPTIONS: &[HelpOption] = &[
         summary: "Child variable for the preceding --key (repeatable).",
     },
     HelpOption {
+        label: "--env-file FILE",
+        summary: "Load KEY=VALUE or nkp:// bindings from a .env file (repeatable).",
+    },
+    HelpOption {
         label: "--password-env NAME",
         summary: "Read the master password from an environment variable.",
     },
@@ -810,6 +814,99 @@ const GROUP_COMMANDS: &[HelpCommand] = &[
         "rm (PATH | --key PATH) (--yes | --dry-run)",
         "Remove a group and its contents; never remove the root.",
         GROUP_RM_OPTIONS,
+        NO_COMMANDS,
+    ),
+];
+const INJECT_OPTIONS: &[HelpOption] = &[
+    FILE_OPTION,
+    STDIN_OPTION,
+    HelpOption {
+        label: "-o, --output PATH",
+        summary: "Write rendered output privately without overwriting an existing file.",
+    },
+    HelpOption {
+        label: "--format raw|dotenv",
+        summary: "Render raw text (default) or double-quoted dotenv assignments.",
+    },
+    HelpOption {
+        label: "--check",
+        summary: "Validate template and resolve references without emitting secrets.",
+    },
+];
+const TRUST_OPTIONS: &[HelpOption] = &[
+    HelpOption {
+        label: "--list",
+        summary: "List trusted manifest and .env entries.",
+    },
+    HelpOption {
+        label: "--json",
+        summary: "Emit NDJSON records when used with --list.",
+    },
+    HelpOption {
+        label: "--prune",
+        summary: "Remove trusted entries whose target files no longer exist.",
+    },
+];
+const UNTRUST_OPTIONS: &[HelpOption] = &[HelpOption {
+    label: "--all",
+    summary: "Revoke every entry in the trust store.",
+}];
+const SHELL_INIT_OPTIONS: &[HelpOption] = &[
+    HelpOption {
+        label: "--no-completion",
+        summary: "Omit static completion generation from init output.",
+    },
+    HelpOption {
+        label: "--no-env",
+        summary: "Omit directory hook and wrapper functions from init output.",
+    },
+];
+const SHELL_LOAD_OPTIONS: &[HelpOption] = &[HelpOption {
+    label: "--shell SHELL",
+    summary: "Target shell when invoking load outside the shell wrapper.",
+}];
+const SHELL_UNLOAD_OPTIONS: &[HelpOption] = &[HelpOption {
+    label: "--shell SHELL",
+    summary: "Target shell when invoking unload outside the shell wrapper.",
+}];
+const SHELL_STATUS_OPTIONS: &[HelpOption] = &[HelpOption {
+    label: "--json",
+    summary: "Print non-disclosing JSON status.",
+}];
+const SHELL_COMMANDS: &[HelpCommand] = &[
+    help_command(
+        "init",
+        "init SHELL [--no-completion] [--no-env]",
+        "Emit shell completions and direnv-style directory hooks.",
+        SHELL_INIT_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "completions|completion",
+        "completions SHELL",
+        "Print static shell completion.",
+        NO_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "load",
+        "load [--shell SHELL] [OPTIONS]",
+        "Load the current directory's trusted manifest into the shell.",
+        SHELL_LOAD_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "unload",
+        "unload [--shell SHELL]",
+        "Unload active nkp-managed environment variables.",
+        SHELL_UNLOAD_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "status",
+        "status [--json]",
+        "Show discovered manifest chain, trust status, and managed variable names.",
+        SHELL_STATUS_OPTIONS,
         NO_COMMANDS,
     ),
 ];
@@ -890,6 +987,34 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         "Run a child with selected values in its environment.",
         EXEC_OPTIONS,
         NO_COMMANDS,
+    ),
+    help_command(
+        "inject",
+        "inject (FILE | --file FILE | --stdin) [-o PATH] [--format raw|dotenv] [--check]",
+        "Render templates or .env files with nkp:// secret references.",
+        INJECT_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "trust",
+        "trust [PATH] | --list [--json] | --prune",
+        "Trust a directory manifest or .env file for shell hooks.",
+        TRUST_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "untrust",
+        "untrust [PATH | --all]",
+        "Revoke trust for a manifest, .env file, or all entries.",
+        UNTRUST_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command(
+        "shell",
+        "shell <COMMAND>",
+        "Configure shell hooks, completions, and environment loading.",
+        NO_OPTIONS,
+        SHELL_COMMANDS,
     ),
     help_command(
         "completion",
@@ -1600,6 +1725,20 @@ fn vault_path_key_for_platform(text: &str, windows: bool) -> String {
     }
 }
 
+/// Platform-normalized deduplication key for vault paths (strips `/`->`\` and
+/// folds ASCII case on Windows, matching `fs_safe::path_lookup_key`).
+fn platform_vault_dedup_key_for_platform(text: &str, windows: bool) -> String {
+    if windows {
+        text.replace('/', "\\").to_ascii_lowercase()
+    } else {
+        text.to_owned()
+    }
+}
+
+fn platform_vault_dedup_key(path: &Path) -> String {
+    platform_vault_dedup_key_for_platform(&normalized_vault_text(path), cfg!(windows))
+}
+
 /// Resolves an explicit `init` target to an absolute, lexically normalized
 /// path. `.` components are harmless and removed; `..` is rejected rather than
 /// allowed to escape the invocation directory or masquerade as a normalized
@@ -2098,6 +2237,7 @@ struct Options<'a> {
     age_recipients: Vec<&'a str>,
     age_identity: Option<&'a str>,
     json: bool,
+    check: bool,
     generate_master_password: bool,
 }
 
@@ -2267,6 +2407,7 @@ fn options_from_refs<'a>(args: &[&'a str], positional: Positional) -> Result<Opt
                 opts.age_identity = value;
             }
             "--json" if !opts.json => opts.json = true,
+            "--check" if !opts.check => opts.check = true,
             "--generate-master-password" if !opts.generate_master_password => {
                 opts.generate_master_password = true;
             }
@@ -2364,6 +2505,7 @@ struct AllowedOptions {
     allow_age_recipients: bool,
     allow_age_identity: bool,
     allow_json: bool,
+    allow_check: bool,
     allow_generate_master_password: bool,
 }
 
@@ -2405,6 +2547,7 @@ impl AllowedOptions {
             allow_age_recipients: false,
             allow_age_identity: false,
             allow_json: false,
+            allow_check: false,
             allow_generate_master_password: false,
         }
     }
@@ -2465,6 +2608,7 @@ fn validate_allowed_options(
         age_recipients,
         age_identity,
         json,
+        check,
         generate_master_password,
     } = opts;
     let AllowedOptions {
@@ -2503,6 +2647,7 @@ fn validate_allowed_options(
         allow_age_recipients,
         allow_age_identity,
         allow_json,
+        allow_check,
         allow_generate_master_password,
     } = *allowed;
 
@@ -2551,6 +2696,7 @@ fn validate_allowed_options(
         || (!allow_age_recipients && !age_recipients.is_empty())
         || (!allow_age_identity && age_identity.is_some())
         || (!allow_json && *json)
+        || (!allow_check && *check)
         || (!allow_generate_master_password && *generate_master_password)
     {
         return Err(err(rejection));
@@ -2657,8 +2803,14 @@ fn credentials_with_password(
     opts: &Options<'_>,
     password: Option<&str>,
 ) -> Result<KdbxCredentials> {
-    let key_file = opts
-        .key_file
+    credentials_with_password_and_keyfile(password, opts.key_file)
+}
+
+fn credentials_with_password_and_keyfile(
+    password: Option<&str>,
+    key_file_path: Option<&str>,
+) -> Result<KdbxCredentials> {
+    let key_file = key_file_path
         .map(|path| {
             File::open(path)
                 .map_err(|_| err("cannot open key file"))
@@ -3824,22 +3976,50 @@ fn emit_shell_value(output: &mut impl Write, name: &str, value: &str) -> Result<
 ///
 /// A single-quoted PowerShell literal is the right shape for a secret because `$`
 /// and the backtick are ordinary characters inside one, so neither needs an
-/// escape. The single quote is the only character that can end the literal, and
-/// doubling it is PowerShell's own escape.
+/// escape. ASCII `'` is doubled (`''`), while PowerShell Unicode curly single
+/// quotes (`U+2018..=U+201B`) are split and concatenated via `[char]0x2018..`
+/// because PowerShell's lexer treats them as single-quote delimiters.
 fn emit_powershell_value(output: &mut impl Write, name: &str, value: &str) -> Result<()> {
-    write!(output, "$env:{name} = '").map_err(|_| err("cannot write value"))?;
-    for (index, part) in value.split('\'').enumerate() {
-        if index > 0 {
-            output
-                .write_all(b"''")
-                .map_err(|_| err("cannot write value"))?;
-        }
+    let has_curly = value
+        .chars()
+        .any(|ch| matches!(ch, '\u{2018}'..='\u{201B}'));
+    write!(output, "$env:{name} = ").map_err(|_| err("cannot write value"))?;
+    if has_curly {
         output
-            .write_all(part.as_bytes())
+            .write_all(b"(")
             .map_err(|_| err("cannot write value"))?;
     }
     output
-        .write_all(b"'\n")
+        .write_all(b"'")
+        .map_err(|_| err("cannot write value"))?;
+    for ch in value.chars() {
+        match ch {
+            '\'' => output
+                .write_all(b"''")
+                .map_err(|_| err("cannot write value"))?,
+            '\u{2018}'..='\u{201B}' => {
+                write!(output, "' + [char]0x{:04X} + '", u32::from(ch))
+                    .map_err(|_| err("cannot write value"))?;
+            }
+            other => {
+                let mut buf = [0_u8; 4];
+                let encoded = other.encode_utf8(&mut buf);
+                output
+                    .write_all(encoded.as_bytes())
+                    .map_err(|_| err("cannot write value"))?;
+            }
+        }
+    }
+    output
+        .write_all(b"'")
+        .map_err(|_| err("cannot write value"))?;
+    if has_curly {
+        output
+            .write_all(b")")
+            .map_err(|_| err("cannot write value"))?;
+    }
+    output
+        .write_all(b"\n")
         .map_err(|_| err("cannot write value"))
 }
 
@@ -6900,6 +7080,7 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     let mut keys = Vec::new();
     let mut fields: Vec<Option<&str>> = Vec::new();
     let mut env_names = Vec::new();
+    let mut env_files = Vec::new();
     let mut used_compact = false;
     let mut used_legacy = false;
     let mut password_arg = None;
@@ -6966,6 +7147,10 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
                 i += 1;
                 env_names.push(take_arg(cli_args, i)?.to_owned());
             }
+            "--env-file" => {
+                i += 1;
+                env_files.push(take_arg(cli_args, i)?);
+            }
             "--password" if password_arg.is_none() => {
                 i += 1;
                 password_arg = Some(take_arg(cli_args, i)?);
@@ -6992,13 +7177,14 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
         }
         i += 1;
     }
-    if keys.is_empty() {
-        return Err(err("exec requires at least one --key or --bind"));
+    if keys.is_empty() && env_files.is_empty() {
+        return Err(err(
+            "exec requires at least one --key, --bind, or --env-file",
+        ));
     }
     if keys.len() != env_names.len() {
         return Err(err("exec requires one --env name for each --key"));
     }
-    validate_exec_env_names_for_platform(&env_names, password_env, cfg!(windows))?;
     let opts = Options {
         password: password_arg,
         password_env,
@@ -7008,77 +7194,130 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
         ..Options::default()
     };
     validate_shared_options(&opts)?;
-    for name in &env_names {
+
+    let mut env_lines = Vec::new();
+    for env_file_path in env_files {
+        let bytes = bounded_regular_file(env_file_path, nkeepass::env_file::MAX_ENV_FILE_BYTES)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| err("env file is not valid UTF-8"))?;
+        let parsed = nkeepass::env_file::parse_env_file(text).map_err(template_cli_error)?;
+        env_lines.extend(parsed);
+    }
+
+    let mut all_env_names = Vec::with_capacity(env_names.len() + env_lines.len());
+    all_env_names.extend(env_names.iter().cloned());
+    all_env_names.extend(env_lines.iter().map(|line| {
+        let nkeepass::env_file::EnvLine { name, .. } = line;
+        name.clone()
+    }));
+    validate_exec_env_names_for_platform(&all_env_names, password_env, cfg!(windows))?;
+
+    for name in &all_env_names {
         if env::var_os(name).is_some() {
             return Err(err("exec environment name already exists"));
         }
     }
-    let (path, _) = active_vault(vault, config)?;
-    let mut credentials = credentials(&opts)?;
-    let mut service = VaultService::default();
-    let session = service
-        .open(&path, &mut credentials, &KDBX_LIMITS)
-        .map_err(|error| match error {
-            nkeepass::ServiceError::Io => err("cannot open vault"),
-            _ => err("cannot unlock vault"),
-        })?;
+
+    let env_needs_vault = env_lines.iter().any(|line| {
+        let nkeepass::env_file::EnvLine { value, .. } = line;
+        matches!(value, nkeepass::env_file::EnvValueKind::Template(_))
+    });
+    let needs_default_vault = !keys.is_empty() || env_lines_need_default_vault(&env_lines)?;
     let mut values: BTreeMap<String, Zeroizing<String>> = BTreeMap::new();
-    // Pinned once for the whole invocation; see `otp_now`.
-    let timestamp = otp_now()?;
-    for ((key, field), name) in keys.iter().zip(&fields).zip(&env_names) {
-        let entry = resolve_service_selector(&service, session, key, config)?;
-        let value: Zeroizing<String> = match field {
-            // `exec` binds the password by default. A named field, and the `otp`
-            // selector, are opt-in per binding.
-            None => {
-                let value = service
-                    .reveal_password(&entry.reference())
-                    .map_err(|_| err("cannot reveal value"))?;
-                Zeroizing::new(
-                    std::str::from_utf8(value.as_slice())
-                        .map_err(|_| err("cannot reveal value"))?
-                        .to_owned(),
-                )
-            }
-            Some(field) => {
-                let bound = Bound::from_field(field);
-                match bound {
-                    Bound::Field(field) => {
-                        let value = reveal_service_field(&service, &entry, field)?;
+
+    if !keys.is_empty() || env_needs_vault {
+        let default_vault = if needs_default_vault {
+            Some(active_vault(vault, config)?.0)
+        } else {
+            None
+        };
+        let pw = password(&opts)?;
+        // Pinned once for the whole invocation; see `otp_now`.
+        let timestamp = otp_now()?;
+        let mut lookup = MultiVaultLookup::new(
+            config,
+            default_vault.clone(),
+            pw,
+            opts.key_file,
+            timestamp,
+            false,
+        );
+
+        if !keys.is_empty() {
+            let path = default_vault
+                .as_deref()
+                .ok_or_else(|| err("cannot open vault"))?;
+            let (service, session) = lookup.open_or_get(path).map_err(|e| match e {
+                nkeepass::template::TemplateError::Service(nkeepass::ServiceError::Io) => {
+                    err("cannot open vault")
+                }
+                _ => err("cannot unlock vault"),
+            })?;
+            for ((key, field), name) in keys.iter().zip(&fields).zip(&env_names) {
+                let entry = resolve_service_selector(service, session, key, config)?;
+                let value: Zeroizing<String> = match field {
+                    // `exec` binds the password by default. A named field, and the `otp`
+                    // selector, are opt-in per binding.
+                    None => {
+                        let value = service
+                            .reveal_password(&entry.reference())
+                            .map_err(|_| err("cannot reveal value"))?;
                         Zeroizing::new(
                             std::str::from_utf8(value.as_slice())
                                 .map_err(|_| err("cannot reveal value"))?
                                 .to_owned(),
                         )
                     }
-                    Bound::Otp => {
-                        let result = service
-                            .totp_code_with_period(&entry.reference(), timestamp)
-                            .map_err(|error| match error {
-                                nkeepass::ServiceError::HotpUnsupported => {
-                                    err("HOTP requires atomic counter persistence")
-                                }
-                                nkeepass::ServiceError::AmbiguousField => {
-                                    err("ambiguous field name")
-                                }
-                                _ => err("invalid OTP field"),
-                            })?;
-                        warn_otp_expiring(name, timestamp, result.period());
-                        Zeroizing::new(result.code().to_owned())
+                    Some(field) => {
+                        let bound = Bound::from_field(field);
+                        match bound {
+                            Bound::Field(field) => {
+                                let value = reveal_service_field(service, &entry, field)?;
+                                Zeroizing::new(
+                                    std::str::from_utf8(value.as_slice())
+                                        .map_err(|_| err("cannot reveal value"))?
+                                        .to_owned(),
+                                )
+                            }
+                            Bound::Otp => {
+                                let result = service
+                                    .totp_code_with_period(&entry.reference(), timestamp)
+                                    .map_err(|error| match error {
+                                        nkeepass::ServiceError::HotpUnsupported => {
+                                            err("HOTP requires atomic counter persistence")
+                                        }
+                                        nkeepass::ServiceError::AmbiguousField => {
+                                            err("ambiguous field name")
+                                        }
+                                        _ => err("invalid OTP field"),
+                                    })?;
+                                warn_otp_expiring(name, timestamp, result.period());
+                                Zeroizing::new(result.code().to_owned())
+                            }
+                        }
                     }
-                }
+                };
+                values.insert(name.clone(), value);
             }
-        };
-        values.insert(name.clone(), value);
-    }
+        }
 
-    // The child receives only explicitly selected, zeroizing values. Do not
-    // keep the unlocked database or its credentials alive while it runs.
-    service
-        .lock(session)
-        .map_err(|_| err("cannot unlock vault"))?;
-    drop(service);
-    drop(credentials);
+        if !env_lines.is_empty() {
+            let resolved_env = nkeepass::env_file::resolve_env_file(&env_lines, &mut lookup)
+                .map_err(template_cli_error)?;
+            for (name, val) in resolved_env {
+                values.insert(name, val);
+            }
+        }
+
+        // The child receives only explicitly selected, zeroizing values. Do not
+        // keep any unlocked database or credentials alive while it runs.
+        lookup.lock_all();
+    } else if !env_lines.is_empty() {
+        let resolved_env = nkeepass::env_file::resolve_env_file(&env_lines, &mut NoopLookup)
+            .map_err(template_cli_error)?;
+        for (name, val) in resolved_env {
+            values.insert(name, val);
+        }
+    }
 
     let status = {
         // `env_clear` first, then an allowlist. The default for
@@ -7120,6 +7359,1525 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
         Ok(())
     } else {
         Err(child_status_error(status))
+    }
+}
+
+#[cfg(unix)]
+const fn cli_unix_o_nonblock() -> i32 {
+    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips64")))]
+    {
+        0x0080
+    }
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "sparc", target_arch = "sparc64")
+    ))]
+    {
+        0x4000
+    }
+    #[cfg(all(
+        target_os = "linux",
+        not(any(
+            target_arch = "mips",
+            target_arch = "mips64",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
+    {
+        0o4_000
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0004
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        0
+    }
+}
+
+/// Reads an existing regular file up to `max` bytes without blocking on FIFOs or
+/// devices.
+fn bounded_regular_file(path: &str, max: usize) -> Result<Zeroizing<Vec<u8>>> {
+    let meta = fs::metadata(path).map_err(|_| err("cannot open input file"))?;
+    if !meta.file_type().is_file() {
+        return Err(err("input path must be a regular file"));
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(cli_unix_o_nonblock());
+    }
+    let file = opts.open(path).map_err(|_| err("cannot open input file"))?;
+    let fmeta = file.metadata().map_err(|_| err("cannot open input file"))?;
+    if !fmeta.file_type().is_file() {
+        return Err(err("input path must be a regular file"));
+    }
+    let max_u64 = u64::try_from(max).map_err(|_| err("input exceeds size limit"))?;
+    let bytes = read_bounded(file, max_u64, "cannot read input file")?;
+    if bytes.len() > max {
+        return Err(err("input exceeds size limit"));
+    }
+    Ok(bytes)
+}
+
+fn template_cli_error(error: nkeepass::template::TemplateError) -> CliError {
+    err(error.to_string())
+}
+
+fn manifest_cli_error(error: nkeepass::manifest::ManifestError) -> CliError {
+    err(error.to_string())
+}
+
+fn trust_cli_error(error: nkeepass::trust::TrustError) -> CliError {
+    err(error.to_string())
+}
+
+struct NoopLookup;
+
+impl nkeepass::template::SecretLookup for NoopLookup {
+    fn resolve_secret(
+        &mut self,
+        _uri: &nkeepass::template::NkpUri,
+    ) -> std::result::Result<Zeroizing<Vec<u8>>, nkeepass::template::TemplateError> {
+        Err(nkeepass::template::TemplateError::VaultLocked)
+    }
+}
+
+fn build_entry_aliases(config: &Config) -> BTreeMap<String, nkeepass::template::EntryAlias> {
+    config
+        .aliases
+        .iter()
+        .filter(|(_, alias)| alias.kind == Kind::Entry)
+        .map(|(name, alias)| {
+            (
+                name.clone(),
+                nkeepass::template::EntryAlias {
+                    target: alias.target.clone(),
+                    field: alias.field.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+struct MultiVaultLookup<'a> {
+    config: &'a Config,
+    default_vault: Option<PathBuf>,
+    layer_vault: Option<PathBuf>,
+    master_pw: Option<Zeroizing<String>>,
+    key_file: Option<&'a str>,
+    timestamp: u64,
+    entry_aliases: BTreeMap<String, nkeepass::template::EntryAlias>,
+    preopen_safe: bool,
+    open_vaults: BTreeMap<String, (VaultService, nkeepass::SessionId)>,
+}
+
+impl<'a> MultiVaultLookup<'a> {
+    fn new(
+        config: &'a Config,
+        default_vault: Option<PathBuf>,
+        master_pw: Option<Zeroizing<String>>,
+        key_file: Option<&'a str>,
+        timestamp: u64,
+        preopen_safe: bool,
+    ) -> Self {
+        Self {
+            config,
+            default_vault,
+            layer_vault: None,
+            master_pw,
+            key_file,
+            timestamp,
+            entry_aliases: build_entry_aliases(config),
+            preopen_safe,
+            open_vaults: BTreeMap::new(),
+        }
+    }
+
+    fn set_layer_vault(&mut self, path: Option<PathBuf>) {
+        self.layer_vault = path;
+    }
+
+    fn open_or_get(
+        &mut self,
+        vault_path: &Path,
+    ) -> std::result::Result<(&VaultService, nkeepass::SessionId), nkeepass::template::TemplateError>
+    {
+        use nkeepass::template::TemplateError;
+        let key = platform_vault_dedup_key(vault_path);
+        if !self.open_vaults.contains_key(&key) {
+            if self.preopen_safe {
+                nkeepass::hook::preopen_vault_fingerprint(vault_path)
+                    .map_err(|_| TemplateError::Service(nkeepass::ServiceError::Io))?;
+            }
+            let mut creds = credentials_with_password_and_keyfile(
+                self.master_pw.as_deref().map(String::as_str),
+                self.key_file,
+            )
+            .map_err(|_| TemplateError::VaultLocked)?;
+            let mut service = VaultService::default();
+            let session =
+                service
+                    .open(vault_path, &mut creds, &KDBX_LIMITS)
+                    .map_err(|e| match e {
+                        nkeepass::ServiceError::Io => TemplateError::Service(e),
+                        _ => TemplateError::VaultLocked,
+                    })?;
+            self.open_vaults.insert(key.clone(), (service, session));
+        }
+        self.open_vaults
+            .get(&key)
+            .map(|(service, session)| (service, *session))
+            .ok_or(TemplateError::VaultLocked)
+    }
+
+    fn resolve_entry_binding(
+        &mut self,
+        binding: &nkeepass::manifest::EnvEntryBinding,
+    ) -> std::result::Result<Zeroizing<Vec<u8>>, nkeepass::template::TemplateError> {
+        use nkeepass::template::SecretLookup;
+        let uri = nkeepass::template::NkpUri {
+            vault_alias: None,
+            entry_path: binding.entry.clone(),
+            field: binding.field.clone(),
+        };
+        self.resolve_secret(&uri)
+    }
+
+    fn lock_all(&mut self) {
+        let vaults = std::mem::take(&mut self.open_vaults);
+        for (_, (mut service, session)) in vaults {
+            let _ = service.lock(session);
+        }
+    }
+}
+
+impl Drop for MultiVaultLookup<'_> {
+    fn drop(&mut self) {
+        self.lock_all();
+    }
+}
+
+impl nkeepass::template::SecretLookup for MultiVaultLookup<'_> {
+    fn resolve_secret(
+        &mut self,
+        uri: &nkeepass::template::NkpUri,
+    ) -> std::result::Result<Zeroizing<Vec<u8>>, nkeepass::template::TemplateError> {
+        use nkeepass::template::{ServiceSecretLookup, TemplateError};
+        let (target_path, alias_name) = match uri.vault_alias.as_deref() {
+            Some(alias) => {
+                let Some(Alias {
+                    kind: Kind::Vault,
+                    target,
+                    ..
+                }) = self.config.aliases.get(alias)
+                else {
+                    return Err(TemplateError::UnknownVaultAlias);
+                };
+                let resolved = vault_path(target).map_err(|_| TemplateError::UnknownVaultAlias)?;
+                (resolved, Some(alias))
+            }
+            None => {
+                let path = self
+                    .layer_vault
+                    .as_ref()
+                    .or(self.default_vault.as_ref())
+                    .cloned()
+                    .ok_or(TemplateError::Service(nkeepass::ServiceError::Io))?;
+                (path, None)
+            }
+        };
+        let timestamp = self.timestamp;
+        let entry_aliases = self.entry_aliases.clone();
+        let (service, session) = self.open_or_get(&target_path)?;
+        let mut adapter =
+            ServiceSecretLookup::new(service, session, timestamp).with_entry_aliases(entry_aliases);
+        if let Some(alias) = alias_name {
+            adapter = adapter.with_vault_alias(alias);
+        }
+        adapter.resolve_secret(uri)
+    }
+}
+
+fn env_lines_need_default_vault(lines: &[nkeepass::env_file::EnvLine]) -> Result<bool> {
+    for line in lines {
+        let nkeepass::env_file::EnvLine { value, .. } = line;
+        if let nkeepass::env_file::EnvValueKind::Template(tmpl) = value {
+            let refs = nkeepass::template::extract_references(tmpl).map_err(template_cli_error)?;
+            if refs.iter().any(|uri| uri.vault_alias.is_none()) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[derive(Clone, Copy)]
+enum InjectFormat {
+    Raw,
+    Dotenv,
+}
+
+fn inject_command(args: &[String], vault: Option<&str>, config: &Config) -> Result<()> {
+    let opts = options(args, Positional::File)?;
+    validate_allowed_options(
+        &opts,
+        &AllowedOptions {
+            allow_file: true,
+            allow_stdin: true,
+            allow_output: true,
+            allow_format: true,
+            allow_check: true,
+            ..AllowedOptions::none()
+        },
+        "invalid inject option",
+        None,
+        "age options are unsupported for inject",
+    )?;
+    let input_count = usize::from(opts.file.is_some()) + usize::from(opts.stdin);
+    if input_count != 1 {
+        return Err(err("select exactly one input file or --stdin"));
+    }
+    if opts.check && opts.output.is_some() {
+        return Err(err("--check cannot be combined with --output"));
+    }
+    let format = match opts.format {
+        None | Some("raw") => InjectFormat::Raw,
+        Some("dotenv") => InjectFormat::Dotenv,
+        Some(_) => return Err(err("invalid inject format")),
+    };
+
+    let raw_bytes = if let Some(path) = opts.file {
+        bounded_regular_file(path, nkeepass::template::MAX_TEMPLATE_INPUT_BYTES)?
+    } else {
+        read_stdin(
+            nkeepass::template::MAX_TEMPLATE_INPUT_BYTES,
+            "cannot read input",
+        )?
+    };
+    let text = Zeroizing::new(
+        std::str::from_utf8(&raw_bytes)
+            .map_err(|_| err("input is not valid UTF-8"))?
+            .to_owned(),
+    );
+    drop(raw_bytes);
+
+    let rendered: Zeroizing<String> = match format {
+        InjectFormat::Raw => {
+            let refs = nkeepass::template::extract_references(&text).map_err(template_cli_error)?;
+            let render_opts = nkeepass::template::RenderOptions::default();
+            if refs.is_empty() {
+                nkeepass::template::render_text(&text, &mut NoopLookup, &render_opts)
+                    .map_err(template_cli_error)?
+            } else {
+                let default_vault = if refs.iter().any(|uri| uri.vault_alias.is_none()) {
+                    Some(active_vault(vault, config)?.0)
+                } else {
+                    None
+                };
+                let pw = password(&opts)?;
+                let timestamp = otp_now()?;
+                let mut lookup = MultiVaultLookup::new(
+                    config,
+                    default_vault,
+                    pw,
+                    opts.key_file,
+                    timestamp,
+                    false,
+                );
+                let out = nkeepass::template::render_text(&text, &mut lookup, &render_opts)
+                    .map_err(template_cli_error)?;
+                lookup.lock_all();
+                out
+            }
+        }
+        InjectFormat::Dotenv => {
+            let lines = nkeepass::env_file::parse_env_file(&text).map_err(template_cli_error)?;
+            let has_refs = lines.iter().any(|line| {
+                let nkeepass::env_file::EnvLine { value, .. } = line;
+                matches!(value, nkeepass::env_file::EnvValueKind::Template(_))
+            });
+            let resolved = if has_refs {
+                let default_vault = if env_lines_need_default_vault(&lines)? {
+                    Some(active_vault(vault, config)?.0)
+                } else {
+                    None
+                };
+                let pw = password(&opts)?;
+                let timestamp = otp_now()?;
+                let mut lookup = MultiVaultLookup::new(
+                    config,
+                    default_vault,
+                    pw,
+                    opts.key_file,
+                    timestamp,
+                    false,
+                );
+                let out = nkeepass::env_file::resolve_env_file(&lines, &mut lookup)
+                    .map_err(template_cli_error)?;
+                lookup.lock_all();
+                out
+            } else {
+                nkeepass::env_file::resolve_env_file(&lines, &mut NoopLookup)
+                    .map_err(template_cli_error)?
+            };
+            let mut out = Zeroizing::new(String::new());
+            for (name, val) in resolved {
+                let quoted = Zeroizing::new(
+                    serde_json::to_string(val.as_str()).map_err(|_| err("cannot encode output"))?,
+                );
+                out.push_str(&name);
+                out.push('=');
+                out.push_str(&quoted);
+                out.push('\n');
+            }
+            out
+        }
+    };
+
+    if opts.check {
+        return Ok(());
+    }
+    if let Some(output_path) = opts.output {
+        return nkeepass::private_file::write_private_noclobber(
+            Path::new(output_path),
+            rendered.as_bytes(),
+        )
+        .map_err(err);
+    }
+    if io::stdout().is_terminal() {
+        validate_tty_raw_bytes(rendered.as_bytes())?;
+        if rendered
+            .chars()
+            .any(nkeepass::template::is_bidi_or_line_separator)
+        {
+            return Err(err(
+                "raw output contains terminal-control bytes; redirect stdout to a file or pipe",
+            ));
+        }
+    }
+    write_stdout(rendered.as_bytes(), "cannot write output")
+}
+
+fn trust_kind_label(kind: nkeepass::trust::TrustKind) -> &'static str {
+    match kind {
+        nkeepass::trust::TrustKind::Toml => "toml",
+        nkeepass::trust::TrustKind::NkpEnv => "nkp-env",
+        nkeepass::trust::TrustKind::DotEnv => "dotenv",
+    }
+}
+
+fn resolve_trust_target_file(raw_target: &Path) -> Result<PathBuf> {
+    let meta = fs::symlink_metadata(raw_target).map_err(|_| err("cannot inspect trust target"))?;
+    if meta.file_type().is_symlink() {
+        return Err(err("trust target must not be a symlink"));
+    }
+    if meta.file_type().is_file() {
+        return Ok(raw_target.to_path_buf());
+    }
+    if meta.file_type().is_dir() {
+        for candidate_name in [".nkp.toml", ".nkp.env"] {
+            let candidate = raw_target.join(candidate_name);
+            match fs::symlink_metadata(&candidate) {
+                Ok(cmeta) => {
+                    if cmeta.file_type().is_symlink() || !cmeta.file_type().is_file() {
+                        return Err(err("trust target must be a safe regular file"));
+                    }
+                    return Ok(candidate);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(err("cannot inspect trust target")),
+            }
+        }
+        return Err(err(
+            "no .nkp.toml or .nkp.env found in directory; pass .env explicitly to trust a .env file",
+        ));
+    }
+    Err(err("trust target must be a regular file or directory"))
+}
+
+fn trust_command(args: &[String]) -> Result<()> {
+    let mut list = false;
+    let mut as_json = false;
+    let mut prune = false;
+    let mut target: Option<&str> = None;
+    let mut end_opts = false;
+
+    for arg in args {
+        let s = arg.as_str();
+        if !end_opts && s == "--" {
+            end_opts = true;
+            continue;
+        }
+        if !end_opts && s.starts_with('-') {
+            match s {
+                "--list" if !list => list = true,
+                "--json" if !as_json => as_json = true,
+                "--prune" if !prune => prune = true,
+                _ => return Err(err("invalid trust option")),
+            }
+            continue;
+        }
+        if target.is_some() {
+            return Err(err("invalid or duplicate trust target"));
+        }
+        target = Some(s);
+    }
+
+    if list && prune {
+        return Err(err("--list cannot be combined with --prune"));
+    }
+    if as_json && !list {
+        return Err(err("--json requires --list"));
+    }
+    if (list || prune) && target.is_some() {
+        return Err(err(
+            "trust target path cannot be combined with --list or --prune",
+        ));
+    }
+
+    let store_dir = data_dir()?;
+    if list {
+        let entries = nkeepass::trust::list_trusted(&store_dir).map_err(trust_cli_error)?;
+        for entry in &entries {
+            if !nkeepass::template::is_safe_display_text(&entry.path) {
+                return Err(err("trusted path contains unsafe characters"));
+            }
+        }
+        if as_json {
+            for entry in &entries {
+                json(entry)?;
+            }
+        } else {
+            for entry in &entries {
+                print_line(&format!(
+                    "{}\t{}\t{}",
+                    trust_kind_label(entry.kind),
+                    entry.sha256,
+                    entry.path
+                ))?;
+            }
+        }
+        return Ok(());
+    }
+
+    if prune {
+        let removed = nkeepass::trust::prune_missing(&store_dir).map_err(trust_cli_error)?;
+        eprintln!(
+            "nkp: pruned {removed} missing trusted {}",
+            if removed == 1 { "entry" } else { "entries" }
+        );
+        return Ok(());
+    }
+
+    let resolved = resolve_trust_target_file(Path::new(target.unwrap_or(".")))?;
+    let now = otp_now()?;
+    let (_loaded, entries) = nkeepass::trust::trust_manifest_file(&store_dir, &resolved, now)
+        .map_err(trust_cli_error)?;
+    for entry in &entries {
+        if nkeepass::template::is_safe_display_text(&entry.path) {
+            eprintln!("nkp: trusted {} ({})", entry.path, &entry.sha256[..12]);
+        }
+    }
+    Ok(())
+}
+
+fn untrust_command(args: &[String]) -> Result<()> {
+    let mut all = false;
+    let mut target: Option<&str> = None;
+    let mut end_opts = false;
+
+    for arg in args {
+        let s = arg.as_str();
+        if !end_opts && s == "--" {
+            end_opts = true;
+            continue;
+        }
+        if !end_opts && s.starts_with('-') {
+            match s {
+                "--all" if !all => all = true,
+                _ => return Err(err("invalid untrust option")),
+            }
+            continue;
+        }
+        if target.is_some() {
+            return Err(err("invalid or duplicate untrust target"));
+        }
+        target = Some(s);
+    }
+
+    if all && target.is_some() {
+        return Err(err("--all cannot be combined with a path"));
+    }
+
+    let store_dir = data_dir()?;
+    if all {
+        let count = nkeepass::trust::untrust_all(&store_dir).map_err(trust_cli_error)?;
+        eprintln!(
+            "nkp: revoked {count} trusted {}",
+            if count == 1 { "entry" } else { "entries" }
+        );
+        return Ok(());
+    }
+
+    let raw_target = Path::new(target.unwrap_or("."));
+    let is_dir = fs::symlink_metadata(raw_target).is_ok_and(|meta| meta.file_type().is_dir());
+    let mut removed_count = 0_usize;
+    if is_dir {
+        let toml_path = raw_target.join(".nkp.toml");
+        if let Ok(loaded) = nkeepass::manifest::load_single_manifest_file(&toml_path) {
+            for env_file in &loaded.env_files {
+                if nkeepass::trust::untrust_file(&store_dir, &env_file.file.canonical_path)
+                    .map_err(trust_cli_error)?
+                {
+                    removed_count += 1;
+                }
+            }
+        }
+        for name in [".nkp.toml", ".nkp.env", ".env"] {
+            if nkeepass::trust::untrust_file(&store_dir, &raw_target.join(name))
+                .map_err(trust_cli_error)?
+            {
+                removed_count += 1;
+            }
+        }
+    } else if nkeepass::trust::untrust_file(&store_dir, raw_target).map_err(trust_cli_error)? {
+        removed_count += 1;
+    }
+
+    if removed_count == 0 {
+        eprintln!("nkp: no matching trusted entry");
+    } else {
+        eprintln!(
+            "nkp: revoked {removed_count} trusted {}",
+            if removed_count == 1 {
+                "entry"
+            } else {
+                "entries"
+            }
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HookMode {
+    Normal,
+    Prompt,
+    Unload,
+}
+
+fn detect_hook_shell(explicit: Option<&str>) -> Result<nkeepass::hook::HookShell> {
+    if let Some(name) = explicit {
+        return nkeepass::hook::HookShell::parse(name).map_err(|e| err(e.to_string()));
+    }
+    let shell_env = env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| err("cannot detect supported shell; pass --shell SHELL"))?;
+    let basename = Path::new(&shell_env)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| err("cannot detect supported shell; pass --shell SHELL"))?;
+    nkeepass::hook::HookShell::parse(basename)
+        .map_err(|_| err("cannot detect supported shell; pass --shell SHELL"))
+}
+
+fn shell_command(args: &[String], config: &Config) -> Result<()> {
+    let Some(sub) = args.first().map(String::as_str) else {
+        return Err(err("shell subcommand required; see --help"));
+    };
+    let rest = &args[1..];
+    match sub {
+        "init" => shell_init_command(rest),
+        "completions" | "completion" => shell_completions_command(rest),
+        "load" => shell_load_command(rest, config),
+        "unload" => shell_unload_command(rest, config),
+        "status" => shell_status_command(rest),
+        _ => Err(err("invalid shell command; see --help")),
+    }
+}
+
+fn shell_init_command(args: &[String]) -> Result<()> {
+    let mut no_completion = false;
+    let mut no_env = false;
+    let mut shell: Option<&str> = None;
+    let mut end_opts = false;
+
+    for arg in args {
+        let s = arg.as_str();
+        if !end_opts && s == "--" {
+            end_opts = true;
+            continue;
+        }
+        if !end_opts && s.starts_with('-') {
+            match s {
+                "--no-completion" if !no_completion => no_completion = true,
+                "--no-env" if !no_env => no_env = true,
+                _ => return Err(err("invalid shell init option")),
+            }
+            continue;
+        }
+        if shell.is_some() {
+            return Err(err("invalid or duplicate shell argument"));
+        }
+        shell = Some(s);
+    }
+
+    let shell_name = shell.ok_or_else(|| err("shell name required"))?;
+    let hook_shell =
+        nkeepass::hook::HookShell::parse(shell_name).map_err(|e| err(e.to_string()))?;
+    let comp = if no_completion {
+        None
+    } else {
+        Some(completion::generate(hook_shell.as_str())?)
+    };
+    let pinned = nkeepass::hook::resolve_pinned_nkp_exe();
+    let script =
+        nkeepass::hook::emit_shell_init_with_bin(hook_shell, comp, !no_env, pinned.as_deref())
+            .map_err(|e| err(e.to_string()))?;
+    write_stdout(script.as_bytes(), "cannot write shell init script")
+}
+
+fn shell_completions_command(args: &[String]) -> Result<()> {
+    let [shell] = args else {
+        return Err(err("unsupported completion shell"));
+    };
+    let script = completion::generate(shell)?;
+    write_stdout(script.as_bytes(), "cannot write completion script")
+}
+
+fn shell_load_command(args: &[String], config: &Config) -> Result<()> {
+    let mut shell_arg: Option<&str> = None;
+    let mut password_arg = None;
+    let mut password_env = None;
+    let mut password_file = None;
+    let mut key_file = None;
+    let mut password_stdin = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--shell" if shell_arg.is_none() => {
+                i += 1;
+                shell_arg = Some(take_arg(args, i)?);
+            }
+            "--password" if password_arg.is_none() => {
+                i += 1;
+                password_arg = Some(take_arg(args, i)?);
+            }
+            "--password-env" if password_env.is_none() => {
+                i += 1;
+                password_env = Some(take_arg(args, i)?);
+            }
+            "--password-file" if password_file.is_none() => {
+                i += 1;
+                password_file = Some(take_arg(args, i)?);
+            }
+            "--key-file" if key_file.is_none() => {
+                i += 1;
+                key_file = Some(take_arg(args, i)?);
+            }
+            "--password-stdin" if !password_stdin => password_stdin = true,
+            _ => return Err(err("invalid shell load option")),
+        }
+        i += 1;
+    }
+
+    let opts = Options {
+        password: password_arg,
+        password_env,
+        password_file,
+        key_file,
+        password_stdin,
+        ..Options::default()
+    };
+    validate_shared_options(&opts)?;
+    let hook_shell = detect_hook_shell(shell_arg)?;
+    run_hook_with_mode(hook_shell, HookMode::Prompt, None, false, &opts, config)
+}
+
+fn shell_unload_command(args: &[String], config: &Config) -> Result<()> {
+    let mut shell_arg: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--shell" if shell_arg.is_none() => {
+                i += 1;
+                shell_arg = Some(take_arg(args, i)?);
+            }
+            _ => return Err(err("invalid shell unload option")),
+        }
+        i += 1;
+    }
+    let hook_shell = detect_hook_shell(shell_arg)?;
+    let opts = Options::default();
+    run_hook_with_mode(hook_shell, HookMode::Unload, None, false, &opts, config)
+}
+
+#[derive(Serialize)]
+struct ShellStatusManifestFile<'a> {
+    path: &'a str,
+    sha256: &'a str,
+    trust: &'static str,
+}
+
+fn shell_status_command(args: &[String]) -> Result<()> {
+    let as_json = match args {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => return Err(err("invalid shell status option")),
+    };
+
+    let encoded = env::var("__NKP_ENV_STATE").unwrap_or_default();
+    let (state_corrupt, state_opt) = match nkeepass::hook::decode_state(&encoded) {
+        nkeepass::hook::StateDecode::Empty => (false, None),
+        nkeepass::hook::StateDecode::Valid(st) => (false, Some(st)),
+        nkeepass::hook::StateDecode::Invalid => (true, None),
+    };
+
+    let store_dir = data_dir()?;
+    let trust_store =
+        nkeepass::trust::TrustStore::load_from_dir(&store_dir).map_err(trust_cli_error)?;
+    let cwd = env::current_dir().map_err(|_| err("cannot determine current directory"))?;
+    let chain_opt =
+        nkeepass::manifest::discover_chain(&cwd, |path| trust_store.contains_path(path))
+            .map_err(manifest_cli_error)?;
+
+    let mut manifest_files = Vec::new();
+    let mut any_modified = false;
+    let mut any_untrusted = false;
+    if let Some(chain) = &chain_opt {
+        for file in &chain.files_to_verify {
+            if !nkeepass::template::is_safe_display_text(&file.display_path) {
+                return Err(err("manifest path contains unsafe characters"));
+            }
+            let file_trust = if trust_store.is_trusted(&file.canonical_path, &file.sha256) {
+                "trusted"
+            } else if trust_store.contains_path(&file.canonical_path) {
+                any_modified = true;
+                "modified"
+            } else {
+                any_untrusted = true;
+                "untrusted"
+            };
+            manifest_files.push((file.display_path.clone(), file.sha256.clone(), file_trust));
+        }
+    }
+
+    let overall_trust = if manifest_files.is_empty() {
+        "none"
+    } else if any_modified {
+        "modified"
+    } else if any_untrusted {
+        "untrusted"
+    } else {
+        "trusted"
+    };
+
+    let current_chain_digest = chain_opt.as_ref().map(|chain| {
+        let entries = nkeepass::hook::ChainEntry::from_discovered_chain(chain);
+        nkeepass::hook::compute_chain_digest(&entries)
+    });
+
+    let is_unloaded = state_opt.as_ref().is_some_and(|st| {
+        st.unloaded.is_some()
+            && (current_chain_digest.is_none()
+                || st.unloaded.as_deref() == current_chain_digest.as_deref())
+    });
+
+    let status_label = if state_corrupt {
+        "invalid"
+    } else if is_unloaded {
+        "unloaded"
+    } else if state_opt
+        .as_ref()
+        .is_some_and(|st| !st.chain.is_empty() && st.unloaded.is_none())
+    {
+        "active"
+    } else {
+        "inactive"
+    };
+
+    let managed_vars: Vec<String> = state_opt
+        .as_ref()
+        .map(|st| st.vars.keys().cloned().collect())
+        .unwrap_or_default();
+
+    if as_json {
+        let records: Vec<ShellStatusManifestFile<'_>> = manifest_files
+            .iter()
+            .map(|(path, sha256, trust)| ShellStatusManifestFile {
+                path,
+                sha256,
+                trust,
+            })
+            .collect();
+        return json(&serde_json::json!({
+            "status": status_label,
+            "trust": overall_trust,
+            "manifest_chain": records,
+            "managed_vars": managed_vars,
+            "unloaded": is_unloaded,
+        }));
+    }
+
+    print_line(&format!("Status: {status_label}"))?;
+    print_line(&format!("Trust: {overall_trust}"))?;
+    if manifest_files.is_empty() {
+        print_line("Manifests: (none)")?;
+    } else {
+        print_line("Manifests:")?;
+        for (path, _sha256, trust) in &manifest_files {
+            print_line(&format!("  {trust}\t{path}"))?;
+        }
+    }
+    if managed_vars.is_empty() {
+        print_line("Managed variables: (none)")?;
+    } else {
+        print_line(&format!("Managed variables: {}", managed_vars.join(", ")))?;
+    }
+    Ok(())
+}
+
+fn hook_command(args: &[String], config: &Config) -> Result<()> {
+    let Some(shell_name) = args.first().map(String::as_str) else {
+        return Err(err("shell name required"));
+    };
+    let hook_shell =
+        nkeepass::hook::HookShell::parse(shell_name).map_err(|e| err(e.to_string()))?;
+
+    let mut prompt = false;
+    let mut unload = false;
+    let mut startup = false;
+    let mut cwd: Option<&str> = None;
+    let mut password_arg = None;
+    let mut password_env = None;
+    let mut password_file = None;
+    let mut key_file = None;
+    let mut password_stdin = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--prompt" if !prompt => prompt = true,
+            "--unload" if !unload => unload = true,
+            "--startup" if !startup => startup = true,
+            "--cwd" if cwd.is_none() => {
+                i += 1;
+                cwd = Some(take_arg(args, i)?);
+            }
+            "--password" if password_arg.is_none() => {
+                i += 1;
+                password_arg = Some(take_arg(args, i)?);
+            }
+            "--password-env" if password_env.is_none() => {
+                i += 1;
+                password_env = Some(take_arg(args, i)?);
+            }
+            "--password-file" if password_file.is_none() => {
+                i += 1;
+                password_file = Some(take_arg(args, i)?);
+            }
+            "--key-file" if key_file.is_none() => {
+                i += 1;
+                key_file = Some(take_arg(args, i)?);
+            }
+            "--password-stdin" if !password_stdin => password_stdin = true,
+            _ => return Err(err("invalid hook option")),
+        }
+        i += 1;
+    }
+    if prompt && unload {
+        return Err(err("--prompt cannot be combined with --unload"));
+    }
+
+    let opts = Options {
+        password: password_arg,
+        password_env,
+        password_file,
+        key_file,
+        password_stdin,
+        ..Options::default()
+    };
+    validate_shared_options(&opts)?;
+    let mode = if unload {
+        HookMode::Unload
+    } else if prompt {
+        HookMode::Prompt
+    } else {
+        HookMode::Normal
+    };
+    run_hook_with_mode(hook_shell, mode, cwd, startup, &opts, config)
+}
+
+fn emit_hook_outcome(
+    shell: nkeepass::hook::HookShell,
+    outcome: &nkeepass::hook::TransitionOutcome,
+) -> Result<()> {
+    if outcome.discarded_corrupt_state {
+        eprintln!("nkp: warning: discarded invalid hook state");
+    }
+    if outcome.emit_patch {
+        let script = nkeepass::hook::emit_hook_patch(shell, &outcome.patch)
+            .map_err(|e| err(e.to_string()))?;
+        write_stdout(script.as_bytes(), "cannot write hook output")?;
+    }
+    Ok(())
+}
+
+fn emit_blocked_or_fail(
+    shell: nkeepass::hook::HookShell,
+    mode: HookMode,
+    encoded_state: &str,
+    warned_digest: &str,
+    message: &str,
+) -> Result<()> {
+    if mode == HookMode::Prompt {
+        return Err(err(message));
+    }
+    let outcome = nkeepass::hook::compute_transition(
+        encoded_state,
+        nkeepass::hook::TransitionAction::Blocked { warned_digest },
+        |name| env::var_os(name),
+    )
+    .map_err(|e| err(e.to_string()))?;
+    if !outcome.suppress_duplicate_warning {
+        eprintln!("{message}");
+    }
+    emit_hook_outcome(shell, &outcome)
+}
+
+fn resolve_vault_spec_path(
+    spec: &nkeepass::manifest::VaultSpec,
+    config: &Config,
+) -> Result<PathBuf> {
+    match spec {
+        nkeepass::manifest::VaultSpec::Alias(alias) => {
+            let Some(Alias {
+                kind: Kind::Vault,
+                target,
+                ..
+            }) = config.aliases.get(alias)
+            else {
+                return Err(err("vault alias not found"));
+            };
+            vault_path(target)
+        }
+        nkeepass::manifest::VaultSpec::Path(path) => {
+            let raw = path
+                .to_str()
+                .ok_or_else(|| err("vault path must be valid UTF-8"))?;
+            vault_path(raw)
+        }
+    }
+}
+
+fn collect_hook_vault_paths(
+    merged: &nkeepass::manifest::MergedBindings,
+    config: &Config,
+) -> Result<Vec<PathBuf>> {
+    if !merged.requires_vault_unlock {
+        return Ok(Vec::new());
+    }
+    let mut seen_keys = BTreeSet::new();
+    let mut paths = Vec::new();
+    let mut cached_default_vault: Option<PathBuf> = None;
+
+    let mut push_path = |path: PathBuf| -> Result<()> {
+        let key = platform_vault_dedup_key(&path);
+        if seen_keys.insert(key) {
+            if paths.len() >= nkeepass::manifest::MAX_VAULTS_PER_HOOK {
+                return Err(err("manifest chain exceeds maximum distinct vault count"));
+            }
+            paths.push(path);
+        }
+        Ok(())
+    };
+
+    let mut resolve_default = || -> Result<PathBuf> {
+        if let Some(existing) = &cached_default_vault {
+            return Ok(existing.clone());
+        }
+        let (path, _) = active_vault(None, config)?;
+        cached_default_vault = Some(path.clone());
+        Ok(path)
+    };
+
+    for binding in merged.bindings.values() {
+        match &binding.source {
+            nkeepass::manifest::BindingSource::Entry(_) => {
+                let path = match &binding.vault {
+                    Some(spec) => resolve_vault_spec_path(spec, config)?,
+                    None => resolve_default()?,
+                };
+                push_path(path)?;
+            }
+            nkeepass::manifest::BindingSource::DotEnv(
+                nkeepass::env_file::EnvValueKind::Template(tmpl),
+            ) => {
+                let refs =
+                    nkeepass::template::extract_references(tmpl).map_err(template_cli_error)?;
+                for uri in refs {
+                    let path = if let Some(alias) = &uri.vault_alias {
+                        resolve_vault_spec_path(
+                            &nkeepass::manifest::VaultSpec::Alias(alias.clone()),
+                            config,
+                        )?
+                    } else if let Some(spec) = &binding.vault {
+                        resolve_vault_spec_path(spec, config)?
+                    } else {
+                        resolve_default()?
+                    };
+                    push_path(path)?;
+                }
+            }
+            nkeepass::manifest::BindingSource::DotEnv(
+                nkeepass::env_file::EnvValueKind::Literal(_),
+            ) => {}
+        }
+    }
+    Ok(paths)
+}
+
+fn read_hook_tty_password() -> Result<Zeroizing<String>> {
+    let timeout = std::time::Duration::from_secs(60);
+    #[cfg(unix)]
+    let pw = terminal_password::read_controlling("Master password: ", timeout)
+        .map_err(|_| err("password source required for non-interactive input"))?;
+    #[cfg(not(unix))]
+    let pw = {
+        eprint!("Master password: ");
+        let _ = io::stderr().flush();
+        let value = terminal_password::read(timeout)
+            .map_err(|_| err("password source required for non-interactive input"))?;
+        eprintln!();
+        value
+    };
+    if pw.is_empty() {
+        return Err(err("password must not be empty"));
+    }
+    Ok(pw)
+}
+
+enum HookCredentialOutcome {
+    Ready(Option<Zeroizing<String>>),
+    Locked,
+}
+
+fn resolve_hook_password(
+    opts: &Options<'_>,
+    mode: HookMode,
+    startup: bool,
+) -> Result<HookCredentialOutcome> {
+    let has_explicit = opts.password.is_some()
+        || opts.password_env.is_some()
+        || opts.password_file.is_some()
+        || opts.key_file.is_some()
+        || opts.password_stdin;
+    if has_explicit {
+        return password(opts).map(HookCredentialOutcome::Ready);
+    }
+    if let Some(value) = app_env_var_os(DEFAULT_PASSWORD_ENV) {
+        return match value.into_string() {
+            Ok(pw) if !pw.is_empty() => Ok(HookCredentialOutcome::Ready(Some(Zeroizing::new(pw)))),
+            _ => Ok(HookCredentialOutcome::Locked),
+        };
+    }
+    let opt_in_prompt = env::var_os("NKP_HOOK_PROMPT").as_deref() == Some(OsStr::new("1"))
+        && !startup
+        && env::var_os("CI").is_none()
+        && io::stderr().is_terminal();
+    if mode == HookMode::Prompt || opt_in_prompt {
+        match read_hook_tty_password() {
+            Ok(pw) => Ok(HookCredentialOutcome::Ready(Some(pw))),
+            Err(error) => {
+                if mode == HookMode::Prompt {
+                    Err(error)
+                } else {
+                    Ok(HookCredentialOutcome::Locked)
+                }
+            }
+        }
+    } else {
+        Ok(HookCredentialOutcome::Locked)
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "hook state machine, trust verification, fast-path, and vault lookup share one fail-closed flow"
+)]
+fn run_hook_with_mode(
+    shell: nkeepass::hook::HookShell,
+    mode: HookMode,
+    cwd_arg: Option<&str>,
+    startup: bool,
+    opts: &Options<'_>,
+    config: &Config,
+) -> Result<()> {
+    let encoded_state = env::var("__NKP_ENV_STATE").unwrap_or_default();
+    let state_decode = nkeepass::hook::decode_state(&encoded_state);
+    let cwd_path = match cwd_arg {
+        Some(raw) => PathBuf::from(raw),
+        None => env::current_dir().map_err(|_| err("cannot determine current directory"))?,
+    };
+    let store_dir = data_dir()?;
+    let trust_store = match nkeepass::trust::TrustStore::load_from_dir(&store_dir) {
+        Ok(store) => store,
+        Err(error) => {
+            if mode == HookMode::Unload {
+                let outcome = nkeepass::hook::compute_transition(
+                    &encoded_state,
+                    nkeepass::hook::TransitionAction::Unload {
+                        current_chain_digest: None,
+                    },
+                    |name| env::var_os(name),
+                )
+                .map_err(|e| err(e.to_string()))?;
+                return emit_hook_outcome(shell, &outcome);
+            }
+            if mode == HookMode::Prompt {
+                return Err(trust_cli_error(error));
+            }
+            let warned = nkeepass::hook::compute_warned_digest("trust.json", "store-error");
+            return emit_blocked_or_fail(
+                shell,
+                mode,
+                &encoded_state,
+                &warned,
+                &format!("nkp: {error}"),
+            );
+        }
+    };
+
+    if mode == HookMode::Unload {
+        let mut chain_digest = match &state_decode {
+            nkeepass::hook::StateDecode::Valid(st) if !st.chain.is_empty() => {
+                Some(nkeepass::hook::compute_chain_digest(&st.chain))
+            }
+            _ => None,
+        };
+        if chain_digest.is_none()
+            && let Ok(Some(chain)) = nkeepass::manifest::discover_chain(&cwd_path, |path| {
+                trust_store.contains_path(path)
+            })
+            && chain
+                .files_to_verify
+                .iter()
+                .all(|f| trust_store.is_trusted(&f.canonical_path, &f.sha256))
+        {
+            let entries = nkeepass::hook::ChainEntry::from_discovered_chain(&chain);
+            chain_digest = Some(nkeepass::hook::compute_chain_digest(&entries));
+        }
+        let outcome = nkeepass::hook::compute_transition(
+            &encoded_state,
+            nkeepass::hook::TransitionAction::Unload {
+                current_chain_digest: chain_digest.as_deref(),
+            },
+            |name| env::var_os(name),
+        )
+        .map_err(|e| err(e.to_string()))?;
+        return emit_hook_outcome(shell, &outcome);
+    }
+
+    let chain_opt =
+        match nkeepass::manifest::discover_chain(&cwd_path, |path| trust_store.contains_path(path))
+        {
+            Ok(opt) => opt,
+            Err(error) => {
+                if mode == HookMode::Prompt {
+                    return Err(manifest_cli_error(error));
+                }
+                let outcome = nkeepass::hook::compute_transition(
+                    &encoded_state,
+                    nkeepass::hook::TransitionAction::Leave,
+                    |name| env::var_os(name),
+                )
+                .map_err(|e| err(e.to_string()))?;
+                eprintln!("nkp: {error}");
+                return emit_hook_outcome(shell, &outcome);
+            }
+        };
+
+    let Some(chain) = chain_opt else {
+        let outcome = nkeepass::hook::compute_transition(
+            &encoded_state,
+            nkeepass::hook::TransitionAction::Leave,
+            |name| env::var_os(name),
+        )
+        .map_err(|e| err(e.to_string()))?;
+        emit_hook_outcome(shell, &outcome)?;
+        if mode == HookMode::Prompt {
+            return Err(err("no manifest found in current directory"));
+        }
+        return Ok(());
+    };
+
+    if let Some(untrusted) = chain
+        .files_to_verify
+        .iter()
+        .find(|f| !trust_store.is_trusted(&f.canonical_path, &f.sha256))
+    {
+        let warned_digest =
+            nkeepass::hook::compute_warned_digest(&untrusted.display_path, &untrusted.sha256);
+        let msg = if trust_store.contains_path(&untrusted.canonical_path) {
+            format!(
+                "nkp: modified manifest {} is not trusted; run 'nkp trust'",
+                untrusted.display_path
+            )
+        } else {
+            format!(
+                "nkp: untrusted manifest {}; run 'nkp trust'",
+                untrusted.display_path
+            )
+        };
+        return emit_blocked_or_fail(shell, mode, &encoded_state, &warned_digest, &msg);
+    }
+
+    let chain_entries = nkeepass::hook::ChainEntry::from_discovered_chain(&chain);
+    let chain_digest = nkeepass::hook::compute_chain_digest(&chain_entries);
+    let merged = match nkeepass::manifest::merge_chain_bindings(&chain) {
+        Ok(m) => m,
+        Err(error) => {
+            if mode == HookMode::Prompt {
+                return Err(manifest_cli_error(error));
+            }
+            let outcome = nkeepass::hook::compute_transition(
+                &encoded_state,
+                nkeepass::hook::TransitionAction::Leave,
+                |name| env::var_os(name),
+            )
+            .map_err(|e| err(e.to_string()))?;
+            eprintln!("nkp: {error}");
+            return emit_hook_outcome(shell, &outcome);
+        }
+    };
+
+    if mode != HookMode::Prompt
+        && let nkeepass::hook::StateDecode::Valid(ref old) = state_decode
+        && old.unloaded.as_deref() == Some(chain_digest.as_str())
+    {
+        return Ok(());
+    }
+
+    let vault_paths = match collect_hook_vault_paths(&merged, config) {
+        Ok(paths) => paths,
+        Err(error) => {
+            let warned =
+                nkeepass::hook::compute_warned_digest(&chain_entries[0].path, &chain_digest);
+            return emit_blocked_or_fail(
+                shell,
+                mode,
+                &encoded_state,
+                &warned,
+                &format!("nkp: {}", error.0),
+            );
+        }
+    };
+
+    let mut vault_fps = Vec::with_capacity(vault_paths.len());
+    for vp in &vault_paths {
+        match nkeepass::hook::preopen_vault_fingerprint(vp) {
+            Ok(fp) => vault_fps.push(fp),
+            Err(_) => {
+                let warned =
+                    nkeepass::hook::compute_warned_digest(&chain_entries[0].path, &chain_digest);
+                return emit_blocked_or_fail(
+                    shell,
+                    mode,
+                    &encoded_state,
+                    &warned,
+                    "nkp: cannot open vault",
+                );
+            }
+        }
+    }
+
+    if mode != HookMode::Prompt
+        && let nkeepass::hook::StateDecode::Valid(ref old) = state_decode
+        && nkeepass::hook::is_fast_path_unchanged(old, &chain_entries, &vault_fps, None)
+    {
+        return Ok(());
+    }
+
+    let resolved_vars: Vec<(String, Zeroizing<String>)> = if !merged.requires_vault_unlock {
+        let mut out = Vec::with_capacity(merged.bindings.len());
+        for (name, binding) in &merged.bindings {
+            if let nkeepass::manifest::BindingSource::DotEnv(
+                nkeepass::env_file::EnvValueKind::Literal(lit),
+            ) = &binding.source
+            {
+                if !nkeepass::template::is_valid_secret_text(lit, true) {
+                    let warned = nkeepass::hook::compute_warned_digest(
+                        &chain_entries[0].path,
+                        &chain_digest,
+                    );
+                    return emit_blocked_or_fail(
+                        shell,
+                        mode,
+                        &encoded_state,
+                        &warned,
+                        "nkp: value contains disallowed control or BiDi characters",
+                    );
+                }
+                out.push((name.clone(), Zeroizing::new(lit.clone())));
+            }
+        }
+        out
+    } else {
+        let pw = match resolve_hook_password(opts, mode, startup)? {
+            HookCredentialOutcome::Ready(pw) => pw,
+            HookCredentialOutcome::Locked => {
+                let warned =
+                    nkeepass::hook::compute_warned_digest(&chain_entries[0].path, &chain_digest);
+                return emit_blocked_or_fail(
+                    shell,
+                    mode,
+                    &encoded_state,
+                    &warned,
+                    nkeepass::hook::LOCKED_VAULT_HINT,
+                );
+            }
+        };
+        let default_vault = active_vault(None, config).ok().map(|(p, _)| p);
+        let timestamp = otp_now()?;
+        let mut lookup =
+            MultiVaultLookup::new(config, default_vault, pw, opts.key_file, timestamp, true);
+        let render_opts = nkeepass::template::RenderOptions::default();
+        let mut out = Vec::with_capacity(merged.bindings.len());
+
+        for (name, binding) in &merged.bindings {
+            let layer_vault = match &binding.vault {
+                Some(spec) => match resolve_vault_spec_path(spec, config) {
+                    Ok(p) => Some(p),
+                    Err(error) => {
+                        let warned = nkeepass::hook::compute_warned_digest(
+                            &chain_entries[0].path,
+                            &chain_digest,
+                        );
+                        return emit_blocked_or_fail(
+                            shell,
+                            mode,
+                            &encoded_state,
+                            &warned,
+                            &format!("nkp: {}", error.0),
+                        );
+                    }
+                },
+                None => None,
+            };
+            lookup.set_layer_vault(layer_vault);
+            let value_res: std::result::Result<
+                Zeroizing<String>,
+                nkeepass::template::TemplateError,
+            > = match &binding.source {
+                nkeepass::manifest::BindingSource::Entry(entry_binding) => {
+                    lookup.resolve_entry_binding(entry_binding).and_then(|raw| {
+                        let s = std::str::from_utf8(&raw)
+                            .map_err(|_| nkeepass::template::TemplateError::NonUtf8Secret)?;
+                        if !nkeepass::template::is_valid_secret_text(s, true) {
+                            return Err(nkeepass::template::TemplateError::UnsafeSecretCharacters);
+                        }
+                        Ok(Zeroizing::new(s.to_owned()))
+                    })
+                }
+                nkeepass::manifest::BindingSource::DotEnv(
+                    nkeepass::env_file::EnvValueKind::Literal(lit),
+                ) => {
+                    if !nkeepass::template::is_valid_secret_text(lit, true) {
+                        Err(nkeepass::template::TemplateError::UnsafeSecretCharacters)
+                    } else {
+                        Ok(Zeroizing::new(lit.clone()))
+                    }
+                }
+                nkeepass::manifest::BindingSource::DotEnv(
+                    nkeepass::env_file::EnvValueKind::Template(tmpl),
+                ) => nkeepass::template::render_text(tmpl, &mut lookup, &render_opts),
+            };
+            match value_res {
+                Ok(val) => out.push((name.clone(), val)),
+                Err(nkeepass::template::TemplateError::VaultLocked) => {
+                    lookup.lock_all();
+                    let warned = nkeepass::hook::compute_warned_digest(
+                        &chain_entries[0].path,
+                        &chain_digest,
+                    );
+                    return emit_blocked_or_fail(
+                        shell,
+                        mode,
+                        &encoded_state,
+                        &warned,
+                        nkeepass::hook::LOCKED_VAULT_HINT,
+                    );
+                }
+                Err(error) => {
+                    lookup.lock_all();
+                    let warned = nkeepass::hook::compute_warned_digest(
+                        &chain_entries[0].path,
+                        &chain_digest,
+                    );
+                    return emit_blocked_or_fail(
+                        shell,
+                        mode,
+                        &encoded_state,
+                        &warned,
+                        &format!("nkp: {error}"),
+                    );
+                }
+            }
+        }
+        lookup.lock_all();
+        out
+    };
+
+    let target = nkeepass::hook::TargetEnv {
+        chain: chain_entries,
+        vaults: vault_fps,
+        session_id: None,
+        resolved_vars,
+    };
+
+    match nkeepass::hook::compute_transition(
+        &encoded_state,
+        nkeepass::hook::TransitionAction::Activate {
+            target: &target,
+            force_reload: mode == HookMode::Prompt,
+        },
+        |name| env::var_os(name),
+    ) {
+        Ok(outcome) => emit_hook_outcome(shell, &outcome),
+        Err(error) => {
+            if mode == HookMode::Prompt {
+                return Err(err(error.to_string()));
+            }
+            if let Some(patch) =
+                nkeepass::hook::revert_only_patch(&encoded_state, |name| env::var_os(name))
+            {
+                let script = nkeepass::hook::emit_hook_patch(shell, &patch)
+                    .map_err(|e| err(e.to_string()))?;
+                write_stdout(script.as_bytes(), "cannot write hook output")?;
+            }
+            eprintln!("nkp: {error}");
+            Ok(())
+        }
     }
 }
 
@@ -7241,6 +8999,9 @@ fn validate_exec_env_names_for_platform(
         if !valid_env_name(name) || !seen.insert(key.into_owned()) {
             return Err(err("invalid or duplicate exec environment name"));
         }
+        if nkeepass::env_file::is_reserved_env_var(name) {
+            return Err(err("reserved environment variable name is forbidden"));
+        }
     }
     Ok(())
 }
@@ -7309,7 +9070,7 @@ fn help_request(args: &[String]) -> Option<Vec<String>> {
         if matches!(arg, "--help" | "-h") {
             if route_tokens
                 .first()
-                .is_some_and(|word| word == "__complete")
+                .is_some_and(|word| matches!(word.as_str(), "__complete" | "__hook"))
             {
                 return None;
             }
@@ -7380,6 +9141,9 @@ fn takes_option_value(option: &str) -> bool {
             | "--kind"
             | "--env"
             | "--bind"
+            | "--env-file"
+            | "--shell"
+            | "--cwd"
     )
 }
 
@@ -7435,11 +9199,13 @@ fn uses_credentials(route: &[String]) -> bool {
     match route {
         [get, many] if get == "get" && many == "many" => true,
         [secrets, get, many] if secrets == "secrets" && get == "get" && many == "many" => true,
+        [shell, load] if shell == "shell" && load == "load" => true,
         [command] => matches!(
             command.as_str(),
             "init"
                 | "exec"
                 | "x"
+                | "inject"
                 | "get"
                 | "list"
                 | "ls"
@@ -7810,7 +9576,8 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     "--vault is not supported for tui; pass the vault path directly: nkp tui PATH",
                 ));
             }
-            "completion" | "version" | "--version" | "use" | "alias" | "config" => {
+            "completion" | "version" | "--version" | "use" | "alias" | "config" | "trust"
+            | "untrust" | "shell" | "__hook" => {
                 return Err(err("this command does not accept --vault"));
             }
             "context" if rest.first().map(String::as_str) != Some("show") => {
@@ -7855,6 +9622,16 @@ fn run(args: &[String], program: &str) -> Result<()> {
             };
             print!("{}", completion::generate(shell)?);
             return Ok(());
+        }
+        "trust" => return trust_command(rest),
+        "untrust" => return untrust_command(rest),
+        "shell"
+            if matches!(
+                rest.first().map(String::as_str),
+                Some("init" | "completions" | "completion" | "status")
+            ) =>
+        {
+            return shell_command(rest, &Config::default());
         }
         "__complete" => return completion::candidates(rest, vault),
         _ => {}
@@ -8131,6 +9908,9 @@ fn run(args: &[String], program: &str) -> Result<()> {
             save_config(&config)
         }
         "exec" | "x" => exec_command(rest, vault, &config),
+        "inject" => inject_command(rest, vault, &config),
+        "shell" => shell_command(rest, &config),
+        "__hook" => hook_command(rest, &config),
         _ => Err(err("unknown command; see --help")),
     }
 }
@@ -8192,7 +9972,7 @@ fn machine_diagnostic_route(args: &[String]) -> bool {
     // Private protocol and version switch deliberately are not help nodes.
     if args
         .get(index)
-        .is_some_and(|token| matches!(token.as_str(), "__complete" | "--version"))
+        .is_some_and(|token| matches!(token.as_str(), "__complete" | "__hook" | "--version"))
     {
         return true;
     }
@@ -8213,9 +9993,11 @@ fn machine_diagnostic_route(args: &[String]) -> bool {
         command,
         "completion"
             | "__complete"
+            | "__hook"
             | "version"
             | "exec"
             | "x"
+            | "inject"
             | "tui"
             | "get"
             | "ls"
@@ -8251,11 +10033,18 @@ fn machine_diagnostic_route(args: &[String]) -> bool {
                 | "sync"
         ))
         || (command == "alias" && matches!(action, "resolve" | "ls" | "list"))
+        || (command == "shell"
+            && matches!(
+                action,
+                "init" | "completions" | "completion" | "load" | "unload"
+            ))
     {
         return true;
     }
     let accepts_json = command == "init"
         || command == "config"
+        || command == "trust"
+        || (command == "shell" && action == "status")
         || command == "context" && matches!(action, "ls" | "list" | "show")
         || command == "secrets" && matches!(action, "ls" | "list");
     let mut cursor = index + 1;
@@ -8577,6 +10366,26 @@ mod tests {
         assert!(machine_diagnostic_route(&args));
         let args = ["show", "--", "--json"].map(str::to_owned);
         assert!(machine_diagnostic_route(&args));
+        for plain_route in [
+            ["__hook", "bash"].as_slice(),
+            ["inject", "tmpl.txt"].as_slice(),
+            ["shell", "init", "bash"].as_slice(),
+            ["shell", "completions", "fish"].as_slice(),
+            ["shell", "status", "--json"].as_slice(),
+            ["trust", "--list", "--json"].as_slice(),
+        ] {
+            let owned = plain_route
+                .iter()
+                .copied()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert!(
+                machine_diagnostic_route(&owned),
+                "{plain_route:?} should use machine diagnostics"
+            );
+        }
+        let status_human = ["shell", "status"].map(str::to_owned);
+        assert!(!machine_diagnostic_route(&status_human));
     }
 
     #[test]
@@ -10814,6 +12623,14 @@ mod tests {
         assert_ne!(
             vault_path_key_for_platform("/work/Vault.kdbx", false),
             vault_path_key_for_platform("/work/vault.kdbx", false)
+        );
+        assert_eq!(
+            platform_vault_dedup_key_for_platform("C:/Users/Work/Vault.kdbx", true),
+            platform_vault_dedup_key_for_platform("C:\\Users\\Work\\vault.kdbx", true)
+        );
+        assert_ne!(
+            platform_vault_dedup_key_for_platform("/work/Vault.kdbx", false),
+            platform_vault_dedup_key_for_platform("/work/vault.kdbx", false)
         );
     }
 

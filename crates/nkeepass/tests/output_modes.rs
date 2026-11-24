@@ -1506,3 +1506,91 @@ elif mode in ("json_c1_safe", "env_json_c1_safe"):
         assert!(status.success(), "PTY mode {mode} failed");
     }
 }
+
+#[test]
+fn powershell_output_neutralizes_unicode_curly_single_quotes() {
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("CurlyEntry");
+    let payload = "a\u{2018}; Invoke-Expression calc;\u{2019}\u{201A}\u{201B}'b";
+    entry.password = ProtectedValue::from_text(payload);
+    database.add_entry(entry);
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("curly.kdbx");
+    KdbxFile::save(
+        &database,
+        std::fs::File::create(&vault).unwrap(),
+        &mut KdbxCredentials::password(PASSWORD).unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+
+    for format in ["pwsh", "powershell"] {
+        let get_out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .args([
+                "--vault",
+                vault.to_str().unwrap(),
+                "get",
+                "CurlyEntry",
+                "--name",
+                "CURLY",
+                "--format",
+                format,
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ])
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8(success(&get_out).to_vec()).unwrap();
+        assert_eq!(
+            text,
+            "$env:CURLY = ('a' + [char]0x2018 + '; Invoke-Expression calc;' + [char]0x2019 + '' + [char]0x201A + '' + [char]0x201B + '''b')\n"
+        );
+        for curly in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            assert!(
+                !text.contains(curly),
+                "raw curly quote U+{:04X} leaked into {format} output: {text}",
+                u32::from(curly)
+            );
+        }
+    }
+
+    let env_out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "secrets",
+            "env",
+            "--key",
+            "CurlyEntry",
+            "--field",
+            "Password",
+            "--name",
+            "CURLY",
+            "--format",
+            "pwsh",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ])
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let env_text = String::from_utf8(success(&env_out).to_vec()).unwrap();
+    assert_eq!(
+        env_text,
+        "$env:CURLY = ('a' + [char]0x2018 + '; Invoke-Expression calc;' + [char]0x2019 + '' + [char]0x201A + '' + [char]0x201B + '''b')\n"
+    );
+}
