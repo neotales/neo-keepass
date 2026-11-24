@@ -2,12 +2,14 @@
 
 #[allow(dead_code, reason = "shared with the CLI's mutation and save paths")]
 pub(crate) mod automation;
+pub mod env_file;
 pub mod glob;
 #[allow(dead_code, reason = "shared interchange model boundary")]
 pub(crate) mod interchange;
 pub mod password_generator;
 pub mod private_file;
 pub mod service;
+pub mod template;
 
 pub use service::{
     AttachmentDescriptor, AttachmentMetadata, AttachmentRef, AutomationError,
