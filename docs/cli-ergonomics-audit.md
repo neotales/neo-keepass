@@ -345,6 +345,7 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   should be supported for dash-leading literal paths. Keep `get many` reservation
   and documented escape, not a renamed bundle route. Avoid auto-create on `set`,
   fuzzy fallback on `get`, or inferred deletion mode on `rm`.
+  (P1-A: positional selectors, `--` selector terminator, and `init -- PATH` implemented in `main.rs`; reference/docs lead and examples remain for P1-B.)
 - [x] Add one positional entry/group selector to `group add/rm`, `files`
   entry-scoped actions, and `field` entry-scoped actions. Legacy `-k` /
   `--key` stays available; duplicate forms fail before vault lookup, and `--`
@@ -359,7 +360,7 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   Field names and attachment names intentionally remain option-only to avoid
   confusing them with the entry selector; this does not complete the broader
   `ENTRY NAME` positional proposal below.
-- [ ] For noun-scoped `files` actions, add `ENTRY [NAME]` (where NAME is required
+- [x] For noun-scoped `files` actions, add `ENTRY [NAME]` (where NAME is required
   except `ls`), `--name NAME` for attachment name, retain legacy `--field/-F`.
   Do not infer a file name or implicitly write to CWD. Retain explicit `-f` or
   `--stdin` (input) and explicit destination; add `-o` for every actual
@@ -370,7 +371,8 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   Optional positionals must have individual slots, reject duplicate roles
   even if values are identical, require explicit placeholders or use the
   named form when mixing would be ambiguous. Do not add `-f` for format.
-- [ ] Add `export DEST` and `import/sync SRC` as exact aliases of
+  Implemented in [`main.rs`](../crates/nkeepass/src/main.rs) (P1-A): `Positional::KeyAndField`, `Positional::KeyAndAttachment`, `-n`/`--name` on `files add/get/rm`, `-o` on `get`/`get many`/`files get`/`export`, `-y` on `rm`/`files rm`/`field rm`/`group rm`.
+- [x] Add `export DEST` and `import/sync SRC` as exact aliases of
   `--output` and `--file`; no extension-based format, no magic `-`, no
   ambiguity with `--stdin`. Add explicit `--format json` for default snapshot
   operations accepting `--format`; keep `sync` JSON-only. Use `--format` for
@@ -379,7 +381,8 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   vocabulary, `--size` alias; explain `init --size` separately as a generated
   entry, not a KDF or master setting (optional explicit long alias
   `--entry-password-length`, not a new required spelling).
-- [ ] Add compact repeatable `--bind NAME=ENTRY` (short `-B`) to `exec/x`,
+  Implemented in [`main.rs`](../crates/nkeepass/src/main.rs) (P1-A): `Positional::Output` (`export DEST`), `Positional::File` (`import`/`sync SRC`), explicit `--format json` on `import`/`export`.
+- [x] Add compact repeatable `--bind NAME=ENTRY` (short `-B`) to `exec/x`,
   defaulting to Password as today. Split at first `=`, validate NAME, keep ENTRY
   as one quoted literal argument, no inline field delimiters that collide with
   paths. Keep explicit field bindings using existing `-k/-F/--env`. For env,
@@ -390,7 +393,8 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   secret. If compact and legacy binding forms are mixed, refuse rather than
   re-pair or change order. Do not shorten by encouraging `eval` or exposing
   values through argv.
-- [ ] Shorten context persistence with `nkp use ALIAS` as a synonym for
+  Implemented in [`main.rs`](../crates/nkeepass/src/main.rs) (P1-A): `-B`/`--bind NAME=ENTRY` on `exec`/`x` (refusing mixed compact/legacy forms and leaving `--` child argv untouched) and `-n` -> `--name` on `env`/`get`/`otp`/`field get`/`files`.
+- [x] Shorten context persistence with `nkp use ALIAS` as a synonym for
   `context use ALIAS`, and accept explicit absolute `PATH` there as a new
   selector form (no CWD inference; store path, not credentials). Keep `context
   set ALIAS PATH` separate from `use`, and `-V ALIAS` for a one-off; `context
@@ -400,6 +404,7 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   other workstream agrees to route it explicitly and safely (otherwise point
   users to `tui PATH`). No implicit nearest vault, directory search, auto-unlock,
   stored password, overwrite, or silent context switch.
+  Implemented in [`main.rs`](../crates/nkeepass/src/main.rs) (P1-A): `nkp use ALIAS_OR_PATH`, absolute normalized path support in `use` and `context use`, and `-V`/`--vault` rejection on non-consuming routes (`tui` points to `nkp tui PATH`).
 
 Shortest common workflows (typed characters including spaces, no newline;
 placeholders are literal example lengths; assumes the correct active vault

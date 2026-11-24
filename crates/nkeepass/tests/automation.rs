@@ -66,9 +66,11 @@ fn load(path: &Path) -> KeePassDatabase {
 }
 
 fn run(vault: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nkp"))
-        .isolate_application_environment()
-        .args(["--vault", vault.to_str().unwrap()])
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+    if args.first() != Some(&"alias") {
+        command.args(["--vault", vault.to_str().unwrap()]);
+    }
+    command
         .args(args)
         .env("XDG_CONFIG_HOME", home)
         .env("XDG_DATA_HOME", home.join("data"))
