@@ -267,7 +267,7 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
 
 ### P0 — Must fix before broadening syntax
 
-- [ ] **Reject all disallowed flags, especially promises of confidentiality.**
+- [x] **Reject all disallowed flags, especially promises of confidentiality.**
   `env … --age-encrypt` prints plaintext successfully; `env … --clipboard`
   is similarly ignored by source inspection. Replace subtractive validation
   with a per-route allowlist (including options accepted but constrained by mode).
@@ -280,7 +280,10 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   credentials or payload and before fetching remote public recipients. Standards:
   Code ergonomics § Cognitive load, Defaults and configuration resolution,
   Trust boundaries and wire formats.
-- [ ] **One token reader for help, normal commands, env, exec, and completion
+  Implemented in [`main.rs`](../crates/nkeepass/src/main.rs) via
+  `AllowedOptions` / `validate_allowed_options` across regular, grouped,
+  interchange, `init`, `env`, and `exec` routes before credential/vault access.
+- [x] **One token reader for help, normal commands, env, exec, and completion
   metadata; no cross-routing by option-value accident.** Today `env` extracts
   binding flags by scanning arbitrary tokens and then scans for `--format`
   again; `exec` searches for the first bare `--` before consuming values.
@@ -294,7 +297,12 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   `config get aliases` metadata checks to **both** `alias resolve` and `alias ls`;
   the two currently emit C1 controls from hand-edited configuration. Ensure
   diagnostics do not echo unsafe labels, arbitrary `argv[0]` or formatter values.
-- [ ] **Separate terminal-safe display and raw output.** Coordinate with parallel
+  Implemented in [`main.rs`](../crates/nkeepass/src/main.rs): `parse_env_options`
+  and `init_command` share `takes_option_value` / `options_from_refs`,
+  `validate_exec_env_names_for_platform` enforces host case semantics,
+  `alias ls`/`alias resolve` share `check_alias_metadata`, and diagnostics
+  pass through `sanitize_terminal_text`.
+- [x] **Separate terminal-safe display and raw output.** Coordinate with parallel
   CLI/TUI work on TTY controls, clipboard, password readers, and write errors.
   For headless CLI never feed untrusted controls to a display sink; allow only
   formatter-owned escapes. Treat explicit raw output redirected to a file/pipe
@@ -307,6 +315,23 @@ file suffix completion with Bash 4+ Readline quoting guarantees.
   valid JSON Unicode escapes on TTY or standardized refusal). Never add a
   color choice that bypasses safety. Keep XML opt-in, no-clobber, key-only
   semantics, fail-closed resolution and destructive confirmation.
+  Implemented in [`main.rs`](../crates/nkeepass/src/main.rs) via
+  `validate_tty_raw_bytes` (preserving LF/HT and `null` delimiters while
+  refusing unsafe C0/ESC/DEL/C1/non-UTF-8 on TTY before first disclosure) and
+  `TtyJsonFormatter` (escaping DEL/C1 as `\u00XX` on TTY without changing
+  piped/redirected bytes).
+  Verification: `cargo +1.98.1 fmt --all --check` (passed),
+  `TMPDIR="$PWD/target/audit-tmp" CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo +1.98.1 clippy --locked --offline -p nkeepass --all-targets` (exited 0 with baseline advisory warnings),
+  `TMPDIR="$PWD/target/audit-tmp" CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo +1.98.1 test --locked --offline -p nkeepass --no-fail-fast`
+  (lib 132/132, `automation` 20/20, `cli` 64/64, `config` 29/29,
+  `context_output` 11/11, `get_many` 7/7, `groups` 4/4, `hardening` 21/21,
+  `init` 29/29, `output_modes` 20/20, `password_mode` 2/2, `root_credentials` 11/11,
+  `set_generator` 4/4, `totp_binding` 11/11, `tui_ui` 15/15 passed; in this
+  sandbox environment `color_output` had 9/10 pass with
+  `auto_styles_help_only_when_stdout_is_a_tty` failing because `script` is not
+  installed, and `--bin nkp` had 197/202 pass with 5 pre-existing
+  `completion::tests` process-group cleanup assertions failing under sandbox PID 1
+  zombie behavior), and `git diff --check` (passed).
 
 ### P1 — Less to type, without silent retargeting
 

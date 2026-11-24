@@ -909,6 +909,8 @@ fn a_hostile_alias_record_is_never_printed() {
     for args in [
         vec!["config", "ls", "--json"],
         vec!["config", "get", "aliases"],
+        vec!["alias", "ls"],
+        vec!["alias", "list"],
     ] {
         let output = run(&home, &args);
         assert!(!output.status.success(), "{args:?} printed a hostile alias");
@@ -916,5 +918,64 @@ fn a_hostile_alias_record_is_never_printed() {
             output.stdout.is_empty(),
             "{args:?} printed the benign record before the hostile one"
         );
+    }
+}
+
+#[test]
+fn alias_ls_and_resolve_reject_c1_del_and_esc_controls() {
+    for (label, seeded_json, alias_name) in [
+        (
+            "c1-target",
+            concat!(
+                r#"{"aliases":{"ok":{"kind":"vault","target":"/tmp/a.kdbx"},"#,
+                r#""demo_bad":{"kind":"entry","target":"Root/bad\u009b31m"}}}"#,
+            ),
+            "demo_bad",
+        ),
+        (
+            "c1-field",
+            concat!(
+                r#"{"aliases":{"ok":{"kind":"vault","target":"/tmp/a.kdbx"},"#,
+                r#""demo_field":{"kind":"entry","target":"Root/E","field":"Token\u009b0m"}}}"#,
+            ),
+            "demo_field",
+        ),
+        (
+            "del-name",
+            concat!(
+                r#"{"aliases":{"ok":{"kind":"vault","target":"/tmp/a.kdbx"},"#,
+                r#""bad\u007fname":{"kind":"entry","target":"Root/E"}}}"#,
+            ),
+            "bad\u{007f}name",
+        ),
+    ] {
+        let home = ConfigHome::new();
+        home.seed(seeded_json);
+        for args in [
+            vec!["alias", "ls"],
+            vec!["alias", "list"],
+            vec!["alias", "resolve", alias_name],
+            vec!["config", "get", "aliases"],
+        ] {
+            let output = run(&home, &args);
+            assert!(
+                !output.status.success(),
+                "{label}: {args:?} accepted control bytes"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{label}: {args:?} wrote stdout: {:?}",
+                output.stdout
+            );
+            let stderr_text = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr_text.chars().any(|ch| ch.is_control() && ch != '\n'),
+                "{label}: {args:?} leaked control byte in stderr: {stderr_text:?}"
+            );
+            assert!(
+                stderr_text.contains("terminal-control bytes"),
+                "{label}: {args:?} wrong error: {stderr_text:?}"
+            );
+        }
     }
 }
