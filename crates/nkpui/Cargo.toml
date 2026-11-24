@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "nkpui"
+version = "0.0.0-alpha.1"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Desktop UI for neo-keepass built with Rune"
+
+[dependencies]
+neotales-keepass = { path = "../neotales-keepass" }
+nkeepass = { path = "../nkeepass" }
+rune = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be", default-features = false, features = ["accessibility", "embedded-fonts", "metal-backend", "svg"] }
+rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be", default-features = false }
+zeroize = { version = "=1.9.1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.24"
+
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+naga = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+winit = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+parley_engine = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
