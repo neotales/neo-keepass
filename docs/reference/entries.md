@@ -23,34 +23,37 @@ supply both.
 ### `files add`
 
 ```text
-nkp files add (ENTRY | --key ENTRY) --field NAME (--file PATH | --stdin)
+nkp files add (ENTRY | -k ENTRY | --key ENTRY) (NAME | -n NAME | --name NAME | -F NAME | --field NAME) (-f PATH | --file PATH | --stdin)
 ```
 
 Reads bytes from exactly one source and adds them as an attachment named by
-`--field`. The operation changes the vault. `import` aliases `add`. The entry
-selector may be positional or supplied with `-k` / `--key`; do not supply
-both.
+`-n` / `--name`, `-F` / `--field`, or the second positional `NAME` argument. The
+operation changes the vault. `import` aliases `add`. The entry selector may be
+positional or supplied with `-k` / `--key`; do not supply both, and do not
+supply both positional `NAME` and a name/field flag.
 
 ### `files get`
 
 ```text
-nkp files get (ENTRY | --key ENTRY) --field NAME --output PATH
+nkp files get (ENTRY | -k ENTRY | --key ENTRY) (NAME | -n NAME | --name NAME | -F NAME | --field NAME) (-o PATH | --output PATH)
 ```
 
 Writes the attachment bytes to a private, no-clobber file. An entry selector,
-`--field`, and `--output` are required. The file contains plaintext attachment
-data. `export` aliases `get`. The entry selector may be positional or supplied with `-k` / `--key`;
-do not supply both.
+attachment name (`NAME`, `-n`/`--name`, or `-F`/`--field`), and `-o` /
+`--output` are required. The file contains plaintext attachment data. `export`
+aliases `get`. The entry selector may be positional or supplied with `-k` /
+`--key`; do not supply both.
 
 ### `files rm`
 
 ```text
-nkp files rm (ENTRY | --key ENTRY) --field NAME --yes
+nkp files rm (ENTRY | -k ENTRY | --key ENTRY) (NAME | -n NAME | --name NAME | -F NAME | --field NAME) (-y | --yes)
 ```
 
-Removes the selected attachment. `--yes` is required and the command does not
-prompt. `remove` aliases `rm`. The entry selector may be positional or
-supplied with `-k` / `--key`; do not supply both.
+Removes the selected attachment (`NAME`, `-n`/`--name`, or `-F`/`--field`). `-y`
+/ `--yes` is required and the command does not prompt. `remove` aliases `rm`.
+The entry selector may be positional or supplied with `-k` / `--key`; do not
+supply both.
 
 ## Groups
 
@@ -106,44 +109,42 @@ supply both.
 ### `field get`
 
 ```text
-nkp field get (ENTRY | --key ENTRY) --field FIELD [--format FORMAT] [--name NAME]
-  [--is-output]
+nkp field get (ENTRY | -k ENTRY | --key ENTRY) (FIELD | -F FIELD | --field FIELD)
+  [--format FORMAT] [-n NAME | --name NAME] [--is-output]
 ```
 
 Reveals one custom field. The format defaults to `text`; supported formats
-match `secrets get`. Named formats require `--name`. `--is-output` is valid
-only for `azure-devops`. It refuses built-in fields; use `secrets get` to read
-them. `reveal` aliases `get`.
+match `secrets get`. Named formats require `-n` / `--name`. `--is-output` is
+an optional Azure DevOps modifier (`azure-devops` works without it). `field get`
+refuses built-in fields; use `get` / `secrets get` to read them. `reveal`
+aliases `get`.
 
-`field get` does not accept `--age-encrypt`, `-r` or `--age-recipient`, or
-`--output`. Its generated help lists those inherited `get` flags, but the
-command rejects them. Use
-`nkp secrets get --key PATH --field FIELD --age-encrypt ...` when you
-need encrypted output.
+`field get` does not accept `--age-encrypt`, `-r` / `--age-recipient`,
+`--clipboard`, or `-o` / `--output`, and omits them from its help. Use
+`nkp get PATH -F FIELD --age-encrypt ...` when you need encrypted output.
 
 ### `field set`
 
 ```text
-nkp field set (ENTRY | --key ENTRY) --field FIELD (--file PATH | --stdin)
+nkp field set (ENTRY | -k ENTRY | --key ENTRY) (FIELD | -F FIELD | --field FIELD)
+  (-f PATH | --file PATH | --stdin)
 ```
 
 Reads one value and sets the custom field. Exactly one input source is
 required. `edit` aliases `set`. The entry selector may be positional or
 supplied with `-k` / `--key`; do not supply both.
 
-`field set` does not accept `--age-decrypt`, `-i`, or `--age-identity`. Its
-generated help lists those inherited `set` flags, but the command rejects
-them. To decrypt input before updating a custom field, use
-`nkp secrets set --key PATH --field FIELD --age-decrypt
---age-identity PATH --file CIPHERTEXT`.
+`field set` does not accept `--age-decrypt`, `-i`, or `--age-identity`, and
+omits them from its help. To decrypt input before updating a custom field, use
+`nkp set PATH -F FIELD --age-decrypt -i PATH -f CIPHERTEXT`.
 
 ### `field rm`
 
 ```text
-nkp field rm (ENTRY | --key ENTRY) --field FIELD --yes
+nkp field rm (ENTRY | -k ENTRY | --key ENTRY) (FIELD | -F FIELD | --field FIELD) (-y | --yes)
 ```
 
-Removes the selected custom field. `--yes` is required and the command does
+Removes the selected custom field. `-y` / `--yes` is required and the command does
 not prompt. It refuses built-in fields such as `Title`, `UserName`,
 `Password`, `URL`, and `Notes`. `remove` aliases `rm`. The entry selector may
 be positional or supplied with `-k` / `--key`; do not supply both.

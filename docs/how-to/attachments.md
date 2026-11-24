@@ -6,25 +6,24 @@ accepted compatibility aliases. Commands operate on one entry.
 ## Add an attachment
 
 ```sh
-nkp files add --key 'Services/Example' --field 'recovery.txt' \
-  --file ./recovery.txt
+nkp files add 'Services/Example' 'recovery.txt' -f ./recovery.txt
 ```
 
 The command reads the file bytes and stores them in the entry. Use
-`--stdin` instead of `--file` to read bytes from standard input.
+`--stdin` instead of `-f` / `--file` to read bytes from standard input; `-k` /
+`--key` and `-F` / `--field` remain supported equivalents.
 
 ## List and extract
 
 ```sh
-nkp files ls --key 'Services/Example'
-nkp files get --key 'Services/Example' --field 'recovery.txt' \
-  --output ./recovery-copy.txt
+nkp files ls 'Services/Example'
+nkp files get 'Services/Example' 'recovery.txt' -o ./recovery-copy.txt
 ```
 
 Listing prints attachment metadata. Extraction writes the contents to a
-private, no-clobber file and refuses to overwrite an existing destination.
-Choose an output directory with appropriate access controls; extracted
-attachments are plaintext.
+private, no-clobber file (`-o` / `--output PATH`) and refuses to overwrite an
+existing destination. Choose an output directory with appropriate access
+controls; extracted attachments are plaintext.
 
 The root `set` shortcut also accepts repeated `--bin`/`-b` attachments:
 
@@ -54,10 +53,10 @@ the path portion dynamically.
 ## Remove an attachment
 
 ```sh
-nkp files rm --key 'Services/Example' --field 'recovery.txt' --yes
+nkp files rm 'Services/Example' 'recovery.txt' -y
 ```
 
-The command requires `--yes` and does not prompt. It removes the named
+The command requires `-y` / `--yes` and does not prompt. It removes the named
 attachment from the vault. Check the entry and attachment name before running
 it.
 

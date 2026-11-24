@@ -10,19 +10,20 @@
 6. `default.kdbx` in the application data directory.
 
 For ordinary vault commands, an explicit absolute path selects that vault.
-A relative `--vault` value is treated as a vault alias, not resolved against
+A relative `-V` / `--vault` value is treated as a vault alias, not resolved against
 the current directory. Create an alias with
 `nkp context set work "$HOME/vaults/work.kdbx"`, then select it with
-`nkp --vault work secrets ls`.
+`nkp -V work ls`.
 
 `init` is the exception because it creates a file. Its positional `PATH` and
 `--vault PATH` target may be relative; the CLI resolves either from the
 current working directory. Do not pass both to `init`.
 
-To persist a context selection, run:
+To persist a context selection, run `nkp use` (shorthand for `nkp context use`)
+with either a configured alias or a normalized absolute vault path:
 
 ```sh
-nkp context use work
+nkp use work
 nkp context show
 ```
 

@@ -21,23 +21,28 @@ and shell history. For a sensitive single value, prefer `--value-stdin`,
 ## Export a snapshot
 
 ```sh
-nkp secrets export --output snapshot.json
+nkp export snapshot.json
+# Explicit KeePass XML export requires --allow-plaintext:
+nkp export snapshot.xml --format keepass-xml --allow-plaintext
 ```
 
 The CLI prompts for the master password and writes a private, no-clobber
-snapshot. It refuses to overwrite an existing destination.
+snapshot (`DEST` or `-o` / `--output DEST`). It refuses to overwrite an existing
+destination.
 
 ## Import or synchronize
 
 ```sh
-nkp secrets import --file snapshot.json --dry-run
-nkp secrets sync --file snapshot.json --strategy newest --dry-run
+nkp import snapshot.json --dry-run
+nkp sync snapshot.json --strategy newest --dry-run
 ```
 
-Review the dry-run report before repeating the operation without
-`--dry-run`. Import refuses to replace a non-empty vault unless you pass
-`--replace`. Sync accepts `--strategy newest` or `--strategy source`.
-Both operations read from exactly one of `--file PATH` and `--stdin`.
+`--dry-run` validates without saving or writing a change report. Import refuses
+to replace a non-empty vault unless you pass `--replace`, and both `import` and
+`sync` accept `--file PATH` / `-f PATH`, positional `SRC`, or `--stdin` (plus
+`--format keepass-xml` on `import`). Sync accepts `--strategy newest` (default),
+`--strategy source` (prefer imported values), or `--strategy target` (keep
+existing vault values on conflict while adding missing items).
 
 The three snapshot operations are available under `nkp automation`. See
 [automation command reference](../reference/automation.md) for each option and

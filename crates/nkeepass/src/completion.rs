@@ -239,16 +239,24 @@ fn authenticated_metadata(
 }
 
 fn visible_file_candidate(path: &Path, prefix: &str, root: &Path) -> bool {
-    if prefix.is_empty() {
+    if prefix.is_empty() || prefix == "." {
         return true;
     }
     let prefix_path = Path::new(prefix);
     if prefix_path.is_absolute() {
-        return path.starts_with(prefix_path);
+        return path.to_str().is_some_and(|text| text.starts_with(prefix));
     }
     if prefix.contains('/') || prefix.contains('\\') {
-        let relative = prefix_path.strip_prefix(".").unwrap_or(prefix_path);
-        return path.starts_with(root.join(relative));
+        let normalized_prefix = prefix
+            .strip_prefix("./")
+            .or_else(|| prefix.strip_prefix(".\\"))
+            .unwrap_or(prefix)
+            .replace('\\', "/");
+        return path
+            .strip_prefix(root)
+            .ok()
+            .and_then(|rel| rel.to_str())
+            .is_some_and(|rel| rel.replace('\\', "/").starts_with(&normalized_prefix));
     }
     path.file_name()
         .and_then(|name| name.to_str())
@@ -279,8 +287,7 @@ fn vault_file_candidates(prefix: &str) -> Result<Vec<String>> {
             let file_type = metadata.file_type();
             if file_type.is_dir() && depth < MAX_VAULT_DEPTH {
                 pending.push((entry.path(), depth + 1));
-            } else if depth > 0
-                && file_type.is_file()
+            } else if file_type.is_file()
                 && entry
                     .path()
                     .extension()
@@ -442,7 +449,7 @@ _nkp_complete() {
                 COMPREPLY=( $(compgen -W 'auto always never basic truecolor' -- "$current") )
                 ;;
             '')
-                choices='init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x version completion --help -h --version --vault -V --password-env --password-stdin --color --no-color'
+                choices='init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x use inject trust untrust shell tui version completion --help -h --version --vault -V --password-env --password-stdin --color --no-color'
                 COMPREPLY=( $(compgen -W "$choices" -- "$current") )
                 ;;
         esac
@@ -639,7 +646,7 @@ _nkp_complete() {
     # --field may itself have been the value of --key.
     local slot_owner='' slot_start=$((index + 1)) consumed_value=false
     case "$command" in
-        secrets|automation|field|custom-field|files|attachment|attachments|group|groups|alias|context|config)
+        secrets|automation|field|custom-field|files|attachment|attachments|group|groups|alias|context|config|shell)
             slot_start=$((index + 2)) ;;
     esac
     for ((scan = slot_start; scan < COMP_CWORD; scan++)); do
@@ -652,7 +659,7 @@ _nkp_complete() {
         fi
         [[ "$element" == -- ]] && break
         case "$element" in
-            --key|-k|--field|-F|--format|--name|--env|--password|--password-env|--password-file|--key-file|--file|-f|--output|--value|--value-env|--value-file|--bin|-b|--username|--url|--notes|--size|--chars|-c|--strategy|--kind|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
+            --key|-k|--field|-F|--format|--name|-n|--env|--bind|-B|--env-file|--shell|--password|--password-env|--password-file|--key-file|--file|-f|--output|-o|--value|--value-env|--value-file|--bin|-b|--username|--url|--notes|--size|--chars|-c|--strategy|--kind|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
                 slot_owner="$element" ;;
         esac
     done
@@ -722,11 +729,11 @@ _nkp_complete() {
                     waiting_for_value=true
                     waiting_owner=field
                     ;;
-                --username|--url|--notes|--value|--value-env|--value-file|--chars|-c|--bin|-b|--name|--file|-f|--output|--password|--password-env|--password-file|--key-file|--size|--format|--strategy|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
+                --username|--url|--notes|--value|--value-env|--value-file|--chars|-c|--bin|-b|--name|-n|--file|-f|--output|-o|--password|--password-env|--password-file|--key-file|--size|--format|--strategy|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
                     waiting_for_value=true
                     waiting_owner=other
                     ;;
-                --yes|--dry-run|--replace|--allow-plaintext|--password-stdin|--stdin|--value-stdin|--generate|--upper|-U|--lower|-L|--digits|-D|--symbols|-S|--is-output|--clipboard|--age-encrypt|--age-decrypt)
+                --yes|-y|--dry-run|--replace|--allow-plaintext|--password-stdin|--stdin|--value-stdin|--generate|--upper|-U|--lower|-L|--digits|-D|--symbols|-S|--is-output|--clipboard|--age-encrypt|--age-decrypt)
                     ;;
                 -*)
                     invalid_option=true
@@ -773,7 +780,15 @@ _nkp_complete() {
             ;;
         --vault|-V) kind='vaults' ;;
     esac
-    if [[ "$command" == context && ( "$action" == use || "$action" == rm || "$action" == remove ) && $position -eq 2 ]]; then
+    if [[ "$command" == use && $position -eq 1 && "$current" != -* ]]; then
+        kind='vaults'
+    elif [[ "$command" == tui && $position -eq 1 && "$current" != -* ]]; then
+        kind='vault-files'
+    elif [[ "$command" == init && $position -eq 1 && "$current" != -* ]]; then
+        kind='vault-files'
+    elif [[ "$command" == context && "$action" == use && $position -eq 2 && "$current" != -* ]]; then
+        kind='vaults'
+    elif [[ "$command" == context && ( "$action" == rm || "$action" == remove ) && $position -eq 2 ]]; then
         kind='vault-aliases'
     elif [[ "$command" == context && "$action" == set && $position -eq 3 ]]; then
         kind='vaults'
@@ -810,8 +825,11 @@ _nkp_complete() {
         --format:otp:*|--format:secrets:otp) choices='text json dotenv shell pwsh powershell github-actions azure-devops null' ;;
         --format:field:get|--format:field:reveal|--format:custom-field:get|--format:custom-field:reveal) choices='text json dotenv shell pwsh powershell github-actions azure-devops null' ;;
         --format:env:*|--format:secrets:env|--format:secrets:environment) choices='dotenv shell pwsh powershell github-actions azure-devops json null' ;;
+        --format:import:*|--format:secrets:import|--format:automation:import|--format:export:*|--format:secrets:export|--format:automation:export) choices='json keepass-xml' ;;
+        --format:inject:*) choices='raw dotenv' ;;
         --strategy:sync:*|--strategy:secrets:sync|--strategy:automation:sync) choices='newest source target' ;;
-        --field:get:*|--field:set:*|--field:secrets:get|--field:secrets:set|--field:field:get|--field:field:reveal|--field:field:set|--field:field:edit|--field:custom-field:get|--field:custom-field:reveal|--field:custom-field:set|--field:custom-field:edit) choices='Password Title UserName URL Notes' ;;
+        --shell:shell:load|--shell:shell:unload) choices='bash zsh fish powershell pwsh nushell' ;;
+        --field:get:*|-F:get:*|--field:set:*|-F:set:*|--field:secrets:get|-F:secrets:get|--field:secrets:set|-F:secrets:set) choices='Password Title UserName URL Notes' ;;
         *) choices='' ;;
     esac
     if [[ -n "$choices" ]]; then
@@ -819,15 +837,21 @@ _nkp_complete() {
         return
     fi
     case "$command" in
-        init) choices='--password --password-env --password-file --password-stdin --key-file --kdf --memory --iterations --parallelism --size' ;;
+        init) choices='--json --generate-master-password --password --password-env --password-file --password-stdin --key-file --kdf --memory --iterations --parallelism --size' ;;
         context)
-            [[ -n "$action" ]] || choices='ls list show use rm remove set'
+            if [[ -z "$action" ]]; then
+                choices='ls list show use rm remove set'
+            else
+                case "$action" in
+                    ls|list|show) choices='--json' ;;
+                esac
+            fi
             ;;
         alias)
             if [[ -z "$action" ]]; then
                 choices='ls list set rm remove resolve'
             elif [[ "$action" == set ]]; then
-                choices='--kind --field'
+                choices='--kind -F --field'
             fi
             ;;
         config)
@@ -836,7 +860,8 @@ _nkp_complete() {
             else
                 case "$action" in
                     ls|list) choices='--json --' ;;
-                    get|show|set|rm|remove) choices='aliases current default_vault' ;;
+                    get|show) choices='aliases current default_vault' ;;
+                    set|rm|remove) [[ $position -eq 2 ]] && choices='current default_vault' ;;
                 esac
             fi
             ;;
@@ -847,45 +872,45 @@ _nkp_complete() {
                 case "$action" in
                     ls|list) choices='--password --password-env --password-file --password-stdin --key-file --' ;;
                     search) choices='--password --password-env --password-file --password-stdin --key-file --' ;;
-                    show) choices='--key --password --password-env --password-file --password-stdin --key-file --' ;;
-                    env|environment) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                    get) choices='many --key --field --name --format --is-output --age-encrypt --age-recipient -r --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
-                    set) choices='--key --field --username --url --notes --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
-                    rm|remove) choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
-                    ensure) choices='--key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file --' ;;
-                    otp) choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file --' ;;
-                    import) choices='--file --stdin --replace --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                    export) choices='--output --password --password-env --password-file --password-stdin --key-file' ;;
-                    sync) choices='--file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                    show) choices='-k --key --password --password-env --password-file --password-stdin --key-file --' ;;
+                    env|environment) choices='-k --key -F --field -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                    get) choices='many -k --key -F --field -n --name --format --is-output --age-encrypt --age-recipient -r -o --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
+                    set) choices='-k --key -F --field --username --url --notes -f --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
+                    rm|remove) choices='-k --key -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                    ensure) choices='-k --key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file --' ;;
+                    otp) choices='-k --key -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file --' ;;
+                    import) choices='-f --file --stdin --replace --dry-run --format --password --password-env --password-file --password-stdin --key-file' ;;
+                    export) choices='-o --output --format --allow-plaintext --password --password-env --password-file --password-stdin --key-file' ;;
+                    sync) choices='-f --file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 esac
             fi
             ;;
-        get) choices='many --key --field --name --format --is-output --age-encrypt --age-recipient -r --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
+        get) choices='many -k --key -F --field -n --name --format --is-output --age-encrypt --age-recipient -r -o --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
         list|ls) choices='--password --password-env --password-file --password-stdin --key-file --' ;;
         search) choices='--password --password-env --password-file --password-stdin --key-file --' ;;
-        show) choices='--key --password --password-env --password-file --password-stdin --key-file --' ;;
-        env) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-        set) choices='--key --field --username --url --notes --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
-        rm|remove) choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
-        ensure) choices='--key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file --' ;;
-        otp) choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file --' ;;
-        import) choices='--file --stdin --replace --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-        export) choices='--output --password --password-env --password-file --password-stdin --key-file' ;;
-        sync) choices='--file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+        show) choices='-k --key --password --password-env --password-file --password-stdin --key-file --' ;;
+        env) choices='-k --key -F --field -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+        set) choices='-k --key -F --field --username --url --notes -f --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
+        rm|remove) choices='-k --key -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
+        ensure) choices='-k --key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file --' ;;
+        otp) choices='-k --key -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file --' ;;
+        import) choices='-f --file --stdin --replace --dry-run --format --password --password-env --password-file --password-stdin --key-file' ;;
+        export) choices='-o --output --format --allow-plaintext --password --password-env --password-file --password-stdin --key-file' ;;
+        sync) choices='-f --file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
         automation)
             choices='import export sync'
             case "$action" in
-                import) choices='--file --stdin --replace --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                export) choices='--output --password --password-env --password-file --password-stdin --key-file' ;;
-                sync) choices='--file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                import) choices='-f --file --stdin --replace --dry-run --format --password --password-env --password-file --password-stdin --key-file' ;;
+                export) choices='-o --output --format --allow-plaintext --password --password-env --password-file --password-stdin --key-file' ;;
+                sync) choices='-f --file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
             esac
             ;;
         group|groups)
             choices='ls list add create ensure rm remove'
             case "$action" in
                 ls|list) choices='--password --password-env --password-file --password-stdin --key-file' ;;
-                add|create|ensure) choices='--key --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                rm|remove) choices='--key --yes --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                add|create|ensure) choices='-k --key --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                rm|remove) choices='-k --key -y --yes --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
             esac
             ;;
         files|attachment|attachments)
@@ -893,10 +918,10 @@ _nkp_complete() {
                 choices='ls list add import get export rm remove'
             else
                 case "$action" in
-                    ls|list) choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
-                    add|import) choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
-                    get|export) choices='--key --field --output --password --password-env --password-file --password-stdin --key-file' ;;
-                    rm|remove) choices='--key --field --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                    ls|list) choices='-k --key --password --password-env --password-file --password-stdin --key-file' ;;
+                    add|import) choices='-k --key -n --name -F --field -f --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                    get|export) choices='-k --key -n --name -F --field -o --output --password --password-env --password-file --password-stdin --key-file' ;;
+                    rm|remove) choices='-k --key -n --name -F --field -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
                 esac
             fi
             ;;
@@ -905,18 +930,34 @@ _nkp_complete() {
                 choices='ls list get reveal set edit rm remove'
             else
                 case "$action" in
-                    ls|list) choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
-                    get|reveal) choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                    set|edit) choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
-                    rm|remove) choices='--key --field --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                    ls|list) choices='-k --key --password --password-env --password-file --password-stdin --key-file' ;;
+                    get|reveal) choices='-k --key -F --field -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                    set|edit) choices='-k --key -F --field -f --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                    rm|remove) choices='-k --key -F --field -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
                 esac
             fi
             ;;
-        exec|x) choices='--key --field --env --password --password-env --password-file --password-stdin --key-file --' ;;
+        exec|x) choices='-B --bind -k --key -F --field --env --env-file --password --password-env --password-file --password-stdin --key-file --' ;;
+        inject) choices='-f --file --stdin -o --output --format --check --password --password-env --password-file --password-stdin --key-file' ;;
+        trust) choices='--list --json --prune --' ;;
+        untrust) choices='--all --' ;;
+        shell)
+            if [[ -z "$action" ]]; then
+                choices='init completions completion load unload status'
+            else
+                case "$action" in
+                    init) choices='--no-completion --no-env bash zsh fish powershell pwsh nushell' ;;
+                    completions|completion) [[ $position -eq 2 ]] && choices='bash sh zsh fish powershell pwsh nushell' ;;
+                    load) choices='--shell --password --password-env --password-file --password-stdin --key-file' ;;
+                    unload) choices='--shell' ;;
+                    status) choices='--json' ;;
+                esac
+            fi
+            ;;
         completion) [[ -z "$action" ]] && choices='bash sh zsh fish powershell pwsh nushell' ;;
     esac
     if [[ "$many_mode" == true && "$previous" != --field && "$previous" != -F && "$previous" != --format ]]; then
-        choices='--field --format --age-encrypt --age-recipient -r --output --is-output --password --password-env --password-file --password-stdin --key-file'
+        choices='-F --field --format --age-encrypt --age-recipient -r -o --output --is-output --password --password-env --password-file --password-stdin --key-file'
     fi
     COMPREPLY=( $(compgen -W "$choices" -- "$current") )
 }
@@ -939,13 +980,24 @@ _nkp_complete_candidates() {
         exec:true:*|x:true:*|exec:*:--|x:*:--) return ;;
     esac
     case "$_nk_previous" in
-        --key) case "$_nk_command" in group|groups) _nk_kind='groups' ;; *) _nk_kind='keys' ;; esac ;;
+        --key|-k) case "$_nk_command" in group|groups) _nk_kind='groups' ;; *) _nk_kind='keys' ;; esac ;;
         --vault|-V) _nk_kind='vaults' ;;
         use|rm)
             if [ "$_nk_command" = context ]; then
-                _nk_kind='vault-aliases'
+                if [ "$_nk_previous" = use ]; then
+                    _nk_kind='vaults'
+                else
+                    _nk_kind='vault-aliases'
+                fi
+            elif [ "$_nk_command" = use ]; then
+                _nk_kind='vaults'
             elif [ "$_nk_command" != config ] && { [ "$_nk_action" = remove ] || [ "$_nk_action" = resolve ] || [ "$_nk_action" = set ]; }; then
                 _nk_kind='aliases'
+            fi
+            ;;
+        tui|init)
+            if [ "$_nk_command" = tui ] || [ "$_nk_command" = init ]; then
+                _nk_kind='vault-files'
             fi
             ;;
         set)
@@ -961,6 +1013,11 @@ _nkp_complete_candidates() {
             fi
             ;;
     esac
+    if [ -z "$_nk_kind" ] && [ "$_nk_command" = use ] && [ -z "$_nk_action" ]; then
+        _nk_kind='vaults'
+    elif [ -z "$_nk_kind" ] && { [ "$_nk_command" = tui ] || [ "$_nk_command" = init ]; } && [ -z "$_nk_action" ]; then
+        _nk_kind='vault-files'
+    fi
     if [ -n "$_nk_kind" ]; then
         case "$_nk_vault_option" in
             --vault|-V)
@@ -982,64 +1039,77 @@ _nkp_complete_candidates() {
         --format:otp:*|--format:secrets:otp) _nk_choices='text json dotenv shell pwsh powershell github-actions azure-devops null' ;;
         --format:field:get|--format:field:reveal|--format:custom-field:get|--format:custom-field:reveal) _nk_choices='text json dotenv shell pwsh powershell github-actions azure-devops null' ;;
         --format:env:*|--format:secrets:env|--format:secrets:environment) _nk_choices='dotenv shell pwsh powershell github-actions azure-devops json null' ;;
+        --format:import:*|--format:secrets:import|--format:automation:import|--format:export:*|--format:secrets:export|--format:automation:export) _nk_choices='json keepass-xml' ;;
+        --format:inject:*) _nk_choices='raw dotenv' ;;
         --strategy:sync:*|--strategy:secrets:sync|--strategy:automation:sync) _nk_choices='newest source target' ;;
-        --field:get:*|--field:set:*|--field:secrets:get|--field:secrets:set|--field:field:get|--field:field:reveal|--field:field:set|--field:field:edit|--field:custom-field:get|--field:custom-field:reveal|--field:custom-field:set|--field:custom-field:edit) _nk_choices='Password Title UserName URL Notes' ;;
+        --shell:shell:load|--shell:shell:unload) _nk_choices='bash zsh fish powershell pwsh nushell' ;;
+        --field:get:*|-F:get:*|--field:set:*|-F:set:*|--field:secrets:get|-F:secrets:get|--field:secrets:set|-F:secrets:set) _nk_choices='Password Title UserName URL Notes' ;;
         *)
             case "$_nk_command:$_nk_action" in
-                :) _nk_choices='init context alias config secrets automation files attachment attachments group groups exec --vault -V --password-env --password-stdin --help' ;;
-                init:*) _nk_choices='--password --password-env --password-file --password-stdin --key-file --kdf --memory --iterations --parallelism --size' ;;
+                :) _nk_choices='init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x use inject trust untrust shell tui version completion --help -h --version --vault -V --password-env --password-stdin --color --no-color' ;;
+                init:*) _nk_choices='--json --generate-master-password --password --password-env --password-file --password-stdin --key-file --kdf --memory --iterations --parallelism --size' ;;
+                context:ls|context:list|context:show) _nk_choices='--json' ;;
                 context:) _nk_choices='ls list show use rm remove set' ;;
                 config:ls|config:list) _nk_choices='--json --' ;;
-                config:get|config:show|config:set|config:rm|config:remove) _nk_choices='aliases current default_vault' ;;
+                config:get|config:show) _nk_choices='aliases current default_vault' ;;
+                config:set|config:rm|config:remove) _nk_choices='current default_vault' ;;
                 config:*) _nk_choices='ls list get show set rm remove' ;;
                 alias:) _nk_choices='ls list set rm remove resolve' ;;
-                alias:set) _nk_choices='--kind --field' ;;
+                alias:set) _nk_choices='--kind -F --field' ;;
                 secrets:) _nk_choices='get list ls search show env environment set rm remove ensure otp import export sync' ;;
                 secrets:ls|secrets:list) _nk_choices='--password --password-env --password-file --password-stdin --key-file --' ;;
                 secrets:search) _nk_choices='--password --password-env --password-file --password-stdin --key-file --' ;;
-                secrets:show) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:env|secrets:environment) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:get) _nk_choices='many --key --field --name --format --is-output --age-encrypt --age-recipient -r --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
-                secrets:set) _nk_choices='--key --field --username --url --notes --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:rm|secrets:remove) _nk_choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:ensure) _nk_choices='--key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:otp) _nk_choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:import) _nk_choices='--file --stdin --replace --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:export) _nk_choices='--output --password --password-env --password-file --password-stdin --key-file' ;;
-                secrets:sync) _nk_choices='--file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                get:) _nk_choices='many --key --field --name --format --is-output --age-encrypt --age-recipient -r --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
-                get:many) _nk_choices='--field --format --age-encrypt --age-recipient -r --output --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:show) _nk_choices='-k --key --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:env|secrets:environment) _nk_choices='-k --key -F --field -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:get) _nk_choices='many -k --key -F --field -n --name --format --is-output --age-encrypt --age-recipient -r -o --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
+                secrets:set) _nk_choices='-k --key -F --field --username --url --notes -f --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:rm|secrets:remove) _nk_choices='-k --key -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:ensure) _nk_choices='-k --key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:otp) _nk_choices='-k --key -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:import) _nk_choices='-f --file --stdin --replace --dry-run --format --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:export) _nk_choices='-o --output --format --allow-plaintext --password --password-env --password-file --password-stdin --key-file' ;;
+                secrets:sync) _nk_choices='-f --file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                get:) _nk_choices='many -k --key -F --field -n --name --format --is-output --age-encrypt --age-recipient -r -o --output --password --password-env --password-file --password-stdin --key-file --clipboard' ;;
+                get:many) _nk_choices='-F --field --format --age-encrypt --age-recipient -r -o --output --is-output --password --password-env --password-file --password-stdin --key-file' ;;
                 list:|ls:) _nk_choices='--password --password-env --password-file --password-stdin --key-file --' ;;
                 search:) _nk_choices='--password --password-env --password-file --password-stdin --key-file --' ;;
-                show:) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
-                env:) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                set:) _nk_choices='--key --field --username --url --notes --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
-                rm:|remove:) _nk_choices='--key --yes --password --password-env --password-file --password-stdin --key-file' ;;
-                ensure:) _nk_choices='--key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                otp:) _nk_choices='--key --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                import:) _nk_choices='--file --stdin --replace --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                export:) _nk_choices='--output --password --password-env --password-file --password-stdin --key-file' ;;
-                sync:) _nk_choices='--file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                show:) _nk_choices='-k --key --password --password-env --password-file --password-stdin --key-file' ;;
+                env:) _nk_choices='-k --key -F --field -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                set:) _nk_choices='-k --key -F --field --username --url --notes -f --file --bin -b --stdin --value --value-env --value-file --value-stdin --generate --chars -c --size --upper -U --lower -L --digits -D --symbols -S --age-decrypt --age-identity -i --password --password-env --password-file --password-stdin --key-file' ;;
+                rm:|remove:) _nk_choices='-k --key -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                ensure:) _nk_choices='-k --key --chars -c --size --upper -U --lower -L --digits -D --symbols -S --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                otp:) _nk_choices='-k --key -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                import:) _nk_choices='-f --file --stdin --replace --dry-run --format --password --password-env --password-file --password-stdin --key-file' ;;
+                export:) _nk_choices='-o --output --format --allow-plaintext --password --password-env --password-file --password-stdin --key-file' ;;
+                sync:) _nk_choices='-f --file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                automation:import) _nk_choices='-f --file --stdin --replace --dry-run --format --password --password-env --password-file --password-stdin --key-file' ;;
+                automation:export) _nk_choices='-o --output --format --allow-plaintext --password --password-env --password-file --password-stdin --key-file' ;;
+                automation:sync) _nk_choices='-f --file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 automation:*) _nk_choices='import export sync' ;;
-                automation:import) _nk_choices='--file --stdin --replace --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                automation:export) _nk_choices='--output --password --password-env --password-file --password-stdin --key-file' ;;
-                automation:sync) _nk_choices='--file --stdin --strategy --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 group:ls|groups:ls|group:list|groups:list) _nk_choices='--password --password-env --password-file --password-stdin --key-file' ;;
-                group:add|groups:add|group:create|groups:create|group:ensure|groups:ensure) _nk_choices='--key --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
-                group:rm|groups:rm|group:remove|groups:remove) _nk_choices='--key --yes --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                group:add|groups:add|group:create|groups:create|group:ensure|groups:ensure) _nk_choices='-k --key --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
+                group:rm|groups:rm|group:remove|groups:remove) _nk_choices='-k --key -y --yes --dry-run --password --password-env --password-file --password-stdin --key-file' ;;
                 group:*|groups:*) _nk_choices='ls list add create ensure rm remove' ;;
-                files:ls|attachment:ls|attachments:ls|files:list|attachment:list|attachments:list) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
-                files:add|attachment:add|attachments:add|files:import|attachment:import|attachments:import) _nk_choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
-                files:get|attachment:get|attachments:get|files:export|attachment:export|attachments:export) _nk_choices='--key --field --output --password --password-env --password-file --password-stdin --key-file' ;;
-                files:rm|attachment:rm|attachments:rm|files:remove|attachment:remove|attachments:remove) _nk_choices='--key --field --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                files:ls|attachment:ls|attachments:ls|files:list|attachment:list|attachments:list) _nk_choices='-k --key --password --password-env --password-file --password-stdin --key-file' ;;
+                files:add|attachment:add|attachments:add|files:import|attachment:import|attachments:import) _nk_choices='-k --key -n --name -F --field -f --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                files:get|attachment:get|attachments:get|files:export|attachment:export|attachments:export) _nk_choices='-k --key -n --name -F --field -o --output --password --password-env --password-file --password-stdin --key-file' ;;
+                files:rm|attachment:rm|attachments:rm|files:remove|attachment:remove|attachments:remove) _nk_choices='-k --key -n --name -F --field -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
                 files:*|attachment:*|attachments:*) _nk_choices='ls list add import get export rm remove' ;;
-                field:*) _nk_choices='ls list get reveal set edit rm remove' ;;
-                custom-field:*) _nk_choices='ls list get reveal set edit rm remove' ;;
-                field:ls|custom-field:ls|field:list|custom-field:list) _nk_choices='--key --password --password-env --password-file --password-stdin --key-file' ;;
-                field:get|custom-field:get|field:reveal|custom-field:reveal) _nk_choices='--key --field --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
-                field:set|custom-field:set|field:edit|custom-field:edit) _nk_choices='--key --field --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
-                field:rm|custom-field:rm|field:remove|custom-field:remove) _nk_choices='--key --field --yes --password --password-env --password-file --password-stdin --key-file' ;;
-                exec:*|x:*) _nk_choices='--key --field --env --password --password-env --password-file --password-stdin --key-file --' ;;
+                field:ls|custom-field:ls|field:list|custom-field:list) _nk_choices='-k --key --password --password-env --password-file --password-stdin --key-file' ;;
+                field:get|custom-field:get|field:reveal|custom-field:reveal) _nk_choices='-k --key -F --field -n --name --format --is-output --password --password-env --password-file --password-stdin --key-file' ;;
+                field:set|custom-field:set|field:edit|custom-field:edit) _nk_choices='-k --key -F --field -f --file --stdin --password --password-env --password-file --password-stdin --key-file' ;;
+                field:rm|custom-field:rm|field:remove|custom-field:remove) _nk_choices='-k --key -F --field -y --yes --password --password-env --password-file --password-stdin --key-file' ;;
+                field:*|custom-field:*) _nk_choices='ls list get reveal set edit rm remove' ;;
+                exec:*|x:*) _nk_choices='-B --bind -k --key -F --field --env --env-file --password --password-env --password-file --password-stdin --key-file --' ;;
+                inject:*) _nk_choices='-f --file --stdin -o --output --format --check --password --password-env --password-file --password-stdin --key-file' ;;
+                trust:*) _nk_choices='--list --json --prune --' ;;
+                untrust:*) _nk_choices='--all --' ;;
+                shell:init) _nk_choices='--no-completion --no-env bash zsh fish powershell pwsh nushell' ;;
+                shell:completions|shell:completion) _nk_choices='bash sh zsh fish powershell pwsh nushell' ;;
+                shell:load) _nk_choices='--shell --password --password-env --password-file --password-stdin --key-file' ;;
+                shell:unload) _nk_choices='--shell' ;;
+                shell:status) _nk_choices='--json' ;;
+                shell:*) _nk_choices='init completions completion load unload status' ;;
                 completion:) _nk_choices='bash sh zsh fish powershell pwsh nushell' ;;
             esac
             ;;
@@ -1092,7 +1162,7 @@ _nkp() {
             choices=(auto always never basic truecolor)
             _describe -t values 'nkp color mode' choices
         else
-            choices=(init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x version completion '--help' '-h' '--version' '--vault' '-V' '--password-env' '--password-stdin' '--color' '--no-color')
+            choices=(init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x use inject trust untrust shell tui version completion '--help' '-h' '--version' '--vault' '-V' '--password-env' '--password-stdin' '--color' '--no-color')
             _describe -t commands 'nkp command' choices
         fi
         return
@@ -1108,7 +1178,7 @@ _nkp() {
     fi
     local slot_owner='' slot_start=$((command_index + 1)) slot_consumed=false
     case "$command" in
-        secrets|automation|field|custom-field|files|attachment|attachments|group|groups|alias|context|config)
+        secrets|automation|field|custom-field|files|attachment|attachments|group|groups|alias|context|config|shell)
             slot_start=$((command_index + 2)) ;;
     esac
     for ((selector_scan = slot_start; selector_scan < CURRENT; selector_scan++)); do
@@ -1121,7 +1191,7 @@ _nkp() {
         fi
         [[ "$element" == -- ]] && break
         case "$element" in
-            --key|-k|--field|-F|--format|--name|--env|--password|--password-env|--password-file|--key-file|--file|-f|--output|--value|--value-env|--value-file|--bin|-b|--username|--url|--notes|--size|--chars|-c|--strategy|--kind|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
+            --key|-k|--field|-F|--format|--name|-n|--env|--bind|-B|--env-file|--shell|--password|--password-env|--password-file|--key-file|--file|-f|--output|-o|--value|--value-env|--value-file|--bin|-b|--username|--url|--notes|--size|--chars|-c|--strategy|--kind|--kdf|--memory|--iterations|--parallelism|--age-recipient|-r|--age-identity|-i)
                 slot_owner="$element" ;;
         esac
     done
@@ -1169,10 +1239,10 @@ _nkp() {
             fi
             case "$element" in
                 --key|-k) selector_waiting=key ;;
-                --password|--password-env|--password-file|--key-file|--name|--format|--size|--chars|-c|--field|-F|--file|-f|--value|--value-env|--value-file|--output|--bin|-b|--username|--url|--notes|--strategy|--age-recipient|-r|--age-identity|-i)
+                --password|--password-env|--password-file|--key-file|--name|-n|--format|--size|--chars|-c|--field|-F|--file|-f|--value|--value-env|--value-file|--output|-o|--bin|-b|--username|--url|--notes|--strategy|--age-recipient|-r|--age-identity|-i)
                     selector_waiting=option
                     ;;
-                --password-stdin|--dry-run|--yes|--upper|-U|--lower|-L|--digits|-D|--symbols|-S|--is-output|--stdin|--value-stdin|--generate|--age-encrypt|--age-decrypt|--clipboard)
+                --password-stdin|--dry-run|--yes|-y|--upper|-U|--lower|-L|--digits|-D|--symbols|-S|--is-output|--stdin|--value-stdin|--generate|--age-encrypt|--age-decrypt|--clipboard)
                     ;;
                 -*)
                     selector_invalid=true
@@ -1196,7 +1266,7 @@ _nkp() {
             && "${words[command_index + 2]-}" == many && $((command_index + 2)) -lt $CURRENT ]]; then
         many_mode=true
         case "$previous" in
-            --field|-F|--format|--age-recipient|-r|--output|--password|--password-env|--password-file|--key-file) ;;
+            --field|-F|--format|--age-recipient|-r|--output|-o|--password|--password-env|--password-file|--key-file) ;;
             *) [[ "$cur" != -* || "$previous" == -- ]] && kind=keys ;;
         esac
     fi
@@ -1226,7 +1296,15 @@ _nkp() {
             fi
             ;;
     esac
-    if [[ "$command" == context && ( "$action" == use || "$action" == rm || "$action" == remove ) && $position -eq 2 ]]; then
+    if [[ "$command" == use && $position -eq 1 && "$cur" != -* ]]; then
+        kind='vaults'
+    elif [[ "$command" == tui && $position -eq 1 && "$cur" != -* ]]; then
+        kind='vault-files'
+    elif [[ "$command" == init && $position -eq 1 && "$cur" != -* ]]; then
+        kind='vault-files'
+    elif [[ "$command" == context && "$action" == use && $position -eq 2 && "$cur" != -* ]]; then
+        kind='vaults'
+    elif [[ "$command" == context && ( "$action" == rm || "$action" == remove ) && $position -eq 2 ]]; then
         kind='vault-aliases'
     elif [[ "$command" == context && "$action" == set && $position -eq 3 ]]; then
         kind='vaults'
@@ -1257,22 +1335,31 @@ _nkp() {
         --format:otp:*|--format:secrets:otp) choices=(text json dotenv shell pwsh powershell github-actions azure-devops null) ;;
         --format:field:get|--format:field:reveal|--format:custom-field:get|--format:custom-field:reveal) choices=(text json dotenv shell pwsh powershell github-actions azure-devops null) ;;
         --format:env:*|--format:secrets:env|--format:secrets:environment) choices=(dotenv shell pwsh powershell github-actions azure-devops json null) ;;
+        --format:import:*|--format:secrets:import|--format:automation:import|--format:export:*|--format:secrets:export|--format:automation:export) choices=(json keepass-xml) ;;
+        --format:inject:*) choices=(raw dotenv) ;;
         --strategy:sync:*|--strategy:secrets:sync|--strategy:automation:sync) choices=(newest source target) ;;
-        --field:get:*|--field:set:*|--field:secrets:get|--field:secrets:set|--field:field:get|--field:field:reveal|--field:field:set|--field:field:edit|--field:custom-field:get|--field:custom-field:reveal|--field:custom-field:set|--field:custom-field:edit) choices=(Password Title UserName URL Notes) ;;
+        --shell:shell:load|--shell:shell:unload) choices=(bash zsh fish powershell pwsh nushell) ;;
+        --field:get:*|-F:get:*|--field:set:*|-F:set:*|--field:secrets:get|-F:secrets:get|--field:secrets:set|-F:secrets:set) choices=(Password Title UserName URL Notes) ;;
     esac
     if (( ${#choices} )); then
         _describe -t values 'nkp value' choices
         return
     fi
     case "$command" in
-        init) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--kdf' '--memory' '--iterations' '--parallelism' '--size') ;;
+        init) choices=('--json' '--generate-master-password' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--kdf' '--memory' '--iterations' '--parallelism' '--size') ;;
         context)
-            [[ -n "$action" ]] || choices=(ls list show use rm remove set) ;;
+            if [[ -z "$action" ]]; then
+                choices=(ls list show use rm remove set)
+            else
+                case "$action" in
+                    ls|list|show) choices=('--json') ;;
+                esac
+            fi ;;
         alias)
             if [[ -z "$action" ]]; then
                 choices=(ls list set rm remove resolve)
             elif [[ "$action" == set ]]; then
-                choices=('--kind' '--field')
+                choices=('--kind' '-F' '--field')
             fi ;;
         config)
             if [[ -z "$action" ]]; then
@@ -1280,7 +1367,8 @@ _nkp() {
             else
                 case "$action" in
                     ls|list) choices=('--json' '--') ;;
-                    get|show|set|rm|remove) choices=(aliases current default_vault) ;;
+                    get|show) choices=(aliases current default_vault) ;;
+                    set|rm|remove) [[ $position -eq 2 ]] && choices=(current default_vault) ;;
                 esac
             fi ;;
         secrets)
@@ -1290,44 +1378,44 @@ _nkp() {
                 case "$action" in
                     ls|list) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
                     search) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
-                    show) choices=('--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    env|environment) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    get) choices=('many' '--key' '--field' '--name' '--format' '--is-output' '--age-encrypt' '--age-recipient' '-r' '--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--clipboard') ;;
-                    set) choices=('--key' '--field' '--username' '--url' '--notes' '--file' '--bin' '-b' '--stdin' '--value' '--value-env' '--value-file' '--value-stdin' '--generate' '--chars' '-c' '--size' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--age-decrypt' '--age-identity' '-i' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    rm|remove) choices=('--key' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    ensure) choices=('--key' '--size' '--chars' '-c' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    otp) choices=('--key' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    import) choices=('--file' '--stdin' '--replace' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    export) choices=('--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    sync) choices=('--file' '--stdin' '--strategy' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    show) choices=('-k' '--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    env|environment) choices=('-k' '--key' '-F' '--field' '-n' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    get) choices=('many' '-k' '--key' '-F' '--field' '-n' '--name' '--format' '--is-output' '--age-encrypt' '--age-recipient' '-r' '-o' '--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--clipboard') ;;
+                    set) choices=('--key' '--field' '--username' '--url' '--notes' '--file' '--bin' '-b' '--stdin' '--value' '--value-env' '--value-file' '--value-stdin' '--generate' '--chars' '-c' '--size' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--age-decrypt' '--age-identity' '-i' '-k' '-F' '-f' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    rm|remove) choices=('-k' '--key' '-y' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    ensure) choices=('-k' '--key' '--size' '--chars' '-c' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    otp) choices=('-k' '--key' '-n' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    import) choices=('-f' '--file' '--stdin' '--replace' '--dry-run' '--format' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    export) choices=('-o' '--output' '--format' '--allow-plaintext' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    sync) choices=('-f' '--file' '--stdin' '--strategy' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                 esac
             fi ;;
-        get) choices=('many' '--key' '--field' '--name' '--format' '--is-output' '--age-encrypt' '--age-recipient' '-r' '--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--clipboard') ;;
-        show) choices=('--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        get) choices=('many' '-k' '--key' '-F' '--field' '-n' '--name' '--format' '--is-output' '--age-encrypt' '--age-recipient' '-r' '-o' '--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--clipboard') ;;
+        show) choices=('-k' '--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         list|ls) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
         search) choices=('--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
-        env) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        set) choices=('--key' '--field' '--username' '--url' '--notes' '--file' '--bin' '-b' '--stdin' '--value' '--value-env' '--value-file' '--value-stdin' '--generate' '--chars' '-c' '--size' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--age-decrypt' '--age-identity' '-i' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        rm|remove) choices=('--key' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        ensure) choices=('--key' '--size' '--chars' '-c' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        otp) choices=('--key' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        import) choices=('--file' '--stdin' '--replace' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        export) choices=('--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-        sync) choices=('--file' '--stdin' '--strategy' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        env) choices=('-k' '--key' '-F' '--field' '-n' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        set) choices=('--key' '--field' '--username' '--url' '--notes' '--file' '--bin' '-b' '--stdin' '--value' '--value-env' '--value-file' '--value-stdin' '--generate' '--chars' '-c' '--size' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--age-decrypt' '--age-identity' '-i' '-k' '-F' '-f' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        rm|remove) choices=('-k' '--key' '-y' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        ensure) choices=('-k' '--key' '--size' '--chars' '-c' '--upper' '-U' '--lower' '-L' '--digits' '-D' '--symbols' '-S' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        otp) choices=('-k' '--key' '-n' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        import) choices=('-f' '--file' '--stdin' '--replace' '--dry-run' '--format' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        export) choices=('-o' '--output' '--format' '--allow-plaintext' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        sync) choices=('-f' '--file' '--stdin' '--strategy' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
         automation)
             choices=(import export sync)
             case "$action" in
-                import) choices=('--file' '--stdin' '--replace' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                export) choices=('--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                sync) choices=('--file' '--stdin' '--strategy' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                import) choices=('-f' '--file' '--stdin' '--replace' '--dry-run' '--format' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                export) choices=('-o' '--output' '--format' '--allow-plaintext' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                sync) choices=('-f' '--file' '--stdin' '--strategy' '--dry-run' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
             esac
             ;;
         group|groups)
             choices=(ls list add create ensure rm remove)
             case "$action" in
                 ls|list) choices=(--password --password-env --password-file --password-stdin --key-file) ;;
-                add|create|ensure) choices=(--key --dry-run --password --password-env --password-file --password-stdin --key-file) ;;
-                rm|remove) choices=(--key --yes --dry-run --password --password-env --password-file --password-stdin --key-file) ;;
+                add|create|ensure) choices=(-k --key --dry-run --password --password-env --password-file --password-stdin --key-file) ;;
+                rm|remove) choices=(-k --key -y --yes --dry-run --password --password-env --password-file --password-stdin --key-file) ;;
             esac
             ;;
         files|attachment|attachments)
@@ -1335,10 +1423,10 @@ _nkp() {
                 choices=(ls list add import get export rm remove)
             else
                 case "$action" in
-                    ls|list) choices=('--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    add|import) choices=('--key' '--field' '--file' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    get|export) choices=('--key' '--field' '--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    rm|remove) choices=('--key' '--field' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    ls|list) choices=('-k' '--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    add|import) choices=('-k' '--key' '-n' '--name' '-F' '--field' '-f' '--file' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    get|export) choices=('-k' '--key' '-n' '--name' '-F' '--field' '-o' '--output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    rm|remove) choices=('-k' '--key' '-n' '--name' '-F' '--field' '-y' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                 esac
             fi ;;
         field|custom-field)
@@ -1346,19 +1434,34 @@ _nkp() {
                 choices=(ls list get reveal set edit rm remove)
             else
                 case "$action" in
-                    ls|list) choices=('--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    get|reveal) choices=('--key' '--field' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    set|edit) choices=('--key' '--field' '--file' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
-                    rm|remove) choices=('--key' '--field' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    ls|list) choices=('-k' '--key' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    get|reveal) choices=('-k' '--key' '-F' '--field' '-n' '--name' '--format' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    set|edit) choices=('-k' '--key' '-F' '--field' '-f' '--file' '--stdin' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    rm|remove) choices=('-k' '--key' '-F' '--field' '-y' '--yes' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
                 esac
             fi ;;
-        exec|x) choices=('--key' '--field' '--env' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
+        exec|x) choices=('-B' '--bind' '-k' '--key' '-F' '--field' '--env' '--env-file' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file' '--') ;;
+        inject) choices=('-f' '--file' '--stdin' '-o' '--output' '--format' '--check' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+        trust) choices=('--list' '--json' '--prune' '--') ;;
+        untrust) choices=('--all' '--') ;;
+        shell)
+            if [[ -z "$action" ]]; then
+                choices=(init completions completion load unload status)
+            else
+                case "$action" in
+                    init) choices=('--no-completion' '--no-env' bash zsh fish powershell pwsh nushell) ;;
+                    completions|completion) [[ $position -eq 2 ]] && choices=(bash sh zsh fish powershell pwsh nushell) ;;
+                    load) choices=('--shell' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file') ;;
+                    unload) choices=('--shell') ;;
+                    status) choices=('--json') ;;
+                esac
+            fi ;;
         completion) [[ -z "$action" ]] && choices=(bash sh zsh fish powershell pwsh nushell) ;;
     esac
     if [[ "$many_mode" == true ]]; then
-        choices=('--field' '--format' '--age-encrypt' '--age-recipient' '-r' '--output' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file')
+        choices=('-F' '--field' '--format' '--age-encrypt' '--age-recipient' '-r' '-o' '--output' '--is-output' '--password' '--password-env' '--password-file' '--password-stdin' '--key-file')
         case "$previous" in
-            --age-recipient|-r|--output|--password|--password-env|--password-file|--key-file) choices=() ;;
+            --age-recipient|-r|--output|-o|--password|--password-env|--password-file|--key-file) choices=() ;;
         esac
     fi
     (( ${#choices} )) && _describe -t values 'nkp value' choices
@@ -1501,9 +1604,9 @@ function __nkp_selector_path_slot
             case --key -k
                 set selector_seen true
                 set waiting key
-            case --password --password-env --password-file --key-file --name --format --size --chars -c --field -F --file -f --value --value-env --value-file --output --bin -b --username --url --notes --strategy --age-recipient -r --age-identity -i
+            case --password --password-env --password-file --key-file --name -n --format --size --chars -c --field -F --file -f --value --value-env --value-file --output -o --bin -b --username --url --notes --strategy --age-recipient -r --age-identity -i
                 set waiting value
-            case --password-stdin --dry-run --yes --upper -U --lower -L --digits -D --symbols -S --is-output --stdin --value-stdin --generate --age-encrypt --age-decrypt --clipboard
+            case --password-stdin --dry-run --yes -y --upper -U --lower -L --digits -D --symbols -S --is-output --stdin --value-stdin --generate --age-encrypt --age-decrypt --clipboard
             case '-*'
                 return 1
             case '*'
@@ -1521,8 +1624,66 @@ function __nkp_selector_path_slot
     set -g __nkp_selector_protocol $protocol
     return 0
 end
+function __nkp_parsed_route
+    set -l words (commandline -opc)
+    set -l count_words (count $words)
+    set -l i 2
+    while test $i -le $count_words
+        switch $words[$i]
+            case --vault -V --password-env --color
+                set i (math $i + 2)
+            case --password-stdin --no-color --color=*
+                set i (math $i + 1)
+            case '*'
+                set -l cmd $words[$i]
+                set -l act ''
+                set -l sub ''
+                if test (math $i + 1) -le $count_words
+                    set act $words[(math $i + 1)]
+                end
+                if test (math $i + 2) -le $count_words
+                    set sub $words[(math $i + 2)]
+                end
+                printf '%s\n%s\n%s\n' "$cmd" "$act" "$sub"
+                return 0
+        end
+    end
+    return 1
+end
+function __nkp_cmd
+    set -l route (__nkp_parsed_route); or return 1
+    contains -- "$route[1]" $argv
+end
+function __nkp_no_action
+    set -l route (__nkp_parsed_route); or return 1
+    test -z "$route[2]"; and contains -- "$route[1]" $argv
+end
+function __nkp_sub
+    set -l route (__nkp_parsed_route); or return 1
+    set -l cmds (string split ' ' -- "$argv[1]")
+    set -l acts (string split ' ' -- "$argv[2]")
+    contains -- "$route[1]" $cmds; and contains -- "$route[2]" $acts
+end
+function __nkp_get_many
+    set -l route (__nkp_parsed_route); or return 1
+    if test "$route[1]" = get -a "$route[2]" = many
+        return 0
+    end
+    test "$route[1]" = secrets -a "$route[2]" = get -a "$route[3]" = many
+end
+function __nkp_secrets_op
+    set -l route (__nkp_parsed_route); or return 1
+    if __nkp_get_many
+        return 1
+    end
+    if test "$route[1]" = secrets
+        contains -- "$route[2]" $argv
+    else
+        contains -- "$route[1]" $argv
+    end
+end
 complete -c nkp -f
-complete -c nkp -n '__fish_use_subcommand' -a 'init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x version completion'
+complete -c nkp -n '__fish_use_subcommand' -a 'init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x use inject trust untrust shell tui version completion'
 complete -c nkp -n '__fish_use_subcommand' -s h -l help
 complete -c nkp -n '__fish_use_subcommand' -s V -l vault -r -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
 complete -c nkp -n '__fish_use_subcommand' -l version
@@ -1530,135 +1691,228 @@ complete -c nkp -n '__fish_use_subcommand' -l password-env -r
 complete -c nkp -n '__fish_use_subcommand' -l password-stdin
 complete -c nkp -n '__fish_use_subcommand' -l color -r -a 'auto always never basic truecolor'
 complete -c nkp -n '__fish_use_subcommand' -l no-color
-complete -c nkp -n '__fish_seen_subcommand_from set ensure' -s c -l chars -r
-complete -c nkp -n '__fish_seen_subcommand_from set ensure' -s U -l upper
-complete -c nkp -n '__fish_seen_subcommand_from set ensure' -s L -l lower
-complete -c nkp -n '__fish_seen_subcommand_from set ensure' -s D -l digits
-complete -c nkp -n '__fish_seen_subcommand_from set ensure' -s S -l symbols
-complete -c nkp -n '__fish_seen_subcommand_from set' -l value -r
-complete -c nkp -n '__fish_seen_subcommand_from set' -l value-env -r
-complete -c nkp -n '__fish_seen_subcommand_from set' -l value-file -r
-complete -c nkp -n '__fish_seen_subcommand_from set' -l value-stdin
-complete -c nkp -n '__fish_seen_subcommand_from set' -l generate
-complete -c nkp -n '__fish_seen_subcommand_from set' -l age-decrypt
-complete -c nkp -n '__fish_seen_subcommand_from set' -s i -l age-identity -r
-complete -c nkp -n '__fish_seen_subcommand_from context' -a 'ls list show use rm remove set'
-complete -c nkp -n '__fish_seen_subcommand_from init' -l kdf -a 'aes argon2d argon2id'
-complete -c nkp -n '__fish_seen_subcommand_from init' -l memory
-complete -c nkp -n '__fish_seen_subcommand_from init' -l iterations
-complete -c nkp -n '__fish_seen_subcommand_from init' -l parallelism
-complete -c nkp -n '__fish_seen_subcommand_from init' -l size
-complete -c nkp -n '__fish_seen_subcommand_from init' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from init' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from init' -l password-file
-complete -c nkp -n '__fish_seen_subcommand_from init' -l key-file
-complete -c nkp -n '__fish_seen_subcommand_from alias' -a 'ls list set rm remove resolve'
-complete -c nkp -n '__fish_seen_subcommand_from alias set rm remove resolve' -a '(nkp (__nkp_complete_vault_args) __complete aliases (commandline -ct))'
-complete -c nkp -n '__fish_seen_subcommand_from context use rm remove' -a '(nkp (__nkp_complete_vault_args) __complete vault-aliases (commandline -ct))'
-complete -c nkp -n '__fish_seen_subcommand_from context set' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
-complete -c nkp -n '__fish_seen_subcommand_from alias; and __fish_seen_argument set' -l kind -a 'vault entry'
-complete -c nkp -n '__fish_seen_subcommand_from alias; and __fish_seen_argument set' -l field
-complete -c nkp -n '__fish_seen_subcommand_from config' -a 'ls list get show set rm remove'
-complete -c nkp -n '__fish_seen_subcommand_from config ls list' -l json
-complete -c nkp -n '__fish_seen_subcommand_from config get show set rm remove' -a 'aliases current default_vault'
-complete -c nkp -n '__fish_seen_subcommand_from config set' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
-complete -c nkp -n '__fish_seen_subcommand_from secrets' -a 'get list ls search show env environment set rm remove ensure otp import export sync'
-complete -c nkp -n '__fish_seen_subcommand_from automation' -a 'import export sync'
-complete -c nkp -n '__fish_seen_subcommand_from get set rm remove ensure search show env environment otp files attachment attachments field custom-field exec x' -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+
+complete -c nkp -n '__nkp_cmd use' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
+complete -c nkp -n '__nkp_cmd tui' -a '(nkp (__nkp_complete_vault_args) __complete vault-files (commandline -ct))'
+
+complete -c nkp -n '__nkp_cmd init' -a '(nkp (__nkp_complete_vault_args) __complete vault-files (commandline -ct))'
+complete -c nkp -n '__nkp_cmd init' -l json
+complete -c nkp -n '__nkp_cmd init' -l generate-master-password
+complete -c nkp -n '__nkp_cmd init' -l kdf -r -a 'aes argon2d argon2id'
+complete -c nkp -n '__nkp_cmd init' -l memory -r
+complete -c nkp -n '__nkp_cmd init' -l iterations -r
+complete -c nkp -n '__nkp_cmd init' -l parallelism -r
+complete -c nkp -n '__nkp_cmd init' -l size -r
+complete -c nkp -n '__nkp_cmd init' -l password -r
+complete -c nkp -n '__nkp_cmd init' -l password-env -r
+complete -c nkp -n '__nkp_cmd init' -l password-file -r
+complete -c nkp -n '__nkp_cmd init' -l password-stdin
+complete -c nkp -n '__nkp_cmd init' -l key-file -r
+
+complete -c nkp -n '__nkp_no_action context' -a 'ls list show use rm remove set'
+complete -c nkp -n '__nkp_sub context "ls list show"' -l json
+complete -c nkp -n '__nkp_sub context "use"' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
+complete -c nkp -n '__nkp_sub context "rm remove"' -a '(nkp (__nkp_complete_vault_args) __complete vault-aliases (commandline -ct))'
+complete -c nkp -n '__nkp_sub context "set"' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
+
+complete -c nkp -n '__nkp_no_action alias' -a 'ls list set rm remove resolve'
+complete -c nkp -n '__nkp_sub alias "set rm remove resolve"' -a '(nkp (__nkp_complete_vault_args) __complete aliases (commandline -ct))'
+complete -c nkp -n '__nkp_sub alias "set"' -l kind -r -a 'vault entry'
+complete -c nkp -n '__nkp_sub alias "set"' -s F -l field -r
+
+complete -c nkp -n '__nkp_no_action config' -a 'ls list get show set rm remove'
+complete -c nkp -n '__nkp_sub config "ls list"' -l json
+complete -c nkp -n '__nkp_sub config "ls list"' -a '--'
+complete -c nkp -n '__nkp_sub config "get show"' -a 'aliases current default_vault'
+complete -c nkp -n '__nkp_sub config "set rm remove"' -a 'current default_vault'
+complete -c nkp -n '__nkp_sub config "set"' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
+
+complete -c nkp -n '__nkp_no_action secrets' -a 'get list ls search show env environment set rm remove ensure otp import export sync'
+complete -c nkp -n '__nkp_no_action automation' -a 'import export sync'
 complete -c nkp -n '__nkp_selector_path_slot' -a '(nkp (__nkp_complete_vault_args) __complete $__nkp_selector_protocol (commandline -ct))'
-complete -c nkp -n '__fish_seen_subcommand_from get set' -l field -a 'Password Title UserName URL Notes'
-complete -c nkp -n '__fish_seen_subcommand_from get otp' -l format -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
-complete -c nkp -n '__fish_seen_subcommand_from env environment' -l format -a 'dotenv shell pwsh powershell github-actions azure-devops json null'
-complete -c nkp -n '__fish_seen_subcommand_from get' -l clipboard
-complete -c nkp -n '__fish_seen_subcommand_from get' -a many
-complete -c nkp -n '__fish_seen_subcommand_from get; and __fish_seen_argument many' -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
-complete -c nkp -n '__fish_seen_subcommand_from get' -l age-encrypt
-complete -c nkp -n '__fish_seen_subcommand_from get' -s r -l age-recipient -r
-complete -c nkp -n '__fish_seen_subcommand_from get' -l output -r
-complete -c nkp -n '__fish_seen_subcommand_from get env environment otp' -l is-output
-complete -c nkp -n '__fish_seen_subcommand_from ls' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from get env environment otp field custom-field' -l name
-complete -c nkp -n '__fish_seen_subcommand_from get ls list search show set rm remove ensure env environment otp' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from get ls list search show set rm remove ensure env environment otp' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from get ls list search show set rm remove ensure env environment otp' -l password
-complete -c nkp -n '__fish_seen_subcommand_from get ls list search show set rm remove ensure env environment otp' -l password-file
-complete -c nkp -n '__fish_seen_subcommand_from get ls list search show set rm remove ensure env environment otp' -l key-file
-complete -c nkp -n '__fish_seen_subcommand_from ls list search' -a '--'
-complete -c nkp -n '__fish_seen_subcommand_from set' -l file
-complete -c nkp -n '__fish_seen_subcommand_from set' -s b -l bin -r
-complete -c nkp -n '__fish_seen_subcommand_from set' -l username -r
-complete -c nkp -n '__fish_seen_subcommand_from set' -l url -r
-complete -c nkp -n '__fish_seen_subcommand_from set' -l notes -r
-complete -c nkp -n '__fish_seen_subcommand_from set' -l stdin
-complete -c nkp -n '__fish_seen_subcommand_from rm' -l yes
-complete -c nkp -n '__fish_seen_subcommand_from ensure' -l size
-complete -c nkp -n '__fish_seen_subcommand_from import sync' -l file
-complete -c nkp -n '__fish_seen_subcommand_from import sync' -l stdin
-complete -c nkp -n '__fish_seen_subcommand_from import' -l replace
-complete -c nkp -n '__fish_seen_subcommand_from import sync' -l dry-run
-complete -c nkp -n '__fish_seen_subcommand_from sync' -l strategy -a 'newest source target'
-complete -c nkp -n '__fish_seen_subcommand_from export' -l output
-complete -c nkp -n '__fish_seen_subcommand_from import export sync' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from import export sync' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from import export sync' -l password
-complete -c nkp -n '__fish_seen_subcommand_from import export sync' -l password-file
-complete -c nkp -n '__fish_seen_subcommand_from import export sync' -l key-file
-complete -c nkp -n '__fish_seen_subcommand_from ensure' -l dry-run
-complete -c nkp -n '__fish_seen_subcommand_from group groups' -a 'ls list add create ensure rm remove'
-complete -c nkp -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument add create ensure rm remove' -l key -r -a '(nkp (__nkp_complete_vault_args) __complete groups (commandline -ct))'
-complete -c nkp -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument add create ensure rm remove' -l dry-run
-complete -c nkp -n '__fish_seen_subcommand_from group groups; and __fish_seen_argument rm remove' -l yes
-complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password -r
-complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password-env -r
-complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password-file -r
-complete -c nkp -n '__fish_seen_subcommand_from group groups' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from group groups' -l key-file -r
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments' -a 'ls list add import get export rm remove'
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l key
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l field
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l file
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument add import' -l stdin
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l field
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument get export' -l output
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l field
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument rm remove' -l yes
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l password-file
-complete -c nkp -n '__fish_seen_subcommand_from files attachment attachments; and __fish_seen_argument ls list add import get export rm remove' -l key-file
-complete -c nkp -n '__fish_seen_subcommand_from add' -l field
-complete -c nkp -n '__fish_seen_subcommand_from add' -l file
-complete -c nkp -n '__fish_seen_subcommand_from add' -l stdin
-complete -c nkp -n '__fish_seen_subcommand_from get' -l output
-complete -c nkp -n '__fish_seen_subcommand_from get' -l field
-complete -c nkp -n '__fish_seen_subcommand_from rm' -l field
-complete -c nkp -n '__fish_seen_subcommand_from add get rm' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from add get rm' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from rm' -l yes
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field' -a 'ls list get reveal set edit rm remove'
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l key
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l field
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit rm remove' -l field
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l format -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument get reveal' -l is-output
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit' -l file
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument set edit' -l stdin
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument rm remove' -l yes
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l password
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l password-file
-complete -c nkp -n '__fish_seen_subcommand_from field custom-field; and __fish_seen_argument ls list get reveal set edit rm remove' -l key-file
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -l env
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -s F -l field -r
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password-env
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password-stdin
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -l password-file
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -l key-file
-complete -c nkp -n '__fish_seen_subcommand_from exec x' -a '--'
-complete -c nkp -n '__fish_seen_subcommand_from completion' -a 'bash sh zsh fish powershell pwsh nushell'
+
+complete -c nkp -n '__nkp_secrets_op get' -a many
+complete -c nkp -n '__nkp_secrets_op get' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_secrets_op get' -s F -l field -r -a 'Password Title UserName URL Notes'
+complete -c nkp -n '__nkp_secrets_op get' -s n -l name -r
+complete -c nkp -n '__nkp_secrets_op get' -l format -r -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
+complete -c nkp -n '__nkp_secrets_op get' -l is-output
+complete -c nkp -n '__nkp_secrets_op get' -l clipboard
+complete -c nkp -n '__nkp_secrets_op get' -l age-encrypt
+complete -c nkp -n '__nkp_secrets_op get' -s r -l age-recipient -r
+complete -c nkp -n '__nkp_secrets_op get' -s o -l output -r
+
+complete -c nkp -n '__nkp_get_many' -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_get_many' -s F -l field -r -a 'Password Title UserName URL Notes'
+complete -c nkp -n '__nkp_get_many' -l format -r -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
+complete -c nkp -n '__nkp_get_many' -l is-output
+complete -c nkp -n '__nkp_get_many' -l age-encrypt
+complete -c nkp -n '__nkp_get_many' -s r -l age-recipient -r
+complete -c nkp -n '__nkp_get_many' -s o -l output -r
+complete -c nkp -n '__nkp_get_many' -l password -r
+complete -c nkp -n '__nkp_get_many' -l password-env -r
+complete -c nkp -n '__nkp_get_many' -l password-file -r
+complete -c nkp -n '__nkp_get_many' -l password-stdin
+complete -c nkp -n '__nkp_get_many' -l key-file -r
+
+complete -c nkp -n '__nkp_secrets_op ls list search' -a '--'
+complete -c nkp -n '__nkp_secrets_op show ensure otp' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+
+complete -c nkp -n '__nkp_secrets_op set' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_secrets_op set' -s F -l field -r -a 'Password Title UserName URL Notes'
+complete -c nkp -n '__nkp_secrets_op set' -s f -l file -r
+complete -c nkp -n '__nkp_secrets_op set' -s b -l bin -r
+complete -c nkp -n '__nkp_secrets_op set' -l stdin
+complete -c nkp -n '__nkp_secrets_op set' -l value -r
+complete -c nkp -n '__nkp_secrets_op set' -l value-env -r
+complete -c nkp -n '__nkp_secrets_op set' -l value-file -r
+complete -c nkp -n '__nkp_secrets_op set' -l value-stdin
+complete -c nkp -n '__nkp_secrets_op set' -l username -r
+complete -c nkp -n '__nkp_secrets_op set' -l url -r
+complete -c nkp -n '__nkp_secrets_op set' -l notes -r
+complete -c nkp -n '__nkp_secrets_op set' -l generate
+complete -c nkp -n '__nkp_secrets_op set' -s c -l chars -r
+complete -c nkp -n '__nkp_secrets_op set' -l size -r
+complete -c nkp -n '__nkp_secrets_op set' -s U -l upper
+complete -c nkp -n '__nkp_secrets_op set' -s L -l lower
+complete -c nkp -n '__nkp_secrets_op set' -s D -l digits
+complete -c nkp -n '__nkp_secrets_op set' -s S -l symbols
+complete -c nkp -n '__nkp_secrets_op set' -l age-decrypt
+complete -c nkp -n '__nkp_secrets_op set' -s i -l age-identity -r
+
+complete -c nkp -n '__nkp_secrets_op rm remove' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_secrets_op rm remove' -s y -l yes
+
+complete -c nkp -n '__nkp_secrets_op ensure' -s c -l chars -r
+complete -c nkp -n '__nkp_secrets_op ensure' -l size -r
+complete -c nkp -n '__nkp_secrets_op ensure' -s U -l upper
+complete -c nkp -n '__nkp_secrets_op ensure' -s L -l lower
+complete -c nkp -n '__nkp_secrets_op ensure' -s D -l digits
+complete -c nkp -n '__nkp_secrets_op ensure' -s S -l symbols
+complete -c nkp -n '__nkp_secrets_op ensure' -l dry-run
+
+complete -c nkp -n '__nkp_secrets_op otp' -s n -l name -r
+complete -c nkp -n '__nkp_secrets_op otp' -l format -r -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
+complete -c nkp -n '__nkp_secrets_op otp' -l is-output
+
+complete -c nkp -n '__nkp_secrets_op env environment' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_secrets_op env environment' -s F -l field -r
+complete -c nkp -n '__nkp_secrets_op env environment' -s n -l name -r
+complete -c nkp -n '__nkp_secrets_op env environment' -l format -r -a 'dotenv shell pwsh powershell github-actions azure-devops json null'
+complete -c nkp -n '__nkp_secrets_op env environment' -l is-output
+
+complete -c nkp -n '__nkp_secrets_op get ls list search show set rm remove ensure env environment otp' -l password -r
+complete -c nkp -n '__nkp_secrets_op get ls list search show set rm remove ensure env environment otp' -l password-env -r
+complete -c nkp -n '__nkp_secrets_op get ls list search show set rm remove ensure env environment otp' -l password-file -r
+complete -c nkp -n '__nkp_secrets_op get ls list search show set rm remove ensure env environment otp' -l password-stdin
+complete -c nkp -n '__nkp_secrets_op get ls list search show set rm remove ensure env environment otp' -l key-file -r
+
+complete -c nkp -n '__nkp_secrets_op import; or __nkp_sub automation "import"' -s f -l file -r
+complete -c nkp -n '__nkp_secrets_op import; or __nkp_sub automation "import"' -l stdin
+complete -c nkp -n '__nkp_secrets_op import; or __nkp_sub automation "import"' -l replace
+complete -c nkp -n '__nkp_secrets_op import; or __nkp_sub automation "import"' -l dry-run
+complete -c nkp -n '__nkp_secrets_op import; or __nkp_sub automation "import"' -l format -r -a 'json keepass-xml'
+
+complete -c nkp -n '__nkp_secrets_op export; or __nkp_sub automation "export"' -s o -l output -r
+complete -c nkp -n '__nkp_secrets_op export; or __nkp_sub automation "export"' -l format -r -a 'json keepass-xml'
+complete -c nkp -n '__nkp_secrets_op export; or __nkp_sub automation "export"' -l allow-plaintext
+
+complete -c nkp -n '__nkp_secrets_op sync; or __nkp_sub automation "sync"' -s f -l file -r
+complete -c nkp -n '__nkp_secrets_op sync; or __nkp_sub automation "sync"' -l stdin
+complete -c nkp -n '__nkp_secrets_op sync; or __nkp_sub automation "sync"' -l dry-run
+complete -c nkp -n '__nkp_secrets_op sync; or __nkp_sub automation "sync"' -l strategy -r -a 'newest source target'
+
+complete -c nkp -n '__nkp_secrets_op import export sync; or __nkp_sub automation "import export sync"' -l password -r
+complete -c nkp -n '__nkp_secrets_op import export sync; or __nkp_sub automation "import export sync"' -l password-env -r
+complete -c nkp -n '__nkp_secrets_op import export sync; or __nkp_sub automation "import export sync"' -l password-file -r
+complete -c nkp -n '__nkp_secrets_op import export sync; or __nkp_sub automation "import export sync"' -l password-stdin
+complete -c nkp -n '__nkp_secrets_op import export sync; or __nkp_sub automation "import export sync"' -l key-file -r
+
+complete -c nkp -n '__nkp_no_action group groups' -a 'ls list add create ensure rm remove'
+complete -c nkp -n '__nkp_sub "group groups" "add create ensure rm remove"' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete groups (commandline -ct))'
+complete -c nkp -n '__nkp_sub "group groups" "add create ensure rm remove"' -l dry-run
+complete -c nkp -n '__nkp_sub "group groups" "rm remove"' -s y -l yes
+complete -c nkp -n '__nkp_sub "group groups" "ls list add create ensure rm remove"' -l password -r
+complete -c nkp -n '__nkp_sub "group groups" "ls list add create ensure rm remove"' -l password-env -r
+complete -c nkp -n '__nkp_sub "group groups" "ls list add create ensure rm remove"' -l password-file -r
+complete -c nkp -n '__nkp_sub "group groups" "ls list add create ensure rm remove"' -l password-stdin
+complete -c nkp -n '__nkp_sub "group groups" "ls list add create ensure rm remove"' -l key-file -r
+
+complete -c nkp -n '__nkp_no_action files attachment attachments' -a 'ls list add import get export rm remove'
+complete -c nkp -n '__nkp_sub "files attachment attachments" "ls list add import get export rm remove"' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_sub "files attachment attachments" "add import get export rm remove"' -s n -l name -r
+complete -c nkp -n '__nkp_sub "files attachment attachments" "add import get export rm remove"' -s F -l field -r
+complete -c nkp -n '__nkp_sub "files attachment attachments" "add import"' -s f -l file -r
+complete -c nkp -n '__nkp_sub "files attachment attachments" "add import"' -l stdin
+complete -c nkp -n '__nkp_sub "files attachment attachments" "get export"' -s o -l output -r
+complete -c nkp -n '__nkp_sub "files attachment attachments" "rm remove"' -s y -l yes
+complete -c nkp -n '__nkp_sub "files attachment attachments" "ls list add import get export rm remove"' -l password -r
+complete -c nkp -n '__nkp_sub "files attachment attachments" "ls list add import get export rm remove"' -l password-env -r
+complete -c nkp -n '__nkp_sub "files attachment attachments" "ls list add import get export rm remove"' -l password-file -r
+complete -c nkp -n '__nkp_sub "files attachment attachments" "ls list add import get export rm remove"' -l password-stdin
+complete -c nkp -n '__nkp_sub "files attachment attachments" "ls list add import get export rm remove"' -l key-file -r
+
+complete -c nkp -n '__nkp_no_action field custom-field' -a 'ls list get reveal set edit rm remove'
+complete -c nkp -n '__nkp_sub "field custom-field" "ls list get reveal set edit rm remove"' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_sub "field custom-field" "get reveal set edit rm remove"' -s F -l field -r
+complete -c nkp -n '__nkp_sub "field custom-field" "get reveal"' -s n -l name -r
+complete -c nkp -n '__nkp_sub "field custom-field" "get reveal"' -l format -r -a 'text json dotenv shell pwsh powershell github-actions azure-devops null'
+complete -c nkp -n '__nkp_sub "field custom-field" "get reveal"' -l is-output
+complete -c nkp -n '__nkp_sub "field custom-field" "set edit"' -s f -l file -r
+complete -c nkp -n '__nkp_sub "field custom-field" "set edit"' -l stdin
+complete -c nkp -n '__nkp_sub "field custom-field" "rm remove"' -s y -l yes
+complete -c nkp -n '__nkp_sub "field custom-field" "ls list get reveal set edit rm remove"' -l password -r
+complete -c nkp -n '__nkp_sub "field custom-field" "ls list get reveal set edit rm remove"' -l password-env -r
+complete -c nkp -n '__nkp_sub "field custom-field" "ls list get reveal set edit rm remove"' -l password-file -r
+complete -c nkp -n '__nkp_sub "field custom-field" "ls list get reveal set edit rm remove"' -l password-stdin
+complete -c nkp -n '__nkp_sub "field custom-field" "ls list get reveal set edit rm remove"' -l key-file -r
+
+complete -c nkp -n '__nkp_cmd exec x' -s B -l bind -r
+complete -c nkp -n '__nkp_cmd exec x' -s k -l key -r -a '(nkp (__nkp_complete_vault_args) __complete keys (commandline -ct))'
+complete -c nkp -n '__nkp_cmd exec x' -s F -l field -r
+complete -c nkp -n '__nkp_cmd exec x' -l env -r
+complete -c nkp -n '__nkp_cmd exec x' -l env-file -r
+complete -c nkp -n '__nkp_cmd exec x' -l password -r
+complete -c nkp -n '__nkp_cmd exec x' -l password-env -r
+complete -c nkp -n '__nkp_cmd exec x' -l password-file -r
+complete -c nkp -n '__nkp_cmd exec x' -l password-stdin
+complete -c nkp -n '__nkp_cmd exec x' -l key-file -r
+complete -c nkp -n '__nkp_cmd exec x' -a '--'
+
+complete -c nkp -n '__nkp_cmd inject' -s f -l file -r
+complete -c nkp -n '__nkp_cmd inject' -l stdin
+complete -c nkp -n '__nkp_cmd inject' -s o -l output -r
+complete -c nkp -n '__nkp_cmd inject' -l format -r -a 'raw dotenv'
+complete -c nkp -n '__nkp_cmd inject' -l check
+complete -c nkp -n '__nkp_cmd inject' -l password -r
+complete -c nkp -n '__nkp_cmd inject' -l password-env -r
+complete -c nkp -n '__nkp_cmd inject' -l password-file -r
+complete -c nkp -n '__nkp_cmd inject' -l password-stdin
+complete -c nkp -n '__nkp_cmd inject' -l key-file -r
+
+complete -c nkp -n '__nkp_cmd trust' -l list
+complete -c nkp -n '__nkp_cmd trust' -l json
+complete -c nkp -n '__nkp_cmd trust' -l prune
+complete -c nkp -n '__nkp_cmd trust' -a '--'
+
+complete -c nkp -n '__nkp_cmd untrust' -l all
+complete -c nkp -n '__nkp_cmd untrust' -a '--'
+
+complete -c nkp -n '__nkp_no_action shell' -a 'init completions completion load unload status'
+complete -c nkp -n '__nkp_sub shell "init"' -a 'bash zsh fish powershell pwsh nushell'
+complete -c nkp -n '__nkp_sub shell "init"' -l no-completion
+complete -c nkp -n '__nkp_sub shell "init"' -l no-env
+complete -c nkp -n '__nkp_sub shell "completions completion"' -a 'bash sh zsh fish powershell pwsh nushell'
+complete -c nkp -n '__nkp_sub shell "load"' -l shell -r -a 'bash zsh fish powershell pwsh nushell'
+complete -c nkp -n '__nkp_sub shell "load"' -l password -r
+complete -c nkp -n '__nkp_sub shell "load"' -l password-env -r
+complete -c nkp -n '__nkp_sub shell "load"' -l password-file -r
+complete -c nkp -n '__nkp_sub shell "load"' -l password-stdin
+complete -c nkp -n '__nkp_sub shell "load"' -l key-file -r
+complete -c nkp -n '__nkp_sub shell "unload"' -l shell -r -a 'bash zsh fish powershell pwsh nushell'
+complete -c nkp -n '__nkp_sub shell "status"' -l json
+
+complete -c nkp -n '__nkp_no_action completion' -a 'bash sh zsh fish powershell pwsh nushell'
 "#;
 
 const POWERSHELL: &str = r#"# Static nkp completion. Dynamic queries return metadata only and never secrets.
@@ -1721,7 +1975,7 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
         }
     }
     $slotStart = $commandIndex + 1
-    if ($command -in @('secrets', 'automation', 'field', 'custom-field', 'files', 'attachment', 'attachments', 'group', 'groups', 'alias', 'context', 'config')) {
+    if ($command -in @('secrets', 'automation', 'field', 'custom-field', 'files', 'attachment', 'attachments', 'group', 'groups', 'alias', 'context', 'config', 'shell')) {
         $slotStart++
     }
     $slotOwner = ''
@@ -1731,7 +1985,7 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
         $slotConsumed = $false
         if ($slotOwner) { $slotOwner = ''; $slotConsumed = $true; continue }
         if ($element -eq '--') { break }
-        if ($element -in @('--key', '-k', '--field', '-F', '--format', '--name', '--env', '--password', '--password-env', '--password-file', '--key-file', '--file', '-f', '--output', '--value', '--value-env', '--value-file', '--bin', '-b', '--username', '--url', '--notes', '--size', '--chars', '-c', '--strategy', '--kind', '--kdf', '--memory', '--iterations', '--parallelism', '--age-recipient', '-r', '--age-identity', '-i')) {
+        if ($element -in @('--key', '-k', '--field', '-F', '--format', '--name', '-n', '--env', '--bind', '-B', '--env-file', '--shell', '--password', '--password-env', '--password-file', '--key-file', '--file', '-f', '--output', '-o', '--value', '--value-env', '--value-file', '--bin', '-b', '--username', '--url', '--notes', '--size', '--chars', '-c', '--strategy', '--kind', '--kdf', '--memory', '--iterations', '--parallelism', '--age-recipient', '-r', '--age-identity', '-i')) {
             $slotOwner = $element
         }
     }
@@ -1747,15 +2001,23 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
             $values = @('Password', 'Title', 'UserName', 'URL', 'Notes')
         } elseif ($previous -eq '--format') {
             $values = @('text', 'json', 'dotenv', 'shell', 'pwsh', 'powershell', 'github-actions', 'azure-devops', 'null')
-        } elseif ($previous -in @('--age-recipient', '-r', '--output', '--password', '--password-env', '--password-file', '--key-file')) {
+        } elseif ($previous -in @('--age-recipient', '-r', '--output', '-o', '--password', '--password-env', '--password-file', '--key-file')) {
             $values = @()
         } elseif (-not $wordToComplete.StartsWith('-') -or $previous -eq '--') {
             $protocolKind = 'keys'
         } else {
-            $values = @('--field', '--format', '--age-encrypt', '--age-recipient', '-r', '--output', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file')
+            $values = @('-F', '--field', '--format', '--age-encrypt', '--age-recipient', '-r', '-o', '--output', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file')
         }
     }
-    if ($command -eq 'context' -and ($action -eq 'use' -or $action -eq 'rm' -or $action -eq 'remove') -and $currentIndex -eq ($commandIndex + 2)) {
+    if ($command -eq 'use' -and $currentIndex -eq ($commandIndex + 1) -and -not $wordToComplete.StartsWith('-')) {
+        $protocolKind = 'vaults'
+    } elseif ($command -eq 'tui' -and $currentIndex -eq ($commandIndex + 1) -and -not $wordToComplete.StartsWith('-')) {
+        $protocolKind = 'vault-files'
+    } elseif ($command -eq 'init' -and $currentIndex -eq ($commandIndex + 1) -and -not $wordToComplete.StartsWith('-')) {
+        $protocolKind = 'vault-files'
+    } elseif ($command -eq 'context' -and $action -eq 'use' -and $currentIndex -eq ($commandIndex + 2) -and -not $wordToComplete.StartsWith('-')) {
+        $protocolKind = 'vaults'
+    } elseif ($command -eq 'context' -and ($action -eq 'rm' -or $action -eq 'remove') -and $currentIndex -eq ($commandIndex + 2)) {
         $protocolKind = 'vault-aliases'
     } elseif ($command -eq 'context' -and $action -eq 'set' -and $currentIndex -eq ($commandIndex + 3)) {
         $protocolKind = 'vaults'
@@ -1809,7 +2071,7 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
                     $waitingFor = 'key'
                     continue
                 }
-                { $_ -in @('--password', '--password-env', '--password-file', '--key-file', '--field', '-F', '--file', '-f', '--value', '--value-env', '--value-file', '--output', '--bin', '-b', '--username', '--url', '--notes', '--strategy', '--age-recipient', '-r', '--age-identity', '-i') } {
+                { $_ -in @('--password', '--password-env', '--password-file', '--key-file', '--field', '-F', '--file', '-f', '--value', '--value-env', '--value-file', '--output', '-o', '--bin', '-b', '--username', '--url', '--notes', '--strategy', '--age-recipient', '-r', '--age-identity', '-i') } {
                     $waitingFor = 'value'
                     continue
                 }
@@ -1817,11 +2079,11 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
                     $waitingFor = 'value'
                     continue
                 }
-                { $effectiveAction -in @('get', 'otp', 'reveal') -and $_ -in @('--name', '--format') } {
+                { $effectiveAction -in @('get', 'otp', 'reveal') -and $_ -in @('--name', '-n', '--format') } {
                     $waitingFor = 'value'
                     continue
                 }
-                { $_ -in @('--password-stdin', '--dry-run', '--yes', '--upper', '-U', '--lower', '-L',
+                { $_ -in @('--password-stdin', '--dry-run', '--yes', '-y', '--upper', '-U', '--lower', '-L',
                     '--digits', '-D', '--symbols', '-S', '--is-output', '--stdin', '--value-stdin',
                     '--generate', '--age-encrypt', '--age-decrypt', '--clipboard', '-h', '--help') } {
                     continue
@@ -1887,36 +2149,46 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
         '--format:secrets:get' { $values = @('text', 'json', 'dotenv', 'shell', 'pwsh', 'powershell', 'github-actions', 'azure-devops', 'null') }
         '--format:secrets:otp' { $values = @('text', 'json', 'dotenv', 'shell', 'pwsh', 'powershell', 'github-actions', 'azure-devops', 'null') }
         '--format:secrets:env' { $values = @('dotenv', 'shell', 'pwsh', 'powershell', 'github-actions', 'azure-devops', 'json', 'null') }
+        '--format:secrets:environment' { $values = @('dotenv', 'shell', 'pwsh', 'powershell', 'github-actions', 'azure-devops', 'json', 'null') }
+        '--format:import:*' { $values = @('json', 'keepass-xml') }
+        '--format:export:*' { $values = @('json', 'keepass-xml') }
+        '--format:secrets:import' { $values = @('json', 'keepass-xml') }
+        '--format:secrets:export' { $values = @('json', 'keepass-xml') }
+        '--format:automation:import' { $values = @('json', 'keepass-xml') }
+        '--format:automation:export' { $values = @('json', 'keepass-xml') }
+        '--format:inject:*' { $values = @('raw', 'dotenv') }
         '--strategy:sync:*' { $values = @('newest', 'source', 'target') }
         '--strategy:secrets:sync' { $values = @('newest', 'source', 'target') }
         '--strategy:automation:sync' { $values = @('newest', 'source', 'target') }
+        '--shell:shell:load' { $values = @('bash', 'zsh', 'fish', 'powershell', 'pwsh', 'nushell') }
+        '--shell:shell:unload' { $values = @('bash', 'zsh', 'fish', 'powershell', 'pwsh', 'nushell') }
         '--field:get:*' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
+        '-F:get:*' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
         '--field:set:*' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
+        '-F:set:*' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
         '--field:secrets:get' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
+        '-F:secrets:get' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
         '--field:secrets:set' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:field:get' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:field:reveal' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:field:set' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:field:edit' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:custom-field:get' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:custom-field:reveal' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:custom-field:set' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
-        '--field:custom-field:edit' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
+        '-F:secrets:set' { $values = @('Password', 'Title', 'UserName', 'URL', 'Notes') }
         default {
             switch ($command) {
-                '' { $values = @('init', 'context', 'alias', 'config', 'secrets', 'automation', 'get', 'list', 'ls', 'search', 'env', 'set', 'rm', 'remove', 'ensure', 'otp', 'import', 'export', 'sync', 'files', 'attachment', 'attachments', 'group', 'groups', 'field', 'custom-field', 'exec', 'x', 'version', 'completion', '--help', '-h', '--version', '--vault', '-V', '--password-env', '--password-stdin', '--color', '--no-color') }
-                'init' { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--kdf', '--memory', '--iterations', '--parallelism', '--size') }
-                'context' { if (-not $action) { $values = @('ls', 'list', 'show', 'use', 'rm', 'remove', 'set') } }
+                '' { $values = @('init', 'context', 'alias', 'config', 'secrets', 'automation', 'get', 'list', 'ls', 'search', 'show', 'env', 'set', 'rm', 'remove', 'ensure', 'otp', 'import', 'export', 'sync', 'files', 'attachment', 'attachments', 'group', 'groups', 'field', 'custom-field', 'exec', 'x', 'use', 'inject', 'trust', 'untrust', 'shell', 'tui', 'version', 'completion', '--help', '-h', '--version', '--vault', '-V', '--password-env', '--password-stdin', '--color', '--no-color') }
+                'init' { $values = @('--json', '--generate-master-password', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--kdf', '--memory', '--iterations', '--parallelism', '--size') }
+                'context' {
+                    if (-not $action) { $values = @('ls', 'list', 'show', 'use', 'rm', 'remove', 'set') }
+                    elseif ($action -in @('ls', 'list', 'show')) { $values = @('--json') }
+                }
                 'alias' {
                     if (-not $action) { $values = @('ls', 'list', 'set', 'rm', 'remove', 'resolve') }
-                    elseif ($action -eq 'set') { $values = @('--kind', '--field') }
+                    elseif ($action -eq 'set') { $values = @('--kind', '-F', '--field') }
                 }
                 'config' {
                     if (-not $action) { $values = @('ls', 'list', 'get', 'show', 'set', 'rm', 'remove') }
                     else {
                         switch ($action) {
                             { $_ -in @('ls', 'list') } { $values = @('--json', '--') }
-                            { $_ -in @('get', 'show', 'set', 'rm', 'remove') } { $values = @('aliases', 'current', 'default_vault') }
+                            { $_ -in @('get', 'show') } { $values = @('aliases', 'current', 'default_vault') }
+                            { $_ -in @('set', 'rm', 'remove') } { if ($currentIndex -eq ($commandIndex + 2)) { $values = @('current', 'default_vault') } }
                         }
                     }
                 }
@@ -1926,37 +2198,37 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
                         switch ($action) {
                             { $_ -in @('ls', 'list') } { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
                             'search' { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
-                            'show' { $values = @('--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('env', 'environment') } { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'get' { $values = @('many', '--key', '--field', '--name', '--format', '--is-output', '--clipboard', '--age-encrypt', '--age-recipient', '-r', '--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'set' { $values = @('--key', '--field', '--username', '--url', '--notes', '--file', '--bin', '-b', '--stdin', '--value', '--value-env', '--value-file', '--value-stdin', '--generate', '--chars', '-c', '--size', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--age-decrypt', '--age-identity', '-i', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('rm', 'remove') } { $values = @('--key', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'ensure' { $values = @('--key', '--size', '--chars', '-c', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'otp' { $values = @('--key', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'import' { $values = @('--file', '--stdin', '--replace', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'export' { $values = @('--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'sync' { $values = @('--file', '--stdin', '--strategy', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'show' { $values = @('-k', '--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('env', 'environment') } { $values = @('-k', '--key', '-F', '--field', '-n', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'get' { $values = @('many', '-k', '--key', '-F', '--field', '-n', '--name', '--format', '--is-output', '--clipboard', '--age-encrypt', '--age-recipient', '-r', '-o', '--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'set' { $values = @('--key', '--field', '--username', '--url', '--notes', '--file', '--bin', '-b', '--stdin', '--value', '--value-env', '--value-file', '--value-stdin', '--generate', '--chars', '-c', '--size', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--age-decrypt', '--age-identity', '-i', '-k', '-F', '-f', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('rm', 'remove') } { $values = @('-k', '--key', '-y', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'ensure' { $values = @('-k', '--key', '--size', '--chars', '-c', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'otp' { $values = @('-k', '--key', '-n', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'import' { $values = @('-f', '--file', '--stdin', '--replace', '--dry-run', '--format', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'export' { $values = @('-o', '--output', '--format', '--allow-plaintext', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'sync' { $values = @('-f', '--file', '--stdin', '--strategy', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                         }
                     }
                 }
-                'get' { $values = @('many', '--key', '--field', '--name', '--format', '--is-output', '--clipboard', '--age-encrypt', '--age-recipient', '-r', '--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'get' { $values = @('many', '-k', '--key', '-F', '--field', '-n', '--name', '--format', '--is-output', '--clipboard', '--age-encrypt', '--age-recipient', '-r', '-o', '--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 { $_ -in @('list', 'ls', 'search') } { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
-                'show' { $values = @('--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'env' { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'set' { $values = @('--key', '--field', '--username', '--url', '--notes', '--file', '--bin', '-b', '--stdin', '--value', '--value-env', '--value-file', '--value-stdin', '--generate', '--chars', '-c', '--size', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--age-decrypt', '--age-identity', '-i', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                { $_ -in @('rm', 'remove') } { $values = @('--key', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'ensure' { $values = @('--key', '--size', '--chars', '-c', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'otp' { $values = @('--key', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'import' { $values = @('--file', '--stdin', '--replace', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'export' { $values = @('--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                'sync' { $values = @('--file', '--stdin', '--strategy', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'show' { $values = @('-k', '--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'env' { $values = @('-k', '--key', '-F', '--field', '-n', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'set' { $values = @('--key', '--field', '--username', '--url', '--notes', '--file', '--bin', '-b', '--stdin', '--value', '--value-env', '--value-file', '--value-stdin', '--generate', '--chars', '-c', '--size', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--age-decrypt', '--age-identity', '-i', '-k', '-F', '-f', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                { $_ -in @('rm', 'remove') } { $values = @('-k', '--key', '-y', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'ensure' { $values = @('-k', '--key', '--size', '--chars', '-c', '--upper', '-U', '--lower', '-L', '--digits', '-D', '--symbols', '-S', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'otp' { $values = @('-k', '--key', '-n', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'import' { $values = @('-f', '--file', '--stdin', '--replace', '--dry-run', '--format', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'export' { $values = @('-o', '--output', '--format', '--allow-plaintext', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'sync' { $values = @('-f', '--file', '--stdin', '--strategy', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                 'automation' {
                     if (-not $action) { $values = @('import', 'export', 'sync') }
                     else {
                         switch ($action) {
-                            'import' { $values = @('--file', '--stdin', '--replace', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'export' { $values = @('--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            'sync' { $values = @('--file', '--stdin', '--strategy', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'import' { $values = @('-f', '--file', '--stdin', '--replace', '--dry-run', '--format', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'export' { $values = @('-o', '--output', '--format', '--allow-plaintext', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'sync' { $values = @('-f', '--file', '--stdin', '--strategy', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                         }
                     }
                 }
@@ -1964,10 +2236,10 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
                     if (-not $action) { $values = @('ls', 'list', 'add', 'import', 'get', 'export', 'rm', 'remove') }
                     else {
                         switch ($action) {
-                            { $_ -in @('ls', 'list') } { $values = @('--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('add', 'import') } { $values = @('--key', '--field', '--file', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('get', 'export') } { $values = @('--key', '--field', '--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('rm', 'remove') } { $values = @('--key', '--field', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('ls', 'list') } { $values = @('-k', '--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('add', 'import') } { $values = @('-k', '--key', '-n', '--name', '-F', '--field', '-f', '--file', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('get', 'export') } { $values = @('-k', '--key', '-n', '--name', '-F', '--field', '-o', '--output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('rm', 'remove') } { $values = @('-k', '--key', '-n', '--name', '-F', '--field', '-y', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                         }
                     }
                 }
@@ -1976,8 +2248,8 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
                     else {
                         switch ($action) {
                             { $_ -in @('ls', 'list') } { $values = @('--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('add', 'create', 'ensure') } { $values = @('--key', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('rm', 'remove') } { $values = @('--key', '--yes', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('add', 'create', 'ensure') } { $values = @('-k', '--key', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('rm', 'remove') } { $values = @('-k', '--key', '-y', '--yes', '--dry-run', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                         }
                     }
                 }
@@ -1985,14 +2257,29 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
                     if (-not $action) { $values = @('ls', 'list', 'get', 'reveal', 'set', 'edit', 'rm', 'remove') }
                     else {
                         switch ($action) {
-                            { $_ -in @('ls', 'list') } { $values = @('--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('get', 'reveal') } { $values = @('--key', '--field', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('set', 'edit') } { $values = @('--key', '--field', '--file', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
-                            { $_ -in @('rm', 'remove') } { $values = @('--key', '--field', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('ls', 'list') } { $values = @('-k', '--key', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('get', 'reveal') } { $values = @('-k', '--key', '-F', '--field', '-n', '--name', '--format', '--is-output', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('set', 'edit') } { $values = @('-k', '--key', '-F', '--field', '-f', '--file', '--stdin', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            { $_ -in @('rm', 'remove') } { $values = @('-k', '--key', '-F', '--field', '-y', '--yes', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
                         }
                     }
                 }
-                { $_ -in @('exec', 'x') } { $values = @('--key', '--field', '--env', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
+                { $_ -in @('exec', 'x') } { $values = @('-B', '--bind', '-k', '--key', '-F', '--field', '--env', '--env-file', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file', '--') }
+                'inject' { $values = @('-f', '--file', '--stdin', '-o', '--output', '--format', '--check', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                'trust' { $values = @('--list', '--json', '--prune', '--') }
+                'untrust' { $values = @('--all', '--') }
+                'shell' {
+                    if (-not $action) { $values = @('init', 'completions', 'completion', 'load', 'unload', 'status') }
+                    else {
+                        switch ($action) {
+                            'init' { $values = @('--no-completion', '--no-env', 'bash', 'zsh', 'fish', 'powershell', 'pwsh', 'nushell') }
+                            { $_ -in @('completions', 'completion') } { if ($currentIndex -eq ($commandIndex + 2)) { $values = @('bash', 'sh', 'zsh', 'fish', 'powershell', 'pwsh', 'nushell') } }
+                            'load' { $values = @('--shell', '--password', '--password-env', '--password-file', '--password-stdin', '--key-file') }
+                            'unload' { $values = @('--shell') }
+                            'status' { $values = @('--json') }
+                        }
+                    }
+                }
                 'completion' { if (-not $action) { $values = @('bash', 'sh', 'zsh', 'fish', 'powershell', 'pwsh', 'nushell') } }
             }
         }
@@ -2077,10 +2364,10 @@ def "nu-complete nkp selector" [context: string, kind: string = "keys"] {
       $selector_seen = true
       $waiting = true
       $i = $i + 1
-    } else if $token in ["--password", "--password-env", "--password-file", "--key-file", "--name", "--format", "--size", "--chars", "-c", "--field", "-F", "--file", "-f", "--output", "--value", "--value-env", "--value-file", "--bin", "-b", "--username", "--url", "--notes", "--strategy", "--age-recipient", "-r", "--age-identity", "-i", "--memory", "--iterations", "--parallelism"] {
+    } else if $token in ["--password", "--password-env", "--password-file", "--key-file", "--name", "-n", "--format", "--size", "--chars", "-c", "--field", "-F", "--file", "-f", "--output", "-o", "--value", "--value-env", "--value-file", "--bin", "-b", "--username", "--url", "--notes", "--strategy", "--age-recipient", "-r", "--age-identity", "-i", "--memory", "--iterations", "--parallelism", "--bind", "-B", "--env-file", "--shell"] {
       $waiting = true
       $i = $i + 1
-    } else if $token in ["--password-stdin", "--dry-run", "--yes", "--upper", "-U", "--lower", "-L", "--digits", "-D", "--symbols", "-S", "--is-output", "--stdin", "--value-stdin", "--generate", "--age-encrypt", "--age-decrypt", "--clipboard"] {
+    } else if $token in ["--password-stdin", "--dry-run", "--yes", "-y", "--upper", "-U", "--lower", "-L", "--digits", "-D", "--symbols", "-S", "--is-output", "--stdin", "--value-stdin", "--generate", "--age-encrypt", "--age-decrypt", "--clipboard"] {
       $i = $i + 1
     } else if ($token | str starts-with "-") {
       $selector_seen = true
@@ -2100,7 +2387,7 @@ def "nu-complete nkp group-selector" [context: string] {
   nu-complete nkp selector $context groups
 }
 export extern nkp [
-  command?: string@"init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x version completion"
+  command?: string@"init context alias config secrets automation get list ls search show env set rm remove ensure otp import export sync files attachment attachments group groups field custom-field exec x use inject trust untrust shell tui version completion"
   --help(-h)
   --version
   --vault(-V): string@"nu-complete nkp vaults"
@@ -2109,18 +2396,31 @@ export extern nkp [
   --color: string@"auto always never basic truecolor"
   --no-color
 ]
-export extern "nkp init" [path?: string@"nu-complete nkp vault-files" --kdf: string@"aes argon2d argon2id" --memory: int --iterations: int --parallelism: int --size: int --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp use" [target: string@"nu-complete nkp vaults"]
+export extern "nkp tui" [path: string@"nu-complete nkp vault-files"]
+export extern "nkp inject" [file?: string --file(-f): string --stdin --output(-o): string --format: string@"raw dotenv" --check --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp trust" [path?: string --list --json --prune]
+export extern "nkp untrust" [path?: string --all]
+export extern "nkp shell" [action: string@"init completions completion load unload status"]
+export extern "nkp shell init" [shell: string@"bash zsh fish powershell pwsh nushell" --no-completion --no-env]
+export extern "nkp shell completions" [shell: string@"bash sh zsh fish powershell pwsh nushell"]
+export extern "nkp shell completion" [shell: string@"bash sh zsh fish powershell pwsh nushell"]
+export extern "nkp shell load" [--shell: string@"bash zsh fish powershell pwsh nushell" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp shell unload" [--shell: string@"bash zsh fish powershell pwsh nushell"]
+export extern "nkp shell status" [--json]
+export extern "nkp init" [path?: string@"nu-complete nkp vault-files" --json --generate-master-password --kdf: string@"aes argon2d argon2id" --memory: int --iterations: int --parallelism: int --size: int --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp context" [action: string@"ls list show use rm remove set"]
-export extern "nkp context ls" []
-export extern "nkp context show" []
-export extern "nkp context use" [alias: string@"nu-complete nkp vault-aliases"]
+export extern "nkp context ls" [--json]
+export extern "nkp context list" [--json]
+export extern "nkp context show" [--json]
+export extern "nkp context use" [target: string@"nu-complete nkp vaults"]
 export extern "nkp context rm" [alias: string@"nu-complete nkp vault-aliases"]
 export extern "nkp context remove" [alias: string@"nu-complete nkp vault-aliases"]
 export extern "nkp context set" [alias: string path: string@"nu-complete nkp vaults"]
 export extern "nkp alias" [action: string@"ls list set rm remove resolve"]
 export extern "nkp alias ls" []
 export extern "nkp alias list" []
-export extern "nkp alias set" [name: string@"nu-complete nkp aliases" target: string@"nu-complete nkp vaults" --kind: string@"vault entry" --field: string]
+export extern "nkp alias set" [name: string@"nu-complete nkp aliases" target: string@"nu-complete nkp vaults" --kind: string@"vault entry" --field(-F): string]
 export extern "nkp alias rm" [name: string@"nu-complete nkp aliases"]
 export extern "nkp alias remove" [name: string@"nu-complete nkp aliases"]
 export extern "nkp alias resolve" [name: string@"nu-complete nkp aliases"]
@@ -2129,99 +2429,108 @@ export extern "nkp config ls" [glob?: string --json]
 export extern "nkp config list" [glob?: string --json]
 export extern "nkp config get" [key: string@"aliases current default_vault"]
 export extern "nkp config show" [key: string@"aliases current default_vault"]
-export extern "nkp config set" [key: string@"aliases current default_vault" value: string@"nu-complete nkp vaults"]
-export extern "nkp config rm" [key: string@"aliases current default_vault"]
-export extern "nkp config remove" [key: string@"aliases current default_vault"]
+export extern "nkp config set" [key: string@"current default_vault" value: string@"nu-complete nkp vaults"]
+export extern "nkp config rm" [key: string@"current default_vault"]
+export extern "nkp config remove" [key: string@"current default_vault"]
 export extern "nkp secrets" [action: string@"get list ls search show env environment set rm remove ensure otp import export sync"]
-export extern "nkp secrets get many" [...paths: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --age-encrypt --age-recipient(-r): string --output: string --is-output --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp get many" [...paths: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --age-encrypt --age-recipient(-r): string --output: string --is-output --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets get many" [...paths: string@"nu-complete nkp keys" --field(-F): string@"Password Title UserName URL Notes" --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --age-encrypt --age-recipient(-r): string --output(-o): string --is-output --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp get many" [...paths: string@"nu-complete nkp keys" --field(-F): string@"Password Title UserName URL Notes" --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --age-encrypt --age-recipient(-r): string --output(-o): string --is-output --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp secrets list" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp secrets search" [query: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp secrets show" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp secrets env" [--key: string@"nu-complete nkp keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkp secrets environment" [--key: string@"nu-complete nkp keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkp secrets get" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp secrets show" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets env" [--key(-k): string@"nu-complete nkp keys" --field(-F): string --name(-n): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
+export extern "nkp secrets environment" [--key(-k): string@"nu-complete nkp keys" --field(-F): string --name(-n): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
+export extern "nkp secrets get" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --field(-F): string@"Password Title UserName URL Notes" --name(-n): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --age-encrypt --age-recipient(-r): string --output(-o): string --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
 export extern "nkp secrets ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp secrets set" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --username: string --url: string --notes: string --field: string --file: string --bin: string --stdin --value: string --value-env: string --value-file: string --value-stdin --generate --chars(-c): int --size: int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --age-decrypt --age-identity(-i): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp secrets rm" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp secrets remove" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp secrets ensure" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --size: int --chars(-c): int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp secrets otp" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
-export extern "nkp secrets import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp secrets export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp secrets sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets set" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --username: string --url: string --notes: string --field(-F): string --file(-f): string --bin(-b): string --stdin --value: string --value-env: string --value-file: string --value-stdin --generate --chars(-c): int --size: int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --age-decrypt --age-identity(-i): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets rm" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp secrets remove" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp secrets ensure" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --size: int --chars(-c): int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets otp" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --name(-n): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp secrets import" [file?: string --file(-f): string --stdin --replace --dry-run --format: string@"json keepass-xml" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets export" [dest?: string --output(-o): string --format: string@"json keepass-xml" --allow-plaintext --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp secrets sync" [file?: string --file(-f): string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp automation" [action: string@"import export sync"]
-export extern "nkp automation import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp automation export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp automation sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp get" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string@"Password Title UserName URL Notes" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp automation import" [file?: string --file(-f): string --stdin --replace --dry-run --format: string@"json keepass-xml" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp automation export" [dest?: string --output(-o): string --format: string@"json keepass-xml" --allow-plaintext --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp automation sync" [file?: string --file(-f): string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp get" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --field(-F): string@"Password Title UserName URL Notes" --name(-n): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --clipboard --age-encrypt --age-recipient(-r): string --output(-o): string --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
 export extern "nkp list" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp ls" [glob?: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp search" [query: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp show" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp env" [--key: string@"nu-complete nkp keys" --field: string --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
-export extern "nkp set" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --username: string --url: string --notes: string --field: string --file: string --bin: string --stdin --value: string --value-env: string --value-file: string --value-stdin --generate --chars(-c): int --size: int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --age-decrypt --age-identity(-i): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp rm" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp remove" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp ensure" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --size: int --chars(-c): int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp otp" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --name: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
-export extern "nkp import" [--file: string --stdin --replace --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp export" [--output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp sync" [--file: string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp show" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp env" [--key(-k): string@"nu-complete nkp keys" --field(-F): string --name(-n): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"dotenv shell pwsh powershell github-actions azure-devops json null"]
+export extern "nkp set" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --username: string --url: string --notes: string --field(-F): string --file(-f): string --bin(-b): string --stdin --value: string --value-env: string --value-file: string --value-stdin --generate --chars(-c): int --size: int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --age-decrypt --age-identity(-i): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp rm" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp remove" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp ensure" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --size: int --chars(-c): int --upper(-U) --lower(-L) --digits(-D) --symbols(-S) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp otp" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --name(-n): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null"]
+export extern "nkp import" [file?: string --file(-f): string --stdin --replace --dry-run --format: string@"json keepass-xml" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp export" [dest?: string --output(-o): string --format: string@"json keepass-xml" --allow-plaintext --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp sync" [file?: string --file(-f): string --stdin --strategy: string@"newest source target" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp group" [action: string@"ls list add create ensure rm remove"]
 export extern "nkp groups" [action: string@"ls list add create ensure rm remove"]
 export extern "nkp group ls" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp group list" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp groups ls" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp groups list" [--password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp group add" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp group create" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp group ensure" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp groups add" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp groups create" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp groups ensure" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp group rm" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp group remove" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp groups rm" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp groups remove" [selector?: string@"nu-complete nkp group-selector" --key: string@"nu-complete nkp groups" --yes --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group add" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group create" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group ensure" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups add" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups create" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups ensure" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group rm" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --yes(-y) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp group remove" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --yes(-y) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups rm" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --yes(-y) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp groups remove" [selector?: string@"nu-complete nkp group-selector" --key(-k): string@"nu-complete nkp groups" --yes(-y) --dry-run --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp files" [action: string@"ls list add import get export rm remove"]
 export extern "nkp attachment" [action: string@"ls list add import get export rm remove"]
 export extern "nkp attachments" [action: string@"ls list add import get export rm remove"]
-export extern "nkp attachment ls" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachment list" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachments ls" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachments list" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachment add" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachment import" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachments add" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachments import" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachment get" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachment export" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachments get" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachments export" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --output: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp attachment rm" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp attachment remove" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp attachments rm" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp attachments remove" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
+export extern "nkp files ls" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp files list" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment ls" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment list" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments ls" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments list" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp files add" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp files import" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment add" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment import" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments add" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments import" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp files get" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --output(-o): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp files export" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --output(-o): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment get" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --output(-o): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachment export" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --output(-o): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments get" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --output(-o): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp attachments export" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --output(-o): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp files rm" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp files remove" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp attachment rm" [selector?: string@"nu-complete nkp selector" name?: string --key(-k): string@"nu-complete nkp keys" --name(-n): string --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp attachment remove" [selector?: string@"nu-complete nkp selector" name?: string@"nu-complete nkp keys" --name(-n): string --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp attachments rm" [selector?: string@"nu-complete nkp selector" name?: string@"nu-complete nkp keys" --name(-n): string --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp attachments remove" [selector?: string@"nu-complete nkp selector" name?: string@"nu-complete nkp keys" --name(-n): string --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
 export extern "nkp field" [action: string@"ls list get reveal set edit rm remove"]
 export extern "nkp custom-field" [action: string@"ls list get reveal set edit rm remove"]
-export extern "nkp field ls" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp field list" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp custom-field ls" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp custom-field list" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp field get" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp field reveal" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp custom-field get" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp custom-field reveal" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --name: string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp field set" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp field edit" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp custom-field set" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp custom-field edit" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --file: string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
-export extern "nkp field rm" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp field remove" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp custom-field rm" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp custom-field remove" [selector?: string@"nu-complete nkp selector" --key: string@"nu-complete nkp keys" --field: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes]
-export extern "nkp exec" [--key: string@"nu-complete nkp keys" --field(-F): string --env: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
-export extern "nkp x" [--key: string@"nu-complete nkp keys" --field(-F): string --env: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
+export extern "nkp field ls" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field list" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field ls" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field list" [selector?: string@"nu-complete nkp selector" --key(-k): string@"nu-complete nkp keys" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field get" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --name(-n): string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field reveal" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --name(-n): string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field get" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --name(-n): string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field reveal" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --name(-n): string --is-output --format: string@"text json dotenv shell pwsh powershell github-actions azure-devops null" --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field set" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field edit" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field set" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp custom-field edit" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --file(-f): string --stdin --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
+export extern "nkp field rm" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp field remove" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp custom-field rm" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp custom-field remove" [selector?: string@"nu-complete nkp selector" field?: string --key(-k): string@"nu-complete nkp keys" --field(-F): string --password: string --password-env: string --password-file: string --password-stdin --key-file: string --yes(-y)]
+export extern "nkp exec" [--bind(-B): string --key(-k): string@"nu-complete nkp keys" --field(-F): string --env: string --env-file: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
+export extern "nkp x" [--bind(-B): string --key(-k): string@"nu-complete nkp keys" --field(-F): string --env: string --env-file: string --password: string --password-env: string --password-file: string --password-stdin --key-file: string ...args: string]
 export extern "nkp version" []
 export extern "nkp completion" [shell: string@"bash sh zsh fish powershell pwsh nushell"]
 "#,
@@ -3864,6 +4173,7 @@ else:
                 "config",
                 "secrets",
                 "automation",
+                "files",
                 "attachment",
                 "field",
                 "env",
@@ -3875,6 +4185,12 @@ else:
                 "export",
                 "sync",
                 "exec",
+                "use",
+                "inject",
+                "trust",
+                "untrust",
+                "shell",
+                "tui",
                 "completion",
             ] {
                 assert!(script.contains(command), "{shell} omitted {command}");
@@ -3900,6 +4216,17 @@ else:
                     "-l format",
                     "-l is-output",
                     "-l env",
+                    "-l bind",
+                    "-l env-file",
+                    "-l check",
+                    "-l no-completion",
+                    "-l no-env",
+                    "-l list",
+                    "-l prune",
+                    "-l all",
+                    "-l shell",
+                    "-l generate-master-password",
+                    "-l allow-plaintext",
                 ]
             } else {
                 &[
@@ -3922,18 +4249,37 @@ else:
                     "--format",
                     "--is-output",
                     "--env",
+                    "--bind",
+                    "--env-file",
+                    "--check",
+                    "--no-completion",
+                    "--no-env",
+                    "--list",
+                    "--prune",
+                    "--all",
+                    "--shell",
+                    "--generate-master-password",
+                    "--allow-plaintext",
                 ]
             };
             for option in options {
                 assert!(script.contains(option), "{shell} omitted {option}");
             }
+            assert!(
+                script.contains("keepass-xml"),
+                "{shell} omitted keepass-xml format"
+            );
+            assert!(
+                script.contains("raw") && script.contains("dotenv"),
+                "{shell} omitted inject formats"
+            );
             assert_kdf_surface(shell, script);
             assert!(script.contains("__complete"));
             for value in ["newest", "source", "target"] {
                 assert!(script.contains(value), "{shell} omitted sync value {value}");
             }
             assert_format_surface(shell, script);
-            for kind in ["aliases", "vault-aliases", "keys", "vaults"] {
+            for kind in ["aliases", "vault-aliases", "vault-files", "keys", "vaults"] {
                 assert!(script.contains(kind), "{shell} omitted {kind} metadata");
             }
             assert!(script.contains("metadata only and never secrets"));
@@ -3946,6 +4292,7 @@ else:
                 "edit",
                 "import",
                 "export",
+                "completions",
             ] {
                 assert!(script.contains(alias), "{shell} omitted alias {alias}");
             }
@@ -3971,6 +4318,65 @@ else:
         }
         assert_eq!(generate("powershell").unwrap(), POWERSHELL);
         assert_eq!(generate("pwsh").unwrap(), POWERSHELL);
+
+        // Route-accuracy assertions across all generated scripts:
+        // 1. config set/rm must not suggest `aliases`.
+        let bash = generate("bash").unwrap();
+        assert!(
+            bash.contains(
+                "set|rm|remove) [[ $position -eq 2 ]] && choices='current default_vault'"
+            )
+        );
+        assert!(!bash.contains("--field:field:get"));
+        let sh = generate("sh").unwrap();
+        assert!(
+            sh.contains("config:set|config:rm|config:remove) _nk_choices='current default_vault'")
+        );
+        assert!(!sh.contains("--field:field:get"));
+        let zsh = generate("zsh").unwrap();
+        assert!(
+            zsh.contains("set|rm|remove) [[ $position -eq 2 ]] && choices=(current default_vault)")
+        );
+        assert!(!zsh.contains("--field:field:get"));
+        let fish = generate("fish").unwrap();
+        assert!(fish.contains("__nkp_sub config \"set rm remove\"' -a 'current default_vault'"));
+        assert!(!fish.contains("__fish_seen_subcommand_from"));
+        let powershell = generate("powershell").unwrap();
+        assert!(powershell.contains("@('current', 'default_vault')"));
+        assert!(!powershell.contains("'--field:field:get'"));
+        let nushell = generate("nushell").unwrap();
+        assert!(
+            nushell.contains(
+                "export extern \"nkp config set\" [key: string@\"current default_vault\""
+            )
+        );
+        assert!(
+            nushell.contains(
+                "export extern \"nkp config rm\" [key: string@\"current default_vault\"]"
+            )
+        );
+        assert!(nushell.contains("export extern \"nkp context ls\" [--json]"));
+        assert!(nushell.contains("export extern \"nkp shell init\""));
+    }
+
+    #[test]
+    fn visible_file_candidate_handles_cwd_and_nested_prefixes() {
+        let root = std::path::Path::new("/tmp/workspace");
+        let cwd_vault = root.join("local.kdbx");
+        let nested_vault = root.join("sub").join("nested.kdbx");
+        assert!(super::visible_file_candidate(&cwd_vault, "", root));
+        assert!(super::visible_file_candidate(&cwd_vault, ".", root));
+        assert!(super::visible_file_candidate(&cwd_vault, "./", root));
+        assert!(super::visible_file_candidate(&cwd_vault, "./loc", root));
+        assert!(super::visible_file_candidate(&cwd_vault, "loc", root));
+        assert!(!super::visible_file_candidate(&cwd_vault, "nested", root));
+        assert!(super::visible_file_candidate(&nested_vault, "nested", root));
+        assert!(super::visible_file_candidate(&nested_vault, "sub/", root));
+        assert!(super::visible_file_candidate(
+            &nested_vault,
+            "./sub/nes",
+            root
+        ));
     }
 
     #[test]

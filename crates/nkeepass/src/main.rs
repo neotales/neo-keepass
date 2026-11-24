@@ -46,9 +46,14 @@ struct HelpCommand {
     names: &'static str,
     usage: &'static str,
     summary: &'static str,
+    examples: &'static [&'static str],
+    help_notes: &'static [&'static str],
     options: &'static [HelpOption],
     children: &'static [HelpCommand],
 }
+
+const NO_EXAMPLES: &[&str] = &[];
+const NO_NOTES: &[&str] = &[];
 
 const fn help_command(
     names: &'static str,
@@ -61,21 +66,51 @@ const fn help_command(
         names,
         usage,
         summary,
+        examples: NO_EXAMPLES,
+        help_notes: NO_NOTES,
         options,
         children,
     }
 }
 
-const GLOBAL_OPTIONS: &[HelpOption] = &[
-    HelpOption {
-        label: "-V, --vault PATH",
-        summary: "Select a vault or configured alias before the command.",
-    },
-    HelpOption {
-        label: "--color MODE, --no-color",
-        summary: "Style human help and diagnostics: auto, always, never, basic, or truecolor.",
-    },
+const fn help_command_with(
+    names: &'static str,
+    usage: &'static str,
+    summary: &'static str,
+    examples: &'static [&'static str],
+    help_notes: &'static [&'static str],
+    options: &'static [HelpOption],
+    children: &'static [HelpCommand],
+) -> HelpCommand {
+    HelpCommand {
+        names,
+        usage,
+        summary,
+        examples,
+        help_notes,
+        options,
+        children,
+    }
+}
+
+const ROOT_EXAMPLES: &[&str] = &[
+    "use work",
+    "ls",
+    "show mail",
+    "get mail --clipboard",
+    "x -B TOKEN=mail -- env",
+    "inject .env.tmpl -o .env.resolved",
+    "shell init bash",
 ];
+
+const GLOBAL_VAULT_OPTION: HelpOption = HelpOption {
+    label: "-V, --vault PATH",
+    summary: "Select a vault path or configured alias before the command.",
+};
+const GLOBAL_COLOR_OPTION: HelpOption = HelpOption {
+    label: "--color MODE, --no-color",
+    summary: "Style human help and diagnostics: auto, always, never, basic, or truecolor.",
+};
 const GLOBAL_CREDENTIAL_OPTIONS: &[HelpOption] = &[
     HelpOption {
         label: "--password-env NAME",
@@ -125,13 +160,29 @@ const CREDENTIAL_OPTIONS: &[HelpOption] = &[
         summary: "Unsafe compatibility mode; visible in process listings and shell history.",
     },
 ];
-const KEY_OPTION: HelpOption = HelpOption {
+const ENTRY_KEY_OPTION: HelpOption = HelpOption {
     label: "-k, --key PATH",
-    summary: "Select an entry or group by path; get, set, rm, show, ensure, otp, group, field, and attachment routes also accept it positionally.",
+    summary: "Select an entry by path or alias (alternative to positional PATH).",
 };
-const FIELD_OPTION: HelpOption = HelpOption {
+const ENTRY_ONLY_KEY_OPTION: HelpOption = HelpOption {
+    label: "-k, --key ENTRY",
+    summary: "Select an entry by path or alias (alternative to positional ENTRY).",
+};
+const OTP_KEY_OPTION: HelpOption = HelpOption {
+    label: "-k, --key PATH",
+    summary: "Select a TOTP entry by path or alias (alternative to positional PATH).",
+};
+const ENTRY_FIELD_OPTION: HelpOption = HelpOption {
     label: "-F, --field FIELD",
-    summary: "Select a field (defaults to Password where applicable).",
+    summary: "Select a field (defaults to Password or the entry alias's bound field).",
+};
+const MANY_FIELD_OPTION: HelpOption = HelpOption {
+    label: "-F, --field FIELD",
+    summary: "Select one common field for all requested paths (defaults to Password).",
+};
+const CUSTOM_FIELD_OPTION: HelpOption = HelpOption {
+    label: "-F, --field FIELD",
+    summary: "Select a custom field (alternative to positional FIELD; built-in fields refused).",
 };
 const FILE_OPTION: HelpOption = HelpOption {
     label: "-f, --file PATH",
@@ -145,13 +196,25 @@ const STDIN_OPTION: HelpOption = HelpOption {
     label: "--stdin",
     summary: "Read input from stdin.",
 };
-const DRY_RUN_OPTION: HelpOption = HelpOption {
+const REPORT_DRY_RUN_OPTION: HelpOption = HelpOption {
     label: "--dry-run",
-    summary: "Validate and report without saving changes.",
+    summary: "Validate and emit report without saving changes.",
 };
-const FORMAT_OPTION: HelpOption = HelpOption {
+const SILENT_DRY_RUN_OPTION: HelpOption = HelpOption {
+    label: "--dry-run",
+    summary: "Validate without modifying or saving the vault; produces no output.",
+};
+const VALUE_FORMAT_OPTION: HelpOption = HelpOption {
     label: "--format FORMAT",
-    summary: "Choose text, JSON, null, or a supported named output format.",
+    summary: "Choose text (default), json, null, dotenv, shell, pwsh, powershell, github-actions, or azure-devops.",
+};
+const ENV_FORMAT_OPTION: HelpOption = HelpOption {
+    label: "--format FORMAT",
+    summary: "Choose shell (default), dotenv, pwsh, powershell, github-actions, azure-devops, json, or null.",
+};
+const IS_OUTPUT_OPTION: HelpOption = HelpOption {
+    label: "--is-output",
+    summary: "Mark Azure DevOps output as an output variable.",
 };
 const NAME_OPTION: HelpOption = HelpOption {
     label: "-n, --name NAME",
@@ -162,43 +225,59 @@ const YES_OPTION: HelpOption = HelpOption {
     summary: "Confirm a destructive operation without prompting.",
 };
 
-const CONTEXT_OUTPUT_OPTIONS: &[HelpOption] = &[HelpOption {
+const CONTEXT_LS_OPTIONS: &[HelpOption] = &[HelpOption {
     label: "--json",
-    summary: "Print machine-readable JSON instead of text.",
+    summary: "Emit one {\"alias\",\"path\"} JSON record per vault alias; omits unaliased paths.",
+}];
+const CONTEXT_SHOW_OPTIONS: &[HelpOption] = &[HelpOption {
+    label: "--json",
+    summary: "Emit {\"path\",\"source\",\"alias\"} JSON (alias is populated only for context source).",
 }];
 const CONTEXT_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "ls|list",
-        "ls",
+        "ls [--json]",
         "List configured vault aliases and paths.",
-        CONTEXT_OUTPUT_OPTIONS,
+        &["context ls", "context ls --json"],
+        &[
+            "JSON output emits configured vault aliases only; human text also lists unaliased current and default paths.",
+        ],
+        CONTEXT_LS_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "show",
-        "show",
+        "show [--json]",
         "Show the selected vault and its source.",
-        CONTEXT_OUTPUT_OPTIONS,
+        &["context show"],
+        NO_NOTES,
+        CONTEXT_SHOW_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "use",
-        "use ALIAS_OR_PATH",
-        "Select a configured vault alias or absolute vault path.",
+        "use <ALIAS|PATH>",
+        "Select a configured vault alias or normalized absolute vault path.",
+        &["context use work", "context use \"$HOME/vaults/work.kdbx\""],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "rm|remove",
         "rm ALIAS",
         "Remove a vault alias.",
+        &["context rm work"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "set",
         "set ALIAS PATH",
-        "Create or update a vault alias and its path.",
+        "Create or update a vault alias and its normalized absolute path.",
+        &["context set work \"$HOME/vaults/work.kdbx\""],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
@@ -209,36 +288,47 @@ const ALIAS_SET_OPTIONS: &[HelpOption] = &[
         summary: "Set the alias target kind; inferred from the target by default.",
     },
     HelpOption {
-        label: "--field FIELD",
-        summary: "Bind an entry alias to a field.",
+        label: "-F, --field FIELD",
+        summary: "Bind an entry alias to a default field.",
     },
 ];
 const ALIAS_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "ls|list",
         "ls",
-        "List configured aliases.",
+        "List configured aliases as JSON lines.",
+        &["alias ls"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "set",
         "set NAME TARGET [OPTIONS]",
         "Create or replace a validated vault or entry alias.",
+        &[
+            "alias set mail Services/mail",
+            "alias set work \"$HOME/vaults/work.kdbx\"",
+        ],
+        NO_NOTES,
         ALIAS_SET_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "rm|remove",
         "rm NAME",
         "Remove an alias.",
+        &["alias rm mail"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "resolve",
         "resolve NAME",
-        "Show the target of an alias.",
+        "Show the target of an alias as JSON.",
+        &["alias resolve mail"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
@@ -248,51 +338,56 @@ const CONFIG_LS_OPTIONS: &[HelpOption] = &[HelpOption {
     summary: "Emit one JSON record per configuration key.",
 }];
 const CONFIG_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "ls|list",
         "ls [GLOB] [--json]",
         "List the closed configuration key set.",
+        &["config ls", "config ls --json"],
+        NO_NOTES,
         CONFIG_LS_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "get|show",
         "get KEY",
-        "Print one configured scalar value.",
+        "Print one configured value.",
+        &["config get current"],
+        &["Valid KEY values: aliases, current, default_vault."],
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "set",
         "set KEY VALUE",
-        "Set a supported configuration value.",
+        "Set a supported scalar configuration key (current or default_vault).",
+        &["config set default_vault work"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "rm|remove",
         "rm KEY",
-        "Clear a configured scalar value.",
+        "Clear a configured scalar key (current or default_vault).",
+        &["config rm current"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
 ];
 const COMMON_LIST_OPTIONS: &[HelpOption] = &[];
 const SEARCH_OPTIONS: &[HelpOption] = &[];
-const SHOW_OPTIONS: &[HelpOption] = &[KEY_OPTION];
+const SHOW_OPTIONS: &[HelpOption] = &[ENTRY_KEY_OPTION];
 const GET_OPTIONS: &[HelpOption] = &[
-    KEY_OPTION,
-    FIELD_OPTION,
-    FORMAT_OPTION,
+    ENTRY_KEY_OPTION,
+    ENTRY_FIELD_OPTION,
+    VALUE_FORMAT_OPTION,
     NAME_OPTION,
     HelpOption {
         label: "--clipboard",
         summary: "Copy the selected value instead of writing it to stdout.",
     },
-    HelpOption {
-        label: "--is-output",
-        summary: "Mark Azure DevOps output as an output variable.",
-    },
+    IS_OUTPUT_OPTION,
     HelpOption {
         label: "--age-encrypt",
         summary: "Encrypt the selected value to one or more age recipients.",
@@ -303,19 +398,12 @@ const GET_OPTIONS: &[HelpOption] = &[
     },
     HelpOption {
         label: "-o, --output PATH",
-        summary: "Write encrypted output to a private, no-clobber file.",
+        summary: "Write encrypted output to a private, no-clobber file (requires --age-encrypt).",
     },
 ];
-const GET_MANY_COMMANDS: &[HelpCommand] = &[help_command(
-    "many",
-    "many PATH... [OPTIONS]",
-    "Bundle selected fields in supplied path order; default field Password.",
-    GET_MANY_OPTIONS,
-    NO_COMMANDS,
-)];
 const GET_MANY_OPTIONS: &[HelpOption] = &[
-    FIELD_OPTION,
-    FORMAT_OPTION,
+    MANY_FIELD_OPTION,
+    VALUE_FORMAT_OPTION,
     HelpOption {
         label: "--age-encrypt",
         summary: "Encrypt the complete rendered bundle once.",
@@ -326,22 +414,26 @@ const GET_MANY_OPTIONS: &[HelpOption] = &[
     },
     HelpOption {
         label: "-o, --output PATH",
-        summary: "Write encrypted output to a private, no-clobber file.",
+        summary: "Write encrypted output to a private, no-clobber file (requires --age-encrypt).",
     },
-    HelpOption {
-        label: "--is-output",
-        summary: "Mark Azure DevOps bindings as output variables.",
-    },
-    HelpOption {
-        label: "Path keys",
-        summary: "JSON uses literal paths; named formats require identifier-style paths or aliases.",
-    },
+    IS_OUTPUT_OPTION,
 ];
+const GET_MANY_COMMANDS: &[HelpCommand] = &[help_command_with(
+    "many",
+    "many PATH... [OPTIONS]",
+    "Bundle selected fields in supplied path order; default field Password.",
+    &["get many mail backup --format json"],
+    &[
+        "Path keys: JSON uses literal paths; named formats require identifier-style paths or aliases.",
+    ],
+    GET_MANY_OPTIONS,
+    NO_COMMANDS,
+)];
 const SET_OPTIONS: &[HelpOption] = &[
-    KEY_OPTION,
+    ENTRY_KEY_OPTION,
     HelpOption {
-        label: "--field NAME=VALUE",
-        summary: "Repeatable assignments; legacy --field NAME selects a value-source target.",
+        label: "-F, --field NAME=VALUE",
+        summary: "Repeatable assignments; -F/--field NAME selects a value-source target (default Password).",
     },
     HelpOption {
         label: "--value VALUE",
@@ -349,7 +441,7 @@ const SET_OPTIONS: &[HelpOption] = &[
     },
     HelpOption {
         label: "--value-stdin",
-        summary: "Read the selected value from stdin; alias --stdin.",
+        summary: "Read the selected value from stdin; alias for --stdin.",
     },
     HelpOption {
         label: "--value-env NAME",
@@ -357,7 +449,7 @@ const SET_OPTIONS: &[HelpOption] = &[
     },
     HelpOption {
         label: "--value-file PATH",
-        summary: "Read a bounded UTF-8 value file; alias --file.",
+        summary: "Read a bounded UTF-8 value file; alias for --file.",
     },
     HelpOption {
         label: "--generate",
@@ -365,7 +457,7 @@ const SET_OPTIONS: &[HelpOption] = &[
     },
     HelpOption {
         label: "-c, --chars N, --size N",
-        summary: "Generated length (default 16); only with --generate.",
+        summary: "Generated length 1..=4096 (default 16); requires --generate.",
     },
     HelpOption {
         label: "-U, --upper",
@@ -382,10 +474,6 @@ const SET_OPTIONS: &[HelpOption] = &[
     HelpOption {
         label: "-S, --symbols",
         summary: "Select ASCII punctuation for generation.",
-    },
-    HelpOption {
-        label: "No update supplied",
-        summary: "Prompt without echo for up to 60 seconds; redirected stdin is refused.",
     },
     HelpOption {
         label: "--username VALUE",
@@ -411,12 +499,12 @@ const SET_OPTIONS: &[HelpOption] = &[
         summary: "Explicit identity wins; otherwise discover init-password.agekey or age/keys.txt.",
     },
 ];
-const RM_OPTIONS: &[HelpOption] = &[KEY_OPTION, FIELD_OPTION, YES_OPTION];
+const ENTRY_RM_OPTIONS: &[HelpOption] = &[ENTRY_KEY_OPTION, YES_OPTION];
 const ENSURE_OPTIONS: &[HelpOption] = &[
-    KEY_OPTION,
+    ENTRY_KEY_OPTION,
     HelpOption {
         label: "-c, --chars N, --size N",
-        summary: "Generated length for new entries only (default 16).",
+        summary: "Generated length 1..=4096 for new entries only (default 16).",
     },
     HelpOption {
         label: "-U, --upper",
@@ -434,20 +522,13 @@ const ENSURE_OPTIONS: &[HelpOption] = &[
         label: "-S, --symbols",
         summary: "Select ASCII punctuation.",
     },
-    HelpOption {
-        label: "Character policy",
-        summary: "No selection: all four. Selected classes only; each is guaranteed.",
-    },
-    DRY_RUN_OPTION,
+    SILENT_DRY_RUN_OPTION,
 ];
 const OTP_OPTIONS: &[HelpOption] = &[
-    KEY_OPTION,
-    FORMAT_OPTION,
+    OTP_KEY_OPTION,
+    VALUE_FORMAT_OPTION,
     NAME_OPTION,
-    HelpOption {
-        label: "--is-output",
-        summary: "Mark Azure DevOps output as an output variable.",
-    },
+    IS_OUTPUT_OPTION,
 ];
 const IMPORT_OPTIONS: &[HelpOption] = &[
     FILE_OPTION,
@@ -456,7 +537,7 @@ const IMPORT_OPTIONS: &[HelpOption] = &[
         label: "--replace",
         summary: "Allow replacing a non-empty vault.",
     },
-    DRY_RUN_OPTION,
+    REPORT_DRY_RUN_OPTION,
     HelpOption {
         label: "--format json|keepass-xml",
         summary: "Import JSON snapshot (default) or KeePass XML.",
@@ -465,7 +546,7 @@ const IMPORT_OPTIONS: &[HelpOption] = &[
 const EXPORT_OPTIONS: &[HelpOption] = &[
     HelpOption {
         label: "-o, --output PATH",
-        summary: "Write the interchange snapshot to this private output file.",
+        summary: "Write the interchange snapshot to this private, no-clobber output file.",
     },
     HelpOption {
         label: "--format json|keepass-xml",
@@ -480,218 +561,301 @@ const SYNC_OPTIONS: &[HelpOption] = &[
     FILE_OPTION,
     STDIN_OPTION,
     HelpOption {
-        label: "--strategy newest|source",
-        summary: "Choose how snapshot data is synchronized.",
+        label: "--strategy newest|source|target",
+        summary: "Choose conflict strategy: newest (default), source, or target.",
     },
-    DRY_RUN_OPTION,
+    REPORT_DRY_RUN_OPTION,
 ];
 const ENV_OPTIONS: &[HelpOption] = &[
     HelpOption {
-        label: "--key PATH",
+        label: "-k, --key PATH",
         summary: "Start a value binding (repeatable).",
     },
     HelpOption {
-        label: "--field FIELD",
-        summary: "Select the field for the current binding; otp emits a code.",
+        label: "-F, --field FIELD",
+        summary: "Select the field for the current binding (required unless alias binds a field); otp emits a code.",
     },
     HelpOption {
         label: "-n, --name NAME",
         summary: "Finish a binding with its output variable name.",
     },
-    FORMAT_OPTION,
-    HelpOption {
-        label: "--is-output",
-        summary: "Mark Azure DevOps output as an output variable.",
-    },
+    ENV_FORMAT_OPTION,
+    IS_OUTPUT_OPTION,
 ];
 const ATTACHMENT_NAME_OPTION: HelpOption = HelpOption {
     label: "-n, --name NAME",
-    summary: "Select the attachment name (alternative to positional NAME or --field).",
+    summary: "Select the attachment name (alternative to positional NAME or -F/--field).",
 };
-const ATTACHMENT_LS_OPTIONS: &[HelpOption] = &[KEY_OPTION];
+const ATTACHMENT_FIELD_OPTION: HelpOption = HelpOption {
+    label: "-F, --field NAME",
+    summary: "Compatibility alias for --name; selects the attachment name (no default).",
+};
+const ATTACHMENT_LS_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION];
 const ATTACHMENT_ADD_OPTIONS: &[HelpOption] = &[
-    KEY_OPTION,
+    ENTRY_ONLY_KEY_OPTION,
     ATTACHMENT_NAME_OPTION,
-    FIELD_OPTION,
-    FILE_OPTION,
-    STDIN_OPTION,
+    ATTACHMENT_FIELD_OPTION,
+    HelpOption {
+        label: "-f, --file PATH",
+        summary: "Read attachment bytes from a file.",
+    },
+    HelpOption {
+        label: "--stdin",
+        summary: "Read attachment bytes from stdin.",
+    },
 ];
-const ATTACHMENT_RM_OPTIONS: &[HelpOption] =
-    &[KEY_OPTION, ATTACHMENT_NAME_OPTION, FIELD_OPTION, YES_OPTION];
+const ATTACHMENT_GET_OPTIONS: &[HelpOption] = &[
+    ENTRY_ONLY_KEY_OPTION,
+    ATTACHMENT_NAME_OPTION,
+    ATTACHMENT_FIELD_OPTION,
+    HelpOption {
+        label: "-o, --output PATH",
+        summary: "Private output destination; existing files are not overwritten.",
+    },
+];
+const ATTACHMENT_RM_OPTIONS: &[HelpOption] = &[
+    ENTRY_ONLY_KEY_OPTION,
+    ATTACHMENT_NAME_OPTION,
+    ATTACHMENT_FIELD_OPTION,
+    YES_OPTION,
+];
+const FIELD_LS_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION];
+const FIELD_GET_OPTIONS: &[HelpOption] = &[
+    ENTRY_ONLY_KEY_OPTION,
+    CUSTOM_FIELD_OPTION,
+    VALUE_FORMAT_OPTION,
+    NAME_OPTION,
+    IS_OUTPUT_OPTION,
+];
+const FIELD_SET_OPTIONS: &[HelpOption] = &[
+    ENTRY_ONLY_KEY_OPTION,
+    CUSTOM_FIELD_OPTION,
+    HelpOption {
+        label: "-f, --file PATH",
+        summary: "Read the bounded UTF-8 field value from a file.",
+    },
+    HelpOption {
+        label: "--stdin",
+        summary: "Read the UTF-8 field value from stdin.",
+    },
+];
+const FIELD_RM_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION, CUSTOM_FIELD_OPTION, YES_OPTION];
 const SECRETS_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "ls|list",
         "ls [--] [GLOB]",
         "List redacted entry metadata as JSON lines.",
+        &["ls", "ls 'Services/*'"],
+        NO_NOTES,
         COMMON_LIST_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "search",
         "search [--] QUERY",
         "Search bounded, allowlisted entry metadata.",
+        &["search mail"],
+        NO_NOTES,
         SEARCH_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "env|environment",
-        "env [--key PATH [--field FIELD] --name NAME]... [OPTIONS]",
+        "env (-k PATH [-F FIELD] -n NAME)... [OPTIONS]",
         "Emit selected values in a named format.",
+        &["env -k mail -F UserName -n MAIL_USER"],
+        NO_NOTES,
         ENV_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "show",
         "show PATH",
         "Show redacted descriptors for one entry.",
+        &["show mail"],
+        NO_NOTES,
         SHOW_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "get",
         "get [PATH] [OPTIONS]",
         "Reveal one explicitly selected value.",
+        &["get mail", "get mail --clipboard"],
+        NO_NOTES,
         GET_OPTIONS,
         GET_MANY_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "set",
         "set [PATH] [OPTIONS]",
         "Set an entry field from explicit input.",
+        &["set mail", "set mail -F UserName=alice"],
+        &[
+            "With no update supplied, prompts without echo for up to 60 seconds; redirected stdin is refused.",
+        ],
         SET_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "rm|remove",
-        "rm [PATH] [OPTIONS]",
-        "Remove an entry or selected field.",
-        RM_OPTIONS,
+        "rm (PATH | -k PATH | --key PATH) (-y | --yes)",
+        "Remove an entry.",
+        &["rm mail -y"],
+        NO_NOTES,
+        ENTRY_RM_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "ensure",
         "ensure PATH [OPTIONS]",
         "Create a missing entry and its parent groups; keep existing entries.",
+        &["ensure Demo/mail"],
+        &[
+            "Character policy: no class flags uses all four; selected classes only, each is guaranteed.",
+        ],
         ENSURE_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "otp",
         "otp PATH [OPTIONS]",
         "Generate a TOTP code; never disclose the seed. HOTP is refused.",
+        &["otp mail"],
+        NO_NOTES,
         OTP_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "import",
-        "import (SRC | --file SRC | --stdin) [OPTIONS]",
+        "import (SRC | -f SRC | --file SRC | --stdin) [OPTIONS]",
         "Import a bounded interchange snapshot.",
+        &["import snapshot.json --dry-run"],
+        NO_NOTES,
         IMPORT_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "export",
         "export (DEST | -o DEST | --output DEST) [OPTIONS]",
         "Write a private interchange snapshot.",
+        &["export snapshot.json"],
+        NO_NOTES,
         EXPORT_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "sync",
-        "sync (SRC | --file SRC | --stdin) [OPTIONS]",
+        "sync (SRC | -f SRC | --file SRC | --stdin) [OPTIONS]",
         "Synchronize a bounded interchange snapshot.",
+        &["sync snapshot.json --strategy newest --dry-run"],
+        NO_NOTES,
         SYNC_OPTIONS,
         NO_COMMANDS,
     ),
 ];
 const AUTOMATION_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "import",
-        "import (SRC | --file SRC | --stdin) [OPTIONS]",
+        "import (SRC | -f SRC | --file SRC | --stdin) [OPTIONS]",
         "Import a bounded interchange snapshot.",
+        &["automation import snapshot.json --dry-run"],
+        NO_NOTES,
         IMPORT_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "export",
         "export (DEST | -o DEST | --output DEST) [OPTIONS]",
         "Write a private interchange snapshot.",
+        &["automation export snapshot.json"],
+        NO_NOTES,
         EXPORT_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "sync",
-        "sync (SRC | --file SRC | --stdin) [OPTIONS]",
+        "sync (SRC | -f SRC | --file SRC | --stdin) [OPTIONS]",
         "Synchronize a bounded interchange snapshot.",
+        &["automation sync snapshot.json --strategy newest --dry-run"],
+        NO_NOTES,
         SYNC_OPTIONS,
         NO_COMMANDS,
     ),
 ];
 const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "ls|list",
-        "ls (PATH | --key PATH)",
+        "ls (ENTRY | --key ENTRY)",
         "List attachment metadata for one entry.",
+        &["files ls mail"],
+        NO_NOTES,
         ATTACHMENT_LS_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "add|import",
-        "add (ENTRY | --key ENTRY) (NAME | --name NAME | --field NAME) [OPTIONS]",
+        "add (ENTRY | --key ENTRY) (NAME | --name NAME | --field NAME) (-f PATH | --file PATH | --stdin)",
         "Add an attachment from explicit input.",
+        &["files add mail note.txt -f ./note.txt"],
+        NO_NOTES,
         ATTACHMENT_ADD_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "get|export",
         "get (ENTRY | --key ENTRY) (NAME | --name NAME | --field NAME) (-o PATH | --output PATH)",
-        "Write one attachment to a private output file.",
-        &[
-            KEY_OPTION,
-            ATTACHMENT_NAME_OPTION,
-            FIELD_OPTION,
-            HelpOption {
-                label: "-o, --output PATH",
-                summary: "Private output destination; existing files are not overwritten.",
-            },
-        ],
+        "Write one attachment to a private, no-clobber output file.",
+        &["files get mail note.txt -o ./note.txt"],
+        NO_NOTES,
+        ATTACHMENT_GET_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "rm|remove",
         "rm (ENTRY | --key ENTRY) (NAME | --name NAME | --field NAME) (-y | --yes)",
         "Remove one attachment.",
+        &["files rm mail note.txt -y"],
+        NO_NOTES,
         ATTACHMENT_RM_OPTIONS,
         NO_COMMANDS,
     ),
 ];
 const FIELD_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "ls|list",
         "ls (ENTRY | --key ENTRY)",
-        "List custom-field names for one entry.",
-        SHOW_OPTIONS,
+        "List field names present on one entry.",
+        &["field ls mail"],
+        NO_NOTES,
+        FIELD_LS_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "get|reveal",
         "get (ENTRY | --key ENTRY) (FIELD | --field FIELD) [OPTIONS]",
         "Reveal one custom field.",
-        GET_OPTIONS,
+        &["field get mail ApiKey"],
+        NO_NOTES,
+        FIELD_GET_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "set|edit",
-        "set (ENTRY | --key ENTRY) (FIELD | --field FIELD) [OPTIONS]",
-        "Set one custom field from explicit input.",
-        SET_OPTIONS,
+        "set (ENTRY | --key ENTRY) (FIELD | --field FIELD) (-f PATH | --file PATH | --stdin)",
+        "Set one custom field from a file or stdin.",
+        &["field set mail ApiKey -f ./value.txt"],
+        NO_NOTES,
+        FIELD_SET_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "rm|remove",
         "rm (ENTRY | --key ENTRY) (FIELD | --field FIELD) (-y | --yes)",
         "Remove one custom field.",
-        RM_OPTIONS,
+        &["field rm mail ApiKey -y"],
+        NO_NOTES,
+        FIELD_RM_OPTIONS,
         NO_COMMANDS,
     ),
 ];
@@ -705,45 +869,32 @@ const INIT_OPTIONS: &[HelpOption] = &[
         summary: "Generate a random master password; recover it from the encrypted backup and age identity.",
     },
     HelpOption {
-        label: "Recovery",
-        summary: "Privately pipe age --decrypt -i IDENTITY BACKUP to nkp --vault DATABASE secrets ls --password-stdin. Protect the identity; see the vault reference.",
-    },
-    HelpOption {
-        label: "Password persistence",
-        summary: "Password-only master passwords are saved age-encrypted in the data directory; identity is in config.",
-    },
-    HelpOption {
-        label: "Crash recovery",
-        summary: "Directory ancestry durability is unconfirmed; keep independent protected copies of the identity and encrypted backup.",
-    },
-    HelpOption {
-        label: "Partial failure",
-        summary: "Supplied password-only: backup follows successful vault creation; backup failure leaves the vault installed. Generated master: backup and association precede vault creation; their failure stops creation.",
-    },
-    HelpOption {
-        label: "Windows private files",
-        summary: "Vaults and backups use owner-only ACLs on supported filesystems.",
-    },
-    HelpOption {
         label: "--size N",
         summary: "Store a generated N-character password in a new entry.",
     },
     HelpOption {
         label: "--kdf aes|argon2d|argon2id",
-        summary: "Choose the key derivation function.",
+        summary: "Choose the key derivation function (default aes).",
     },
     HelpOption {
         label: "--memory KIB",
-        summary: "Argon2 memory cost; requires an Argon2 KDF.",
+        summary: "Argon2 memory cost in KiB; requires an Argon2 KDF.",
     },
     HelpOption {
         label: "--iterations N",
-        summary: "KDF transform rounds or time cost.",
+        summary: "KDF transform rounds or Argon2 time cost.",
     },
     HelpOption {
         label: "--parallelism N",
         summary: "Argon2 lanes; requires an Argon2 KDF.",
     },
+];
+const INIT_NOTES: &[&str] = &[
+    "Recovery: Privately pipe age --decrypt -i IDENTITY BACKUP to nkp --vault DATABASE secrets ls --password-stdin. Protect the identity; see the vault reference.",
+    "Password persistence: Password-only master passwords are saved age-encrypted in the data directory; identity is in config.",
+    "Crash recovery: Directory ancestry durability is unconfirmed; keep independent protected copies of the identity and encrypted backup.",
+    "Partial failure: Supplied password-only: backup follows successful vault creation; backup failure leaves the vault installed. Generated master: backup and association precede vault creation; their failure stops creation.",
+    "Windows private files: Vaults and backups use owner-only ACLs on supported filesystems.",
 ];
 const EXEC_OPTIONS: &[HelpOption] = &[
     HelpOption {
@@ -751,11 +902,11 @@ const EXEC_OPTIONS: &[HelpOption] = &[
         summary: "Bind a literal entry's Password into the child environment (repeatable).",
     },
     HelpOption {
-        label: "--key PATH",
+        label: "-k, --key PATH",
         summary: "Entry to bind into the child environment (repeatable).",
     },
     HelpOption {
-        label: "--field FIELD",
+        label: "-F, --field FIELD",
         summary: "Bind this field for the preceding --key; otp emits a code.",
     },
     HelpOption {
@@ -766,53 +917,39 @@ const EXEC_OPTIONS: &[HelpOption] = &[
         label: "--env-file FILE",
         summary: "Load KEY=VALUE or nkp:// bindings from a .env file (repeatable).",
     },
-    HelpOption {
-        label: "--password-env NAME",
-        summary: "Read the master password from an environment variable.",
-    },
-    HelpOption {
-        label: "--password-stdin",
-        summary: "Read one password line from stdin.",
-    },
-    HelpOption {
-        label: "--password-file PATH",
-        summary: "Read one password line from a file.",
-    },
-    HelpOption {
-        label: "--key-file PATH",
-        summary: "Add a key-file credential component.",
-    },
-    HelpOption {
-        label: "--password VALUE",
-        summary: "Unsafe compatibility mode; visible in process listings and shell history.",
-    },
 ];
 const NO_COMMANDS: &[HelpCommand] = &[];
 const GROUP_KEY_OPTION: HelpOption = HelpOption {
     label: "-k, --key PATH",
-    summary: "Select a group path, with or without the root name; add and rm also accept it positionally.",
+    summary: "Select a group path, with or without the root name (alternative to positional PATH).",
 };
-const GROUP_ADD_OPTIONS: &[HelpOption] = &[GROUP_KEY_OPTION, DRY_RUN_OPTION];
-const GROUP_RM_OPTIONS: &[HelpOption] = &[GROUP_KEY_OPTION, YES_OPTION, DRY_RUN_OPTION];
+const GROUP_ADD_OPTIONS: &[HelpOption] = &[GROUP_KEY_OPTION, SILENT_DRY_RUN_OPTION];
+const GROUP_RM_OPTIONS: &[HelpOption] = &[GROUP_KEY_OPTION, YES_OPTION, SILENT_DRY_RUN_OPTION];
 const GROUP_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "ls|list",
         "ls",
         "List group paths.",
+        &["group ls"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "add|create|ensure",
         "add (PATH | --key PATH) [--dry-run]",
         "Create missing groups; keep existing groups.",
+        &["group add Services/Prod"],
+        NO_NOTES,
         GROUP_ADD_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "rm|remove",
-        "rm (PATH | --key PATH) (--yes | --dry-run)",
+        "rm (PATH | --key PATH) (-y | --yes | --dry-run)",
         "Remove a group and its contents; never remove the root.",
+        &["group rm Services/Old -y"],
+        NO_NOTES,
         GROUP_RM_OPTIONS,
         NO_COMMANDS,
     ),
@@ -863,65 +1000,222 @@ const SHELL_INIT_OPTIONS: &[HelpOption] = &[
 ];
 const SHELL_LOAD_OPTIONS: &[HelpOption] = &[HelpOption {
     label: "--shell SHELL",
-    summary: "Target shell when invoking load outside the shell wrapper.",
+    summary: "Target shell (bash, zsh, fish, pwsh, powershell, or nushell) outside the shell wrapper.",
 }];
 const SHELL_UNLOAD_OPTIONS: &[HelpOption] = &[HelpOption {
     label: "--shell SHELL",
-    summary: "Target shell when invoking unload outside the shell wrapper.",
+    summary: "Target shell (bash, zsh, fish, pwsh, powershell, or nushell) outside the shell wrapper.",
 }];
 const SHELL_STATUS_OPTIONS: &[HelpOption] = &[HelpOption {
     label: "--json",
     summary: "Print non-disclosing JSON status.",
 }];
 const SHELL_COMMANDS: &[HelpCommand] = &[
-    help_command(
+    help_command_with(
         "init",
         "init SHELL [--no-completion] [--no-env]",
-        "Emit shell completions and direnv-style directory hooks.",
+        "Emit completions and direnv-style hooks for bash, zsh, fish, pwsh, powershell, or nushell.",
+        &["shell init bash"],
+        &[
+            "POSIX sh does not support directory hooks; use `nkp shell completions sh` or `nkp completion sh` for completions.",
+        ],
         SHELL_INIT_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "completions|completion",
         "completions SHELL",
-        "Print static shell completion.",
+        "Print static shell completion for bash, sh, zsh, fish, powershell, pwsh, or nushell.",
+        &["shell completions bash"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "load",
         "load [--shell SHELL] [OPTIONS]",
         "Load the current directory's trusted manifest into the shell.",
+        &["shell load"],
+        NO_NOTES,
         SHELL_LOAD_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "unload",
         "unload [--shell SHELL]",
         "Unload active nkp-managed environment variables.",
+        &["shell unload"],
+        NO_NOTES,
         SHELL_UNLOAD_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
         "status",
         "status [--json]",
         "Show discovered manifest chain, trust status, and managed variable names.",
+        &["shell status", "shell status --json"],
+        NO_NOTES,
         SHELL_STATUS_OPTIONS,
         NO_COMMANDS,
     ),
 ];
 const ROOT_COMMANDS: &[HelpCommand] = &[
-    help_command(
-        "tui",
-        "tui PATH",
-        "Open the interactive private-terminal browser.",
+    // Daily secrets & execution
+    help_command_with(
+        "list|ls",
+        "ls [--] [GLOB]",
+        "Shortcut for secrets ls.",
+        &["ls", "ls 'Services/*'"],
+        NO_NOTES,
+        COMMON_LIST_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "show",
+        "show PATH",
+        "Shortcut for secrets show.",
+        &["show mail"],
+        NO_NOTES,
+        SHOW_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "get",
+        "get [PATH] [OPTIONS]",
+        "Shortcut for secrets get.",
+        &["get mail", "get mail --clipboard"],
+        NO_NOTES,
+        GET_OPTIONS,
+        GET_MANY_COMMANDS,
+    ),
+    help_command_with(
+        "set",
+        "set [PATH] [OPTIONS]",
+        "Shortcut for secrets set.",
+        &["set mail", "set mail -F UserName=alice"],
+        &[
+            "With no update supplied, prompts without echo for up to 60 seconds; redirected stdin is refused.",
+        ],
+        SET_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "ensure",
+        "ensure PATH [OPTIONS]",
+        "Shortcut for secrets ensure.",
+        &["ensure Demo/mail"],
+        &[
+            "Character policy: no class flags uses all four; selected classes only, each is guaranteed.",
+        ],
+        ENSURE_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "otp",
+        "otp PATH [OPTIONS]",
+        "Shortcut for secrets otp.",
+        &["otp mail"],
+        NO_NOTES,
+        OTP_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "rm|remove",
+        "rm (PATH | -k PATH | --key PATH) (-y | --yes)",
+        "Shortcut for secrets rm.",
+        &["rm mail -y"],
+        NO_NOTES,
+        ENTRY_RM_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "exec|x",
+        "exec (-B NAME=ENTRY | -k PATH [-F FIELD] --env NAME | --env-file FILE)... [OPTIONS] -- COMMAND [ARG ...]",
+        "Run a child with selected values in its environment.",
+        &["x -B TOKEN=mail -- env", "x --env-file .env -- env"],
+        NO_NOTES,
+        EXEC_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "env",
+        "env (-k PATH [-F FIELD] -n NAME)... [OPTIONS]",
+        "Emit selected values in a named format.",
+        &["env -k mail -F UserName -n MAIL_USER"],
+        NO_NOTES,
+        ENV_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "search",
+        "search [--] QUERY",
+        "Shortcut for secrets search.",
+        &["search mail"],
+        NO_NOTES,
+        SEARCH_OPTIONS,
+        NO_COMMANDS,
+    ),
+    // Vaults, shell & browser
+    help_command_with(
+        "use",
+        "use <ALIAS|PATH>",
+        "Select a configured vault alias or normalized absolute vault path.",
+        &["use work", "use \"$HOME/vaults/work.kdbx\""],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
-    help_command(
+    help_command_with(
+        "inject",
+        "inject (FILE | -f FILE | --file FILE | --stdin) [-o PATH] [--format raw|dotenv] [--check]",
+        "Render templates or .env files with nkp:// secret references.",
+        &["inject .env.tmpl -o .env.resolved", "inject .env --check"],
+        NO_NOTES,
+        INJECT_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "trust",
+        "trust [PATH] | --list [--json] | --prune",
+        "Trust a directory manifest or .env file for shell hooks.",
+        &["trust", "trust .env"],
+        NO_NOTES,
+        TRUST_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "untrust",
+        "untrust [PATH | --all]",
+        "Revoke trust for a manifest, .env file, or all entries.",
+        &["untrust", "untrust --all"],
+        NO_NOTES,
+        UNTRUST_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "shell",
+        "shell <COMMAND>",
+        "Configure shell hooks, completions, and environment loading.",
+        &["shell init bash", "shell status"],
+        NO_NOTES,
+        NO_OPTIONS,
+        SHELL_COMMANDS,
+    ),
+    help_command_with(
+        "tui",
+        "tui PATH",
+        "Open the interactive private-terminal browser.",
+        &["tui \"$HOME/vaults/work.kdbx\""],
+        NO_NOTES,
+        NO_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
         "init",
         "init [PATH] [OPTIONS]",
         "Create a KDBX 4.1 vault; never overwrites.",
+        &["init \"$HOME/vaults/work.kdbx\""],
+        INIT_NOTES,
         INIT_OPTIONS,
         NO_COMMANDS,
     ),
@@ -939,6 +1233,55 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         NO_OPTIONS,
         ALIAS_COMMANDS,
     ),
+    // Entries, interchange & system
+    help_command(
+        "files|attachment|attachments",
+        "files <COMMAND>",
+        "List or manage attachments.",
+        NO_OPTIONS,
+        ATTACHMENT_COMMANDS,
+    ),
+    help_command(
+        "field|custom-field",
+        "field <COMMAND>",
+        "List or manage custom fields.",
+        NO_OPTIONS,
+        FIELD_COMMANDS,
+    ),
+    help_command(
+        "group|groups",
+        "group <COMMAND>",
+        "List, create, or remove vault groups.",
+        NO_OPTIONS,
+        GROUP_COMMANDS,
+    ),
+    help_command_with(
+        "import",
+        "import (SRC | -f SRC | --file SRC | --stdin) [OPTIONS]",
+        "Shortcut for secrets import.",
+        &["import snapshot.json --dry-run"],
+        NO_NOTES,
+        IMPORT_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "export",
+        "export (DEST | -o DEST | --output DEST) [OPTIONS]",
+        "Shortcut for secrets export.",
+        &["export snapshot.json"],
+        NO_NOTES,
+        EXPORT_OPTIONS,
+        NO_COMMANDS,
+    ),
+    help_command_with(
+        "sync",
+        "sync (SRC | -f SRC | --file SRC | --stdin) [OPTIONS]",
+        "Shortcut for secrets sync.",
+        &["sync snapshot.json --strategy newest --dry-run"],
+        NO_NOTES,
+        SYNC_OPTIONS,
+        NO_COMMANDS,
+    ),
     help_command(
         "secrets",
         "secrets <COMMAND>",
@@ -954,72 +1297,18 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         AUTOMATION_COMMANDS,
     ),
     help_command(
-        "files|attachment|attachments",
-        "files <COMMAND>",
-        "List or manage attachments.",
-        NO_OPTIONS,
-        ATTACHMENT_COMMANDS,
-    ),
-    help_command(
-        "group|groups",
-        "group <COMMAND>",
-        "List, create, or remove vault groups.",
-        NO_OPTIONS,
-        GROUP_COMMANDS,
-    ),
-    help_command(
-        "field|custom-field",
-        "field <COMMAND>",
-        "List or manage custom fields.",
-        NO_OPTIONS,
-        FIELD_COMMANDS,
-    ),
-    help_command(
         "config",
         "config <COMMAND>",
         "Inspect or change configuration.",
         NO_OPTIONS,
         CONFIG_COMMANDS,
     ),
-    help_command(
-        "exec|x",
-        "exec [--key PATH [--field FIELD] --env NAME]... [OPTIONS] -- COMMAND [ARG ...]",
-        "Run a child with selected values in its environment.",
-        EXEC_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "inject",
-        "inject (FILE | --file FILE | --stdin) [-o PATH] [--format raw|dotenv] [--check]",
-        "Render templates or .env files with nkp:// secret references.",
-        INJECT_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "trust",
-        "trust [PATH] | --list [--json] | --prune",
-        "Trust a directory manifest or .env file for shell hooks.",
-        TRUST_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "untrust",
-        "untrust [PATH | --all]",
-        "Revoke trust for a manifest, .env file, or all entries.",
-        UNTRUST_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "shell",
-        "shell <COMMAND>",
-        "Configure shell hooks, completions, and environment loading.",
-        NO_OPTIONS,
-        SHELL_COMMANDS,
-    ),
-    help_command(
+    help_command_with(
         "completion",
         "completion SHELL",
-        "Print static shell completion.",
+        "Print static shell completion for bash, sh, zsh, fish, powershell, pwsh, or nushell.",
+        &["completion bash"],
+        NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
     ),
@@ -1027,97 +1316,6 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
         "version",
         "version",
         "Print version information.",
-        NO_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "get",
-        "get [PATH] [OPTIONS]",
-        "Shortcut for secrets get.",
-        GET_OPTIONS,
-        GET_MANY_COMMANDS,
-    ),
-    help_command(
-        "list|ls",
-        "ls [--] [GLOB] [OPTIONS]",
-        "Shortcut for secrets ls.",
-        COMMON_LIST_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "search",
-        "search [--] QUERY",
-        "Shortcut for secrets search.",
-        SEARCH_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "show",
-        "show PATH [OPTIONS]",
-        "Shortcut for secrets show.",
-        SHOW_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "set",
-        "set [PATH] [OPTIONS]",
-        "Shortcut for secrets set.",
-        SET_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "rm|remove",
-        "rm [PATH] [OPTIONS]",
-        "Shortcut for secrets rm.",
-        RM_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "ensure",
-        "ensure PATH [OPTIONS]",
-        "Shortcut for secrets ensure.",
-        ENSURE_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "otp",
-        "otp PATH [OPTIONS]",
-        "Shortcut for secrets otp.",
-        OTP_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "import",
-        "import (SRC | --file SRC | --stdin) [OPTIONS]",
-        "Shortcut for secrets import.",
-        IMPORT_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "export",
-        "export (DEST | -o DEST | --output DEST) [OPTIONS]",
-        "Shortcut for secrets export.",
-        EXPORT_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "sync",
-        "sync (SRC | --file SRC | --stdin) [OPTIONS]",
-        "Shortcut for secrets sync.",
-        SYNC_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "env",
-        "env [--key PATH [--field FIELD] --name NAME]... [OPTIONS]",
-        "Emit selected values in a named format.",
-        ENV_OPTIONS,
-        NO_COMMANDS,
-    ),
-    help_command(
-        "use",
-        "use ALIAS_OR_PATH",
-        "Select a configured vault alias or absolute vault path.",
         NO_OPTIONS,
         NO_COMMANDS,
     ),
@@ -9075,10 +9273,24 @@ fn help_request(args: &[String]) -> Option<Vec<String>> {
                 return None;
             }
             if (!route_tokens.is_empty() && route.is_empty())
-                || (route_tokens
-                    .first()
-                    .is_some_and(|group| matches!(group.as_str(), "secrets" | "automation"))
-                    && route_tokens.len() > 1
+                || (route_tokens.first().is_some_and(|group| {
+                    matches!(
+                        group.as_str(),
+                        "secrets"
+                            | "automation"
+                            | "context"
+                            | "alias"
+                            | "config"
+                            | "files"
+                            | "attachment"
+                            | "attachments"
+                            | "group"
+                            | "groups"
+                            | "field"
+                            | "custom-field"
+                            | "shell"
+                    )
+                }) && route_tokens.len() > 1
                     && route.len() < 2)
             {
                 return None;
@@ -9195,6 +9407,30 @@ fn command_path<'a>(commands: &'a [HelpCommand], route: &[String]) -> Option<&'a
     current
 }
 
+fn uses_vault_option(route: &[String]) -> bool {
+    if route.is_empty() {
+        return true;
+    }
+    if route.len() == 2 && route[0] == "context" && route[1] == "show" {
+        return true;
+    }
+    !route.first().is_some_and(|cmd| {
+        matches!(
+            cmd.as_str(),
+            "tui"
+                | "completion"
+                | "version"
+                | "use"
+                | "alias"
+                | "config"
+                | "trust"
+                | "untrust"
+                | "shell"
+                | "context"
+        )
+    })
+}
+
 fn uses_credentials(route: &[String]) -> bool {
     match route {
         [get, many] if get == "get" && many == "many" => true,
@@ -9239,6 +9475,7 @@ fn uses_credentials(route: &[String]) -> bool {
     }
 }
 
+#[cfg(test)]
 fn render_help(program: &str, route: &[String], width: usize) -> String {
     render_help_with_style(program, route, width, 0)
 }
@@ -9291,6 +9528,23 @@ fn render_help_with_style(program: &str, route: &[String], width: usize, style: 
         output.push('\n');
     }
 
+    let examples = if route.is_empty() {
+        ROOT_EXAMPLES
+    } else {
+        command.map_or(NO_EXAMPLES, |node| node.examples)
+    };
+    if !examples.is_empty() {
+        output.push_str(if examples.len() == 1 {
+            "EXAMPLE:\n"
+        } else {
+            "EXAMPLES:\n"
+        });
+        for example in examples {
+            let _ = writeln!(output, "  {program} {example}");
+        }
+        output.push('\n');
+    }
+
     let children = command.map_or(ROOT_COMMANDS, |node| node.children);
     if !children.is_empty() {
         output.push_str("COMMANDS:\n");
@@ -9299,7 +9553,16 @@ fn render_help_with_style(program: &str, route: &[String], width: usize, style: 
             .map(|item| display_aliases(item.names))
             .collect::<Vec<_>>();
         let col = aligned_column(labels.iter().map(String::as_str), width);
-        for (item, label) in children.iter().zip(&labels) {
+        for (idx, (item, label)) in children.iter().zip(&labels).enumerate() {
+            if route.is_empty() {
+                if idx == 0 {
+                    output.push_str("  Daily secrets & execution:\n");
+                } else if idx == 10 {
+                    output.push_str("\n  Vaults, shell & browser:\n");
+                } else if idx == 19 {
+                    output.push_str("\n  Entries, interchange & system:\n");
+                }
+            }
             let summary = if route.is_empty() {
                 shortcut_summary(item).unwrap_or(item.summary)
             } else {
@@ -9311,6 +9574,14 @@ fn render_help_with_style(program: &str, route: &[String], width: usize, style: 
     }
 
     write_help_options(&mut output, command, route, width);
+    let help_notes = command.map_or(NO_NOTES, |node| node.help_notes);
+    if !help_notes.is_empty() {
+        output.push_str("NOTES:\n");
+        for note in help_notes {
+            write_paragraph(&mut output, note, width, "  ");
+        }
+        output.push('\n');
+    }
     if route.is_empty() || uses_credentials(route) {
         output.push_str("CREDENTIALS:\n");
         write_paragraph(
@@ -9320,27 +9591,27 @@ fn render_help_with_style(program: &str, route: &[String], width: usize, style: 
             "  ",
         );
         output.push('\n');
+        output.push_str("SAFETY:\n");
+        write_paragraph(
+            &mut output,
+            "Credentials are prompted without echo; init never overwrites or prints a password.",
+            width,
+            "  ",
+        );
+        write_paragraph(
+            &mut output,
+            "WARNING: --password VALUE is exposed in process listings and shell history.",
+            width,
+            "  ",
+        );
+        write_paragraph(
+            &mut output,
+            "Selected values are explicit disclosures; stdout may be captured in logs or files.",
+            width,
+            "  ",
+        );
+        output.push('\n');
     }
-    output.push_str("SAFETY:\n");
-    write_paragraph(
-        &mut output,
-        "Credentials are prompted without echo; init never overwrites or prints a password.",
-        width,
-        "  ",
-    );
-    write_paragraph(
-        &mut output,
-        "WARNING: --password VALUE is exposed in process listings and shell history.",
-        width,
-        "  ",
-    );
-    write_paragraph(
-        &mut output,
-        "Selected values are explicit disclosures; stdout may be captured in logs or files.",
-        width,
-        "  ",
-    );
-    output.push('\n');
     output.push_str("MORE HELP:\n");
     write_paragraph(
         &mut output,
@@ -9350,7 +9621,7 @@ fn render_help_with_style(program: &str, route: &[String], width: usize, style: 
     );
     write_paragraph(
         &mut output,
-        "See the README: “Creating a vault”, “Explicit value output”, “Glob syntax”, and “Automation and interchange”.",
+        "See the README and docs/ for guides: “Creating a vault”, “Explicit value output”, “Glob syntax”, “Automation and interchange”, and “Shell integration”.",
         width,
         "  ",
     );
@@ -9391,7 +9662,11 @@ fn write_help_options(
     }
     output.push('\n');
     output.push_str("GLOBAL OPTIONS:\n");
-    let mut globals = GLOBAL_OPTIONS.iter().collect::<Vec<_>>();
+    let mut globals = Vec::new();
+    if uses_vault_option(route) {
+        globals.push(&GLOBAL_VAULT_OPTION);
+    }
+    globals.push(&GLOBAL_COLOR_OPTION);
     if route.is_empty() || uses_credentials(route) {
         globals.extend(GLOBAL_CREDENTIAL_OPTIONS.iter());
     }
@@ -13506,9 +13781,21 @@ mod tests {
 
         const SCANNED: &[&str] = &["clipboard", "completion", "tui"];
         const SCANNED_LIBRARY: &[&str] = &["glob", "private_file", "password_generator"];
-        // These remain explicit trust-boundary exemptions: they are library-side
-        // model adapters/implementations, not user-facing CLI modules.
-        const TRUSTED_LIBRARY_BOUNDARIES: &[&str] = &["service", "automation", "interchange"];
+        // These remain explicit library-side exemptions: service/model adapters
+        // plus non-vault shell/hook/manifest/template/trust helpers that have
+        // no neotales_keepass model dependency.
+        const TRUSTED_LIBRARY_BOUNDARIES: &[&str] = &[
+            "service",
+            "automation",
+            "interchange",
+            "env_file",
+            "fs_safe",
+            "hook",
+            "manifest",
+            "sha256",
+            "template",
+            "trust",
+        ];
         let declared = external_modules(include_str!("main.rs"));
         const EXPECTED_MODULE_SOURCES: &[(&str, &str)] = &[
             ("clipboard", "clipboard.rs"),
@@ -13553,11 +13840,18 @@ mod tests {
         let declared_library = external_modules(include_str!("lib.rs"));
         const EXPECTED_LIBRARY_MODULE_SOURCES: &[(&str, &str)] = &[
             ("automation", "automation.rs"),
+            ("env_file", "env_file.rs"),
+            ("fs_safe", "fs_safe.rs"),
             ("glob", "glob.rs"),
+            ("hook", "hook.rs"),
             ("interchange", "interchange.rs"),
-            ("private_file", "private_file.rs"),
+            ("manifest", "manifest.rs"),
             ("password_generator", "password_generator.rs"),
+            ("private_file", "private_file.rs"),
             ("service", "service.rs"),
+            ("sha256", "sha256.rs"),
+            ("template", "template.rs"),
+            ("trust", "trust.rs"),
         ];
         let library_accounted_for = [SCANNED_LIBRARY, TRUSTED_LIBRARY_BOUNDARIES].concat();
         assert_eq!(
@@ -14251,5 +14545,459 @@ mod tests {
             tty_multi_null.is_empty(),
             "refusal must precede first disclosure"
         );
+    }
+
+    fn collect_help_routes<'a>(
+        commands: &'a [HelpCommand],
+        prefix: &[String],
+        out: &mut Vec<(Vec<String>, &'a HelpCommand)>,
+    ) {
+        for command in commands {
+            let canonical = aliases(command.names).next().unwrap().to_owned();
+            let mut route = prefix.to_vec();
+            route.push(canonical);
+            out.push((route.clone(), command));
+            collect_help_routes(command.children, &route, out);
+        }
+    }
+
+    fn extract_section_lines<'a>(help: &'a str, section: &str) -> Vec<&'a str> {
+        let marker = format!("{section}:");
+        let Some(start) = help.lines().position(|line| line == marker) else {
+            return Vec::new();
+        };
+        help.lines()
+            .skip(start + 1)
+            .take_while(|line| line.is_empty() || line.starts_with(' '))
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    fn advertised_flags(option_label: &str) -> Vec<&str> {
+        option_label
+            .split([',', ' '])
+            .filter(|token| token.starts_with('-'))
+            .collect()
+    }
+
+    #[test]
+    fn help_schema_matches_parser_allowlists_across_all_routes() {
+        let mut routes = Vec::new();
+        collect_help_routes(ROOT_COMMANDS, &[], &mut routes);
+
+        for (route, node) in &routes {
+            let help = render_help("nkp", route, HELP_WIDTH);
+            let options_lines = extract_section_lines(&help, "OPTIONS");
+            assert!(
+                !options_lines.is_empty(),
+                "route {route:?} missing OPTIONS section"
+            );
+
+            // Every option row in OPTIONS: must start with '-' and have no duplicate flags.
+            let mut seen_flags = BTreeSet::new();
+            for opt in node.options {
+                assert!(
+                    opt.label.starts_with('-'),
+                    "route {route:?} has fake option row in OPTIONS: {:?}",
+                    opt.label
+                );
+                for flag in advertised_flags(opt.label) {
+                    assert!(
+                        seen_flags.insert(flag),
+                        "route {route:?} duplicates option flag {flag} in OPTIONS:\n{help}"
+                    );
+                }
+            }
+            if uses_credentials(route) {
+                for opt in CREDENTIAL_OPTIONS {
+                    for flag in advertised_flags(opt.label) {
+                        assert!(
+                            seen_flags.insert(flag),
+                            "route {route:?} duplicates credential flag {flag} in OPTIONS:\n{help}"
+                        );
+                    }
+                }
+            }
+
+            let globals_text = extract_section_lines(&help, "GLOBAL OPTIONS").join("\n");
+            assert_eq!(
+                globals_text.contains("-V, --vault PATH"),
+                uses_vault_option(route),
+                "route {route:?} vault legend mismatch:\n{help}"
+            );
+            assert_eq!(
+                help.contains("\nCREDENTIALS:\n"),
+                uses_credentials(route),
+                "route {route:?} CREDENTIALS section mismatch:\n{help}"
+            );
+            assert_eq!(
+                help.contains("\nSAFETY:\n"),
+                uses_credentials(route),
+                "route {route:?} SAFETY section mismatch:\n{help}"
+            );
+            assert_eq!(
+                globals_text.contains("--password-env NAME"),
+                uses_credentials(route),
+                "route {route:?} GLOBAL CREDENTIAL OPTIONS mismatch:\n{help}"
+            );
+        }
+
+        // Verify specific baseline audit fixes.
+        for route in [vec!["rm"], vec!["secrets", "rm"]] {
+            let owned: Vec<String> = route.iter().map(|s| (*s).to_owned()).collect();
+            let help = render_help("nkp", &owned, HELP_WIDTH);
+            assert!(!help.contains("--field"), "{route:?} advertised --field");
+            assert!(!help.contains("-F"), "{route:?} advertised -F");
+            assert!(
+                !help.contains("selected field"),
+                "{route:?} claimed field removal"
+            );
+            assert!(
+                help.contains("(-y | --yes)"),
+                "{route:?} omitted (-y | --yes)"
+            );
+        }
+
+        for route in [vec!["field", "get"], vec!["custom-field", "get"]] {
+            let owned: Vec<String> = route.iter().map(|s| (*s).to_owned()).collect();
+            let help = render_help("nkp", &owned, HELP_WIDTH);
+            for forbidden in [
+                "--output",
+                "-o,",
+                "--clipboard",
+                "--age-encrypt",
+                "-r,",
+                "--age-recipient",
+            ] {
+                assert!(
+                    !help.contains(forbidden),
+                    "{route:?} advertised {forbidden}"
+                );
+            }
+        }
+
+        for route in [vec!["field", "set"], vec!["custom-field", "set"]] {
+            let owned: Vec<String> = route.iter().map(|s| (*s).to_owned()).collect();
+            let help = render_help("nkp", &owned, HELP_WIDTH);
+            for forbidden in [
+                "--generate",
+                "--value",
+                "--chars",
+                "--size",
+                "--upper",
+                "--lower",
+                "--digits",
+                "--symbols",
+                "--username",
+                "--url",
+                "--notes",
+                "--bin",
+                "-b,",
+                "--age-decrypt",
+                "--age-identity",
+            ] {
+                assert!(
+                    !help.contains(forbidden),
+                    "{route:?} advertised {forbidden}"
+                );
+            }
+        }
+
+        for route in [vec!["exec"], vec!["x"]] {
+            let owned: Vec<String> = route.iter().map(|s| (*s).to_owned()).collect();
+            let help = render_help("nkp", &owned, HELP_WIDTH);
+            let opts_section = extract_section_lines(&help, "OPTIONS").join("\n");
+            assert_eq!(
+                opts_section.matches("--password-env").count(),
+                1,
+                "{route:?} repeated --password-env:\n{help}"
+            );
+        }
+
+        // Verify non-vault routes omit -V, --vault, and context show keeps it.
+        for non_vault in [
+            vec!["trust"],
+            vec!["untrust"],
+            vec!["use"],
+            vec!["tui"],
+            vec!["version"],
+            vec!["completion"],
+            vec!["shell"],
+            vec!["shell", "init"],
+            vec!["shell", "completions"],
+            vec!["shell", "load"],
+            vec!["shell", "unload"],
+            vec!["shell", "status"],
+            vec!["context"],
+            vec!["context", "ls"],
+            vec!["context", "use"],
+            vec!["context", "set"],
+            vec!["context", "rm"],
+            vec!["alias"],
+            vec!["alias", "set"],
+            vec!["config"],
+            vec!["config", "ls"],
+        ] {
+            let owned: Vec<String> = non_vault.iter().map(|s| (*s).to_owned()).collect();
+            let help = render_help("nkp", &owned, HELP_WIDTH);
+            assert!(
+                !help.contains("--vault"),
+                "non-vault route {non_vault:?} advertised --vault:\n{help}"
+            );
+        }
+        assert!(
+            render_help("nkp", &["context".into(), "show".into()], HELP_WIDTH)
+                .contains("-V, --vault PATH")
+        );
+
+        // Verify every advertised flag on operation() routes is accepted by the parser.
+        let operation_routes: &[(&str, &[&str])] = &[
+            ("ls", &["ls"]),
+            ("search", &["search"]),
+            ("show", &["show"]),
+            ("get", &["get"]),
+            ("get-many", &["get", "many"]),
+            ("set", &["set"]),
+            ("rm", &["rm"]),
+            ("ensure", &["ensure"]),
+            ("otp", &["otp"]),
+            ("import", &["import"]),
+            ("export", &["export"]),
+            ("sync", &["sync"]),
+            ("attachment-ls", &["files", "ls"]),
+            ("attachment-add", &["files", "add"]),
+            ("attachment-get", &["files", "get"]),
+            ("attachment-rm", &["files", "rm"]),
+            ("field-ls", &["field", "ls"]),
+            ("field-get", &["field", "get"]),
+            ("field-set", &["field", "set"]),
+            ("field-rm", &["field", "rm"]),
+            ("group-ls", &["group", "ls"]),
+            ("group-add", &["group", "add"]),
+            ("group-rm", &["group", "rm"]),
+        ];
+        for (action, route) in operation_routes {
+            let owned: Vec<String> = route.iter().map(|s| (*s).to_owned()).collect();
+            let node = command_path(ROOT_COMMANDS, &owned).unwrap();
+            for opt in node.options {
+                for flag in advertised_flags(opt.label) {
+                    let mut raw_args: Vec<String> = Vec::new();
+                    match flag {
+                        "-h" | "--help" => continue,
+                        "-k" | "--key" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("Demo/Entry".to_owned());
+                        }
+                        "-F" | "--field" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push(if *action == "set" {
+                                "Custom=val".to_owned()
+                            } else {
+                                "Custom".to_owned()
+                            });
+                        }
+                        "-f" | "--file" | "--value-file" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("input.txt".to_owned());
+                        }
+                        "-b" | "--bin" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("note=note.txt".to_owned());
+                        }
+                        "-n" | "--name" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("OUT_VAR".to_owned());
+                            if matches!(*action, "get" | "field-get" | "otp") {
+                                raw_args.push("--format".to_owned());
+                                raw_args.push("dotenv".to_owned());
+                            }
+                        }
+                        "-o" | "--output" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("out.txt".to_owned());
+                        }
+                        "-r" | "--age-recipient" => {
+                            raw_args.push("--age-encrypt".to_owned());
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("age1example".to_owned());
+                        }
+                        "-i" | "--age-identity" => {
+                            raw_args.push("--age-decrypt".to_owned());
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("id.txt".to_owned());
+                            raw_args.push("--stdin".to_owned());
+                        }
+                        "-c" | "--chars" | "--size" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("20".to_owned());
+                        }
+                        "--format" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push(if matches!(*action, "import" | "export") {
+                                "keepass-xml".to_owned()
+                            } else {
+                                "json".to_owned()
+                            });
+                        }
+                        "--strategy" => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("target".to_owned());
+                        }
+                        _ if takes_option_value(flag) => {
+                            raw_args.push(flag.to_owned());
+                            raw_args.push("SAMPLE".to_owned());
+                        }
+                        _ => raw_args.push(flag.to_owned()),
+                    }
+                    // Supply required companion flags so allowlist check tests the target flag itself.
+                    if !raw_args
+                        .iter()
+                        .any(|a| matches!(a.as_str(), "-k" | "--key"))
+                        && !matches!(
+                            *action,
+                            "ls" | "search"
+                                | "get-many"
+                                | "import"
+                                | "export"
+                                | "sync"
+                                | "group-ls"
+                        )
+                    {
+                        raw_args.push("--key".to_owned());
+                        raw_args.push("Demo/Entry".to_owned());
+                    }
+                    if *action == "search" {
+                        raw_args.push("Demo".to_owned());
+                    }
+                    if *action == "get-many" {
+                        raw_args.push("Demo/One".to_owned());
+                    }
+                    if matches!(*action, "field-get" | "field-set" | "field-rm")
+                        && !matches!(flag, "-F" | "--field")
+                    {
+                        raw_args.push("--field".to_owned());
+                        raw_args.push("Custom".to_owned());
+                    }
+                    if matches!(
+                        *action,
+                        "attachment-add" | "attachment-get" | "attachment-rm"
+                    ) && !matches!(flag, "-n" | "--name" | "-F" | "--field")
+                    {
+                        raw_args.push("--name".to_owned());
+                        raw_args.push("note.txt".to_owned());
+                    }
+                    if matches!(*action, "attachment-get" | "export")
+                        && !matches!(flag, "-o" | "--output")
+                    {
+                        raw_args.push("--output".to_owned());
+                        raw_args.push("out.txt".to_owned());
+                    }
+                    if *action == "export" && flag == "--allow-plaintext" {
+                        raw_args.push("--format".to_owned());
+                        raw_args.push("keepass-xml".to_owned());
+                    }
+                    if *action == "export"
+                        && flag == "--format"
+                        && !raw_args.iter().any(|a| a == "--allow-plaintext")
+                    {
+                        raw_args.push("--allow-plaintext".to_owned());
+                    }
+                    if matches!(*action, "attachment-add" | "field-set" | "import" | "sync")
+                        && !matches!(flag, "-f" | "--file" | "--stdin")
+                    {
+                        raw_args.push("--stdin".to_owned());
+                    }
+                    if matches!(*action, "rm" | "field-rm" | "attachment-rm" | "group-rm")
+                        && !matches!(flag, "-y" | "--yes" | "--dry-run")
+                    {
+                        raw_args.push("--yes".to_owned());
+                    }
+                    if *action == "set"
+                        && matches!(
+                            flag,
+                            "-c" | "--chars"
+                                | "--size"
+                                | "-U"
+                                | "--upper"
+                                | "-L"
+                                | "--lower"
+                                | "-D"
+                                | "--digits"
+                                | "-S"
+                                | "--symbols"
+                        )
+                    {
+                        raw_args.push("--generate".to_owned());
+                    }
+                    if *action == "set" && flag == "--age-decrypt" {
+                        raw_args.push("--stdin".to_owned());
+                    }
+                    if matches!(*action, "get" | "get-many") && matches!(flag, "-o" | "--output") {
+                        raw_args.push("--age-encrypt".to_owned());
+                        raw_args.push("--age-recipient".to_owned());
+                        raw_args.push("age1example".to_owned());
+                    }
+                    if matches!(*action, "get" | "get-many")
+                        && flag == "--age-encrypt"
+                        && !raw_args
+                            .iter()
+                            .any(|a| matches!(a.as_str(), "-r" | "--age-recipient"))
+                    {
+                        raw_args.push("--age-recipient".to_owned());
+                        raw_args.push("age1example".to_owned());
+                    }
+                    if flag == "--is-output" && !raw_args.iter().any(|a| a == "--format") {
+                        raw_args.push("--format".to_owned());
+                        raw_args.push("azure-devops".to_owned());
+                    }
+                    if flag == "--is-output"
+                        && *action != "get-many"
+                        && !raw_args
+                            .iter()
+                            .any(|a| matches!(a.as_str(), "-n" | "--name"))
+                    {
+                        raw_args.push("--name".to_owned());
+                        raw_args.push("OUT_VAR".to_owned());
+                    }
+                    let mut full_argv = owned.clone();
+                    full_argv.extend(raw_args);
+                    let normalized = normalize_cli_aliases(&full_argv);
+                    let parsed =
+                        options(&normalized[owned.len()..], Positional::for_action(action))
+                            .unwrap_or_else(|e| {
+                                panic!("flag {flag} on {action} failed options(): {e:?}")
+                            });
+                    let validated = if matches!(*action, "import" | "export" | "sync") {
+                        validate_automation_options(action, &parsed)
+                    } else {
+                        validate_regular_options(action, &parsed)
+                    };
+                    assert!(
+                        validated.is_ok(),
+                        "advertised flag {flag} on {action} was rejected: {validated:?}"
+                    );
+                }
+            }
+        }
+
+        // Verify unknown subcommands on parent-only groups do not return parent help.
+        for bogus in [
+            vec!["context", "bogus", "--help"],
+            vec!["shell", "bogus", "--help"],
+            vec!["files", "bogus", "--help"],
+            vec!["field", "bogus", "--help"],
+            vec!["group", "bogus", "--help"],
+            vec!["alias", "bogus", "--help"],
+            vec!["config", "bogus", "--help"],
+            vec!["secrets", "bogus", "--help"],
+            vec!["automation", "bogus", "--help"],
+        ] {
+            let owned: Vec<String> = bogus.iter().map(|s| (*s).to_owned()).collect();
+            assert_eq!(
+                help_request(&owned),
+                None,
+                "{bogus:?} disguised unknown subcommand as parent help"
+            );
+        }
     }
 }

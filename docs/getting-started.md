@@ -23,8 +23,7 @@ Now select this vault explicitly and create the entry. `ensure` creates
 missing parent groups and the entry, while leaving an existing entry alone:
 
 ```sh
-nkp --vault "$HOME/nkeepass-demo/demo.kdbx" \
-  secrets ensure --key 'Demo/Example'
+nkp -V "$HOME/nkeepass-demo/demo.kdbx" ensure Demo/Example
 ```
 
 The command creates `Demo/Example` if it does not exist. It does not replace
@@ -35,9 +34,8 @@ for the hidden master-password prompt:
 
 ```sh
 printf '%s' 'demo-user' > "$HOME/nkeepass-demo/username.txt"
-nkp --vault "$HOME/nkeepass-demo/demo.kdbx" \
-  secrets set --key 'Demo/Example' --field UserName \
-  --file "$HOME/nkeepass-demo/username.txt"
+nkp -V "$HOME/nkeepass-demo/demo.kdbx" \
+  set Demo/Example -F UserName -f "$HOME/nkeepass-demo/username.txt"
 ```
 
 The command prompts for the master password and stores the field in the vault.
@@ -48,8 +46,7 @@ value in that order instead of prompting. Legacy `NKEEPASS_PASSWORD` is ignored.
 Read it back:
 
 ```sh
-nkp --vault "$HOME/nkeepass-demo/demo.kdbx" \
-  secrets get --key 'Demo/Example' --field UserName
+nkp -V "$HOME/nkeepass-demo/demo.kdbx" get Demo/Example -F UserName
 ```
 
 Enter the same master password. The command prints `demo-user` to stdout.
@@ -58,11 +55,12 @@ Treat real output as sensitive: terminals, logs, and pipes can retain it.
 List redacted entry metadata without revealing the field:
 
 ```sh
-nkp --vault "$HOME/nkeepass-demo/demo.kdbx" secrets ls
+nkp -V "$HOME/nkeepass-demo/demo.kdbx" ls
 ```
 
 The output is JSON Lines with entry metadata. `get` is an explicit disclosure;
-`show` and `ls` provide metadata instead.
+`show` and `ls` provide metadata instead. For day-to-day work after registering a
+vault alias with `nkp context set demo ...`, run `nkp use demo` to omit `-V`.
 
 To remove the demo vault, first make sure its path is correct. The CLI does not
 have a vault-delete command. Remove the file and its containing demo directory

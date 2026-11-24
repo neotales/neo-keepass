@@ -15,9 +15,11 @@ invocation, options, output, and failures, open the linked reference page.
 | `config ls` | `config list` | [System commands](reference/system.md#config) |
 | `config get` | `config show` | [System commands](reference/system.md#config) |
 | `config rm` | `config remove` | [System commands](reference/system.md#config) |
-| `context ls` | `context list` | [Vault, context, and alias commands](reference/vault.md#context) |
-| `context rm` | `context remove` | [Vault, context, and alias commands](reference/vault.md#context) |
+| `context ls` | `context list` | [Vault, context, and alias commands](reference/vault.md#context-and-use) |
+| `context rm` | `context remove` | [Vault, context, and alias commands](reference/vault.md#context-and-use) |
+| `context use` | Root `use` | [Vault, context, and alias commands](reference/vault.md#context-and-use) |
 | `exec` | `x` | [System commands](reference/system.md#exec) |
+| `shell completions` | `shell completion`, root `completion` | [Shell integration](how-to/shell-integration.md) |
 | `field` | `custom-field` | [Attachments, groups, and custom fields](reference/entries.md#custom-fields) |
 | `field ls` | `field list` | [Custom fields](reference/entries.md#custom-fields) |
 | `field get` | `field reveal` | [Custom fields](reference/entries.md#custom-fields) |
@@ -41,17 +43,26 @@ invocation, options, output, and failures, open the linked reference page.
 | `-k PATH` | `--key PATH` | [Secrets commands](reference/secrets.md#read-selected-values) |
 | `-F FIELD` | `--field FIELD` | [Secrets commands](reference/secrets.md#change-entries-and-fields) |
 | `-f PATH` | `--file PATH` | [Secrets commands](reference/secrets.md#change-entries-and-fields) |
+| `-n NAME` | `--name NAME` | [Secrets env and files add](reference/secrets.md#read-selected-values) |
+| `-o PATH` | `--output PATH` | [Export, files get, get, and inject](reference/secrets.md#read-selected-values) |
+| `-y` | `--yes` | [Destructive removals](reference/secrets.md#secrets-rm) |
+| `-B NAME=ENTRY` | `--bind NAME=ENTRY` | [System commands](reference/system.md#exec) |
 | `-b NAME=FILE_PATH` | `--bin NAME=FILE_PATH` | [Secrets set](reference/secrets.md#change-entries-and-fields) |
 | `-r KEY` | `--age-recipient KEY` | [Secrets commands](reference/secrets.md#read-selected-values) |
 | `-i PATH` | `--age-identity PATH` | [Secrets commands](reference/secrets.md#change-entries-and-fields) |
 | Shell completion name `powershell` | `pwsh` | [System commands](reference/system.md#completion) |
 
-Root `get` (including `get many`), `search`, `show`, `set`, `ensure`, `otp`,
-`import`, `export`, `sync`, and `env` are shortcuts for the same `secrets`
-subcommand. The aliases `field-get`, `field-set`, and `attachment-add` are
-internal dispatch action names, not public command routes.
-`__complete` is a private protocol used by generated shell completion, not a
-public command.
+Root `ls`/`list`, `get` (including `get many`), `search`, `show`, `set`,
+`rm`/`remove`, `ensure`, `otp`, `import`, `export`, `sync`, and `env` are
+shortcuts for the same `secrets` subcommand. Root `use` is a shortcut for
+`context use`. Root `inject`, `trust`, `untrust`, and `shell` (`init`,
+`completions`, `load`, `unload`, `status`) live in
+[System commands](reference/system.md) and
+[Shell integration](how-to/shell-integration.md). The aliases `field-get`,
+`field-set`, and `attachment-add` are internal dispatch action names, not public
+command routes.
+`__complete` and `__hook` are private protocols used by generated shell
+completion and directory hooks, not public commands.
 
 Entry selection accepts `--key PATH` or `-k PATH`; `get`, `set`, `rm` /
 `remove`, `show`, `ensure`, `otp`, `field`, and `files` routes also accept the
@@ -60,12 +71,14 @@ path positionally. Do not supply both forms. `PATH` may be an entry path or
 configured entry alias (group routes take group paths). For a selector
 beginning with `-`, place `--` after options immediately before it, such as
 `nkp show -- -DashEntry`.
-`--field` also accepts `-F`; `--file` accepts `-f`.
+`--field` also accepts `-F`; `--file` accepts `-f`; `--name` accepts `-n`;
+`--output` accepts `-o`; `--yes` accepts `-y`; `--bind` accepts `-B` (on
+`exec`/`x`).
 `set` additionally accepts repeatable `--field NAME=VALUE`. Its `--value-file`
 and `--value-stdin` sources alias `--file` and `--stdin`.
 Generator `--chars` / `-c` aliases `--size`; class flags are `--upper` / `-U`,
 `--lower` / `-L`, `--digits` / `-D`, and `--symbols` / `-S`. These apply to
 `ensure` and to `set --generate`.
-`--bin NAME=FILE_PATH` accepts `-b` and may be repeated. These short options
-are not rewritten after an `exec --` child separator. The global vault option
-is `-V PATH` or `--vault PATH`.
+`--bin NAME=FILE_PATH` accepts `-b` and may be repeated. Short options are not
+rewritten after an `exec --` child separator. The global vault option is
+`-V PATH` or `--vault PATH` (accepted on vault-opening commands).

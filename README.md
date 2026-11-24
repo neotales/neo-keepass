@@ -5,6 +5,22 @@ package lives under `crates/`; the root manifest contains workspace
 configuration. KDBX parsing is delegated to `neotales-keepass`, never
 reimplemented here.
 
+## Quick start
+
+```sh
+nkp use work                             # select active vault alias or path
+nkp ls                                   # list redacted entry metadata
+nkp show mail                            # inspect one entry's metadata
+nkp get mail                             # print Password (or -F UserName, --clipboard)
+nkp x -B TOKEN=mail -- env               # inject one binding into a child process
+nkp x --env-file .env -- env             # inject KEY=nkp://... bindings from .env
+nkp inject .env.in -o .env.resolved      # render nkp:// templates explicitly
+nkp trust                                # trust ./.nkp.toml for directory hooks
+nkp shell init bash                      # wire completion + optional cd hook
+```
+
+See [the documentation index](docs/README.md), [shell integration and `.nkp.toml`](docs/how-to/shell-integration.md), and the [alias index](docs/commands.md).
+
 ## Migrating from `nkeepass`
 
 The executable was renamed from `nkeepass` to `nkp`. A previously installed
@@ -33,9 +49,10 @@ behavior. KDBX parsing and writing are delegated to the vendored
 `neotales-x509` dependency are also vendored under `crates/`, with MIT license
 files.
 
-This checkout does **not** yet include a GPUI desktop application
-(`nkpui`). Passkeys, HIBP checks, icons, SSH-agent integration, and
-automatic recipient discovery remain planned scope. Basic age encryption and
+The experimental desktop application (`nkpui`) in `crates/nkpui/` is built with
+Rune (`rune` / `rune-kit`) rather than GPUI and lives alongside the `nkp` CLI/TUI
+crate. Passkeys, HIBP checks, icons, SSH-agent integration, and automatic
+recipient discovery remain planned scope. Basic age encryption and
 decryption are wired into `get` and `set`; consult command help below for
 supported local key forms and current limitations. TOTP support is present too.
 
@@ -91,18 +108,17 @@ adversary; it does not defend against administrators or the same user.
 The `get` command can encrypt a selected value to native age or SSH recipients:
 
 ```sh
-nkp secrets get --key service/account --age-encrypt \
-  -r age1... --output account.age
+nkp get service/account --age-encrypt -r age1... -o account.age
 ```
 
-Without `--output`, armored ciphertext is written to stdout. `-r`/`--age-recipient`
+Without `-o`/`--output`, armored ciphertext is written to stdout. `-r`/`--age-recipient`
 may be repeated; `-r @PATH` reads recipient keys from a bounded key file.
 `-r gh:username` looks up that account's public SSH keys; an HTTPS URL may also
 serve newline-delimited age or SSH public keys. These network forms make an
 explicit HTTPS request only when supplied. They require `curl`, cap responses
 at 64 KiB and the request at five seconds, reject redirects, and validate every
 returned key before encryption.
-`set --age-decrypt -i IDENTITY --value-file ciphertext.age --key service/account`
+`nkp set service/account --age-decrypt -i IDENTITY -f ciphertext.age`
 decrypts armored or binary age input before updating the field. Identity files
 may contain native age identities or unencrypted SSH private keys. Encrypted
 SSH identities are not supported yet.
@@ -142,6 +158,7 @@ limits and security behavior.
 ## Workspace layout
 
 - `crates/nkeepass/` — CLI/TUI application and integration tests.
+- `crates/nkpui/` — experimental Rune-based desktop application crate.
 - [`crates/terminal-password/`](crates/terminal-password/README.md) — bounded hidden terminal input and platform restoration tests.
 - `crates/neotales-keepass/` — KDBX library.
 - `crates/neotales-age/` — age file-encryption library vendored from plab.

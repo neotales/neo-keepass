@@ -1,8 +1,10 @@
 # Configuration, child processes, completion, and root commands
 
-Every route accepts `-h` or `--help`; `-V PATH` or `--vault PATH` may precede
-the command. Password flags are available only on credential routes. See
-[vault credentials](credentials.md) for the exact route matrix.
+Every route accepts `-h` or `--help`. `-V PATH` or `--vault PATH` may precede
+vault-opening commands (it is rejected on `tui`, `use`, `alias`, `config`,
+`completion`, `version`, `trust`, `untrust`, `shell`, and `context` subcommands
+other than `context show`). Password flags are available only on credential
+routes. See [vault credentials](credentials.md) for the exact route matrix.
 
 ## Human output color
 
@@ -50,9 +52,7 @@ nkp tui PATH
 
 Opens the interactive terminal browser for the supplied vault path. This
 command requires exactly one path argument. It does not use the active-vault
-selection; pass the path to the vault you want to open. The global `--vault`
-flag is accepted before `tui` but does not replace the required positional
-path.
+selection and does not accept `-V` / `--vault`; pass the vault path directly.
 
 The UI pauses key handling below 40 columns by 12 rows. Revealed values own
 focus: Esc or Enter hides them; unrelated keys do not open hidden dialogs.
@@ -171,17 +171,23 @@ unset. `aliases` is managed with `alias` commands. `remove` aliases `rm`.
 ## `exec`
 
 ```text
-nkp exec [--key PATH [--field FIELD] --env NAME]...
+nkp exec (-B NAME=ENTRY | -k PATH [-F FIELD] --env NAME | --env-file FILE)...
   [CREDENTIAL OPTIONS] -- COMMAND [ARG ...]
 ```
 
-Each binding selects an entry and maps one field to a child environment
-variable. At least one `--key` binding is required, and each binding needs
-exactly one matching `--env NAME`. Repeat the binding sequence for more
-values. Omit `--field` to select the `Password` field. Set `--field otp` to
-pass a TOTP code instead; HOTP is refused. The first `--` after `exec` / `x`
-marks the child command and its arguments, after root option values have been
-consumed.
+Each binding maps a vault value into a child environment variable using:
+- `-B NAME=ENTRY` / `--bind NAME=ENTRY` (uses `Password`, or the entry alias's
+  bound field when `ENTRY` is a field-bound alias),
+- `-k PATH [-F FIELD] --env NAME` (`--field` defaults to `Password`, or `otp`
+  for a TOTP code; HOTP is refused), or
+- `--env-file FILE` (loads `KEY=VALUE` and `nkp://` / `{{nkp://...}}` template
+  bindings from a bounded `.env` file).
+
+Repeat bindings as needed; at least one binding or `--env-file` is required. The
+first `--` after `exec` / `x` marks the child command and its arguments, after
+root option values have been consumed. Root `--password-env` and
+`--password-stdin` may appear before or after `exec`/`x`; `--password-file`,
+`--key-file`, and `--password` go after `exec`/`x` and before `-- COMMAND`.
 
 See [vault credentials](credentials.md) for accepted password sources and
 their precedence. The child receives a fixed allowlist of environment
@@ -207,7 +213,7 @@ for the vault password without placing it in the command. Run it in Bash:
   printf '\n'
   export DEMO_MASTER
   unset DEMO_USERNAME
-  nkp --vault ./tutorial.kdbx exec --key 'Demo/Example' --field UserName --env DEMO_USERNAME \
+  nkp -V "$HOME/nkeepass-demo/demo.kdbx" x -k 'Demo/Example' -F UserName --env DEMO_USERNAME \
     --password-env DEMO_MASTER -- \
     sh -c 'printf "%s\n" "$DEMO_USERNAME"'
 )
@@ -275,13 +281,22 @@ equivalent, along with the shared flags and credential options listed in
 [vault credentials](credentials.md). The operation rejects flags that do not
 apply to it.
 
+The `use`, `inject`, `trust`, `untrust`, and `shell` commands (`init`,
+`completions`/`completion`, `load`, `unload`, `status`) manage active vaults,
+`.nkp.toml` project trust, shell hooks, and `nkp://` template rendering. See
+[shell integration and secret injection](../how-to/shell-integration.md) and
+[`context`](vault.md#context-and-use).
+
 ## Global flags
 
 `-h` and `--help` print help for the selected command. `-V PATH` and
-`--vault PATH` select a vault before a command. Root `--version` prints
-version information. The only other short options are `-r` for
-`--age-recipient` and `-i` for `--age-identity`. Other options use their
-long spelling.
+`--vault PATH` select a vault before vault-opening commands. Root `--version`
+prints version information. Normalized short options across CLI routes are `-h`,
+`-V`, `-k` (`--key`), `-f` (`--file`), `-F` (`--field`), `-n` (`--name`), `-o`
+(`--output`), `-y` (`--yes`), `-B` (`--bind` on `exec`/`x`), `-b` (`--bin`),
+`-c` (`--chars` / `--size`), `-U` (`--upper`), `-L` (`--lower`), `-D`
+(`--digits`), `-S` (`--symbols`), `-r` (`--age-recipient`), and `-i`
+(`--age-identity`).
 
 Password options are available only on vault-opening or vault-creation
 commands. See [vault credentials](credentials.md) for route coverage,
