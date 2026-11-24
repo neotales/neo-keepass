@@ -3,13 +3,18 @@
 #[allow(dead_code, reason = "shared with the CLI's mutation and save paths")]
 pub(crate) mod automation;
 pub mod env_file;
+pub(crate) mod fs_safe;
 pub mod glob;
+pub mod hook;
 #[allow(dead_code, reason = "shared interchange model boundary")]
 pub(crate) mod interchange;
+pub mod manifest;
 pub mod password_generator;
 pub mod private_file;
 pub mod service;
+pub(crate) mod sha256;
 pub mod template;
+pub mod trust;
 
 pub use service::{
     AttachmentDescriptor, AttachmentMetadata, AttachmentRef, AutomationError,
