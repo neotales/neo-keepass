@@ -81,12 +81,12 @@ supported alternatives. It does not reveal field values.
 ### `secrets env`
 
 ```text
-nkp secrets env (-k PATH [-F FIELD] (-n NAME | --env NAME))...
+nkp secrets env (-k PATH [-F FIELD] (-n NAME | --name NAME))...
   [--format FORMAT] [--is-output]
 ```
 
 Each binding starts with `-k` / `--key PATH`, may select a field with `-F` /
-`--field`, then must end with `-n` / `--name NAME` (or compatibility `--env NAME`).
+`--field`, then must end with `-n` / `--name NAME`.
 Repeat the sequence for additional values. The field defaults to an entry alias's
 bound field when omitted, and is otherwise required (`Password` is not assumed
 without an explicit `-F` or field-bound alias). Use `-F otp` to emit a TOTP code;

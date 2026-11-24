@@ -995,8 +995,8 @@ _nkp_complete_candidates() {
                 _nk_kind='aliases'
             fi
             ;;
-        tui)
-            if [ "$_nk_command" = tui ]; then
+        tui|init)
+            if [ "$_nk_command" = tui ] || [ "$_nk_command" = init ]; then
                 _nk_kind='vault-files'
             fi
             ;;
@@ -1015,7 +1015,7 @@ _nkp_complete_candidates() {
     esac
     if [ -z "$_nk_kind" ] && [ "$_nk_command" = use ] && [ -z "$_nk_action" ]; then
         _nk_kind='vaults'
-    elif [ -z "$_nk_kind" ] && [ "$_nk_command" = tui ] && [ -z "$_nk_action" ]; then
+    elif [ -z "$_nk_kind" ] && { [ "$_nk_command" = tui ] || [ "$_nk_command" = init ]; } && [ -z "$_nk_action" ]; then
         _nk_kind='vault-files'
     fi
     if [ -n "$_nk_kind" ]; then

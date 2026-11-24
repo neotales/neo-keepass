@@ -23,35 +23,37 @@ supply both.
 ### `files add`
 
 ```text
-nkp files add (ENTRY | -k ENTRY | --key ENTRY) (NAME | -F NAME | --field NAME) (-f PATH | --file PATH | --stdin)
+nkp files add (ENTRY | -k ENTRY | --key ENTRY) (NAME | -n NAME | --name NAME | -F NAME | --field NAME) (-f PATH | --file PATH | --stdin)
 ```
 
 Reads bytes from exactly one source and adds them as an attachment named by
-`-F` / `--field` (or the second positional `NAME` argument). The operation
-changes the vault. `import` aliases `add`. The entry selector may be positional
-or supplied with `-k` / `--key`; do not supply both, and do not supply both
-positional `NAME` and `-F` / `--field`.
+`-n` / `--name`, `-F` / `--field`, or the second positional `NAME` argument. The
+operation changes the vault. `import` aliases `add`. The entry selector may be
+positional or supplied with `-k` / `--key`; do not supply both, and do not
+supply both positional `NAME` and a name/field flag.
 
 ### `files get`
 
 ```text
-nkp files get (ENTRY | -k ENTRY | --key ENTRY) (NAME | -F NAME | --field NAME) (-o PATH | --output PATH)
+nkp files get (ENTRY | -k ENTRY | --key ENTRY) (NAME | -n NAME | --name NAME | -F NAME | --field NAME) (-o PATH | --output PATH)
 ```
 
 Writes the attachment bytes to a private, no-clobber file. An entry selector,
-attachment name, and `-o` / `--output` are required. The file contains
-plaintext attachment data. `export` aliases `get`. The entry selector may be
-positional or supplied with `-k` / `--key`; do not supply both.
+attachment name (`NAME`, `-n`/`--name`, or `-F`/`--field`), and `-o` /
+`--output` are required. The file contains plaintext attachment data. `export`
+aliases `get`. The entry selector may be positional or supplied with `-k` /
+`--key`; do not supply both.
 
 ### `files rm`
 
 ```text
-nkp files rm (ENTRY | -k ENTRY | --key ENTRY) (NAME | -F NAME | --field NAME) (-y | --yes)
+nkp files rm (ENTRY | -k ENTRY | --key ENTRY) (NAME | -n NAME | --name NAME | -F NAME | --field NAME) (-y | --yes)
 ```
 
-Removes the selected attachment. `-y` / `--yes` is required and the command does not
-prompt. `remove` aliases `rm`. The entry selector may be positional or
-supplied with `-k` / `--key`; do not supply both.
+Removes the selected attachment (`NAME`, `-n`/`--name`, or `-F`/`--field`). `-y`
+/ `--yes` is required and the command does not prompt. `remove` aliases `rm`.
+The entry selector may be positional or supplied with `-k` / `--key`; do not
+supply both.
 
 ## Groups
 

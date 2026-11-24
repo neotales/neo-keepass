@@ -158,6 +158,7 @@ limits and security behavior.
 ## Workspace layout
 
 - `crates/nkeepass/` — CLI/TUI application and integration tests.
+- `crates/nkpui/` — experimental Rune-based desktop application crate.
 - [`crates/terminal-password/`](crates/terminal-password/README.md) — bounded hidden terminal input and platform restoration tests.
 - `crates/neotales-keepass/` — KDBX library.
 - `crates/neotales-age/` — age file-encryption library vendored from plab.

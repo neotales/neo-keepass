@@ -285,7 +285,7 @@ The `use`, `inject`, `trust`, `untrust`, and `shell` commands (`init`,
 `completions`/`completion`, `load`, `unload`, `status`) manage active vaults,
 `.nkp.toml` project trust, shell hooks, and `nkp://` template rendering. See
 [shell integration and secret injection](../how-to/shell-integration.md) and
-[`context`](vault.md#context).
+[`context`](vault.md#context-and-use).
 
 ## Global flags
 

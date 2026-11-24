@@ -108,17 +108,24 @@ nkp shell status
 nkp shell status --json
 ```
 
-Load or unload the trusted directory's vault/environment state manually in an interactive shell (supplying credentials via env var or stdin, never `--password VALUE`):
+Load or unload the trusted directory's vault/environment state manually in an interactive shell where `nkp shell init` is enabled (supplying credentials via env var or stdin, never `--password VALUE`):
 
 ```sh
 export NEO_KEEPASS_PASSWORD=...
-eval "$(nkp shell load)"
+nkp shell load
 ```
 
 To clear environment variables exported by `nkp shell load`:
 
 ```sh
-eval "$(nkp shell unload)"
+nkp shell unload
+```
+
+Call `nkp shell load` and `nkp shell unload` directly when `nkp shell init` is active (wrapping them in `eval "$(...)"` runs the shell wrapper inside a subshell where exported variables are discarded). Without `nkp shell init` loaded, use the explicit binary instead:
+
+```sh
+eval "$(command nkp shell load --shell bash)"
+eval "$(command nkp shell unload --shell bash)"
 ```
 
 ## Render templates or run one-off commands (`nkp inject` & `nkp x`)
@@ -135,7 +142,7 @@ nkp inject < .env.template > .env.resolved
 
 # Run a single command with bindings and/or an env file
 nkp x -B TOKEN=services/api -- ./deploy.sh
-nkp x --env-file .env -B OVERRIDE=services/staging#token -- ./deploy.sh
+nkp x --env-file .env -B OVERRIDE=services/staging -- ./deploy.sh
 ```
 
-`nkp inject` requires `nkp://` / `{{nkp://...}}` placeholders for secret substitution; `nkp x --env-file` reads the same `nkp://` and `{{nkp://...}}` syntax per invocation.
+`-B`/`--bind NAME=ENTRY` binds `Password` (or a field-bound entry alias) literally and does not parse `#field`; pass `-k services/staging -F token --env OVERRIDE` when selecting another field. `nkp inject` requires `nkp://` / `{{nkp://...}}` placeholders for secret substitution; `nkp x --env-file` reads the same `nkp://` and `{{nkp://...}}` syntax per invocation.

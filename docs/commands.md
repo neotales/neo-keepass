@@ -15,9 +15,9 @@ invocation, options, output, and failures, open the linked reference page.
 | `config ls` | `config list` | [System commands](reference/system.md#config) |
 | `config get` | `config show` | [System commands](reference/system.md#config) |
 | `config rm` | `config remove` | [System commands](reference/system.md#config) |
-| `context ls` | `context list` | [Vault, context, and alias commands](reference/vault.md#context) |
-| `context rm` | `context remove` | [Vault, context, and alias commands](reference/vault.md#context) |
-| `context use` | Root `use` | [Vault, context, and alias commands](reference/vault.md#context) |
+| `context ls` | `context list` | [Vault, context, and alias commands](reference/vault.md#context-and-use) |
+| `context rm` | `context remove` | [Vault, context, and alias commands](reference/vault.md#context-and-use) |
+| `context use` | Root `use` | [Vault, context, and alias commands](reference/vault.md#context-and-use) |
 | `exec` | `x` | [System commands](reference/system.md#exec) |
 | `shell completions` | `shell completion`, root `completion` | [Shell integration](how-to/shell-integration.md) |
 | `field` | `custom-field` | [Attachments, groups, and custom fields](reference/entries.md#custom-fields) |
@@ -73,7 +73,7 @@ beginning with `-`, place `--` after options immediately before it, such as
 `nkp show -- -DashEntry`.
 `--field` also accepts `-F`; `--file` accepts `-f`; `--name` accepts `-n`;
 `--output` accepts `-o`; `--yes` accepts `-y`; `--bind` accepts `-B` (on
-`exec`/`x`). On `env`, `--name` also accepts legacy `--env`.
+`exec`/`x`).
 `set` additionally accepts repeatable `--field NAME=VALUE`. Its `--value-file`
 and `--value-stdin` sources alias `--file` and `--stdin`.
 Generator `--chars` / `-c` aliases `--size`; class flags are `--upper` / `-U`,
