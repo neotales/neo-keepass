@@ -97,6 +97,44 @@ jobs:
         timeout-minutes: 30
         run: cargo test -p neotales-age --test rsa_16384 -- --ignored
 
+  keepassxc-interop:
+    name: KeePassXC interop (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # Cold test compile plus keepassxc apt install and CLI interop runs.
+    # 30 is a conservative cap, not a measured multiple.
+    timeout-minutes: 30
+    steps:
+      # Untrusted pull-request code is compiled and run by this job; the
+      # checkout token must not persist into those steps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install KeePassXC CLI
+        # Ubuntu 24.04 (noble) ships keepassxc-cli in the monolithic keepassxc
+        # package; keepassxc-minimal does not exist until later releases.
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends keepassxc
+          command -v keepassxc-cli
+          keepassxc-cli --version
+      - name: Run neotales-keepass KeePassXC interop tests
+        # Spawns keepassxc-cli with stdin password prompts; bounded tighter than
+        # the job so a prompt wedge fails fast.
+        timeout-minutes: 15
+        shell: bash
+        run: cargo +1.98.1 test --locked -p neotales-keepass --test cli_interop -- --ignored
+      - name: Run nkeepass KeePassXC interop tests
+        # Spawns keepassxc-cli against the nkp CLI; bounded tighter than the job.
+        timeout-minutes: 15
+        shell: bash
+        run: cargo +1.98.1 test --locked -p nkeepass --test keepassxc_interop -- --ignored
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

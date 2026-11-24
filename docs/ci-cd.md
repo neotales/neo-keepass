@@ -32,10 +32,24 @@ Triggered on push to `main`/`dev`, pull requests, and manual dispatch.
 
 | Job | Runner | Runs |
 |-----|--------|------|
+| `completion-interpreters` | `ubuntu-24.04` | generated zsh (`5.9`) and PowerShell (`7.6.10`) syntax tests |
+| `rsa-slow-lane` | `ubuntu-24.04` | ignored 16,384-bit RSA SSH round-trip fixture test |
+| `keepassxc-interop` | `ubuntu-24.04` | installs `keepassxc` (`keepassxc-cli`) and runs ignored KeePassXC interop tests for `neotales-keepass` (`cli_interop`) and `nkeepass` (`keepassxc_interop`) |
 | `test` | `ubuntu-24.04`, `macos-15`, `windows-2025` | `cargo test --workspace` |
-| `lint` | `ubuntu-24.04` | `cargo fmt --check`, `cargo clippy --workspace --all-targets` |
+| `lint` | `ubuntu-24.04` | `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `scripts/check-workflows.sh` |
 | `packaging-tests` | `ubuntu-24.04` | builds the release binary, runs `packaging/test.sh` (real `dpkg-deb` builder path) |
 | `audit` | `ubuntu-24.04` | `cargo audit` against the pinned `Cargo.lock` |
+
+**KeePassXC interop lane (`keepassxc-interop`):** runs on `ubuntu-24.04`
+(30-minute job timeout, 15-minute bound on each test step). Ubuntu 24.04
+(Noble) ships `keepassxc-cli` inside the `keepassxc` package
+(`keepassxc-minimal` is only packaged in later Debian/Ubuntu releases), so the
+job installs `keepassxc` non-interactively with `--no-install-recommends`,
+verifies `keepassxc-cli` is on `PATH`, logs `keepassxc-cli --version`, and runs
+`cargo +1.98.1 test --locked -p neotales-keepass --test cli_interop -- --ignored`
+and `cargo +1.98.1 test --locked -p nkeepass --test keepassxc_interop -- --ignored`.
+Failure mode: if `keepassxc-cli` is missing or exits non-zero, the tests fail
+closed rather than skipping silently.
 
 **Platform gating:** most integration tests under `crates/nkeepass/tests/`
 exercise Unix permissions and terminal password prompts. `windows_private.rs`
