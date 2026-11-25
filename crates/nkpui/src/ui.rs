@@ -24,9 +24,14 @@ use crate::controller::{
     current_unix_seconds, ensure_kdbx_extension, format_byte_size, open_vault_blocking,
     read_inject_file_bounded, sanitize_attachment_prefill, save_vault_blocking,
 };
-use crate::icons::{SEARCH_ICON, STAR_FILLED_ICON, STAR_ICON, render_keepass_icon};
+use crate::icons::{
+    MAX_CUSTOM_ICON_DIMENSION, SEARCH_ICON, STAR_FILLED_ICON, STAR_ICON,
+    raster_dimensions_within_limit, render_keepass_icon,
+};
 
 const SECRET_CLIPBOARD_TTL: Duration = Duration::from_secs(30);
+const MAX_CUSTOM_ICON_CACHE_ENTRIES: usize = 256;
+const MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME: usize = 32;
 
 /// Explicit confirmation dialog kind for destructive browser actions.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,6 +178,8 @@ pub struct AppState {
     /// Session-scoped decoded custom KDBX icon images, cleared on `lock()`.
     pub custom_icons: HashMap<CustomIconId, Image>,
     failed_custom_icons: HashSet<CustomIconId>,
+    /// True while a native/scripted OS file picker is open so focus loss does not lock the vault.
+    pub file_dialog_active: bool,
     /// Whether the Attach Binary File dialog is open.
     pub attach_dialog_open: bool,
     /// Source file path input in the Attach Binary File dialog.
@@ -241,6 +248,7 @@ impl Default for AppState {
             images: None,
             custom_icons: HashMap::new(),
             failed_custom_icons: HashSet::new(),
+            file_dialog_active: false,
             attach_dialog_open: false,
             attach_path_edit: TextEdit::new(""),
             attach_name_edit: TextEdit::new(""),
@@ -359,13 +367,40 @@ impl AppState {
         self.apply_lock_cleanup(cleanup, tx);
     }
 
-    /// Handles window deactivation by requesting a focus-loss lock while preserving
-    /// any active 30s timed `SecretCopy` lease for Alt+Tab paste.
-    pub fn handle_focus_lost(&mut self, tx: &mut Tx) {
+    /// Masks all revealed secrets in controller state and UI text widgets.
+    pub fn mask_all_reveals(&mut self) {
+        self.controller.mask_all_reveals();
+        self.edit_password.set_revealed(false);
+        self.edit_otp_uri.set_revealed(false);
+        for edit in &mut self.edit_custom_values {
+            edit.set_revealed(false);
+        }
+        self.add_custom_form.revealed = false;
+        if self.add_custom_form.protected {
+            self.add_custom_form.value_edit.set_revealed(false);
+        }
+    }
+
+    /// Handles window deactivation by masking all revealed secrets and requesting a
+    /// Masks all revealed secrets immediately and returns lock cleanup unless
+    /// a native OS file dialog is currently open.
+    #[must_use]
+    pub fn focus_lost_lock_cleanup(&mut self) -> Option<LockCleanup> {
+        self.mask_all_reveals();
         self.master_input.replace_text("");
         self.confirm_master_edit.replace_text("");
-        let cleanup = self.controller.on_window_focus(false);
-        self.apply_lock_cleanup(cleanup, tx);
+        if self.file_dialog_active {
+            return None;
+        }
+        Some(self.controller.on_window_focus(false))
+    }
+
+    /// Handles OS window focus loss: always masks revealed secrets and runs
+    /// focus-loss lock (skipped only while a native file dialog is active).
+    pub fn handle_focus_lost(&mut self, tx: &mut Tx) {
+        if let Some(cleanup) = self.focus_lost_lock_cleanup() {
+            self.apply_lock_cleanup(cleanup, tx);
+        }
     }
 
     /// Populates all Entry Editor [`TextEdit`] widgets from `controller.editor`.
@@ -443,6 +478,7 @@ impl AppState {
         self.icon_search_edit.replace_text("");
         self.custom_icons.clear();
         self.failed_custom_icons.clear();
+        self.file_dialog_active = false;
         self.attach_dialog_open = false;
         self.attach_path_edit.replace_text("");
         self.attach_name_edit.replace_text("");
@@ -458,27 +494,56 @@ impl AppState {
         id.and_then(|icon_id| self.custom_icons.get(&icon_id))
     }
 
-    fn cache_custom_icon(&mut self, id: CustomIconId) -> bool {
+    fn record_failed_custom_icon(&mut self, id: CustomIconId) {
+        if self.failed_custom_icons.len() >= MAX_CUSTOM_ICON_CACHE_ENTRIES
+            && let Some(&evict) = self.failed_custom_icons.iter().next()
+        {
+            self.failed_custom_icons.remove(&evict);
+        }
+        self.failed_custom_icons.insert(id);
+    }
+
+    fn cache_custom_icon_bytes(&mut self, id: CustomIconId, bytes: Vec<u8>) -> bool {
         if self.custom_icons.contains_key(&id) || self.failed_custom_icons.contains(&id) {
             return false;
         }
         let Some(cache) = &self.images else {
             return false;
         };
-        match self.controller.custom_icon_bytes(id) {
-            Ok(Some(bytes)) if bytes.len() <= MAX_CUSTOM_ICON_BYTES => {
-                let image = cache.load_scaled(bytes, 64.0, 1.0);
-                self.custom_icons.insert(id, image);
-                true
+        if bytes.len() <= MAX_CUSTOM_ICON_BYTES
+            && raster_dimensions_within_limit(&bytes, MAX_CUSTOM_ICON_DIMENSION)
+        {
+            if self.custom_icons.len() >= MAX_CUSTOM_ICON_CACHE_ENTRIES
+                && let Some(&evict) = self.custom_icons.keys().next()
+            {
+                self.custom_icons.remove(&evict);
             }
-            _ => {
-                self.failed_custom_icons.insert(id);
-                false
-            }
+            let image = cache.load_scaled(bytes, 64.0, 1.0);
+            self.custom_icons.insert(id, image);
+            true
+        } else {
+            self.record_failed_custom_icon(id);
+            false
         }
     }
 
-    /// Ensures any visible custom KDBX icon UUIDs are queued for decoding in `images`.
+    fn cache_custom_icon(&mut self, id: CustomIconId) -> bool {
+        if self.custom_icons.contains_key(&id)
+            || self.failed_custom_icons.contains(&id)
+            || self.images.is_none()
+        {
+            return false;
+        }
+        if let Ok(Some(bytes)) = self.controller.custom_icon_bytes(id) {
+            self.cache_custom_icon_bytes(id, bytes)
+        } else {
+            self.record_failed_custom_icon(id);
+            false
+        }
+    }
+
+    /// Ensures up to [`MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME`] uncached visible custom
+    /// KDBX icon UUIDs are validated and queued for decoding in `images`.
     pub fn sync_custom_icons(&mut self) -> bool {
         if !self.controller.is_unlocked() || self.controller.saving || self.images.is_none() {
             return false;
@@ -510,7 +575,15 @@ impl AppState {
             ids.push(id);
         }
         let mut changed = false;
+        let mut lookups = 0usize;
         for id in ids {
+            if self.custom_icons.contains_key(&id) || self.failed_custom_icons.contains(&id) {
+                continue;
+            }
+            if lookups >= MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME {
+                break;
+            }
+            lookups += 1;
             changed |= self.cache_custom_icon(id);
         }
         changed
@@ -975,21 +1048,28 @@ fn attach_source_row(k: &Kit, state: &AppState) -> El {
                 directory: starting_directory_from_path(&s.attach_path_edit.text),
                 ..FileDialogOptions::default()
             };
-            tx.open_file(opts, |s: &mut AppState, res, _| match res {
-                Ok(Some(path)) => {
-                    let path_text = path.to_string_lossy().into_owned();
-                    s.attach_path_edit.replace_text(path_text);
-                    if s.attach_name_edit.text.trim().is_empty()
-                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
-                    {
-                        s.attach_name_edit
-                            .replace_text(sanitize_attachment_prefill(name));
-                    }
-                    s.attach_dialog_error = None;
+            s.file_dialog_active = true;
+            tx.open_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || !s.attach_dialog_open {
+                    return;
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    s.attach_dialog_error = Some(format!("File dialog unavailable: {err}"));
+                match res {
+                    Ok(Some(path)) => {
+                        let path_text = path.to_string_lossy().into_owned();
+                        s.attach_path_edit.replace_text(path_text);
+                        if s.attach_name_edit.text.trim().is_empty()
+                            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                        {
+                            s.attach_name_edit
+                                .replace_text(sanitize_attachment_prefill(name));
+                        }
+                        s.attach_dialog_error = None;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        s.attach_dialog_error = Some(format!("File dialog unavailable: {err}"));
+                    }
                 }
             });
         })
@@ -1115,18 +1195,25 @@ fn extract_dest_row(k: &Kit, state: &AppState, default_name: String) -> El {
                 directory: starting_directory_from_path(&s.extract_path_edit.text),
                 ..FileDialogOptions::default()
             };
-            tx.save_file(opts, |s: &mut AppState, res, _| match res {
-                Ok(Some(path)) => {
-                    s.extract_path_edit
-                        .replace_text(path.to_string_lossy().into_owned());
-                    if let Some(dlg) = s.extract_dialog.as_mut() {
-                        dlg.error = None;
-                    }
+            s.file_dialog_active = true;
+            tx.save_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || s.extract_dialog.is_none() {
+                    return;
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    if let Some(dlg) = s.extract_dialog.as_mut() {
-                        dlg.error = Some(format!("File dialog unavailable: {err}"));
+                match res {
+                    Ok(Some(path)) => {
+                        s.extract_path_edit
+                            .replace_text(path.to_string_lossy().into_owned());
+                        if let Some(dlg) = s.extract_dialog.as_mut() {
+                            dlg.error = None;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        if let Some(dlg) = s.extract_dialog.as_mut() {
+                            dlg.error = Some(format!("File dialog unavailable: {err}"));
+                        }
                     }
                 }
             });
@@ -1242,7 +1329,7 @@ fn icon_picker_tile(
 ) -> El {
     let mut tile = col()
         .key(format!("icon-tile-{icon_id}"))
-        .w(68.0)
+        .w(76.0)
         .h(56.0)
         .padding(4.0)
         .gap(2.0)
@@ -1258,10 +1345,15 @@ fn icon_picker_tile(
             },
         )
         .focusable(true)
+        .checked(selected)
         .press_on_return()
         .hover(k.c.hover)
         .press(k.c.pressed)
-        .label(format!("Icon {icon_id}: {icon_name}"))
+        .label(if selected {
+            format!("Icon {icon_id}: {icon_name}, selected")
+        } else {
+            format!("Icon {icon_id}: {icon_name}")
+        })
         .help(format!("{icon_id}: {icon_name}"))
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
@@ -1300,7 +1392,12 @@ fn build_icon_picker_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .key("icon-picker-search-input");
 
     let needle = state.icon_search_edit.text.trim().to_ascii_lowercase();
-    let mut grid = row().key("icon-picker-grid").w_full().flex_wrap().gap(6.0);
+    let mut grid = row()
+        .key("icon-picker-grid")
+        .w_full()
+        .flex_wrap()
+        .gap(6.0)
+        .focus_group();
     let mut matches = 0usize;
     for meta in standard_icons() {
         let id_str = meta.id.to_string();
@@ -1332,6 +1429,7 @@ fn build_icon_picker_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .child(if matches == 0 {
             text("No matching KeePass icons")
                 .key("icon-picker-empty")
+                .padding(12.0)
                 .font(k.ty.text_small)
                 .color(k.c.text_muted)
         } else {
@@ -1644,6 +1742,12 @@ fn lock_vault_path_row(
         .disabled(unlocking)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             let directory = starting_directory_from_path(&s.vault_path_edit.text);
+            let expected_mode = if is_create {
+                LockMode::Create
+            } else {
+                LockMode::Open
+            };
+            s.file_dialog_active = true;
             if is_create {
                 let opts = FileDialogOptions {
                     title: String::from("Create KeePass Database"),
@@ -1652,18 +1756,27 @@ fn lock_vault_path_row(
                     ..FileDialogOptions::default()
                 }
                 .filter("KeePass Database", &["kdbx"]);
-                tx.save_file(opts, |s: &mut AppState, res, _| match res {
-                    Ok(Some(path)) => {
-                        let resolved = ensure_kdbx_extension(path);
-                        let text = resolved.to_string_lossy().into_owned();
-                        s.vault_path_edit.replace_text(text.clone());
-                        s.controller.vault_path = text;
-                        s.controller.clear_lock_status();
+                tx.save_file(opts, move |s: &mut AppState, res, _| {
+                    s.file_dialog_active = false;
+                    if s.controller.phase != VaultPhase::Locked
+                        || s.controller.lock_mode != expected_mode
+                    {
+                        return;
                     }
-                    Ok(None) => {}
-                    Err(err) => {
-                        s.controller.lock_status = Some(format!("File dialog unavailable: {err}"));
-                        s.controller.lock_error_field = LockErrorField::Info;
+                    match res {
+                        Ok(Some(path)) => {
+                            let resolved = ensure_kdbx_extension(path);
+                            let text = resolved.to_string_lossy().into_owned();
+                            s.vault_path_edit.replace_text(text.clone());
+                            s.controller.vault_path = text;
+                            s.controller.clear_lock_status();
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            s.controller.lock_status =
+                                Some(format!("File dialog unavailable: {err}"));
+                            s.controller.lock_error_field = LockErrorField::Info;
+                        }
                     }
                 });
             } else {
@@ -1673,17 +1786,26 @@ fn lock_vault_path_row(
                     ..FileDialogOptions::default()
                 }
                 .filter("KeePass Database", &["kdbx"]);
-                tx.open_file(opts, |s: &mut AppState, res, _| match res {
-                    Ok(Some(path)) => {
-                        let text = path.to_string_lossy().into_owned();
-                        s.vault_path_edit.replace_text(text.clone());
-                        s.controller.vault_path = text;
-                        s.controller.clear_lock_status();
+                tx.open_file(opts, move |s: &mut AppState, res, _| {
+                    s.file_dialog_active = false;
+                    if s.controller.phase != VaultPhase::Locked
+                        || s.controller.lock_mode != expected_mode
+                    {
+                        return;
                     }
-                    Ok(None) => {}
-                    Err(err) => {
-                        s.controller.lock_status = Some(format!("File dialog unavailable: {err}"));
-                        s.controller.lock_error_field = LockErrorField::Info;
+                    match res {
+                        Ok(Some(path)) => {
+                            let text = path.to_string_lossy().into_owned();
+                            s.vault_path_edit.replace_text(text.clone());
+                            s.controller.vault_path = text;
+                            s.controller.clear_lock_status();
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            s.controller.lock_status =
+                                Some(format!("File dialog unavailable: {err}"));
+                            s.controller.lock_error_field = LockErrorField::Info;
+                        }
                     }
                 });
             }
@@ -1724,19 +1846,26 @@ fn lock_keyfile_path_row(k: &Kit, state: &AppState, unlocking: bool, key_invalid
                 ..FileDialogOptions::default()
             }
             .filter("Key Files", &["keyx", "key"]);
-            tx.open_file(opts, |s: &mut AppState, res, _| match res {
-                Ok(Some(path)) => {
-                    let text = path.to_string_lossy().into_owned();
-                    s.key_file_edit.replace_text(text.clone());
-                    s.controller.key_file_path = text;
-                    if s.controller.lock_error_field == LockErrorField::KeyFile {
-                        s.controller.clear_lock_status();
-                    }
+            s.file_dialog_active = true;
+            tx.open_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if s.controller.phase != VaultPhase::Locked {
+                    return;
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    s.controller.lock_status = Some(format!("File dialog unavailable: {err}"));
-                    s.controller.lock_error_field = LockErrorField::Info;
+                match res {
+                    Ok(Some(path)) => {
+                        let text = path.to_string_lossy().into_owned();
+                        s.key_file_edit.replace_text(text.clone());
+                        s.controller.key_file_path = text;
+                        if s.controller.lock_error_field == LockErrorField::KeyFile {
+                            s.controller.clear_lock_status();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        s.controller.lock_status = Some(format!("File dialog unavailable: {err}"));
+                        s.controller.lock_error_field = LockErrorField::Info;
+                    }
                 }
             });
         })
@@ -1986,7 +2115,7 @@ fn lock_view(k: &Kit, state: &AppState) -> El {
         .key("lock-screen")
         .w_full()
         .h_full()
-        .center()
+        .items_center()
         .padding(16.0)
         .scroll(ScrollSpec::default())
         .child(card)
@@ -2173,7 +2302,7 @@ fn group_icon_picker_button(k: &Kit, state: &AppState) -> (El, String) {
         "current-group-icon",
     );
     let btn = Button::new("Change group icon")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Ghost)
         .disabled(state.controller.saving)
         .label_with(move |_font, _ink| row().gap(6.0).center_y().child(cur_group_icon_el))
@@ -2198,7 +2327,7 @@ fn group_sidebar(k: &Kit, state: &AppState) -> El {
     } else {
         "+ Group"
     })
-    .control_size(ControlSize::Small)
+    .control_size(ControlSize::Regular)
     .variant(ButtonVariant::Ghost)
     .disabled(state.controller.saving)
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -2222,19 +2351,15 @@ fn group_sidebar(k: &Kit, state: &AppState) -> El {
         .gap(8.0)
         .fill(k.c.layer_01)
         .child(
-            row()
+            col()
                 .key("group-sidebar-header")
                 .w_full()
-                .justify_between()
-                .center_y()
-                .gap(4.0)
+                .gap(6.0)
                 .child(
                     row()
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .shrink()
-                        .gap(4.0)
+                        .w_full()
                         .center_y()
+                        .gap(6.0)
                         .child(group_icon_btn)
                         .child(
                             text(cur_group_label)
@@ -2243,10 +2368,19 @@ fn group_sidebar(k: &Kit, state: &AppState) -> El {
                                 .min_w(0.0)
                                 .truncate()
                                 .font(k.ty.small_medium)
-                                .color(k.c.text_muted),
+                                .color(k.c.text_base),
                         ),
                 )
-                .child(add_group_toggle),
+                .child(
+                    row()
+                        .key("group-sidebar-actions")
+                        .w_full()
+                        .justify_between()
+                        .center_y()
+                        .gap(4.0)
+                        .child(text("Groups").font(k.ty.text_xsmall).color(k.c.text_muted))
+                        .child(add_group_toggle),
+                ),
         );
 
     if state.show_new_group_form {
@@ -2464,7 +2598,7 @@ fn entry_detail_actions(k: &Kit, state: &AppState, detail: &EntryDetailState, sa
     } else {
         &STAR_ICON
     })
-    .control_size(ControlSize::Small)
+    .control_size(ControlSize::Regular)
     .variant(IconButtonVariant::Ghost)
     .disabled(saving)
     .label(if is_fav {
@@ -2618,7 +2752,12 @@ fn entry_detail_scroll_body(k: &Kit, detail: &EntryDetailState, saving: bool) ->
     if let Some(totp) = &detail.totp {
         scroll_body = scroll_body.child(totp_row(k, totp));
     }
-    if !detail.metadata.custom_fields().is_empty() {
+    let has_visible_custom_fields = detail
+        .metadata
+        .custom_fields()
+        .iter()
+        .any(|field| !(detail.metadata.has_otp() && field.name() == "otp"));
+    if has_visible_custom_fields {
         scroll_body = custom_fields_section(k, scroll_body, detail);
     }
     attachments_section(k, scroll_body, detail, saving)
@@ -2694,7 +2833,9 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
 fn editor_header_row(k: &Kit, state: &AppState, editor: &EntryEditorState, saving: bool) -> El {
     let custom_img = state.custom_icon_for(editor.custom_icon_id);
     let icon_id = editor.icon_id;
-    let editor_icon_el = render_keepass_icon(k, icon_id, custom_img, 18.0, "editor-header-icon");
+    let preview_icon =
+        render_keepass_icon(k, icon_id, custom_img, 20.0, "editor-header-preview-icon");
+    let picker_icon = render_keepass_icon(k, icon_id, custom_img, 16.0, "editor-header-icon");
     let icon_btn = Button::new("Change icon")
         .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Neutral)
@@ -2703,7 +2844,7 @@ fn editor_header_row(k: &Kit, state: &AppState, editor: &EntryEditorState, savin
             row()
                 .gap(6.0)
                 .center_y()
-                .child(editor_icon_el)
+                .child(picker_icon)
                 .child(text("Change icon").font(font).color(ink))
         })
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
@@ -2719,7 +2860,7 @@ fn editor_header_row(k: &Kit, state: &AppState, editor: &EntryEditorState, savin
         .label("Change entry icon");
 
     let apply_btn = Button::new("Apply")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Submit)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -2730,7 +2871,7 @@ fn editor_header_row(k: &Kit, state: &AppState, editor: &EntryEditorState, savin
         .key("editor-apply-btn");
 
     let cancel_btn = Button::new("Cancel")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Neutral)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -2740,20 +2881,17 @@ fn editor_header_row(k: &Kit, state: &AppState, editor: &EntryEditorState, savin
         .build(k)
         .key("editor-cancel-btn");
 
-    row()
+    col()
         .key("editor-header-row")
         .w_full()
-        .justify_between()
-        .center_y()
         .gap(8.0)
         .child(
             row()
-                .grow(1.0)
-                .min_w(0.0)
-                .shrink()
-                .gap(8.0)
+                .key("editor-header-title-row")
+                .w_full()
                 .center_y()
-                .child(icon_btn)
+                .gap(8.0)
+                .child(preview_icon)
                 .child(
                     col()
                         .grow(1.0)
@@ -2781,9 +2919,12 @@ fn editor_header_row(k: &Kit, state: &AppState, editor: &EntryEditorState, savin
         .child(
             row()
                 .key("editor-header-actions")
+                .w_full()
+                .justify_between()
+                .center_y()
                 .gap(6.0)
-                .child(cancel_btn)
-                .child(apply_btn),
+                .child(icon_btn)
+                .child(row().gap(6.0).child(cancel_btn).child(apply_btn)),
         )
 }
 
@@ -2798,7 +2939,7 @@ fn editor_generator_controls(k: &Kit, state: &AppState) -> El {
     for len in [16_usize, 20, 24, 32] {
         len_row = len_row.child(
             Button::new(format!("{len}"))
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .variant(if cur_len == len {
                     ButtonVariant::Contrast
                 } else {
@@ -3095,7 +3236,7 @@ fn entry_editor_body(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEdit
 }
 
 fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEditorState) -> El {
-    let mut chips = row().key("editor-tag-chips").w_full().flex_wrap().gap(6.0);
+    let mut chips = row().key("editor-tag-chips").w_full().flex_wrap().gap(10.0);
     if editor.tags.is_empty() {
         chips = chips.child(
             text("No tags")
@@ -3108,7 +3249,10 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
             chips = chips.child(
                 row()
                     .key(format!("editor-tag-chip-{tag}"))
+                    .padding(2.0)
                     .gap(4.0)
+                    .radius(k.radius.sm)
+                    .fill(k.c.layer_01)
                     .center_y()
                     .child(
                         Badge::new(tag.clone())
@@ -3708,7 +3852,11 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
                 .font(k.ty.small_medium)
                 .color(k.c.text_muted),
         );
+    let hide_otp = detail.metadata.has_otp();
     for (idx, field) in detail.metadata.custom_fields().iter().enumerate() {
+        if hide_otp && field.name() == "otp" {
+            continue;
+        }
         let field_name = field.name().to_owned();
         let revealed = detail.revealed_custom_fields.get(&idx);
         let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
@@ -3932,21 +4080,29 @@ fn inject_mode_bar(k: &Kit, state: &AppState) -> El {
                 ..FileDialogOptions::default()
             }
             .filter("Template / Env Files", &["env", "tmpl", "txt"]);
-            tx.open_file(opts, |s: &mut AppState, res, _| match res {
-                Ok(Some(path)) => match read_inject_file_bounded(&path) {
-                    Ok(content) => {
-                        s.inject_edit.replace_text(content.clone());
-                        s.controller.set_inject_input(content);
-                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-                        s.controller.inject_status = Some(format!("Loaded \"{name}\""));
-                    }
+            s.file_dialog_active = true;
+            tx.open_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || s.controller.active_tab != WorkspaceTab::Inject {
+                    return;
+                }
+                match res {
+                    Ok(Some(path)) => match read_inject_file_bounded(&path) {
+                        Ok(content) => {
+                            s.inject_edit.replace_text(content.clone());
+                            s.controller.set_inject_input(content);
+                            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                            s.controller.set_inject_info(format!("Loaded \"{name}\""));
+                        }
+                        Err(err) => {
+                            s.controller.set_inject_error(err);
+                        }
+                    },
+                    Ok(None) => {}
                     Err(err) => {
-                        s.controller.inject_status = Some(err);
+                        s.controller
+                            .set_inject_error(format!("File dialog unavailable: {err}"));
                     }
-                },
-                Ok(None) => {}
-                Err(err) => {
-                    s.controller.inject_status = Some(format!("File dialog unavailable: {err}"));
                 }
             });
         })
@@ -4024,7 +4180,7 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             if let Err(err) = s.controller.render_inject(current_unix_seconds()) {
-                s.controller.inject_status = Some(err.to_string());
+                s.controller.set_inject_error(err.to_string());
             }
         })
         .build(k)
@@ -4055,6 +4211,11 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
     }
 
     if let Some(status) = &state.controller.inject_status {
+        let status_color = if state.controller.inject_status_is_error {
+            k.c.danger.fg
+        } else {
+            k.c.info.fg
+        };
         page = page.child(
             text(status.clone())
                 .key("inject-status")
@@ -4062,7 +4223,7 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
                 .w_full()
                 .wrap_anywhere()
                 .font(k.ty.text_small)
-                .color(k.c.info.fg),
+                .color(status_color),
         );
     }
 
@@ -4146,15 +4307,23 @@ fn inject_save_row(k: &Kit, state: &AppState) -> El {
                 directory: starting_directory_from_path(&s.save_path_edit.text),
                 ..FileDialogOptions::default()
             };
-            tx.save_file(opts, |s: &mut AppState, res, _| match res {
-                Ok(Some(path)) => {
-                    let text = path.to_string_lossy().into_owned();
-                    s.save_path_edit.replace_text(text.clone());
-                    s.controller.inject_save_path = text;
+            s.file_dialog_active = true;
+            tx.save_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || s.controller.active_tab != WorkspaceTab::Inject {
+                    return;
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    s.controller.inject_status = Some(format!("File dialog unavailable: {err}"));
+                match res {
+                    Ok(Some(path)) => {
+                        let text = path.to_string_lossy().into_owned();
+                        s.save_path_edit.replace_text(text.clone());
+                        s.controller.inject_save_path = text;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        s.controller
+                            .set_inject_error(format!("File dialog unavailable: {err}"));
+                    }
                 }
             });
         })
@@ -4193,11 +4362,12 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
         s.note_activity(tx);
         s.controller.inject_output_revealed = !s.controller.inject_output_revealed;
-        s.controller.inject_status = Some(if s.controller.inject_output_revealed {
+        let msg = if s.controller.inject_output_revealed {
             String::from("Rendered output revealed in memory")
         } else {
             String::from("Rendered securely in memory (masked)")
-        });
+        };
+        s.controller.set_inject_info(msg);
     })
     .build(k)
     .key("inject-output-toggle");
@@ -4258,4 +4428,147 @@ fn labeled_field(k: &Kit, key: impl Into<String>, label: &str, field: El) -> El 
                 .color(k.c.text_muted),
         )
         .child(field)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use zeroize::Zeroizing;
+
+    fn test_custom_icon_id(index: usize) -> Result<CustomIconId, String> {
+        let mut bytes = [0_u8; 16];
+        let raw = u32::try_from(index + 1)
+            .map_err(|err| format!("index overflow: {err}"))?
+            .to_be_bytes();
+        bytes[..4].copy_from_slice(&raw);
+        CustomIconId::from_bytes(bytes).ok_or_else(|| String::from("zero custom icon id"))
+    }
+
+    fn png_header_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+        ];
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn focus_loss_with_active_file_dialog_masks_reveals_without_locking() -> Result<(), String> {
+        let temp_dir =
+            std::env::temp_dir().join(format!("nkpui-ui-focus-dialog-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).map_err(|err| format!("mkdir failed: {err}"))?;
+        let vault_path = temp_dir.join("focus.kdbx");
+        let master = Zeroizing::new(String::from("FocusDialog!Pass99"));
+
+        let mut state = AppState::default();
+        state.controller.lock_mode = LockMode::Create;
+        state.controller.vault_path = vault_path.to_string_lossy().into_owned();
+
+        let Some((path, key, gen_id)) = state.controller.begin_unlock(false) else {
+            return Err(String::from("begin_unlock failed"));
+        };
+        let outcome = create_and_open_vault_blocking(&path, &master, key.as_deref());
+        state.controller.finish_unlock(gen_id, outcome, 1.0);
+        assert!(state.controller.is_unlocked());
+
+        state
+            .controller
+            .create_entry_in_current_group(Some("Vault Entry"), 1_700_000_000)?;
+        state.sync_editor_widgets_from_controller();
+        state.edit_password.set_revealed(true);
+        state.edit_otp_uri.set_revealed(true);
+        if let Some(editor) = state.controller.editor.as_mut() {
+            editor.password_revealed = true;
+            editor.otp_revealed = true;
+        }
+        state.controller.toggle_reveal_password();
+        state.controller.inject_output_revealed = true;
+        state.file_dialog_active = true;
+
+        assert!(state.focus_lost_lock_cleanup().is_none());
+        assert!(state.controller.is_unlocked());
+        assert!(state.controller.pending_lock_decision.is_none());
+        assert!(!state.controller.inject_output_revealed);
+        assert!(
+            state
+                .controller
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.revealed_password.is_none())
+        );
+        assert!(
+            state
+                .controller
+                .editor
+                .as_ref()
+                .is_some_and(|editor| !editor.password_revealed && !editor.otp_revealed)
+        );
+
+        state.file_dialog_active = false;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn custom_icon_cache_caps_entries_and_per_frame_lookups() -> Result<(), String> {
+        let temp_dir =
+            std::env::temp_dir().join(format!("nkpui-ui-icon-caps-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).map_err(|err| format!("mkdir failed: {err}"))?;
+        let vault_path = temp_dir.join("icons.kdbx");
+        let master = Zeroizing::new(String::from("IconsCache!Pass99"));
+
+        let mut state = AppState {
+            images: Some(ImageCache::new(Arc::new(|| {}))),
+            ..AppState::default()
+        };
+        state.controller.lock_mode = LockMode::Create;
+        state.controller.vault_path = vault_path.to_string_lossy().into_owned();
+        let Some((path, key, gen_id)) = state.controller.begin_unlock(false) else {
+            return Err(String::from("begin_unlock failed"));
+        };
+        let outcome = create_and_open_vault_blocking(&path, &master, key.as_deref());
+        state.controller.finish_unlock(gen_id, outcome, 1.0);
+        assert!(state.controller.is_unlocked());
+
+        // Oversized raster header is rejected into failed_custom_icons without calling decode.
+        let bad_id = test_custom_icon_id(999)?;
+        let oversized = png_header_bytes(8192, 8192);
+        assert!(!state.cache_custom_icon_bytes(bad_id, oversized));
+        assert!(!state.custom_icons.contains_key(&bad_id));
+        assert!(state.failed_custom_icons.contains(&bad_id));
+        state.failed_custom_icons.clear();
+
+        // Both custom_icons and failed_custom_icons stay capped at MAX_CUSTOM_ICON_CACHE_ENTRIES.
+        let valid_png = png_header_bytes(32, 32);
+        for idx in 0..300 {
+            let id = test_custom_icon_id(idx)?;
+            assert!(state.cache_custom_icon_bytes(id, valid_png.clone()));
+            state.record_failed_custom_icon(id);
+        }
+        assert_eq!(state.custom_icons.len(), MAX_CUSTOM_ICON_CACHE_ENTRIES);
+        assert_eq!(
+            state.failed_custom_icons.len(),
+            MAX_CUSTOM_ICON_CACHE_ENTRIES
+        );
+
+        // sync_custom_icons processes at most MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME new lookups per frame.
+        state.custom_icons.clear();
+        state.failed_custom_icons.clear();
+        state.controller.breadcrumb_icons.clear();
+        for idx in 0..40 {
+            let id = test_custom_icon_id(idx)?;
+            state.controller.breadcrumb_icons.push((0, Some(id)));
+        }
+        let _ = state.sync_custom_icons();
+        assert_eq!(
+            state.failed_custom_icons.len(),
+            MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
 }

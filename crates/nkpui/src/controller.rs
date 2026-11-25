@@ -22,7 +22,7 @@ use nkeepass::private_file::write_private_noclobber;
 use nkeepass::service::FieldUpdate;
 use nkeepass::template::{
     NkpUri, RenderOptions, ServiceSecretLookup, TemplateError, ValueEscape, extract_references,
-    render_text,
+    is_safe_display_text, render_text,
 };
 use nkeepass::{
     AttachmentDescriptor, CustomIconId, EntryRef, GroupRef, KDBX_LIMITS, SearchHit, SelectedEntry,
@@ -47,6 +47,15 @@ pub const FAVORITE_TAG: &str = "favorite";
 
 /// Maximum number of recent in-session vault paths shown on the lock screen.
 pub const MAX_RECENT_VAULTS: usize = 8;
+
+/// Maximum number of configured vault shortcuts loaded from `config.json`.
+pub const MAX_CONFIGURED_VAULTS: usize = 32;
+
+/// Maximum byte length of a configured vault display label.
+pub const MAX_CONFIGURED_LABEL_BYTES: usize = 64;
+
+/// Maximum byte length of a configured vault path.
+pub const MAX_CONFIGURED_PATH_BYTES: usize = 4096;
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 
@@ -433,6 +442,8 @@ pub struct VaultController {
     pub inject_output_revealed: bool,
     /// Non-secret status message for the inject view.
     pub inject_status: Option<String>,
+    /// Whether `inject_status` represents an error (`true`) vs informational notice (`false`).
+    pub inject_status_is_error: bool,
     /// Last user interaction timestamp (monotonic seconds from runtime clock).
     pub last_activity_secs: f64,
     service: VaultService,
@@ -505,6 +516,7 @@ impl Default for VaultController {
             rendered_output: None,
             inject_output_revealed: false,
             inject_status: None,
+            inject_status_is_error: false,
             last_activity_secs: 0.0,
             service: VaultService::default(),
             session: None,
@@ -815,36 +827,125 @@ pub fn read_inject_file_bounded(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| String::from("template/env file must be valid UTF-8"))
 }
 
-fn resolve_nkp_config_path() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("NEO_KEEPASS_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(dir).join("config.json"));
+fn validated_env_base_dir(raw: &std::ffi::OsStr) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
     }
-    if let Some(dir) = std::env::var_os("XDG_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(dir).join("nkeepass").join("config.json"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if raw.as_bytes().contains(&0) {
+            return None;
+        }
     }
-    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(dir).join("nkeepass").join("config.json"));
+    let text = raw.to_str()?;
+    if text.contains('\0')
+        || text.starts_with(r"\\?\")
+        || text.starts_with(r"\\.\")
+        || text.starts_with("//?/")
+        || text.starts_with("//./")
+    {
+        return None;
     }
-    #[cfg(windows)]
-    if let Some(dir) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(dir).join("nkeepass").join("config.json"));
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return None;
     }
-    let home = std::env::var_os("HOME").filter(|v| !v.is_empty())?;
-    Some(
-        PathBuf::from(home)
-            .join(".config")
-            .join("nkeepass")
-            .join("config.json"),
-    )
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(path)
 }
 
-fn push_unique_configured_vault(out: &mut Vec<ConfiguredVault>, label: String, path: &str) {
+fn validated_env_var_dir(name: &str) -> Option<PathBuf> {
+    let raw = std::env::var_os(name)?;
+    validated_env_base_dir(&raw)
+}
+
+fn resolve_nkp_config_path() -> Option<PathBuf> {
+    if let Some(dir) = validated_env_var_dir("NKP_CONFIG_HOME") {
+        return Some(dir.join("config.json"));
+    }
+    if let Some(dir) = validated_env_var_dir("NEO_KEEPASS_CONFIG_DIR") {
+        return Some(dir.join("config.json"));
+    }
+    if let Some(dir) = validated_env_var_dir("XDG_CONFIG_DIR") {
+        return Some(dir.join("nkeepass").join("config.json"));
+    }
+    if let Some(dir) = validated_env_var_dir("XDG_CONFIG_HOME") {
+        return Some(dir.join("nkeepass").join("config.json"));
+    }
+    #[cfg(windows)]
+    if let Some(dir) = validated_env_var_dir("APPDATA") {
+        return Some(dir.join("nkeepass").join("config.json"));
+    }
+    let home = validated_env_var_dir("HOME")?;
+    Some(home.join(".config").join("nkeepass").join("config.json"))
+}
+
+fn config_parent_is_safe(config_path: &Path) -> bool {
+    let Some(parent) = config_path.parent() else {
+        return false;
+    };
+    let Ok(meta) = std::fs::symlink_metadata(parent) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (meta.mode() & 0o002) != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn config_file_permissions_safe(config_path: &Path, opened: &File) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(lmeta) = std::fs::symlink_metadata(config_path) else {
+            return false;
+        };
+        if (lmeta.mode() & 0o077) != 0 {
+            return false;
+        }
+        let Ok(fmeta) = opened.metadata() else {
+            return false;
+        };
+        if (fmeta.mode() & 0o077) != 0 {
+            return false;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (config_path, opened);
+    true
+}
+
+fn push_unique_configured_vault(out: &mut Vec<ConfiguredVault>, label: &str, path: &str) {
+    if out.len() >= MAX_CONFIGURED_VAULTS {
+        return;
+    }
+    let trimmed_label = label.trim();
     let trimmed = path.trim();
-    if trimmed.is_empty() || out.iter().any(|existing| existing.path == trimmed) {
+    if trimmed_label.is_empty()
+        || trimmed_label.len() > MAX_CONFIGURED_LABEL_BYTES
+        || trimmed.is_empty()
+        || trimmed.len() > MAX_CONFIGURED_PATH_BYTES
+        || !is_safe_display_text(trimmed_label)
+        || !is_safe_display_text(trimmed)
+        || out.iter().any(|existing| existing.path == trimmed)
+    {
         return;
     }
     out.push(ConfiguredVault {
-        label,
+        label: trimmed_label.to_owned(),
         path: trimmed.to_owned(),
     });
 }
@@ -853,10 +954,13 @@ fn push_unique_configured_vault(out: &mut Vec<ConfiguredVault>, label: String, p
 /// returning an empty list if absent, unsafe, or malformed.
 #[must_use]
 pub fn load_configured_vaults_from_path(config_path: &Path) -> Vec<ConfiguredVault> {
+    if !config_parent_is_safe(config_path) {
+        return Vec::new();
+    }
     let Ok((file, meta)) = open_regular_file_nofollow(config_path, "config.json") else {
         return Vec::new();
     };
-    if meta.len() > MAX_CONFIG_BYTES {
+    if !config_file_permissions_safe(config_path, &file) || meta.len() > MAX_CONFIG_BYTES {
         return Vec::new();
     }
     let mut bytes = Vec::new();
@@ -877,6 +981,9 @@ pub fn load_configured_vaults_from_path(config_path: &Path) -> Vec<ConfiguredVau
     let mut out = Vec::new();
     if let Some(aliases) = obj.get("aliases").and_then(serde_json::Value::as_object) {
         for (name, entry) in aliases {
+            if out.len() >= MAX_CONFIGURED_VAULTS {
+                break;
+            }
             let Some(entry_obj) = entry.as_object() else {
                 continue;
             };
@@ -888,12 +995,12 @@ pub fn load_configured_vaults_from_path(config_path: &Path) -> Vec<ConfiguredVau
                 continue;
             };
             if is_vault {
-                push_unique_configured_vault(&mut out, name.clone(), target);
+                push_unique_configured_vault(&mut out, name, target);
             }
         }
     }
     if let Some(default_vault) = obj.get("default_vault").and_then(serde_json::Value::as_str) {
-        push_unique_configured_vault(&mut out, String::from("Default"), default_vault);
+        push_unique_configured_vault(&mut out, "Default", default_vault);
     }
     if let Some(current) = obj.get("current").and_then(serde_json::Value::as_str) {
         let matches_alias = out.iter().any(|item| item.label == current);
@@ -904,7 +1011,7 @@ pub fn load_configured_vaults_from_path(config_path: &Path) -> Vec<ConfiguredVau
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("kdbx")))
         {
-            push_unique_configured_vault(&mut out, String::from("Current"), current);
+            push_unique_configured_vault(&mut out, "Current", current);
         }
     }
     out
@@ -1311,10 +1418,28 @@ impl VaultController {
         self.rendered_output = None;
         self.inject_output_revealed = false;
         self.inject_status = None;
+        self.inject_status_is_error = false;
         LockCleanup {
             locked_active_session: was_active,
             clear_clipboard: true,
         }
+    }
+
+    /// Masks all revealed secrets across entry detail, entry editor, and inject output.
+    pub fn mask_all_reveals(&mut self) {
+        if let Some(detail) = self.detail.as_mut() {
+            detail.revealed_password = None;
+            detail.revealed_standard_fields.clear();
+            detail.revealed_custom_fields.clear();
+        }
+        if let Some(editor) = self.editor.as_mut() {
+            editor.password_revealed = false;
+            editor.otp_revealed = false;
+            for field in &mut editor.custom_fields {
+                field.revealed = false;
+            }
+        }
+        self.inject_output_revealed = false;
     }
 
     fn lock_with_trigger(&mut self, trigger: LockTrigger) -> LockCleanup {
@@ -3108,12 +3233,25 @@ impl VaultController {
         Ok(Zeroizing::new(text.to_owned()))
     }
 
+    /// Sets an informational inject banner status.
+    pub fn set_inject_info(&mut self, msg: impl Into<String>) {
+        self.inject_status = Some(msg.into());
+        self.inject_status_is_error = false;
+    }
+
+    /// Sets an error inject banner status.
+    pub fn set_inject_error(&mut self, msg: impl Into<String>) {
+        self.inject_status = Some(msg.into());
+        self.inject_status_is_error = true;
+    }
+
     /// Updates `inject_input` and refreshes reference extraction without resolving secrets.
     pub fn set_inject_input(&mut self, input: String) {
         self.inject_input = input;
         self.rendered_output = None;
         self.inject_output_revealed = false;
         self.inject_status = None;
+        self.inject_status_is_error = false;
         self.refresh_inject_preview();
     }
 
@@ -3123,6 +3261,7 @@ impl VaultController {
         self.rendered_output = None;
         self.inject_output_revealed = false;
         self.inject_status = None;
+        self.inject_status_is_error = false;
         self.refresh_inject_preview();
     }
 
@@ -3201,7 +3340,7 @@ impl VaultController {
         };
         self.rendered_output = Some(output);
         self.inject_output_revealed = false;
-        self.inject_status = Some(String::from("Rendered securely in memory (masked)"));
+        self.set_inject_info("Rendered securely in memory (masked)");
         Ok(())
     }
 
@@ -3216,18 +3355,19 @@ impl VaultController {
         let target = self.inject_save_path.trim();
         if target.is_empty() {
             let msg = "enter a target path before saving";
-            self.inject_status = Some(msg.to_owned());
+            self.set_inject_error(msg);
             return Err(msg);
         }
         let Some(output) = &self.rendered_output else {
             let msg = "render the template before saving";
-            self.inject_status = Some(msg.to_owned());
+            self.set_inject_error(msg);
             return Err(msg);
         };
-        write_private_noclobber(Path::new(target), output.as_bytes()).inspect_err(|err| {
-            self.inject_status = Some((*err).to_owned());
-        })?;
-        self.inject_status = Some(String::from("Saved private output (no-clobber)"));
+        if let Err(err) = write_private_noclobber(Path::new(target), output.as_bytes()) {
+            self.set_inject_error(err);
+            return Err(err);
+        }
+        self.set_inject_info("Saved private output (no-clobber)");
         Ok(())
     }
 }
@@ -4189,6 +4329,15 @@ mod tests {
 
     #[test]
     fn configured_vaults_loads_aliases_and_ignores_malformed() -> Result<(), String> {
+        use std::ffi::OsStr;
+
+        assert!(validated_env_base_dir(OsStr::new("")).is_none());
+        assert!(validated_env_base_dir(OsStr::new("relative/dir")).is_none());
+        assert!(validated_env_base_dir(OsStr::new("/tmp/../etc")).is_none());
+        assert!(validated_env_base_dir(OsStr::new("/tmp/has\0nul")).is_none());
+        assert!(validated_env_base_dir(OsStr::new(r"\\?\C:\foo")).is_none());
+        assert!(validated_env_base_dir(OsStr::new(r"\\.\pipe\foo")).is_none());
+
         let dir = tempdir().map_err(|err| err.to_string())?;
         let missing = dir.path().join("does-not-exist.json");
         assert_eq!(load_configured_vaults_from_path(&missing), Vec::new());
@@ -4197,7 +4346,9 @@ mod tests {
         std::fs::write(&malformed, b"{not valid json").map_err(|err| err.to_string())?;
         assert_eq!(load_configured_vaults_from_path(&malformed), Vec::new());
 
-        let cfg = dir.path().join("config.json");
+        let cfg_dir = dir.path().join("safe-cfg");
+        std::fs::create_dir_all(&cfg_dir).map_err(|err| err.to_string())?;
+        let cfg = cfg_dir.join("config.json");
         std::fs::write(
             &cfg,
             r#"{
@@ -4205,11 +4356,27 @@ mod tests {
                 "default_vault": "/vaults/default.kdbx",
                 "aliases": {
                     "work": { "kind": "vault", "target": "/vaults/work.kdbx" },
+                    "bidi": { "kind": "vault", "target": "/vaults/\u202Eevil.kdbx" },
                     "api": { "kind": "entry", "target": "Infra/ProdAPI", "field": "Password" }
                 }
             }"#,
         )
         .map_err(|err| err.to_string())?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cfg_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|err| err.to_string())?;
+            // Group/world-readable config.json must be rejected.
+            std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o644))
+                .map_err(|err| err.to_string())?;
+            assert_eq!(load_configured_vaults_from_path(&cfg), Vec::new());
+            // Owner-only config.json succeeds.
+            std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| err.to_string())?;
+        }
+
         let vaults = load_configured_vaults_from_path(&cfg);
         assert_eq!(
             vaults,
@@ -4224,6 +4391,65 @@ mod tests {
                 },
             ]
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // World-writable parent directory must be rejected.
+            std::fs::set_permissions(&cfg_dir, std::fs::Permissions::from_mode(0o777))
+                .map_err(|err| err.to_string())?;
+            assert_eq!(load_configured_vaults_from_path(&cfg), Vec::new());
+
+            // Symlinked parent directory must be rejected.
+            let link_dir = dir.path().join("link-cfg");
+            std::os::unix::fs::symlink(&cfg_dir, &link_dir).map_err(|err| err.to_string())?;
+            assert_eq!(
+                load_configured_vaults_from_path(&link_dir.join("config.json")),
+                Vec::new()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mask_all_reveals_clears_dirty_session_reveals_on_focus_loss() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let (vault_path, master) = build_fixture_vault(dir.path())?;
+
+        let mut ctrl = VaultController::new();
+        ctrl.vault_path = vault_path.to_string_lossy().into_owned();
+        let (path, key_path, gen_id) = ctrl
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        let outcome = open_vault_blocking(&path, &master, key_path.as_deref());
+        ctrl.finish_unlock(gen_id, outcome, 10.0);
+        ctrl.open_child_group(0);
+
+        ctrl.toggle_reveal_password();
+        ctrl.toggle_reveal_custom_field(1);
+        ctrl.begin_edit_selected_entry()?;
+        if let Some(ed) = ctrl.editor.as_mut() {
+            ed.password_revealed = true;
+            ed.otp_revealed = true;
+            if let Some(cf) = ed.custom_fields.get_mut(0) {
+                cf.revealed = true;
+            }
+        }
+        ctrl.inject_output_revealed = true;
+        ctrl.dirty = true;
+
+        ctrl.mask_all_reveals();
+        let cleanup = ctrl.on_window_focus(false);
+        assert!(!cleanup.locked_active_session);
+        assert!(ctrl.pending_lock_decision.is_some());
+        let detail = ctrl.detail.as_ref().ok_or_else(|| String::from("detail"))?;
+        assert!(detail.revealed_password.is_none());
+        assert!(detail.revealed_custom_fields.is_empty());
+        let ed = ctrl.editor.as_ref().ok_or_else(|| String::from("editor"))?;
+        assert!(!ed.password_revealed);
+        assert!(!ed.otp_revealed);
+        assert!(ed.custom_fields.iter().all(|f| !f.revealed));
+        assert!(!ctrl.inject_output_revealed);
         Ok(())
     }
 

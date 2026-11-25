@@ -411,6 +411,200 @@ pub fn semantic_tint(k: &Kit, id: u32) -> Color {
     }
 }
 
+/// Maximum allowed raster width or height in pixels for decoded custom KDBX icons.
+pub const MAX_CUSTOM_ICON_DIMENSION: u32 = 1024;
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let slice = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([slice[0], slice[1]]))
+}
+
+fn read_u16_be(bytes: &[u8], offset: usize) -> Option<u16> {
+    let slice = bytes.get(offset..offset + 2)?;
+    Some(u16::from_be_bytes([slice[0], slice[1]]))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let slice = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn read_u32_be(bytes: &[u8], offset: usize) -> Option<u32> {
+    let slice = bytes.get(offset..offset + 4)?;
+    Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn dims_within(w: u32, h: u32, max_dim: u32) -> bool {
+    w > 0 && h > 0 && w <= max_dim && h <= max_dim
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.get(..8) != Some(SIG.as_slice()) || bytes.get(12..16) != Some(b"IHDR".as_slice()) {
+        return None;
+    }
+    Some((read_u32_be(bytes, 16)?, read_u32_be(bytes, 20)?))
+}
+
+fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let hdr = bytes.get(..6)?;
+    if hdr != b"GIF87a" && hdr != b"GIF89a" {
+        return None;
+    }
+    Some((
+        u32::from(read_u16_le(bytes, 6)?),
+        u32::from(read_u16_le(bytes, 8)?),
+    ))
+}
+
+fn bmp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.get(..2) != Some(b"BM".as_slice()) {
+        return None;
+    }
+    let dib_size = read_u32_le(bytes, 14)?;
+    if dib_size == 12 {
+        Some((
+            u32::from(read_u16_le(bytes, 18)?),
+            u32::from(read_u16_le(bytes, 20)?),
+        ))
+    } else if dib_size >= 40 {
+        let w = i32::from_le_bytes(bytes.get(18..22)?.try_into().ok()?);
+        let h = i32::from_le_bytes(bytes.get(22..26)?.try_into().ok()?);
+        (w > 0 && h != 0).then(|| (w.unsigned_abs(), h.unsigned_abs()))
+    } else {
+        None
+    }
+}
+
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.get(..4) != Some(b"RIFF".as_slice()) || bytes.get(8..12) != Some(b"WEBP".as_slice()) {
+        return None;
+    }
+    match bytes.get(12..16)? {
+        b"VP8 " => {
+            if bytes.get(23..26) != Some([0x9d_u8, 0x01, 0x2a].as_slice()) {
+                return None;
+            }
+            let w = u32::from(read_u16_le(bytes, 26)? & 0x3fff);
+            let h = u32::from(read_u16_le(bytes, 28)? & 0x3fff);
+            Some((w, h))
+        }
+        b"VP8L" => {
+            if *bytes.get(20)? != 0x2f {
+                return None;
+            }
+            let bits = read_u32_le(bytes, 21)?;
+            Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        b"VP8X" => {
+            let w0 = u32::from(*bytes.get(24)?);
+            let w1 = u32::from(*bytes.get(25)?);
+            let w2 = u32::from(*bytes.get(26)?);
+            let h0 = u32::from(*bytes.get(27)?);
+            let h1 = u32::from(*bytes.get(28)?);
+            let h2 = u32::from(*bytes.get(29)?);
+            Some((
+                (w0 | (w1 << 8) | (w2 << 16)) + 1,
+                (h0 | (h1 << 8) | (h2 << 16)) + 1,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.get(..2) != Some([0xff_u8, 0xd8].as_slice()) {
+        return None;
+    }
+    let mut pos = 2usize;
+    while pos < bytes.len() {
+        while bytes.get(pos) == Some(&0xff) {
+            pos += 1;
+        }
+        let marker = *bytes.get(pos)?;
+        pos += 1;
+        if marker == 0x00 || (0xd0..=0xd9).contains(&marker) || marker == 0x01 {
+            if marker == 0xd9 || marker == 0xda {
+                break;
+            }
+            continue;
+        }
+        let seg_len = usize::from(read_u16_be(bytes, pos)?);
+        if seg_len < 2 {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        ) {
+            let h = u32::from(read_u16_be(bytes, pos + 3)?);
+            let w = u32::from(read_u16_be(bytes, pos + 5)?);
+            return Some((w, h));
+        }
+        pos = pos.checked_add(seg_len)?;
+    }
+    None
+}
+
+fn ico_dimensions_within(bytes: &[u8], max_dim: u32) -> Option<bool> {
+    if bytes.get(..4) != Some([0x00_u8, 0x00, 0x01, 0x00].as_slice()) {
+        return None;
+    }
+    let count = usize::from(read_u16_le(bytes, 4)?);
+    if count == 0 || count > 64 {
+        return Some(false);
+    }
+    for i in 0..count {
+        let entry = bytes.get(6 + i * 16..6 + (i + 1) * 16)?;
+        let w = if entry[0] == 0 {
+            256
+        } else {
+            u32::from(entry[0])
+        };
+        let h = if entry[1] == 0 {
+            256
+        } else {
+            u32::from(entry[1])
+        };
+        if !dims_within(w, h, max_dim) {
+            return Some(false);
+        }
+        let payload_len = usize::try_from(read_u32_le(entry, 8)?).ok()?;
+        let payload_off = usize::try_from(read_u32_le(entry, 12)?).ok()?;
+        let payload_end = payload_off.checked_add(payload_len)?;
+        let payload = bytes.get(payload_off..payload_end)?;
+        if payload.get(..8) == Some(b"\x89PNG\r\n\x1a\n".as_slice()) {
+            let Some((pw, ph)) = png_dimensions(payload) else {
+                return Some(false);
+            };
+            if !dims_within(pw, ph, max_dim) {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
+}
+
+/// Validates raster image header dimensions (PNG IHDR, JPEG SOF, GIF, BMP, WebP, ICO)
+/// before handing untrusted custom KDBX icon bytes to Rune's image decoder.
+///
+/// Rejects unrecognized formats, zero dimensions, and dimensions exceeding `max_dim`.
+#[must_use]
+pub fn raster_dimensions_within_limit(bytes: &[u8], max_dim: u32) -> bool {
+    if max_dim == 0 {
+        return false;
+    }
+    if let Some((w, h)) = png_dimensions(bytes)
+        .or_else(|| gif_dimensions(bytes))
+        .or_else(|| bmp_dimensions(bytes))
+        .or_else(|| webp_dimensions(bytes))
+        .or_else(|| jpeg_dimensions(bytes))
+    {
+        return dims_within(w, h, max_dim);
+    }
+    ico_dimensions_within(bytes, max_dim).unwrap_or(false)
+}
+
 /// Renders either a decoded custom KDBX icon (`img.size().is_some()`) or the matching
 /// standard `KeePass` vector SVG icon with semantic [`Kit`] tinting.
 pub fn render_keepass_icon(
@@ -469,5 +663,76 @@ mod tests {
                 assert!(c.a > 0.5, "icon {id} tint should remain opaque");
             }
         }
+    }
+
+    fn png_header_bytes(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(29);
+        out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        out.extend_from_slice(&13_u32.to_be_bytes());
+        out.extend_from_slice(b"IHDR");
+        out.extend_from_slice(&w.to_be_bytes());
+        out.extend_from_slice(&h.to_be_bytes());
+        out.extend_from_slice(&[8, 6, 0, 0, 0]);
+        out
+    }
+
+    #[test]
+    fn raster_dimension_guard_validates_headers_and_rejects_oversized() {
+        assert!(raster_dimensions_within_limit(
+            &png_header_bytes(64, 64),
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+        assert!(raster_dimensions_within_limit(
+            &png_header_bytes(1024, 1024),
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+        assert!(!raster_dimensions_within_limit(
+            &png_header_bytes(8192, 8192),
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+        assert!(!raster_dimensions_within_limit(
+            &png_header_bytes(0, 64),
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&32_u16.to_le_bytes());
+        gif.extend_from_slice(&32_u16.to_le_bytes());
+        assert!(raster_dimensions_within_limit(
+            &gif,
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+
+        let mut huge_gif = b"GIF89a".to_vec();
+        huge_gif.extend_from_slice(&2048_u16.to_le_bytes());
+        huge_gif.extend_from_slice(&32_u16.to_le_bytes());
+        assert!(!raster_dimensions_within_limit(
+            &huge_gif,
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+
+        let jpeg = [
+            0xff_u8, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x40, 0x00, 0x40,
+        ];
+        assert!(raster_dimensions_within_limit(
+            &jpeg,
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+        let huge_jpeg = [
+            0xff_u8, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x10, 0x00, 0x00, 0x40,
+        ];
+        assert!(!raster_dimensions_within_limit(
+            &huge_jpeg,
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+
+        assert!(!raster_dimensions_within_limit(
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+        assert!(!raster_dimensions_within_limit(
+            b"not-an-image",
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
     }
 }
