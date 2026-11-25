@@ -2,7 +2,6 @@
 //! `nkp trust` / `nkp untrust`, `nkp shell` subcommands, `nkp __hook`, and a
 //! real `/usr/bin/bash` direnv-style lifecycle.
 
-#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -16,6 +15,7 @@ use application_environment::IsolatedApplicationEnvironment;
 
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -89,6 +89,7 @@ impl TestFixture {
             &KdbxReadLimits::default(),
         )
         .unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&vault, fs::Permissions::from_mode(0o600)).unwrap();
 
         let mut work_db = KeePassDatabase::default();
@@ -110,6 +111,7 @@ impl TestFixture {
             &KdbxReadLimits::default(),
         )
         .unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&work_vault, fs::Permissions::from_mode(0o600)).unwrap();
 
         Self {
@@ -159,6 +161,7 @@ impl TestFixture {
 
 fn write_private(path: &Path, content: &str) {
     fs::write(path, content.as_bytes()).unwrap();
+    #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
@@ -246,8 +249,11 @@ fn inject_raw_dotenv_check_output_alias_literal_only_and_non_recursive() {
         fs::read_to_string(&out_file).unwrap(),
         format!("token={STRIPE_SECRET}\n")
     );
-    let mode = fs::metadata(&out_file).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600);
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(&out_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     // No-clobber refuses overwriting existing file
     let clobber = fx
@@ -414,6 +420,97 @@ fn inject_raw_dotenv_check_output_alias_literal_only_and_non_recursive() {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ExecProbeCase {
+    Full,
+    Literal,
+    Combined,
+    Noop,
+}
+
+#[cfg(unix)]
+fn exec_child_args(_dir: &Path, case: ExecProbeCase) -> Vec<String> {
+    match case {
+        ExecProbeCase::Full => vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf '%s|%s|%s|%s|%s|%s' \"$STRIPE_KEY\" \"$PLAIN\" \"$WORK_KEY\" \"${UNRELATED_SECRET:-absent}\" \"${NKEEPASS_TEST_PW:-absent}\" \"$1\"".to_owned(),
+            "sh".to_owned(),
+            "--help".to_owned(),
+        ],
+        ExecProbeCase::Literal => vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf '%s' \"$PLAIN_ONLY\"".to_owned(),
+        ],
+        ExecProbeCase::Combined => vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf '%s|%s|%s' \"$BOUND\" \"$PLAIN_ONLY\" \"$EXTRA\"".to_owned(),
+        ],
+        ExecProbeCase::Noop => vec!["/bin/true".to_owned()],
+    }
+}
+
+#[cfg(windows)]
+fn exec_child_args(dir: &Path, case: ExecProbeCase) -> Vec<String> {
+    match case {
+        ExecProbeCase::Full => {
+            let script = dir.join("probe_full.ps1");
+            fs::write(
+                &script,
+                "$u = if ($env:UNRELATED_SECRET) { $env:UNRELATED_SECRET } else { 'absent' }\n\
+                 $p = if ($env:NKEEPASS_TEST_PW) { $env:NKEEPASS_TEST_PW } else { 'absent' }\n\
+                 [Console]::Write(\"$($env:STRIPE_KEY)|$($env:PLAIN)|$($env:WORK_KEY)|$u|$p|$($args[0])\")\n",
+            )
+            .unwrap();
+            vec![
+                "powershell.exe".to_owned(),
+                "-NoProfile".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                script.to_str().unwrap().to_owned(),
+                "--help".to_owned(),
+            ]
+        }
+        ExecProbeCase::Literal => {
+            let script = dir.join("probe_lit.ps1");
+            fs::write(&script, "[Console]::Write($env:PLAIN_ONLY)\n").unwrap();
+            vec![
+                "powershell.exe".to_owned(),
+                "-NoProfile".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                script.to_str().unwrap().to_owned(),
+            ]
+        }
+        ExecProbeCase::Combined => {
+            let script = dir.join("probe_combined.ps1");
+            fs::write(
+                &script,
+                "[Console]::Write(\"$($env:BOUND)|$($env:PLAIN_ONLY)|$($env:EXTRA)\")\n",
+            )
+            .unwrap();
+            vec![
+                "powershell.exe".to_owned(),
+                "-NoProfile".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                script.to_str().unwrap().to_owned(),
+            ]
+        }
+        ExecProbeCase::Noop => vec![
+            "cmd.exe".to_owned(),
+            "/C".to_owned(),
+            "exit".to_owned(),
+            "0".to_owned(),
+        ],
+    }
+}
+
 #[test]
 fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
     let fx = TestFixture::new();
@@ -428,6 +525,7 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
     )
     .unwrap();
 
+    let full_child = exec_child_args(fx.dir.path(), ExecProbeCase::Full);
     let out = fx
         .cmd_with_pw()
         .env("UNRELATED_SECRET", "must-not-leak")
@@ -440,12 +538,8 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
             "--password-env",
             "NKEEPASS_TEST_PW",
             "--",
-            "/bin/sh",
-            "-c",
-            "printf '%s|%s|%s|%s|%s|%s' \"$STRIPE_KEY\" \"$PLAIN\" \"$WORK_KEY\" \"${UNRELATED_SECRET:-absent}\" \"${NKEEPASS_TEST_PW:-absent}\" \"$1\"",
-            "sh",
-            "--help",
         ])
+        .args(&full_child)
         .output()
         .unwrap();
     assert!(
@@ -461,17 +555,11 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
     // Literal-only --env-file works without vault or password!
     let lit_env = fx.dir.path().join("literal.env");
     fs::write(&lit_env, "PLAIN_ONLY=hello_literal\n").unwrap();
+    let lit_child = exec_child_args(fx.dir.path(), ExecProbeCase::Literal);
     let lit_out = fx
         .cmd()
-        .args([
-            "x",
-            "--env-file",
-            lit_env.to_str().unwrap(),
-            "--",
-            "/bin/sh",
-            "-c",
-            "printf '%s' \"$PLAIN_ONLY\"",
-        ])
+        .args(["x", "--env-file", lit_env.to_str().unwrap(), "--"])
+        .args(&lit_child)
         .output()
         .unwrap();
     assert!(lit_out.status.success());
@@ -480,6 +568,7 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
     // Combined --env-file + -B and collision rejection across sources
     let second_env = fx.dir.path().join("second.env");
     fs::write(&second_env, "EXTRA=from_second\n").unwrap();
+    let combined_child = exec_child_args(fx.dir.path(), ExecProbeCase::Combined);
     let combined_out = fx
         .cmd_with_pw()
         .args([
@@ -495,10 +584,8 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
             "--password-env",
             "NKEEPASS_TEST_PW",
             "--",
-            "/bin/sh",
-            "-c",
-            "printf '%s|%s|%s' \"$BOUND\" \"$PLAIN_ONLY\" \"$EXTRA\"",
         ])
+        .args(&combined_child)
         .output()
         .unwrap();
     assert!(combined_out.status.success());
@@ -508,6 +595,7 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
     );
 
     // Collision between --bind and --env-file must fail closed
+    let noop_child = exec_child_args(fx.dir.path(), ExecProbeCase::Noop);
     let collide = fx
         .cmd_with_pw()
         .args([
@@ -521,8 +609,8 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
             "--password-env",
             "NKEEPASS_TEST_PW",
             "--",
-            "/bin/true",
         ])
+        .args(&noop_child)
         .output()
         .unwrap();
     assert!(!collide.status.success());
@@ -532,13 +620,8 @@ fn exec_env_file_resolves_secrets_literals_and_enforces_isolation() {
     fs::write(&reserved_env, "LD_PRELOAD=/tmp/evil.so\n").unwrap();
     let reserved = fx
         .cmd()
-        .args([
-            "x",
-            "--env-file",
-            reserved_env.to_str().unwrap(),
-            "--",
-            "/bin/true",
-        ])
+        .args(["x", "--env-file", reserved_env.to_str().unwrap(), "--"])
+        .args(&noop_child)
         .output()
         .unwrap();
     assert!(!reserved.status.success());
@@ -569,11 +652,11 @@ fn trust_untrust_list_prune_and_tamper_detection() {
 
     let manifest = proj.join(".nkp.toml");
     let dot_env = proj.join(".env");
+    let vault_toml = serde_json::to_string(fx.vault.to_str().unwrap()).unwrap();
     write_private(
         &manifest,
         &format!(
-            "version = 1\nvault = \"{}\"\nenv_file = \".env\"\n\n[env]\nAPI = \"projects/myapp/stripe\"\n",
-            fx.vault.to_str().unwrap()
+            "version = 1\nvault = {vault_toml}\nenv_file = \".env\"\n\n[env]\nAPI = \"projects/myapp/stripe\"\n"
         ),
     );
     write_private(&dot_env, "PLAIN=initial\n");
@@ -802,6 +885,7 @@ fn shell_init_completions_status_and_help_cover_all_shells() {
     assert!(hook_help.stdout.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn real_bash_end_to_end_direnv_lifecycle() {
     let fx = TestFixture::new();
@@ -949,6 +1033,7 @@ tick_prompt
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn real_bash_reverts_secrets_when_trust_store_fails_or_is_corrupt() {
     let fx = TestFixture::new();
@@ -1062,6 +1147,7 @@ tick_prompt
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn real_bash_shell_load_handles_root_options_with_cli_parity() {
     let fx = TestFixture::new();
