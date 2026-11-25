@@ -5,6 +5,36 @@ All notable changes to `neo-keepass` (`nkp` and `nkpui`) are documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.0-alpha.1] - 2026-11-25
+
+### Added
+
+- **Shared KeePass 2.x standard icon catalog & service APIs (`nkeepass`, `neotales-keepass`):**
+  - Canonical KeePass 2.x standard icon catalog (`0..=68`) with opaque `CustomIconId`, `IconInfo`, `VaultService::set_entry_icon`, `VaultService::set_group_icon`, `VaultService::root_icon`, and bounded `VaultService::custom_icon_bytes`.
+- **TUI icon picker, modal editors, and adaptive color (`nkp`):**
+  - Icon rendering in group trees and entry lists alongside a searchable `I` icon picker modal.
+  - Rename title, edit tags, and OTP URI edit modals in the TUI, plus history and recycle-bin integration tests.
+  - 4-tier adaptive color detection (`TrueColor -> 256 -> ANSI 16 -> None`), non-Windows 30s best-effort timed clipboard expiry, and dynamic `argv[0]` help name (with `.exe` stripping).
+- **Desktop UX, icons, and native file pickers (`nkpui`):**
+  - Native `.kdbx`, keyfile, attachment, and `.env` inject file pickers via `rune/native-file-dialog`.
+  - 69 vector SVG KeePass icons, bounded custom KDBX icon rendering, and a searchable Icon Picker modal for entries and groups.
+  - Configured and recent vault chips on the unlock screen, favorites toggle/filtering, secure OTP URI editor, inline password generator controls, and keyboard shortcuts.
+
+### Changed
+
+- **CLI distribution archive naming:** Renamed CLI distribution archives from `nkeepass-<version>-<triple>.{tar.gz,zip}` to `nkp-<version>-<triple>.{tar.gz,zip}` across packaging scripts, validators, and release workflows.
+- **Default entry icon:** `Entry::new` now defaults to standard KeePass key icon `0`.
+- **Branding & versions:** Updated `nkp` TUI branding and aligned `nkeepass`, `nkpui`, and packaging manifest versions to `0.0.0-alpha.1`.
+
+### Fixed
+
+- **Windows desktop launch (`nkpui`):** Enabled `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` so release Windows builds launch without opening a background console window.
+
+### Security
+
+- **Service boundary & icon bounds:** Wrapped internal `KdbxUuid` in opaque `CustomIconId` at the `VaultService` boundary, enforced fail-closed duplicate-UUID and session checks on icon mutation/lookup, and bounded `custom_icon_bytes` payload reads.
+- **Desktop image & dialog hardening (`nkpui`):** Hardened image header parsers (`<= 1024x1024` dimension guard before decoding custom KDBX icons) and serialized concurrent native file dialog invocations.
+
 ## [0.0.0-alpha.0] - 2026-11-24
 
 Initial tagged alpha release of `neo-keepass` (`nkp` CLI/TUI and experimental `nkpui` desktop UI). See [the `v0.0.0-alpha.0` milestone](docs/milestones/v0.0.0-alpha.0.md) for the full completion checklist and `v0.0.0-alpha.1` roadmap.
