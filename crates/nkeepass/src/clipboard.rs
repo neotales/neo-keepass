@@ -49,6 +49,10 @@ pub(crate) trait ClipboardAdapter {
     fn supports_timed_clear(&self) -> bool {
         false
     }
+    /// Whether timed/release clear verifies ownership atomically (Windows sequence number).
+    fn supports_atomic_ownership_clear(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(not(windows))]
@@ -148,6 +152,12 @@ impl ClipboardAdapter for ArboardAdapter {
     fn supports_timed_clear(&self) -> bool {
         true
     }
+
+    /// Returns `true` only on Windows, where the clipboard sequence number
+    /// provides atomic ownership verification across concurrent writes.
+    fn supports_atomic_ownership_clear(&self) -> bool {
+        cfg!(windows)
+    }
 }
 
 #[cfg(windows)]
@@ -230,6 +240,10 @@ impl<A: ClipboardAdapter> ClipboardLease<A> {
 
     pub(crate) fn supports_timed_clear(&self) -> bool {
         self.adapter.supports_timed_clear()
+    }
+
+    pub(crate) fn supports_atomic_ownership_clear(&self) -> bool {
+        self.adapter.supports_atomic_ownership_clear()
     }
 
     pub(crate) fn has_lease(&self) -> bool {
@@ -474,6 +488,7 @@ mod tests {
     fn arboard_adapter_supports_timed_clear_and_compare_and_clear() {
         let adapter = super::ArboardAdapter::default();
         assert!(adapter.supports_timed_clear());
+        assert!(!adapter.supports_atomic_ownership_clear());
 
         let mut cleared = false;
         assert_eq!(

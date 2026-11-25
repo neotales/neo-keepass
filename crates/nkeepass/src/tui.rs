@@ -79,6 +79,9 @@ fn detect_color_tier(
     if override_mode == ColorOverride::Basic {
         return ColorTier::Basic16;
     }
+    if override_mode == ColorOverride::TrueColor {
+        return ColorTier::TrueColor;
+    }
     if colorterm.is_some_and(|value| {
         value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
     }) || wt_session.is_some_and(|value| !value.is_empty())
@@ -1500,11 +1503,13 @@ fn copy_password(app: &mut App) {
     match app.clipboard.copy(Zeroizing::new(value.to_owned())) {
         Ok(ClipboardCopyOutcome::Copied) => {
             app.clipboard_may_contain_password = true;
-            if !app.clipboard.supports_timed_clear() {
+            if !app.clipboard.supports_atomic_ownership_clear() {
                 app.clipboard_warning_pending = true;
             }
-            app.status = if app.clipboard.supports_timed_clear() {
+            app.status = if app.clipboard.supports_atomic_ownership_clear() {
                 "Password copied; an ownership-safe clear will be attempted after 30s. Verify manually; it may remain.".into()
+            } else if app.clipboard.supports_timed_clear() {
+                "Password copied; best-effort compare-and-clear in 30s (verify manually; clipboard history or concurrent copies may retain it).".into()
             } else {
                 "Password copied; this platform cannot safely auto-clear it. Clear manually; it may remain.".into()
             };
@@ -2116,8 +2121,14 @@ impl App {
     ) {
         match outcome {
             Ok(Some(true)) => {
-                self.clipboard_may_contain_password = false;
-                self.status = "Clipboard lease expired and clipboard was cleared".into();
+                if self.clipboard.supports_atomic_ownership_clear() {
+                    self.clipboard_may_contain_password = false;
+                    self.status = "Clipboard lease expired and clipboard was cleared".into();
+                } else {
+                    self.clipboard_may_contain_password = true;
+                    self.clipboard_warning_pending = true;
+                    self.status = "Clipboard lease expired; best-effort compare-and-clear attempted (verify manually; clipboard history or concurrent copies may retain it).".into();
+                }
             }
             Ok(Some(false)) | Err(_) => {
                 self.clipboard_may_contain_password = true;
@@ -2135,7 +2146,9 @@ impl App {
         self.clear_reveal();
         let had_clipboard_lease = self.clipboard.has_lease();
         if had_clipboard_lease {
-            if let Ok(true) = self.clipboard.release() {
+            if self.clipboard.release() == Ok(true)
+                && self.clipboard.supports_atomic_ownership_clear()
+            {
                 self.clipboard_may_contain_password = false;
             } else {
                 self.clipboard_may_contain_password = true;
@@ -2163,7 +2176,6 @@ impl App {
         self.groups.clear();
         self.hits.clear();
         self.entry = None;
-        self.entry_icon = None;
         self.entry_icon = None;
         self.detail.clear();
         self.fields.clear();
@@ -2715,7 +2727,7 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String], theme: &
         } => {
             let matches = filtered_standard_icons(filter);
             let block = Block::default()
-                .title("nkp Icons · Enter apply · Esc cancel")
+                .title("nkp Icons · Enter · Esc")
                 .borders(Borders::ALL);
             let inner = block.inner(area);
             frame.render_widget(block, area);
@@ -2770,9 +2782,9 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String], theme: &
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     if *filtering {
-                        "Type to filter · Backspace · Enter apply · Esc cancel"
+                        "Type filter · Enter · Esc"
                     } else {
-                        "Enter apply · / filter · Esc cancel"
+                        "/ filter · Enter · Esc"
                     },
                     theme.muted,
                 ))),
@@ -2863,6 +2875,256 @@ fn draw_target_dialog(
     );
     frame.render_widget(Paragraph::new(clean(input)), chunks[2]);
     frame.render_widget(Paragraph::new(keys).wrap(Wrap { trim: false }), chunks[3]);
+}
+
+fn handle_input_mode_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => {
+            app.action_target = None;
+            if app.action == Action::Query {
+                cancel_live_query(&mut app.query, &mut app.query_before_input, &mut app.input);
+                app.input_mode = false;
+                app.edit_mode = false;
+                app.refresh();
+            } else {
+                discard_input_draft(
+                    &mut app.input,
+                    &mut app.field_to_reveal,
+                    &mut app.input_mode,
+                    &mut app.edit_mode,
+                );
+                app.edit_field.clear();
+                app.pending_group = None;
+                app.pending_entry = None;
+            }
+        }
+        KeyCode::Backspace => {
+            let retained_chars = app.input.chars().count().saturating_sub(1);
+            let mut remaining =
+                Zeroizing::new(app.input.chars().take(retained_chars).collect::<String>());
+            clear_input(&mut app.input);
+            app.input.push_str(&remaining);
+            clear_input(&mut remaining);
+            if app.action == Action::Query {
+                update_live_query(&mut app.query, &app.input);
+                app.refresh();
+            }
+        }
+        KeyCode::Enter if app.edit_mode && app.action == Action::SetOtp => {
+            match validate_totp_uri(&app.input) {
+                Ok(()) => {
+                    let Some(reference) = app.pending_entry.as_ref().or(app.entry.as_ref()) else {
+                        clear_input(&mut app.input);
+                        app.input_mode = false;
+                        app.edit_mode = false;
+                        app.pending_entry = None;
+                        app.status = "No selected entry".into();
+                        return;
+                    };
+                    match app.service.set_custom_field(reference, "otp", &app.input) {
+                        Ok(()) => {
+                            clear_input(&mut app.input);
+                            app.input_mode = false;
+                            app.edit_mode = false;
+                            app.pending_entry = None;
+                            app.dirty = true;
+                            app.reset_tree_after_mutation();
+                            app.entry = None;
+                            app.entry_icon = None;
+                            app.detail.clear();
+                            app.fields.clear();
+                            app.refresh();
+                            app.status = "OTP URI updated in memory; press s to save".into();
+                        }
+                        Err(error) => {
+                            app.status = format!(
+                                "{}; draft retained (retry or Esc to discard)",
+                                clean(error.message())
+                            );
+                        }
+                    }
+                }
+                Err(message) => {
+                    app.status = format!("{message}; draft retained (retry or Esc to discard)");
+                }
+            }
+        }
+        KeyCode::Enter if app.edit_mode => {
+            let reference = app.entry.clone();
+            let status = submit_edit_draft(
+                &app.edit_field,
+                &mut app.input,
+                &mut app.input_mode,
+                &mut app.edit_mode,
+                |field, value| {
+                    let Some(reference) = reference.as_ref() else {
+                        return Err("No selected entry".into());
+                    };
+                    app.service
+                        .set_field(reference, field, value)
+                        .map_err(|error| error.message().to_owned())
+                },
+            );
+            let succeeded = !app.input_mode;
+            app.status = status;
+            if succeeded {
+                app.edit_field.clear();
+                app.dirty = true;
+                app.reset_tree_after_mutation();
+                app.entry = None;
+                app.entry_icon = None;
+                app.detail.clear();
+                app.fields.clear();
+                app.refresh();
+            }
+        }
+        KeyCode::Enter if !app.edit_mode && app.action != Action::Query => {
+            let value = Zeroizing::new(app.input.to_string());
+            match app.action {
+                Action::RenameTitle => {
+                    if let Some(reference) = app.pending_entry.take().or_else(|| app.entry.clone())
+                    {
+                        match app.service.set_title(&reference, &value) {
+                            Ok(()) => {
+                                app.dirty = true;
+                                app.reset_tree_after_mutation();
+                                app.entry = None;
+                                app.entry_icon = None;
+                                app.detail.clear();
+                                app.fields.clear();
+                                app.refresh();
+                                app.status =
+                                    "Entry title renamed in memory; press s to save".into();
+                            }
+                            Err(error) => app.status = clean(error.message()),
+                        }
+                    } else {
+                        app.status = "No entry selected".into();
+                    }
+                }
+                Action::EditTags => {
+                    if let Some(reference) = app.pending_entry.take().or_else(|| app.entry.clone())
+                    {
+                        let tags = value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|tag| !tag.is_empty())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        match app.service.set_tags(&reference, tags) {
+                            Ok(()) => {
+                                app.dirty = true;
+                                app.reset_tree_after_mutation();
+                                app.entry = None;
+                                app.entry_icon = None;
+                                app.detail.clear();
+                                app.fields.clear();
+                                app.refresh();
+                                app.status = "Entry tags updated in memory; press s to save".into();
+                            }
+                            Err(error) => app.status = clean(error.message()),
+                        }
+                    } else {
+                        app.status = "No entry selected".into();
+                    }
+                }
+                Action::PasswordReveal => {
+                    if value.as_str() == "YES" {
+                        reveal_password(app);
+                    } else {
+                        app.status = "Reveal cancelled; type YES to confirm".into();
+                    }
+                }
+                Action::ClipboardCopy => {
+                    if value.as_str() == "YES" {
+                        copy_password(app);
+                    } else {
+                        app.status = "Clipboard copy cancelled".into();
+                    }
+                }
+                Action::TotpReveal => {
+                    if value.as_str() == "YES" {
+                        reveal_totp(app);
+                    } else {
+                        app.status = "TOTP reveal cancelled".into();
+                    }
+                }
+                Action::Generate => match value.parse::<usize>() {
+                    Ok(size @ 1..=4096) => {
+                        app.generation_size = size;
+                        begin_action(
+                            app,
+                            Action::GenerateConfirm,
+                            "This replaces the current password. Type YES to confirm; any other input cancels.",
+                        );
+                        // A transition to another input action must not
+                        // fall through the common input_mode cleanup.
+                        return;
+                    }
+                    _ => app.status = "Password size must be 1..=4096".into(),
+                },
+                Action::GenerateConfirm => confirm_generation(app, &value),
+                Action::AddAttachment => attachment_add(app, &value),
+                Action::ExportAttachment => attachment_export(app, &value),
+                Action::RemoveAttachment => {
+                    if value.as_str() == "YES" {
+                        if let Some(target) = app.action_target.take() {
+                            attachment_remove(app, &target.name);
+                        }
+                    } else {
+                        app.status = "Attachment removal cancelled".into();
+                    }
+                }
+                Action::AddGroup | Action::AddEntry => {
+                    create_group_or_entry(app, app.action, &value);
+                    app.pending_group = None;
+                }
+                Action::ExportInterchange => snapshot_export(app, &value),
+                Action::ImportInterchange => snapshot_import(app, &value),
+                Action::RevealField => {
+                    if let Some(field) = approve_field_reveal(&value, &mut app.field_to_reveal) {
+                        reveal_selected_field(app, &field);
+                    } else if value.as_str() == "YES" {
+                        app.status = "No field selected".into();
+                    } else {
+                        app.status = "Field reveal cancelled".into();
+                    }
+                }
+                Action::Query | Action::Edit | Action::SetOtp => unreachable!(),
+            }
+            clear_input(&mut app.input);
+            app.input_mode = false;
+            app.edit_mode = false;
+            app.action_target = None;
+            app.pending_entry = None;
+        }
+        KeyCode::Enter => {
+            app.query.zeroize();
+            app.query.push_str(&app.input);
+            app.query_before_input.zeroize();
+            clear_input(&mut app.input);
+            app.input_mode = false;
+            app.refresh();
+        }
+        KeyCode::Char(c)
+            if !c.is_control()
+                && app.input.len() + c.len_utf8()
+                    <= if app.edit_mode {
+                        64 * 1024
+                    } else if app.action == Action::Query {
+                        MAX_PATH_FILTER
+                    } else {
+                        MAX_QUERY
+                    } =>
+        {
+            app.input.push(c);
+            if app.action == Action::Query {
+                update_live_query(&mut app.query, &app.input);
+                app.refresh();
+            }
+        }
+        _ => {}
+    }
 }
 
 #[allow(
@@ -2998,265 +3260,7 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
             continue;
         }
         if app.input_mode {
-            match key.code {
-                KeyCode::Esc => {
-                    app.action_target = None;
-                    if app.action == Action::Query {
-                        cancel_live_query(
-                            &mut app.query,
-                            &mut app.query_before_input,
-                            &mut app.input,
-                        );
-                        app.input_mode = false;
-                        app.edit_mode = false;
-                        app.refresh();
-                    } else {
-                        discard_input_draft(
-                            &mut app.input,
-                            &mut app.field_to_reveal,
-                            &mut app.input_mode,
-                            &mut app.edit_mode,
-                        );
-                        app.edit_field.clear();
-                        app.pending_group = None;
-                        app.pending_entry = None;
-                    }
-                }
-                KeyCode::Backspace => {
-                    let retained_chars = app.input.chars().count().saturating_sub(1);
-                    let mut remaining =
-                        Zeroizing::new(app.input.chars().take(retained_chars).collect::<String>());
-                    clear_input(&mut app.input);
-                    app.input.push_str(&remaining);
-                    clear_input(&mut remaining);
-                    if app.action == Action::Query {
-                        update_live_query(&mut app.query, &app.input);
-                        app.refresh();
-                    }
-                }
-                KeyCode::Enter if app.edit_mode && app.action == Action::SetOtp => {
-                    match validate_totp_uri(&app.input) {
-                        Ok(()) => {
-                            let Some(reference) = app.pending_entry.as_ref().or(app.entry.as_ref())
-                            else {
-                                clear_input(&mut app.input);
-                                app.input_mode = false;
-                                app.edit_mode = false;
-                                app.pending_entry = None;
-                                app.status = "No selected entry".into();
-                                continue;
-                            };
-                            match app.service.set_custom_field(reference, "otp", &app.input) {
-                                Ok(()) => {
-                                    clear_input(&mut app.input);
-                                    app.input_mode = false;
-                                    app.edit_mode = false;
-                                    app.pending_entry = None;
-                                    app.dirty = true;
-                                    app.reset_tree_after_mutation();
-                                    app.entry = None;
-                                    app.entry_icon = None;
-                                    app.detail.clear();
-                                    app.fields.clear();
-                                    app.refresh();
-                                    app.status =
-                                        "OTP URI updated in memory; press s to save".into();
-                                }
-                                Err(error) => {
-                                    app.status = format!(
-                                        "{}; draft retained (retry or Esc to discard)",
-                                        clean(error.message())
-                                    );
-                                }
-                            }
-                        }
-                        Err(message) => {
-                            app.status =
-                                format!("{message}; draft retained (retry or Esc to discard)");
-                        }
-                    }
-                }
-                KeyCode::Enter if app.edit_mode => {
-                    let reference = app.entry.clone();
-                    let status = submit_edit_draft(
-                        &app.edit_field,
-                        &mut app.input,
-                        &mut app.input_mode,
-                        &mut app.edit_mode,
-                        |field, value| {
-                            let Some(reference) = reference.as_ref() else {
-                                return Err("No selected entry".into());
-                            };
-                            app.service
-                                .set_field(reference, field, value)
-                                .map_err(|error| error.message().to_owned())
-                        },
-                    );
-                    let succeeded = !app.input_mode;
-                    app.status = status;
-                    if succeeded {
-                        app.edit_field.clear();
-                        app.dirty = true;
-                        app.reset_tree_after_mutation();
-                        app.entry = None;
-                        app.entry_icon = None;
-                        app.detail.clear();
-                        app.fields.clear();
-                        app.refresh();
-                    }
-                }
-                KeyCode::Enter if !app.edit_mode && app.action != Action::Query => {
-                    let value = Zeroizing::new(app.input.to_string());
-                    match app.action {
-                        Action::RenameTitle => {
-                            if let Some(reference) =
-                                app.pending_entry.take().or_else(|| app.entry.clone())
-                            {
-                                match app.service.set_title(&reference, &value) {
-                                    Ok(()) => {
-                                        app.dirty = true;
-                                        app.reset_tree_after_mutation();
-                                        app.entry = None;
-                                        app.entry_icon = None;
-                                        app.detail.clear();
-                                        app.fields.clear();
-                                        app.refresh();
-                                        app.status =
-                                            "Entry title renamed in memory; press s to save".into();
-                                    }
-                                    Err(error) => app.status = clean(error.message()),
-                                }
-                            } else {
-                                app.status = "No entry selected".into();
-                            }
-                        }
-                        Action::EditTags => {
-                            if let Some(reference) =
-                                app.pending_entry.take().or_else(|| app.entry.clone())
-                            {
-                                let tags = value
-                                    .split(',')
-                                    .map(str::trim)
-                                    .filter(|tag| !tag.is_empty())
-                                    .map(str::to_owned)
-                                    .collect::<Vec<_>>();
-                                match app.service.set_tags(&reference, tags) {
-                                    Ok(()) => {
-                                        app.dirty = true;
-                                        app.reset_tree_after_mutation();
-                                        app.entry = None;
-                                        app.entry_icon = None;
-                                        app.detail.clear();
-                                        app.fields.clear();
-                                        app.refresh();
-                                        app.status =
-                                            "Entry tags updated in memory; press s to save".into();
-                                    }
-                                    Err(error) => app.status = clean(error.message()),
-                                }
-                            } else {
-                                app.status = "No entry selected".into();
-                            }
-                        }
-                        Action::PasswordReveal => {
-                            if value.as_str() == "YES" {
-                                reveal_password(app);
-                            } else {
-                                app.status = "Reveal cancelled; type YES to confirm".into();
-                            }
-                        }
-                        Action::ClipboardCopy => {
-                            if value.as_str() == "YES" {
-                                copy_password(app);
-                            } else {
-                                app.status = "Clipboard copy cancelled".into();
-                            }
-                        }
-                        Action::TotpReveal => {
-                            if value.as_str() == "YES" {
-                                reveal_totp(app);
-                            } else {
-                                app.status = "TOTP reveal cancelled".into();
-                            }
-                        }
-                        Action::Generate => match value.parse::<usize>() {
-                            Ok(size @ 1..=4096) => {
-                                app.generation_size = size;
-                                begin_action(
-                                    app,
-                                    Action::GenerateConfirm,
-                                    "This replaces the current password. Type YES to confirm; any other input cancels.",
-                                );
-                                // A transition to another input action must not
-                                // fall through the common input_mode cleanup.
-                                continue;
-                            }
-                            _ => app.status = "Password size must be 1..=4096".into(),
-                        },
-                        Action::GenerateConfirm => confirm_generation(app, &value),
-                        Action::AddAttachment => attachment_add(app, &value),
-                        Action::ExportAttachment => attachment_export(app, &value),
-                        Action::RemoveAttachment => {
-                            if value.as_str() == "YES" {
-                                if let Some(target) = app.action_target.take() {
-                                    attachment_remove(app, &target.name);
-                                }
-                            } else {
-                                app.status = "Attachment removal cancelled".into();
-                            }
-                        }
-                        Action::AddGroup | Action::AddEntry => {
-                            create_group_or_entry(app, app.action, &value);
-                            app.pending_group = None;
-                        }
-                        Action::ExportInterchange => snapshot_export(app, &value),
-                        Action::ImportInterchange => snapshot_import(app, &value),
-                        Action::RevealField => {
-                            if let Some(field) =
-                                approve_field_reveal(&value, &mut app.field_to_reveal)
-                            {
-                                reveal_selected_field(app, &field);
-                            } else if value.as_str() == "YES" {
-                                app.status = "No field selected".into();
-                            } else {
-                                app.status = "Field reveal cancelled".into();
-                            }
-                        }
-                        Action::Query | Action::Edit | Action::SetOtp => unreachable!(),
-                    }
-                    clear_input(&mut app.input);
-                    app.input_mode = false;
-                    app.edit_mode = false;
-                    app.action_target = None;
-                    app.pending_entry = None;
-                }
-                KeyCode::Enter => {
-                    app.query.zeroize();
-                    app.query.push_str(&app.input);
-                    app.query_before_input.zeroize();
-                    clear_input(&mut app.input);
-                    app.input_mode = false;
-                    app.refresh();
-                }
-                KeyCode::Char(c)
-                    if !c.is_control()
-                        && app.input.len() + c.len_utf8()
-                            <= if app.edit_mode {
-                                64 * 1024
-                            } else if app.action == Action::Query {
-                                MAX_PATH_FILTER
-                            } else {
-                                MAX_QUERY
-                            } =>
-                {
-                    app.input.push(c);
-                    if app.action == Action::Query {
-                        update_live_query(&mut app.query, &app.input);
-                        app.refresh();
-                    }
-                }
-                _ => {}
-            }
+            handle_input_mode_key(app, key.code);
         } else if app.entry.is_none() {
             match key.code {
                 KeyCode::Char('n') => app.next_page(),
@@ -3364,8 +3368,10 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                 KeyCode::Char('c') => begin_action(
                     app,
                     Action::ClipboardCopy,
-                    if app.clipboard.supports_timed_clear() {
-                        "Copy password? Other apps can read it. nkp will attempt an ownership-safe clear in 30s, but it may remain. Type YES to confirm."
+                    if app.clipboard.supports_atomic_ownership_clear() {
+                        "Copy password? Other apps can read it. Windows will attempt an ownership-safe clear in 30s, but it may remain. Type YES to confirm."
+                    } else if app.clipboard.supports_timed_clear() {
+                        "Copy password? Other apps can read it. nkp will attempt a best-effort compare-and-clear in 30s (verify manually; clipboard history or concurrent copies may retain it). Type YES to confirm."
                     } else {
                         "Copy password? Other apps can read it. This platform cannot safely auto-clear; clear manually when done. Type YES to confirm."
                     },
@@ -4385,7 +4391,10 @@ mod tests {
                 .unwrap();
             app.apply_clipboard_tick(lease.tick(std::time::Instant::now()));
             assert!(!lease.has_lease());
-            assert_eq!(app.clipboard_warning_pending, outcome != 0);
+            assert_eq!(
+                app.clipboard_warning_pending,
+                outcome != 0 || !app.clipboard.supports_atomic_ownership_clear()
+            );
             assert_eq!(app.action, super::Action::GenerateConfirm);
             assert!(app.input_mode);
             assert_eq!(app.action_prompt, instructions);
@@ -5169,6 +5178,30 @@ mod tests {
             ),
             super::ColorTier::Basic16
         );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::TrueColor,
+                None,
+                Some("xterm"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::TrueColor
+        );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::TrueColor,
+                None,
+                Some("dumb"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::None
+        );
 
         let none_theme = super::TuiTheme::from_tier(super::ColorTier::None);
         for style in [
@@ -5327,5 +5360,104 @@ mod tests {
         assert_eq!(view.tags(), ["work", "mail"]);
         assert!(view.has_otp());
         assert!(app.service.totp_code_with_period(&final_ref, 59).is_ok());
+    }
+
+    #[test]
+    fn entry_title_tags_and_otp_input_modals_render_and_manage_lifecycle() {
+        use crossterm::event::KeyCode;
+
+        let (_dir, mut app) = app_fixture();
+
+        // Palette item 7: Rename entry title (unmasked, pre-populated, Esc clears pending_entry).
+        super::select_palette_action(&mut app, 7);
+        assert!(app.input_mode);
+        assert!(!app.edit_mode);
+        assert!(app.pending_entry.is_some());
+        assert_eq!(app.input.as_str(), "Example");
+        let rename_screen = screen(&app, 80, 24);
+        assert!(rename_screen.contains("Rename entry title"));
+        assert!(rename_screen.contains("Example"));
+
+        super::handle_input_mode_key(&mut app, KeyCode::Esc);
+        assert!(!app.input_mode);
+        assert!(app.pending_entry.is_none());
+        assert!(app.input.is_empty());
+
+        // Rename via key events: clear pre-populated "Example", type "MailBox", Enter.
+        super::select_palette_action(&mut app, 7);
+        for _ in 0.."Example".len() {
+            super::handle_input_mode_key(&mut app, KeyCode::Backspace);
+        }
+        for ch in "MailBox".chars() {
+            super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_input_mode_key(&mut app, KeyCode::Enter);
+        assert!(!app.input_mode);
+        assert!(app.pending_entry.is_none());
+        assert!(app.dirty);
+        assert_eq!(app.hits[0].title(), "MailBox");
+
+        // Palette item 8: Edit entry tags via key events.
+        super::select_palette_action(&mut app, 8);
+        assert!(app.input_mode);
+        assert!(!app.edit_mode);
+        assert!(app.pending_entry.is_some());
+        for ch in "ops, prod".chars() {
+            super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
+        }
+        let tags_screen = screen(&app, 80, 24);
+        assert!(tags_screen.contains("Edit tags"));
+        assert!(tags_screen.contains("ops, prod"));
+        super::handle_input_mode_key(&mut app, KeyCode::Enter);
+        assert!(!app.input_mode);
+        assert!(app.pending_entry.is_none());
+        assert_eq!(app.hits[0].tags(), ["ops", "prod"]);
+
+        // Palette item 9: Set/update OTP URI (masked with '•', retains draft & pending_entry on invalid URI).
+        super::select_palette_action(&mut app, 9);
+        assert!(app.input_mode);
+        assert!(app.edit_mode);
+        assert!(app.pending_entry.is_some());
+        for ch in "bad-otp".chars() {
+            super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
+        }
+        let masked_screen = screen(&app, 80, 24);
+        assert!(masked_screen.contains("Set/update OTP URI"));
+        assert!(masked_screen.contains(&"•".repeat("bad-otp".len())));
+        assert!(!masked_screen.contains("bad-otp"));
+
+        super::handle_input_mode_key(&mut app, KeyCode::Enter);
+        assert!(app.input_mode);
+        assert!(app.edit_mode);
+        assert!(app.pending_entry.is_some());
+        assert!(app.status.contains("draft retained"));
+
+        // Replace with valid TOTP URI and submit.
+        for _ in 0.."bad-otp".len() {
+            super::handle_input_mode_key(&mut app, KeyCode::Backspace);
+        }
+        let uri = "otpauth://totp/mail?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=6&period=30";
+        for ch in uri.chars() {
+            super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
+        }
+        let masked_valid = screen(&app, 80, 24);
+        assert!(!masked_valid.contains("GEZDGNBVGY3TQOJQ"));
+        assert!(masked_valid.contains(&"•".repeat(64)));
+
+        super::handle_input_mode_key(&mut app, KeyCode::Enter);
+        assert!(!app.input_mode);
+        assert!(!app.edit_mode);
+        assert!(app.pending_entry.is_none());
+        assert!(app.input.is_empty());
+
+        let entry_ref = app.hits[0].reference();
+        let view = app.service.selected_entry(&entry_ref).unwrap();
+        assert!(view.has_otp());
+
+        // Also verify IconPicker 40x12 filtering footer fits without clipping.
+        super::begin_icon_picker(&mut app, Some(false));
+        super::handle_modal_key(&mut app, KeyCode::Char('/'));
+        let picker_40x12 = screen(&app, 40, 12);
+        assert!(picker_40x12.contains("Type filter · Enter · Esc"));
     }
 }

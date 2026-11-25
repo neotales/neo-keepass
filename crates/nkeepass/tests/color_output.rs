@@ -92,10 +92,7 @@ fn color_environment_and_explicit_options_only_style_human_help_and_diagnostics(
 
     let basic = nkp(&["--color=basic", "--help"], &[]);
     let ansi256 = nkp(&["--color=always", "--help"], &[("TERM", "xterm-256color")]);
-    let truecolor = nkp(
-        &["--color=truecolor", "--help"],
-        &[("COLORTERM", "truecolor")],
-    );
+    let truecolor = nkp(&["--color=truecolor", "--help"], &[]);
     assert!(basic.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
     assert!(ansi256.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
     assert!(truecolor.stdout.windows(2).any(|bytes| bytes == b"\x1b["));

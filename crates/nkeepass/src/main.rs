@@ -4904,10 +4904,10 @@ fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
         ttl,
         cfg!(target_os = "linux"),
         |duration| {
-            if cfg!(target_os = "linux") {
+            if !cfg!(windows) {
                 let _ = writeln!(
                     io::stderr(),
-                    "nkp: keeping clipboard available for up to 30 seconds"
+                    "nkp: keeping clipboard available for up to 30 seconds before best-effort clear"
                 );
             }
             std::thread::sleep(duration);
@@ -4928,10 +4928,10 @@ fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
         }
         ClipboardCopyOutcome::Copied => {}
     }
-    if !cfg!(windows) && !cfg!(target_os = "linux") {
+    if !cfg!(windows) {
         let _ = writeln!(
             io::stderr(),
-            "nkp: clipboard may retain the secret; this platform cannot safely clear it"
+            "nkp: best-effort clipboard clear attempted; clipboard may retain the secret (verify manually)"
         );
     }
     Ok(())
@@ -11025,7 +11025,8 @@ impl ColorOption {
         match self {
             Self::Never => 0,
             Self::Basic => 1,
-            Self::Truecolor | Self::Always => Self::detected_style(term, colorterm),
+            Self::Truecolor => 3,
+            Self::Always => Self::detected_style(term, colorterm),
             Self::Auto if tty => Self::detected_style(term, colorterm),
             Self::Auto => 0,
         }
@@ -11203,11 +11204,12 @@ mod tests {
             style(ColorOption::Always, false, Some("dumb"), Some("truecolor")),
             0
         );
-        assert_eq!(style(ColorOption::Truecolor, false, Some("xterm"), None), 1);
+        assert_eq!(style(ColorOption::Truecolor, false, Some("xterm"), None), 3);
         assert_eq!(
             style(ColorOption::Truecolor, false, Some("xterm-256color"), None),
-            2
+            3
         );
+        assert_eq!(style(ColorOption::Truecolor, true, Some("dumb"), None), 0);
         assert_eq!(
             style(ColorOption::Never, true, Some("xterm"), Some("truecolor")),
             0
@@ -11311,12 +11313,16 @@ mod tests {
         assert_eq!(program_basename(OsStr::new(r"C:\Tools\nkp.exe")), "nkp");
 
         let init_help = render_help("kp", &["init".to_owned()], HELP_WIDTH);
-        assert!(init_help.contains("to kp --vault DATABASE"));
-        assert!(!init_help.contains("to nkp --vault DATABASE"));
+        let normalized_init_help = init_help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized_init_help.contains("to kp --vault DATABASE"));
+        assert!(!normalized_init_help.contains("to nkp --vault DATABASE"));
 
         let shell_help = render_help("kp", &["shell".to_owned(), "init".to_owned()], HELP_WIDTH);
-        assert!(shell_help.contains("use `kp shell completions sh` or `kp completion sh`"));
-        assert!(!shell_help.contains("`nkp shell completions sh`"));
+        let normalized_shell_help = shell_help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized_shell_help.contains("use `kp shell completions sh` or `kp completion sh`")
+        );
+        assert!(!normalized_shell_help.contains("`nkp shell completions sh`"));
     }
 
     #[test]
