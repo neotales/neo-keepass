@@ -846,13 +846,13 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     }
 
     // Shell init scripts
-    let bash_init = emit_shell_init_with_bin(
-        HookShell::Bash,
-        Some("# bash comp"),
-        true,
-        Some(Path::new("/usr/local/bin/nkp")),
-    )
-    .unwrap();
+    #[cfg(windows)]
+    let pinned_bin = Path::new(r"C:\Program Files\nkp\nkp.exe");
+    #[cfg(not(windows))]
+    let pinned_bin = Path::new("/usr/local/bin/nkp");
+    let bash_init =
+        emit_shell_init_with_bin(HookShell::Bash, Some("# bash comp"), true, Some(pinned_bin))
+            .unwrap();
     assert!(bash_init.contains("# bash comp"));
     assert!(bash_init.contains("PROMPT_COMMAND"));
     assert!(bash_init.contains("__NKP_ENV_STATE=\"${_nkp_env_state:-}\""));
@@ -880,9 +880,19 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     assert!(fish_init.contains("--on-variable PWD"));
     assert!(fish_init.contains("--on-event fish_prompt"));
 
+    // Reject relative executable paths in pinned bin_path
+    assert_eq!(
+        emit_shell_init_with_bin(HookShell::Bash, None, true, Some(Path::new("bin/nkp"))),
+        Err(HookError::InvalidExecutablePath)
+    );
+
     // Reject PowerShell Unicode curly quotes U+2018..=U+201B in pinned bin_path
     for q in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
-        let bad_bin = format!("/usr/local/bin/nkp{q}evil");
+        let bad_bin = if cfg!(windows) {
+            format!(r"C:\Program Files\nkp\nkp{q}evil.exe")
+        } else {
+            format!("/usr/local/bin/nkp{q}evil")
+        };
         assert_eq!(
             emit_shell_init_with_bin(HookShell::Pwsh, None, true, Some(Path::new(&bad_bin))),
             Err(HookError::InvalidExecutablePath)
