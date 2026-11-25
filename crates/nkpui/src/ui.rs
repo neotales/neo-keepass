@@ -643,7 +643,7 @@ impl AppState {
         let msg = format!("Copied {label} to secret clipboard (30s TTL)");
         match self.controller.active_tab {
             WorkspaceTab::Browser => self.controller.set_browser_info(msg),
-            WorkspaceTab::Inject => self.controller.inject_status = Some(msg),
+            WorkspaceTab::Inject => self.controller.set_inject_info(msg),
         }
     }
 
@@ -1043,6 +1043,9 @@ fn attach_source_row(k: &Kit, state: &AppState) -> El {
         .control_size(ControlSize::Regular)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
             let opts = FileDialogOptions {
                 title: String::from("Attach File"),
                 directory: starting_directory_from_path(&s.attach_path_edit.text),
@@ -1189,6 +1192,9 @@ fn extract_dest_row(k: &Kit, state: &AppState, default_name: String) -> El {
         .control_size(ControlSize::Regular)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
             let opts = FileDialogOptions {
                 title: String::from("Save Attachment"),
                 file_name: Some(default_name.clone()),
@@ -1711,6 +1717,71 @@ fn lock_mode_switcher(k: &Kit, is_create: bool, unlocking: bool) -> El {
         .child(create_mode_btn)
 }
 
+fn handle_lock_vault_dialog_result(
+    s: &mut AppState,
+    res: Result<Option<PathBuf>, impl fmt::Display>,
+    expected_mode: LockMode,
+    ensure_ext: bool,
+) {
+    s.file_dialog_active = false;
+    if s.controller.phase != VaultPhase::Locked || s.controller.lock_mode != expected_mode {
+        return;
+    }
+    match res {
+        Ok(Some(path)) => {
+            let resolved = if ensure_ext {
+                ensure_kdbx_extension(path)
+            } else {
+                path
+            };
+            let text = resolved.to_string_lossy().into_owned();
+            s.vault_path_edit.replace_text(text.clone());
+            s.controller.vault_path = text;
+            s.controller.clear_lock_status();
+        }
+        Ok(None) => {}
+        Err(err) => {
+            s.controller.lock_status = Some(format!("File dialog unavailable: {err}"));
+            s.controller.lock_error_field = LockErrorField::Info;
+        }
+    }
+}
+
+fn launch_lock_vault_file_dialog(s: &mut AppState, tx: &mut Tx, is_create: bool) {
+    if s.file_dialog_active {
+        return;
+    }
+    let directory = starting_directory_from_path(&s.vault_path_edit.text);
+    let expected_mode = if is_create {
+        LockMode::Create
+    } else {
+        LockMode::Open
+    };
+    s.file_dialog_active = true;
+    if is_create {
+        let opts = FileDialogOptions {
+            title: String::from("Create KeePass Database"),
+            directory,
+            file_name: Some(String::from("vault.kdbx")),
+            ..FileDialogOptions::default()
+        }
+        .filter("KeePass Database", &["kdbx"]);
+        tx.save_file(opts, move |s: &mut AppState, res, _| {
+            handle_lock_vault_dialog_result(s, res, expected_mode, true);
+        });
+    } else {
+        let opts = FileDialogOptions {
+            title: String::from("Open KeePass Database"),
+            directory,
+            ..FileDialogOptions::default()
+        }
+        .filter("KeePass Database", &["kdbx"]);
+        tx.open_file(opts, move |s: &mut AppState, res, _| {
+            handle_lock_vault_dialog_result(s, res, expected_mode, false);
+        });
+    }
+}
+
 fn lock_vault_path_row(
     k: &Kit,
     state: &AppState,
@@ -1741,74 +1812,7 @@ fn lock_vault_path_row(
         .control_size(ControlSize::Regular)
         .disabled(unlocking)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
-            let directory = starting_directory_from_path(&s.vault_path_edit.text);
-            let expected_mode = if is_create {
-                LockMode::Create
-            } else {
-                LockMode::Open
-            };
-            s.file_dialog_active = true;
-            if is_create {
-                let opts = FileDialogOptions {
-                    title: String::from("Create KeePass Database"),
-                    directory,
-                    file_name: Some(String::from("vault.kdbx")),
-                    ..FileDialogOptions::default()
-                }
-                .filter("KeePass Database", &["kdbx"]);
-                tx.save_file(opts, move |s: &mut AppState, res, _| {
-                    s.file_dialog_active = false;
-                    if s.controller.phase != VaultPhase::Locked
-                        || s.controller.lock_mode != expected_mode
-                    {
-                        return;
-                    }
-                    match res {
-                        Ok(Some(path)) => {
-                            let resolved = ensure_kdbx_extension(path);
-                            let text = resolved.to_string_lossy().into_owned();
-                            s.vault_path_edit.replace_text(text.clone());
-                            s.controller.vault_path = text;
-                            s.controller.clear_lock_status();
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            s.controller.lock_status =
-                                Some(format!("File dialog unavailable: {err}"));
-                            s.controller.lock_error_field = LockErrorField::Info;
-                        }
-                    }
-                });
-            } else {
-                let opts = FileDialogOptions {
-                    title: String::from("Open KeePass Database"),
-                    directory,
-                    ..FileDialogOptions::default()
-                }
-                .filter("KeePass Database", &["kdbx"]);
-                tx.open_file(opts, move |s: &mut AppState, res, _| {
-                    s.file_dialog_active = false;
-                    if s.controller.phase != VaultPhase::Locked
-                        || s.controller.lock_mode != expected_mode
-                    {
-                        return;
-                    }
-                    match res {
-                        Ok(Some(path)) => {
-                            let text = path.to_string_lossy().into_owned();
-                            s.vault_path_edit.replace_text(text.clone());
-                            s.controller.vault_path = text;
-                            s.controller.clear_lock_status();
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            s.controller.lock_status =
-                                Some(format!("File dialog unavailable: {err}"));
-                            s.controller.lock_error_field = LockErrorField::Info;
-                        }
-                    }
-                });
-            }
+            launch_lock_vault_file_dialog(s, tx, is_create);
         })
         .build(k)
         .key("lock-vault-browse-btn");
@@ -1840,6 +1844,9 @@ fn lock_keyfile_path_row(k: &Kit, state: &AppState, unlocking: bool, key_invalid
         .control_size(ControlSize::Regular)
         .disabled(unlocking)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            if s.file_dialog_active {
+                return;
+            }
             let opts = FileDialogOptions {
                 title: String::from("Select Key File"),
                 directory: starting_directory_from_path(&s.key_file_edit.text),
@@ -4075,6 +4082,9 @@ fn inject_mode_bar(k: &Kit, state: &AppState) -> El {
         .disabled(state.controller.saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
             let opts = FileDialogOptions {
                 title: String::from("Open Template or .env File"),
                 ..FileDialogOptions::default()
@@ -4301,6 +4311,9 @@ fn inject_save_row(k: &Kit, state: &AppState) -> El {
         .control_size(ControlSize::Regular)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
             let opts = FileDialogOptions {
                 title: String::from("Save Rendered Output"),
                 file_name: Some(String::from(default_out_name)),

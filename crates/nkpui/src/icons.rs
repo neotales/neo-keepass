@@ -496,18 +496,8 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             let bits = read_u32_le(bytes, 21)?;
             Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
         }
-        b"VP8X" => {
-            let w0 = u32::from(*bytes.get(24)?);
-            let w1 = u32::from(*bytes.get(25)?);
-            let w2 = u32::from(*bytes.get(26)?);
-            let h0 = u32::from(*bytes.get(27)?);
-            let h1 = u32::from(*bytes.get(28)?);
-            let h2 = u32::from(*bytes.get(29)?);
-            Some((
-                (w0 | (w1 << 8) | (w2 << 16)) + 1,
-                (h0 | (h1 << 8) | (h2 << 16)) + 1,
-            ))
-        }
+        // Reject extended/animated WebP (VP8X) because canvas dimensions can
+        // understate inner VP8/VP8L/ANMF frame allocations during decode.
         _ => None,
     }
 }
@@ -518,15 +508,18 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
     let mut pos = 2usize;
     while pos < bytes.len() {
+        if bytes.get(pos) != Some(&0xff) {
+            return None;
+        }
         while bytes.get(pos) == Some(&0xff) {
             pos += 1;
         }
         let marker = *bytes.get(pos)?;
         pos += 1;
-        if marker == 0x00 || (0xd0..=0xd9).contains(&marker) || marker == 0x01 {
-            if marker == 0xd9 || marker == 0xda {
-                break;
-            }
+        if marker == 0x00 || marker == 0xd9 || marker == 0xda {
+            return None;
+        }
+        if (0xd0..=0xd8).contains(&marker) || marker == 0x01 {
             continue;
         }
         let seg_len = usize::from(read_u16_be(bytes, pos)?);
@@ -537,6 +530,9 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             marker,
             0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
         ) {
+            if seg_len < 7 {
+                return None;
+            }
             let h = u32::from(read_u16_be(bytes, pos + 3)?);
             let w = u32::from(read_u16_be(bytes, pos + 5)?);
             return Some((w, h));
@@ -544,6 +540,37 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         pos = pos.checked_add(seg_len)?;
     }
     None
+}
+
+fn ico_dib_dimensions_within(payload: &[u8], max_dim: u32) -> bool {
+    let Some(dib_size) = read_u32_le(payload, 0) else {
+        return false;
+    };
+    if dib_size == 12 && payload.len() >= 12 {
+        let Some(w) = read_u16_le(payload, 4).map(u32::from) else {
+            return false;
+        };
+        let Some(h) = read_u16_le(payload, 6).map(u32::from) else {
+            return false;
+        };
+        h >= 2 && dims_within(w, h / 2, max_dim)
+    } else if dib_size >= 40 && payload.len() >= 40 {
+        let Ok(w_bytes) = payload[4..8].try_into() else {
+            return false;
+        };
+        let Ok(h_bytes) = payload[8..12].try_into() else {
+            return false;
+        };
+        let w = i32::from_le_bytes(w_bytes);
+        let h = i32::from_le_bytes(h_bytes);
+        if w <= 0 || h == 0 || h == i32::MIN {
+            return false;
+        }
+        let ico_h = h.unsigned_abs() / 2;
+        dims_within(w.unsigned_abs(), ico_h, max_dim)
+    } else {
+        false
+    }
 }
 
 fn ico_dimensions_within(bytes: &[u8], max_dim: u32) -> Option<bool> {
@@ -580,6 +607,8 @@ fn ico_dimensions_within(bytes: &[u8], max_dim: u32) -> Option<bool> {
             if !dims_within(pw, ph, max_dim) {
                 return Some(false);
             }
+        } else if !ico_dib_dimensions_within(payload, max_dim) {
+            return Some(false);
         }
     }
     Some(true)
@@ -732,6 +761,54 @@ mod tests {
         ));
         assert!(!raster_dimensions_within_limit(
             b"not-an-image",
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+
+        // Reject extended/animated WebP (VP8X) while allowing simple VP8L.
+        let mut extended_webp = Vec::from(*b"RIFF\x24\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00");
+        extended_webp.extend_from_slice(&[0_u8; 4]);
+        extended_webp.extend_from_slice(&[31, 0, 0, 31, 0, 0]);
+        assert!(!raster_dimensions_within_limit(
+            &extended_webp,
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+        let mut lossless_webp = Vec::from(*b"RIFF\x18\x00\x00\x00WEBPVP8L\x0c\x00\x00\x00\x2f");
+        let packed = 31_u32 | (31_u32 << 14);
+        lossless_webp.extend_from_slice(&packed.to_le_bytes());
+        assert!(raster_dimensions_within_limit(
+            &lossless_webp,
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+
+        // Reject spoofed JPEG markers lacking 0xFF prefix (even if followed by valid SOF0).
+        let spoofed_jpeg = [
+            0xff_u8, 0xd8, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x20, 0x00, 0x20, 0xff, 0xc0, 0x00, 0x0b,
+            0x08, 0x20, 0x00, 0x20, 0x00,
+        ];
+        assert!(!raster_dimensions_within_limit(
+            &spoofed_jpeg,
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+
+        // Validate ICO DIB headers: reject (0, 0) entry with 8192x16384 BITMAPINFOHEADER, accept 32x64.
+        let make_dib_ico = |w: i32, h: i32| -> Vec<u8> {
+            let mut ico = Vec::with_capacity(62);
+            ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
+            ico.extend_from_slice(&[0, 0, 0, 0, 1, 0, 32, 0]);
+            ico.extend_from_slice(&40_u32.to_le_bytes());
+            ico.extend_from_slice(&22_u32.to_le_bytes());
+            ico.extend_from_slice(&40_u32.to_le_bytes());
+            ico.extend_from_slice(&w.to_le_bytes());
+            ico.extend_from_slice(&h.to_le_bytes());
+            ico.extend_from_slice(&[0_u8; 28]);
+            ico
+        };
+        assert!(!raster_dimensions_within_limit(
+            &make_dib_ico(8192, 16384),
+            MAX_CUSTOM_ICON_DIMENSION
+        ));
+        assert!(raster_dimensions_within_limit(
+            &make_dib_ico(32, 64),
             MAX_CUSTOM_ICON_DIMENSION
         ));
     }
