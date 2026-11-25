@@ -57,6 +57,20 @@ fn reopen_vault(path: &std::path::Path) -> (VaultService, SessionId) {
     (service, session)
 }
 
+fn save_db(path: &std::path::Path, db: &KeePassDatabase) {
+    let mut creds = credentials();
+    let mut file = Vec::new();
+    KdbxFile::save(
+        db,
+        &mut file,
+        &mut creds,
+        fast_write_options(),
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+    std::fs::write(path, file).unwrap();
+}
+
 fn is_forbidden_bidi_or_format(ch: char) -> bool {
     matches!(
         ch as u32,
@@ -215,19 +229,19 @@ fn model_entry_and_group_default_icons() {
 }
 
 #[test]
-fn projections_and_set_icon_apis_work_and_persist() {
-    let (_dir, path, mut service, session) = create_and_open_vault();
+fn projections_expose_default_icons_and_reject_invalid_ids() {
+    let (_dir, _path, mut service, session) = create_and_open_vault();
 
-    let (root_id, root_custom) = service.root_icon().unwrap();
-    assert_eq!(root_id, DEFAULT_GROUP_ICON_ID);
-    assert_eq!(root_custom, None);
+    let root_info = service.root_icon(session).unwrap();
+    assert_eq!(root_info.icon_id(), DEFAULT_GROUP_ICON_ID);
+    assert_eq!(root_info.custom_icon_id(), None);
 
     let root = service.root_group(session).unwrap();
     service.add_group(&root, "Work").unwrap();
     let root = service.root_group(session).unwrap();
     let entry_ref = service.create_entry_in_group(&root, "Mail").unwrap();
 
-    // Check default icon_id on newly created entry via SelectedEntry, tree_page, and search_page.
+    // Check default icon_id across SelectedEntry, tree_page, search_page, and list_page.
     let selected = service.selected_entry(&entry_ref).unwrap();
     assert_eq!(selected.icon_id(), DEFAULT_ENTRY_ICON_ID);
     assert_eq!(selected.custom_icon_id(), None);
@@ -245,6 +259,11 @@ fn projections_and_set_icon_apis_work_and_persist() {
     assert_eq!(search.hits.len(), 1);
     assert_eq!(search.hits[0].icon_id(), DEFAULT_ENTRY_ICON_ID);
     assert_eq!(search.hits[0].custom_icon_id(), None);
+
+    let listed = service.list_page(session, None, None).unwrap();
+    assert_eq!(listed.hits.len(), 1);
+    assert_eq!(listed.hits[0].icon_id(), DEFAULT_ENTRY_ICON_ID);
+    assert_eq!(listed.hits[0].custom_icon_id(), None);
 
     // Invalid icon IDs fail with InvalidInput without mutating or invalidating handles.
     assert_eq!(
@@ -264,6 +283,16 @@ fn projections_and_set_icon_apis_work_and_persist() {
         service.set_group_icon(&group_ref, u32::MAX),
         Err(ServiceError::InvalidInput)
     );
+}
+
+#[test]
+fn set_icon_apis_persist_and_enforce_session_and_lock_contracts() {
+    let (_dir, path, mut service, session) = create_and_open_vault();
+
+    let root = service.root_group(session).unwrap();
+    service.add_group(&root, "Work").unwrap();
+    let root = service.root_group(session).unwrap();
+    service.create_entry_in_group(&root, "Mail").unwrap();
 
     // Valid icon IDs succeed and invalidate prior handles.
     for valid_id in [0, 19, 48, 68] {
@@ -279,7 +308,7 @@ fn projections_and_set_icon_apis_work_and_persist() {
         assert_eq!(selected.custom_icon_id(), None);
     }
 
-    // Set entry to 19 (Email) and group to 4 (Marked Directory).
+    // Set entry to 19 (Email), child group to 4 (Marked Directory), and root group to 60 (Home).
     let current_entry = service.resolve_entry(session, "Mail").unwrap().reference();
     service.set_entry_icon(&current_entry, 19).unwrap();
 
@@ -292,9 +321,26 @@ fn projections_and_set_icon_apis_work_and_persist() {
         Err(ServiceError::Stale)
     );
 
+    let root = service.root_group(session).unwrap();
+    service.set_group_icon(&root, 60).unwrap();
+    assert_eq!(service.set_group_icon(&root, 60), Err(ServiceError::Stale));
+    let root_info = service.root_icon(session).unwrap();
+    assert_eq!(root_info.icon_id(), 60);
+    assert_eq!(root_info.custom_icon_id(), None);
+
     service.save(&path, &mut credentials()).unwrap();
 
     let (mut reopened, reopened_session) = reopen_vault(&path);
+    assert_eq!(reopened.root_icon(session), Err(ServiceError::Stale));
+    assert_eq!(
+        reopened.custom_icon_bytes(session, KdbxUuid::from_bytes([0x11; 16])),
+        Err(ServiceError::Stale)
+    );
+
+    let reopened_root_info = reopened.root_icon(reopened_session).unwrap();
+    assert_eq!(reopened_root_info.icon_id(), 60);
+    assert_eq!(reopened_root_info.custom_icon_id(), None);
+
     let reopened_entry = reopened
         .resolve_entry(reopened_session, "Mail")
         .unwrap()
@@ -306,21 +352,22 @@ fn projections_and_set_icon_apis_work_and_persist() {
     let reopened_root = reopened.root_group(reopened_session).unwrap();
     let reopened_tree = reopened.tree_page(&reopened_root, None).unwrap();
     assert_eq!(reopened_tree.groups[0].icon_id(), 4);
-    assert_eq!(reopened_tree.groups[0].custom_icon_id(), None);
     assert_eq!(reopened_tree.entries[0].icon_id(), 19);
-    assert_eq!(reopened_tree.entries[0].custom_icon_id(), None);
 
     let reopened_search = reopened
         .search_page(reopened_session, "Mail", None)
         .unwrap();
     assert_eq!(reopened_search.hits[0].icon_id(), 19);
-    assert_eq!(reopened_search.hits[0].custom_icon_id(), None);
+    let reopened_list = reopened.list_page(reopened_session, None, None).unwrap();
+    assert_eq!(reopened_list.hits[0].icon_id(), 19);
 
-    // Locked service rejects icon reads/writes.
     reopened.lock(reopened_session).unwrap();
-    assert_eq!(reopened.root_icon(), Err(ServiceError::Locked));
     assert_eq!(
-        reopened.custom_icon_bytes(KdbxUuid::from_bytes([0x11; 16])),
+        reopened.root_icon(reopened_session),
+        Err(ServiceError::Locked)
+    );
+    assert_eq!(
+        reopened.custom_icon_bytes(reopened_session, KdbxUuid::from_bytes([0x11; 16])),
         Err(ServiceError::Locked)
     );
     assert_eq!(
@@ -342,6 +389,7 @@ struct CustomIconFixture {
     empty_id: KdbxUuid,
     group_custom_id: KdbxUuid,
     root_custom_id: KdbxUuid,
+    duplicate_custom_id: KdbxUuid,
     png_bytes: Vec<u8>,
     exact_bytes: Vec<u8>,
 }
@@ -356,6 +404,7 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
     let empty_id = KdbxUuid::from_bytes([0x44; 16]);
     let group_custom_id = KdbxUuid::from_bytes([0x55; 16]);
     let root_custom_id = KdbxUuid::from_bytes([0x66; 16]);
+    let duplicate_custom_id = KdbxUuid::from_bytes([0x77; 16]);
 
     let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
     let exact_bytes = vec![0xAB; MAX_CUSTOM_ICON_BYTES];
@@ -371,6 +420,8 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
         (empty_id, None, Vec::new()),
         (group_custom_id, None, png_bytes.clone()),
         (root_custom_id, None, png_bytes.clone()),
+        (duplicate_custom_id, None, png_bytes.clone()),
+        (duplicate_custom_id, None, vec![1, 2, 3]),
     ] {
         db.meta.custom_icons.push(CustomIcon {
             uuid,
@@ -389,17 +440,7 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
     group.add_entry(entry);
     db.root.add_group(group);
 
-    let mut creds = credentials();
-    let mut file = Vec::new();
-    KdbxFile::save(
-        &db,
-        &mut file,
-        &mut creds,
-        fast_write_options(),
-        &KdbxReadLimits::default(),
-    )
-    .unwrap();
-    std::fs::write(&path, file).unwrap();
+    save_db(&path, &db);
 
     CustomIconFixture {
         dir,
@@ -410,6 +451,7 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
         empty_id,
         group_custom_id,
         root_custom_id,
+        duplicate_custom_id,
         png_bytes,
         exact_bytes,
     }
@@ -422,34 +464,51 @@ fn custom_icon_lookup_is_bounded_and_cleared_by_set_icon() {
     let (mut service, session) = reopen_vault(&fixture.path);
 
     // Root icon exposes custom UUID.
-    assert_eq!(
-        service.root_icon().unwrap(),
-        (49, Some(fixture.root_custom_id))
-    );
+    let root_info = service.root_icon(session).unwrap();
+    assert_eq!(root_info.icon_id(), 49);
+    assert_eq!(root_info.custom_icon_id(), Some(fixture.root_custom_id));
 
-    // Bounded custom icon lookup checks.
-    assert_eq!(service.custom_icon_bytes(KdbxUuid::ZERO).unwrap(), None);
+    // Bounded custom icon lookup checks + duplicate UUID fail-closed rejection.
+    assert_eq!(
+        service.custom_icon_bytes(session, KdbxUuid::ZERO).unwrap(),
+        None
+    );
     assert_eq!(
         service
-            .custom_icon_bytes(KdbxUuid::from_bytes([0x99; 16]))
+            .custom_icon_bytes(session, KdbxUuid::from_bytes([0x99; 16]))
             .unwrap(),
         None
     );
-    assert_eq!(service.custom_icon_bytes(fixture.empty_id).unwrap(), None);
     assert_eq!(
-        service.custom_icon_bytes(fixture.oversized_id).unwrap(),
+        service
+            .custom_icon_bytes(session, fixture.empty_id)
+            .unwrap(),
         None
     );
     assert_eq!(
-        service.custom_icon_bytes(fixture.small_id).unwrap(),
+        service
+            .custom_icon_bytes(session, fixture.oversized_id)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        service
+            .custom_icon_bytes(session, fixture.small_id)
+            .unwrap(),
         Some(fixture.png_bytes)
     );
     assert_eq!(
-        service.custom_icon_bytes(fixture.exact_limit_id).unwrap(),
+        service
+            .custom_icon_bytes(session, fixture.exact_limit_id)
+            .unwrap(),
         Some(fixture.exact_bytes)
     );
+    assert_eq!(
+        service.custom_icon_bytes(session, fixture.duplicate_custom_id),
+        Err(ServiceError::DuplicateIds)
+    );
 
-    // Projections expose custom_icon_id.
+    // Projections expose custom_icon_id across tree, selected, search, and list.
     let root = service.root_group(session).unwrap();
     let tree = service.tree_page(&root, None).unwrap();
     assert_eq!(tree.groups[0].icon_id(), 4);
@@ -471,7 +530,11 @@ fn custom_icon_lookup_is_bounded_and_cleared_by_set_icon() {
     assert_eq!(search.hits[0].icon_id(), 19);
     assert_eq!(search.hits[0].custom_icon_id(), Some(fixture.small_id));
 
-    // Setting a standard icon clears custom_icon_id on both entry and group.
+    let listed = service.list_page(session, None, None).unwrap();
+    assert_eq!(listed.hits[0].icon_id(), 19);
+    assert_eq!(listed.hits[0].custom_icon_id(), Some(fixture.small_id));
+
+    // Setting a standard icon clears custom_icon_id on entry, child group, and root group.
     service.set_entry_icon(&entry_ref, 0).unwrap();
     let refreshed_entry = service
         .resolve_entry(session, "CustomGroup/CustomEntry")
@@ -491,4 +554,75 @@ fn custom_icon_lookup_is_bounded_and_cleared_by_set_icon() {
     let tree = service.tree_page(&root, None).unwrap();
     assert_eq!(tree.groups[0].icon_id(), 48);
     assert_eq!(tree.groups[0].custom_icon_id(), None);
+
+    let root = service.root_group(session).unwrap();
+    service.set_group_icon(&root, 48).unwrap();
+    let refreshed_root = service.root_icon(session).unwrap();
+    assert_eq!(refreshed_root.icon_id(), 48);
+    assert_eq!(refreshed_root.custom_icon_id(), None);
+}
+
+#[test]
+fn icon_mutations_invalidate_tree_cursors_and_reject_duplicate_object_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paginated.kdbx");
+
+    let mut db = KeePassDatabase::default();
+    for index in 0..130 {
+        db.root.add_entry(Entry::new(format!("entry-{index:03}")));
+    }
+    save_db(&path, &db);
+
+    let (mut service, session) = reopen_vault(&path);
+    let root = service.root_group(session).unwrap();
+    let first_page = service.tree_page(&root, None).unwrap();
+    let cursor = first_page
+        .next_cursor
+        .expect("130 entries should require a TreeCursor");
+    let first_entry = first_page.entries[0].reference();
+
+    service.set_entry_icon(&first_entry, 19).unwrap();
+    let root = service.root_group(session).unwrap();
+    assert_eq!(
+        service.tree_page(&root, Some(cursor)).err(),
+        Some(ServiceError::Stale)
+    );
+
+    let second_page = service.tree_page(&root, None).unwrap();
+    let cursor_before_group_icon = second_page
+        .next_cursor
+        .expect("130 entries should require a TreeCursor");
+    service.set_group_icon(&root, 49).unwrap();
+    let root = service.root_group(session).unwrap();
+    assert_eq!(
+        service
+            .tree_page(&root, Some(cursor_before_group_icon))
+            .err(),
+        Some(ServiceError::Stale)
+    );
+
+    // Duplicate object UUIDs fail closed on set_entry_icon and set_group_icon.
+    let dup_path = dir.path().join("dup_ids.kdbx");
+    let shared_id = KdbxUuid::from_bytes([0xA5; 16]);
+    let mut dup_db = KeePassDatabase::default();
+    let mut e1 = Entry::new("first");
+    e1.id = shared_id;
+    let mut e2 = Entry::new("second");
+    e2.id = shared_id;
+    dup_db.root.add_entry(e1);
+    dup_db.root.add_entry(e2);
+    save_db(&dup_path, &dup_db);
+
+    let (mut dup_service, dup_session) = reopen_vault(&dup_path);
+    let dup_root = dup_service.root_group(dup_session).unwrap();
+    let dup_tree = dup_service.tree_page(&dup_root, None).unwrap();
+    let dup_entry_ref = dup_tree.entries[0].reference();
+    assert_eq!(
+        dup_service.set_entry_icon(&dup_entry_ref, 19),
+        Err(ServiceError::DuplicateIds)
+    );
+    assert_eq!(
+        dup_service.set_group_icon(&dup_root, 49),
+        Err(ServiceError::DuplicateIds)
+    );
 }

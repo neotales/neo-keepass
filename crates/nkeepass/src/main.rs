@@ -14427,7 +14427,7 @@ mod tests {
         }
 
         const SCANNED: &[&str] = &["clipboard", "completion", "tui"];
-        const SCANNED_LIBRARY: &[&str] = &["glob", "private_file", "password_generator"];
+        const SCANNED_LIBRARY: &[&str] = &["glob", "icons", "private_file", "password_generator"];
         // These remain explicit library-side exemptions: service/model adapters
         // plus non-vault shell/hook/manifest/template/trust helpers that have
         // no neotales_keepass model dependency.
@@ -14491,6 +14491,7 @@ mod tests {
             ("fs_safe", "fs_safe.rs"),
             ("glob", "glob.rs"),
             ("hook", "hook.rs"),
+            ("icons", "icons.rs"),
             ("interchange", "interchange.rs"),
             ("manifest", "manifest.rs"),
             ("password_generator", "password_generator.rs"),
@@ -14529,7 +14530,7 @@ mod tests {
                 .filter(|(name, _)| SCANNED_LIBRARY.contains(&name.as_str()))
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
-            ["glob", "password_generator", "private_file"],
+            ["glob", "icons", "password_generator", "private_file"],
             "only non-service library modules are scanned as frontend code"
         );
 

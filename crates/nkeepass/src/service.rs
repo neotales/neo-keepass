@@ -383,6 +383,27 @@ pub struct TreeCursor {
     token: u64,
 }
 
+/// Standard and optional custom icon metadata for a vault object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IconInfo {
+    icon_id: u32,
+    custom_icon_id: Option<KdbxUuid>,
+}
+
+impl IconInfo {
+    /// Standard `KeePass` 2.x icon identifier.
+    #[must_use]
+    pub const fn icon_id(&self) -> u32 {
+        self.icon_id
+    }
+
+    /// Custom icon UUID when assigned (non-zero).
+    #[must_use]
+    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+        self.custom_icon_id
+    }
+}
+
 /// Safe direct child group projection and its opaque handle.
 pub struct TreeGroup {
     label: String,
@@ -1283,7 +1304,7 @@ impl VaultService {
 
     /// Sets an entry's standard `KeePass` 2.x icon identifier and clears any custom icon assignment.
     ///
-    /// All session entry handles and cursors are invalidated after mutation.
+    /// All session handles (including [`GroupRef`] and [`EntryRef`]) and cursors are invalidated after mutation.
     ///
     /// # Errors
     ///
@@ -1315,7 +1336,7 @@ impl VaultService {
 
     /// Sets a group's standard `KeePass` 2.x icon identifier and clears any custom icon assignment.
     ///
-    /// All session entry handles and cursors are invalidated after mutation.
+    /// All session handles (including [`GroupRef`] and [`EntryRef`]) and cursors are invalidated after mutation.
     ///
     /// # Errors
     ///
@@ -2634,39 +2655,61 @@ impl VaultService {
     /// Returns the root group's standard icon ID and optional non-zero custom icon UUID.
     ///
     /// # Errors
-    /// Returns [`ServiceError::Locked`] without an open vault.
-    pub fn root_icon(&self) -> Result<(u32, Option<KdbxUuid>), ServiceError> {
+    /// Returns [`ServiceError::Locked`] without an open vault or
+    /// [`ServiceError::Stale`] for a non-current session.
+    pub fn root_icon(&self, session: SessionId) -> Result<IconInfo, ServiceError> {
         let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
-        Ok((
-            live.database.root.icon_id,
-            nonzero_custom_icon(live.database.root.custom_icon_id),
-        ))
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
+        Ok(IconInfo {
+            icon_id: live.database.root.icon_id,
+            custom_icon_id: nonzero_custom_icon(live.database.root.custom_icon_id),
+        })
     }
 
     /// Returns bounded custom icon bytes for `id` when present, non-empty, and
     /// within [`crate::icons::MAX_CUSTOM_ICON_BYTES`].
     ///
+    /// Returned bytes are raw, unvalidated payload bytes stored in KDBX
+    /// metadata; UI image decoders must treat them as untrusted input.
+    ///
     /// Returns `Ok(None)` for the zero UUID, unknown IDs, empty payloads, or
     /// oversized custom icons (fail-safe withholding).
     ///
     /// # Errors
-    /// Returns [`ServiceError::Locked`] without an open vault.
-    pub fn custom_icon_bytes(&self, id: KdbxUuid) -> Result<Option<Vec<u8>>, ServiceError> {
+    /// Returns [`ServiceError::Locked`] without an open vault,
+    /// [`ServiceError::Stale`] for a non-current session, or
+    /// [`ServiceError::DuplicateIds`] when `meta.custom_icons` contains more
+    /// than one entry matching `id`.
+    pub fn custom_icon_bytes(
+        &self,
+        session: SessionId,
+        id: KdbxUuid,
+    ) -> Result<Option<Vec<u8>>, ServiceError> {
         let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
         if id.is_zero() {
             return Ok(None);
         }
-        let found = live
-            .database
-            .meta
-            .custom_icons
-            .iter()
-            .find(|icon| icon.uuid == id)
-            .filter(|icon| {
-                !icon.data.is_empty() && icon.data.len() <= crate::icons::MAX_CUSTOM_ICON_BYTES
-            })
-            .map(|icon| icon.data.clone());
-        Ok(found)
+        let mut matched = None;
+        for icon in &live.database.meta.custom_icons {
+            if icon.uuid == id {
+                if matched.is_some() {
+                    return Err(ServiceError::DuplicateIds);
+                }
+                matched = Some(icon);
+            }
+        }
+        let Some(icon) = matched else {
+            return Ok(None);
+        };
+        if icon.data.is_empty() || icon.data.len() > crate::icons::MAX_CUSTOM_ICON_BYTES {
+            return Ok(None);
+        }
+        Ok(Some(icon.data.clone()))
     }
 
     /// Lists one bounded page of a group's direct child groups and entries.
@@ -9064,8 +9107,16 @@ mod tests {
             service.set_tags(&e1_ref, vec!["tag".into()]),
             Err(ServiceError::DuplicateIds)
         );
+        assert_eq!(
+            service.set_entry_icon(&e1_ref, 19),
+            Err(ServiceError::DuplicateIds)
+        );
+        assert_eq!(
+            service.set_group_icon(&root, 49),
+            Err(ServiceError::DuplicateIds)
+        );
 
-        // DuplicateFields on create_entry_in_group, set_title, and set_tags.
+        // DuplicateFields on create_entry_in_group, set_title, set_tags, and icon mutations.
         let mut dup_field_db = KeePassDatabase::default();
         let mut e1 = Entry::new("first");
         e1.fields.push(Field::new("dup", "one"));
@@ -9090,6 +9141,14 @@ mod tests {
         );
         assert_eq!(
             service.set_tags(&e1_ref, vec!["tag".into()]),
+            Err(ServiceError::DuplicateFields)
+        );
+        assert_eq!(
+            service.set_entry_icon(&e1_ref, 19),
+            Err(ServiceError::DuplicateFields)
+        );
+        assert_eq!(
+            service.set_group_icon(&root, 49),
             Err(ServiceError::DuplicateFields)
         );
     }
