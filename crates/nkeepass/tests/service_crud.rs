@@ -239,21 +239,31 @@ fn create_entry_in_group_immediate_operations_with_returned_ref() {
         .add_attachment(&r3, "doc.txt", Zeroizing::new(b"hello".to_vec()))
         .unwrap();
 
-    // Invalid titles and locked session fail closed.
+    // Invalid titles leave handle and group state intact; locked session fails closed.
     let root = service.root_group(session).unwrap();
+    for bad in [
+        "",
+        ".",
+        "..",
+        "bad/title",
+        "bad\u{200E}title",
+        "bad\u{200F}title",
+        "bad\u{061C}title",
+        "bad\u{202E}title",
+    ] {
+        assert_eq!(
+            service.create_entry_in_group(&root, bad).err(),
+            Some(ServiceError::InvalidInput),
+            "title {bad:?} must be rejected"
+        );
+    }
+    // Failed creates did not invalidate `root` or add entries.
+    let valid = service
+        .create_entry_in_group(&root, "valid-after-failures")
+        .unwrap();
     assert_eq!(
-        service.create_entry_in_group(&root, "").err(),
-        Some(ServiceError::InvalidInput)
-    );
-    assert_eq!(
-        service.create_entry_in_group(&root, "bad/title").err(),
-        Some(ServiceError::InvalidInput)
-    );
-    assert_eq!(
-        service
-            .create_entry_in_group(&root, "bad\u{202E}title")
-            .err(),
-        Some(ServiceError::InvalidInput)
+        service.selected_entry(&valid).unwrap().title(),
+        "valid-after-failures"
     );
 
     service.lock(session).unwrap();
@@ -264,15 +274,17 @@ fn create_entry_in_group_immediate_operations_with_returned_ref() {
 }
 
 #[test]
-fn set_title_validation_projection_sync_and_set_field_invariants() {
-    let (_dir, path, mut service, session) = create_and_open_vault();
+fn set_title_rejects_invalid_titles_and_preserves_state() {
+    let (_dir, _path, mut service, session) = create_and_open_vault();
     let root = service.root_group(session).unwrap();
     let entry_ref = service.create_entry_in_group(&root, "initial").unwrap();
 
-    // Reject empty, overlong, slash, control chars, and BiDi/line-separator overrides.
+    // Reject empty, ".", "..", overlong, slash, control chars, and all BiDi/line-separator controls.
     let too_long = "t".repeat(4097);
     let mut invalid_titles = vec![
         String::new(),
+        ".".to_owned(),
+        "..".to_owned(),
         too_long,
         "group/entry".to_owned(),
         "line\nbreak".to_owned(),
@@ -280,6 +292,9 @@ fn set_title_validation_projection_sync_and_set_field_invariants() {
         "tab\tchar".to_owned(),
         "del\x7fchar".to_owned(),
         "c1\u{0085}char".to_owned(),
+        "lrm\u{200E}mark".to_owned(),
+        "rlm\u{200F}mark".to_owned(),
+        "alm\u{061C}mark".to_owned(),
     ];
     for code in (0x2028..=0x202E).chain(0x2066..=0x2069) {
         let ch = char::from_u32(code).unwrap();
@@ -292,6 +307,11 @@ fn set_title_validation_projection_sync_and_set_field_invariants() {
             "title {bad:?} must be rejected"
         );
     }
+    // Failed set_title calls leave entry_ref valid and title unchanged.
+    assert_eq!(
+        service.selected_entry(&entry_ref).unwrap().title(),
+        "initial"
+    );
 
     // Max valid length (4096 bytes) is accepted.
     let max_title = "m".repeat(4096);
@@ -301,6 +321,13 @@ fn set_title_validation_projection_sync_and_set_field_invariants() {
         .unwrap()
         .reference();
     assert_eq!(service.selected_entry(&fresh).unwrap().title(), max_title);
+}
+
+#[test]
+fn set_title_updates_projection_and_preserves_set_field_invariants() {
+    let (_dir, path, mut service, session) = create_and_open_vault();
+    let root = service.root_group(session).unwrap();
+    let fresh = service.create_entry_in_group(&root, "initial").unwrap();
 
     // Update to a short title and verify Title projection & existing set_field invariants.
     service.set_title(&fresh, "renamed-entry").unwrap();
@@ -378,6 +405,41 @@ fn set_title_validation_projection_sync_and_set_field_invariants() {
 }
 
 #[test]
+fn set_title_sibling_collision_case_self_rename_and_locked() {
+    let (_dir, _path, mut service, session) = create_and_open_vault();
+    let root = service.root_group(session).unwrap();
+    let _first = service.create_entry_in_group(&root, "mail").unwrap();
+    let root = service.root_group(session).unwrap();
+    let second = service.create_entry_in_group(&root, "banking").unwrap();
+
+    // Renaming to collide with another sibling (ASCII case-insensitive) fails with Ambiguous
+    // and preserves both the handle and the original title.
+    assert_eq!(
+        service.set_title(&second, "MAIL"),
+        Err(ServiceError::Ambiguous)
+    );
+    assert_eq!(service.selected_entry(&second).unwrap().title(), "banking");
+
+    // Case-only rename of the SAME entry succeeds.
+    service.set_title(&second, "Banking").unwrap();
+    let refreshed = service
+        .resolve_entry(session, "Banking")
+        .unwrap()
+        .reference();
+    assert_eq!(
+        service.selected_entry(&refreshed).unwrap().title(),
+        "Banking"
+    );
+
+    // Locked session rejects set_title.
+    service.lock(session).unwrap();
+    assert_eq!(
+        service.set_title(&refreshed, "Other"),
+        Err(ServiceError::Locked)
+    );
+}
+
+#[test]
 fn set_tags_validation_normalization_clearing_and_round_trip() {
     let (_dir, path, mut service, session) = create_and_open_vault();
     let root = service.root_group(session).unwrap();
@@ -400,6 +462,9 @@ fn set_tags_validation_normalization_clearing_and_round_trip() {
         vec!["ctrl\n".to_owned()],
         vec!["\ttrimmed-ctrl".to_owned()],
         vec!["null\0byte".to_owned()],
+        vec!["lrm\u{200E}tag".to_owned()],
+        vec!["rlm\u{200F}tag".to_owned()],
+        vec!["alm\u{061C}tag".to_owned()],
         vec!["bidi\u{202E}tag".to_owned()],
         vec!["bidi\u{2066}tag".to_owned()],
         vec!["sep\u{2028}tag".to_owned()],
@@ -410,6 +475,14 @@ fn set_tags_validation_normalization_clearing_and_round_trip() {
             Err(ServiceError::InvalidInput)
         );
     }
+    // Failed set_tags calls leave handle valid and tags empty.
+    assert!(
+        service
+            .selected_entry(&entry_ref)
+            .unwrap()
+            .tags()
+            .is_empty()
+    );
 
     // Add tags with whitespace trimming and case-insensitive deduplication preserving first spelling.
     service
@@ -469,12 +542,54 @@ fn set_tags_validation_normalization_clearing_and_round_trip() {
     reopened.set_tags(&fresh, Vec::new()).unwrap();
     reopened.save(&path, &mut credentials()).unwrap();
 
-    let (reopened, reopened_session) = reopen_vault(&path);
+    let (mut reopened, reopened_session) = reopen_vault(&path);
     let fresh = reopened
         .resolve_entry(reopened_session, "tagged")
         .unwrap()
         .reference();
     assert!(reopened.selected_entry(&fresh).unwrap().tags().is_empty());
+
+    // Locked session rejects set_tags.
+    reopened.lock(reopened_session).unwrap();
+    assert_eq!(
+        reopened.set_tags(&fresh, vec!["tag".to_owned()]),
+        Err(ServiceError::Locked)
+    );
+}
+
+#[test]
+fn set_tags_accepts_upper_boundary_counts_and_lengths() {
+    let (_dir, _path, mut service, session) = create_and_open_vault();
+    let root = service.root_group(session).unwrap();
+    let entry_ref = service
+        .create_entry_in_group(&root, "bounded-tags")
+        .unwrap();
+
+    // Single 256-byte tag succeeds.
+    let max_len_tag = "z".repeat(256);
+    service
+        .set_tags(&entry_ref, vec![max_len_tag.clone()])
+        .unwrap();
+    let fresh = service
+        .resolve_entry(session, "bounded-tags")
+        .unwrap()
+        .reference();
+    assert_eq!(
+        service.selected_entry(&fresh).unwrap().tags(),
+        &[max_len_tag]
+    );
+
+    // 256 distinct tags succeed.
+    let max_count_tags: Vec<String> = (0..256).map(|i| format!("t-{i}")).collect();
+    service.set_tags(&fresh, max_count_tags.clone()).unwrap();
+    let fresh = service
+        .resolve_entry(session, "bounded-tags")
+        .unwrap()
+        .reference();
+    assert_eq!(
+        service.selected_entry(&fresh).unwrap().tags(),
+        max_count_tags.as_slice()
+    );
 }
 
 #[test]

@@ -1153,9 +1153,15 @@ impl VaultService {
     /// Updates an entry's title and synchronizes its `"Title"` field
     /// projection.
     ///
-    /// Valid titles are non-empty, at most 4096 UTF-8 bytes, and contain no `/`,
-    /// control characters (`char::is_control`), or Unicode BiDi/line-separator
-    /// controls (`U+2028..=U+202E`, `U+2066..=U+2069`).
+    /// Valid titles are non-empty, at most 4096 UTF-8 bytes, not `"."` or
+    /// `".."`, and contain no `/`, control characters (`char::is_control`), or
+    /// Unicode BiDi/line-separator controls (`U+061C`, `U+200E`, `U+200F`,
+    /// `U+2028..=U+202E`, `U+2066..=U+2069`).
+    ///
+    /// Renaming an entry to match another sibling's ASCII case-insensitive
+    /// title in the same parent group is rejected with
+    /// [`ServiceError::Ambiguous`], while case-only renames of the same entry
+    /// are permitted.
     ///
     /// All session entry handles and cursors are invalidated after mutation.
     ///
@@ -1163,9 +1169,11 @@ impl VaultService {
     ///
     /// Returns [`ServiceError::InvalidInput`] for an invalid title,
     /// [`ServiceError::Locked`] without an open vault,
-    /// [`ServiceError::Stale`] for an expired handle, or
+    /// [`ServiceError::Stale`] for an expired handle,
     /// [`ServiceError::DuplicateIds`] or [`ServiceError::DuplicateFields`] when
-    /// the vault model is malformed.
+    /// the vault model is malformed, or
+    /// [`ServiceError::Ambiguous`] when another entry in the same group already
+    /// has the same ASCII case-insensitive title.
     pub fn set_title(&mut self, reference: &EntryRef, title: &str) -> Result<(), ServiceError> {
         validate_entry_title(title)?;
         let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
@@ -1174,6 +1182,13 @@ impl VaultService {
         }
         validate_unique_object_ids(&live.database)?;
         validate_unique_field_names(&live.database)?;
+        let (group, entry_index, _) =
+            resolve_entry_with_group(&live.database, &reference.locator, reference.id)?;
+        if group.entries.iter().enumerate().any(|(index, sibling)| {
+            index != entry_index && sibling.title.eq_ignore_ascii_case(title)
+        }) {
+            return Err(ServiceError::Ambiguous);
+        }
         normalize_standard_projections(&mut live.database);
         let entry = resolve_locator_mut(&mut live.database, &reference.locator, reference.id)?;
         title.clone_into(&mut entry.title);
@@ -1187,11 +1202,12 @@ impl VaultService {
     ///
     /// Accepts at most 256 tags (including an empty list to clear all tags).
     /// Each tag is rejected if it contains control characters, Unicode
-    /// BiDi/line-separator controls (`U+2028..=U+202E`, `U+2066..=U+2069`), `;`,
-    /// or `,`; leading and trailing whitespace is trimmed, and the trimmed tag
-    /// must be non-empty and at most 256 UTF-8 bytes. Duplicate tags are
-    /// removed case-insensitively (`str::to_lowercase`), preserving the first
-    /// occurrence's spelling and order.
+    /// BiDi/line-separator controls (`U+061C`, `U+200E`, `U+200F`,
+    /// `U+2028..=U+202E`, `U+2066..=U+2069`), `;`, or `,`; leading and trailing
+    /// whitespace is trimmed, and the trimmed tag must be non-empty and at most
+    /// 256 UTF-8 bytes. Duplicate tags are removed case-insensitively
+    /// (`str::to_lowercase`), preserving the first occurrence's spelling and
+    /// order.
     ///
     /// All session entry handles and cursors are invalidated after mutation.
     ///
@@ -1339,10 +1355,11 @@ impl VaultService {
     /// a fresh [`EntryRef`] valid at the new session generation.
     ///
     /// Valid titles follow the same rules as [`Self::set_title`]: non-empty,
-    /// at most 4096 UTF-8 bytes, and free of `/`, control characters, and
-    /// Unicode BiDi/line-separator controls. Rejects creating an entry whose
-    /// title collides case-insensitively (ASCII) with an existing entry in
-    /// `group`.
+    /// at most 4096 UTF-8 bytes, not `"."` or `".."`, and free of `/`, control
+    /// characters, and Unicode BiDi/line-separator controls (`U+061C`, `U+200E`,
+    /// `U+200F`, `U+2028..=U+202E`, `U+2066..=U+2069`). Rejects creating an
+    /// entry whose title collides case-insensitively (ASCII) with an existing
+    /// entry in `group`.
     ///
     /// All prior session handles and cursors are invalidated; callers must use
     /// the returned [`EntryRef`] (and re-fetch group handles if needed) for
@@ -3442,13 +3459,14 @@ fn is_standard_field(name: &str) -> bool {
 fn has_bidi_control(value: &str) -> bool {
     value
         .chars()
-        .any(|character| matches!(character, '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+        .any(crate::template::is_bidi_or_line_separator)
 }
 
 fn validate_entry_title(title: &str) -> Result<(), ServiceError> {
     if title.is_empty()
         || title.len() > MAX_TREE_LABEL_BYTES
         || title.contains('/')
+        || matches!(title, "." | "..")
         || title.chars().any(char::is_control)
         || has_bidi_control(title)
     {
@@ -4465,11 +4483,11 @@ fn group_path_context(
     Ok(path)
 }
 
-fn resolve_locator<'a>(
+fn resolve_entry_with_group<'a>(
     database: &'a KeePassDatabase,
     locator: &[usize],
     id: KdbxUuid,
-) -> Result<&'a Entry, ServiceError> {
+) -> Result<(&'a Group, usize, &'a Entry), ServiceError> {
     let (entry_index, group_indices) = locator.split_last().ok_or(ServiceError::NotFound)?;
     let mut group = &database.root;
     for &group_index in group_indices {
@@ -4479,7 +4497,15 @@ fn resolve_locator<'a>(
     if entry.id != id {
         return Err(ServiceError::Stale);
     }
-    Ok(entry)
+    Ok((group, *entry_index, entry))
+}
+
+fn resolve_locator<'a>(
+    database: &'a KeePassDatabase,
+    locator: &[usize],
+    id: KdbxUuid,
+) -> Result<&'a Entry, ServiceError> {
+    resolve_entry_with_group(database, locator, id).map(|(_, _, entry)| entry)
 }
 
 #[derive(Clone, Copy)]
@@ -8691,5 +8717,121 @@ mod tests {
         let page = scan_page(&root, &mut state).unwrap();
         assert_eq!(page.hits.len(), MAX_RESULTS);
         assert!(state.has_more());
+    }
+
+    #[test]
+    fn create_entry_in_group_enforces_xml_depth_and_duplicate_model_contracts() {
+        let max_child_groups = crate::KDBX_LIMITS.max_xml_depth - 6;
+        let mut deep_db = KeePassDatabase::default();
+        let mut cursor = &mut deep_db.root;
+        let mut max_locator = Vec::with_capacity(max_child_groups);
+        for index in 0..max_child_groups {
+            cursor.groups.push(Group::new(format!("g-{index}")));
+            cursor = cursor.groups.last_mut().unwrap();
+            max_locator.push(0);
+        }
+        let max_group_id = cursor.id;
+        let mut service = service_with_database(deep_db);
+        let max_group = GroupRef {
+            session: SessionId(1),
+            generation: 1,
+            id: max_group_id,
+            locator: max_locator.clone(),
+        };
+        let created = service
+            .create_entry_in_group(&max_group, "at-max-depth")
+            .unwrap();
+        assert_eq!(
+            service.selected_entry(&created).unwrap().title(),
+            "at-max-depth"
+        );
+
+        // One deeper child group reaches XML depth limit for its own empty group
+        // but leaves no room for an entry (depth + 3 > max_xml_depth).
+        let mut too_deep_db = KeePassDatabase::default();
+        let mut cursor = &mut too_deep_db.root;
+        let mut too_deep_locator = Vec::with_capacity(max_child_groups + 1);
+        for index in 0..=max_child_groups {
+            cursor.groups.push(Group::new(format!("g-{index}")));
+            cursor = cursor.groups.last_mut().unwrap();
+            too_deep_locator.push(0);
+        }
+        let too_deep_id = cursor.id;
+        let mut service = service_with_database(too_deep_db);
+        let too_deep_group = GroupRef {
+            session: SessionId(1),
+            generation: 1,
+            id: too_deep_id,
+            locator: too_deep_locator,
+        };
+        assert_eq!(
+            service
+                .create_entry_in_group(&too_deep_group, "too-deep")
+                .err(),
+            Some(ServiceError::XmlDepth)
+        );
+        assert!(
+            service.session.as_ref().unwrap().database.root.groups[0]
+                .entries
+                .is_empty()
+        );
+
+        // DuplicateIds on create_entry_in_group, set_title, and set_tags.
+        let mut dup_id_db = KeePassDatabase::default();
+        let shared_id = KdbxUuid::from_bytes([7; 16]);
+        let mut e1 = Entry::new("first");
+        e1.id = shared_id;
+        let mut e2 = Entry::new("second");
+        e2.id = shared_id;
+        dup_id_db.root.add_entry(e1);
+        dup_id_db.root.add_entry(e2);
+        let mut service = service_with_database(dup_id_db);
+        let root = service.root_group(SessionId(1)).unwrap();
+        let e1_ref = EntryRef {
+            session: SessionId(1),
+            generation: 1,
+            id: shared_id,
+            locator: vec![0],
+        };
+        assert_eq!(
+            service.create_entry_in_group(&root, "third").err(),
+            Some(ServiceError::DuplicateIds)
+        );
+        assert_eq!(
+            service.set_title(&e1_ref, "renamed"),
+            Err(ServiceError::DuplicateIds)
+        );
+        assert_eq!(
+            service.set_tags(&e1_ref, vec!["tag".into()]),
+            Err(ServiceError::DuplicateIds)
+        );
+
+        // DuplicateFields on create_entry_in_group, set_title, and set_tags.
+        let mut dup_field_db = KeePassDatabase::default();
+        let mut e1 = Entry::new("first");
+        e1.fields.push(Field::new("dup", "one"));
+        e1.fields.push(Field::new("dup", "two"));
+        let e1_id = e1.id;
+        dup_field_db.root.add_entry(e1);
+        let mut service = service_with_database(dup_field_db);
+        let root = service.root_group(SessionId(1)).unwrap();
+        let e1_ref = EntryRef {
+            session: SessionId(1),
+            generation: 1,
+            id: e1_id,
+            locator: vec![0],
+        };
+        assert_eq!(
+            service.create_entry_in_group(&root, "second").err(),
+            Some(ServiceError::DuplicateFields)
+        );
+        assert_eq!(
+            service.set_title(&e1_ref, "renamed"),
+            Err(ServiceError::DuplicateFields)
+        );
+        assert_eq!(
+            service.set_tags(&e1_ref, vec!["tag".into()]),
+            Err(ServiceError::DuplicateFields)
+        );
     }
 }
