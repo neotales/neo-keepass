@@ -62,7 +62,7 @@ jobs:
           # through tee; every value here is a literal in this file.
           log="$(mktemp)"
           status=0
-          cargo test -p nkeepass --bin nkp generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed 2>&1 | tee "$log" || status=$?
+          cargo test --locked -p nkeepass --bin nkp generated_zsh_and_powershell_scripts_parse_when_interpreters_are_installed 2>&1 | tee "$log" || status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::completion-interpreter cargo test exited $status; see the output above"
             exit "$status"
@@ -95,7 +95,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Run the ignored 16,384-bit RSA SSH round trip
         timeout-minutes: 30
-        run: cargo test -p neotales-age --test rsa_16384 -- --ignored
+        run: cargo test --locked -p neotales-age --test rsa_16384 -- --ignored
 
   keepassxc-interop:
     name: KeePassXC interop (Ubuntu 24.04)
@@ -231,10 +231,10 @@ jobs:
       # doctest compile error, or a runtime error.
       - name: Check
         shell: bash
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
       - name: Test compile
         shell: bash
-        run: cargo test --workspace --no-run
+        run: cargo test --locked --workspace --no-run
       - name: Windows private-write native canaries
         if: runner.os == 'Windows'
         shell: bash
@@ -242,9 +242,9 @@ jobs:
           run_canary() {
             local package="$1" target="$2" name="$3" output status=0
             if [ "$target" = lib ]; then
-              output="$(cargo test -p "$package" --lib -- --exact "$name" 2>&1)" || status=$?
+              output="$(cargo test --locked -p "$package" --lib -- --exact "$name" 2>&1)" || status=$?
             else
-              output="$(cargo test -p "$package" --test "$target" -- --exact "$name" 2>&1)" || status=$?
+              output="$(cargo test --locked -p "$package" --test "$target" -- --exact "$name" 2>&1)" || status=$?
             fi
             printf '%s\n' "$output"
             if [ "$status" -ne 0 ] || ! grep -q 'test result: ok\. 1 passed; 0 failed; 0 ignored' <<< "$output"; then
@@ -316,7 +316,7 @@ jobs:
           )
           log="$(mktemp)"
           status=0
-          cargo test -p nkeepass --bin nkp -- generated_bash_and_posix bash_filename_completion bash_dynamic_completion 2>&1 | tee "$log" || status=$?
+          cargo test --locked -p nkeepass --bin nkp -- generated_bash_and_posix bash_filename_completion bash_dynamic_completion 2>&1 | tee "$log" || status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::canary cargo test exited $status; see the output above"
             exit "$status"
@@ -385,7 +385,7 @@ jobs:
         # Bounded tighter than the job so a hang fails fast with a clear
         # timeout instead of consuming the whole job budget.
         timeout-minutes: 30
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   lint:
     name: fmt and clippy
@@ -407,10 +407,52 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --locked --workspace --all-targets
       # Rejects folded-scalar backslash continuations and bash -n fails.
       - name: workflow run blocks
         run: scripts/check-workflows.sh
+
+  nkpui:
+    name: nkpui (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # Cold compile of Rune plus nkpui clippy, tests, and release check.
+    # 40 is a conservative cap, not a measured multiple.
+    timeout-minutes: 40
+    steps:
+      # Untrusted pull-request code is compiled and run by this job; the
+      # checkout token must not persist into those steps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates/nkpui
+      - name: Install libxkbcommon-dev
+        # Required at link time because rune links -lxkbcommon via xkbcommon.
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends libxkbcommon-dev
+      - name: rustfmt
+        working-directory: crates/nkpui
+        run: cargo +1.98.1 fmt --check
+      - name: clippy
+        working-directory: crates/nkpui
+        run: cargo +1.98.1 clippy --locked --all-targets --no-deps -- -D warnings
+      - name: Test
+        working-directory: crates/nkpui
+        # Bounded tighter than the job so a wedged test fails fast instead of
+        # consuming the full job budget.
+        timeout-minutes: 20
+        run: cargo +1.98.1 test --locked
+      - name: Release check
+        working-directory: crates/nkpui
+        run: cargo +1.98.1 check --locked --release
 
   packaging-tests:
     name: packaging self-tests
@@ -429,7 +471,7 @@ jobs:
           toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build release binary
-        run: cargo build --release -p nkeepass
+        run: cargo build --release --locked -p nkeepass
       # On ubuntu, dpkg-deb is available, so the positive deb is built by the
       # real builder and its metadata checked by dpkg-deb. The pacman builder
       # is skipped there (no makepkg) and exercised on Arch hosts instead.
@@ -459,9 +501,11 @@ jobs:
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-audit
-      # The lockfile pins the audited inputs, but results depend on the
+      # The lockfiles pin the audited inputs, but results depend on the
       # advisory database at run time, so findings can change over time. The
-      # current lockfile has no known findings in the audit database; keep the
+      # current lockfiles have no known findings in the audit database; keep the
       # job unsuppressed so future vulnerable dependencies fail visibly.
-      - name: cargo audit
+      - name: cargo audit (workspace)
         run: cargo audit
+      - name: cargo audit (nkpui)
+        run: cargo audit --file crates/nkpui/Cargo.lock
