@@ -2578,7 +2578,6 @@ fn write_selected_fields(fields: &[nkeepass::FieldMetadata], format: MetadataFor
 fn render_selected_entry_human(
     selected: &nkeepass::SelectedEntry,
     path: &str,
-    has_otp: bool,
     max_width: usize,
     style: u8,
 ) -> Vec<String> {
@@ -2607,7 +2606,7 @@ fn render_selected_entry_human(
     lines.push(format!("{} {safe_path}", label("Entry:")));
     lines.push(format!("{} {safe_title}", label("Title:")));
     lines.push(format!("{} {safe_tags}", label("Tags:")));
-    if has_otp {
+    if selected.has_otp() {
         lines.push(format!(
             "{} {} configured",
             label("OTP:"),
@@ -2646,9 +2645,15 @@ fn render_selected_entry_human(
             .max()
             .unwrap_or(8)
             .clamp(8, max_width.saturating_sub(28).clamp(8, 36));
+        let flags_budget = max_width.saturating_sub(name_col + 4);
         for (field, safe_name) in selected.fields().iter().zip(&field_names) {
             let name_cell = pad_human_cell(&truncate_human_cell(safe_name, name_col), name_col);
-            let flags = format_field_flags(field, style);
+            let flags_plain = format_field_flags(field, 0);
+            let flags = if human_display_width(&flags_plain) <= flags_budget {
+                format_field_flags(field, style)
+            } else {
+                truncate_human_cell(&flags_plain, flags_budget)
+            };
             lines.push(format!("  {name_cell}  {flags}"));
         }
     }
@@ -2721,7 +2726,6 @@ fn write_selected_entry(
             let lines = render_selected_entry_human(
                 selected,
                 path,
-                has_otp,
                 human_output_width(),
                 current_stdout_style(),
             );
@@ -3447,12 +3451,12 @@ fn password(opts: &Options<'_>) -> Result<Option<Zeroizing<String>>> {
     if !io::stdin().is_terminal() {
         return Err(err("password source required for non-interactive input"));
     }
-    eprint!("Master password: ");
+    let _ = write!(io::stderr(), "Master password: ");
     io::stderr()
         .flush()
         .map_err(|_| err("cannot start password prompt"))?;
     let value = rpassword::read_password().map_err(|_| err("cannot read password"))?;
-    eprintln!();
+    let _ = writeln!(io::stderr());
     if value.is_empty() {
         return Err(err("password must not be empty"));
     }
@@ -4800,6 +4804,7 @@ fn write_value_for_sink(
             }
             output
                 .write_all(value)
+                .and_then(|()| output.flush())
                 .map_err(|_| err("cannot write value"))
         }
         "null" => {
@@ -4809,6 +4814,7 @@ fn write_value_for_sink(
             output
                 .write_all(value)
                 .and_then(|()| output.write_all(b"\0"))
+                .and_then(|()| output.flush())
                 .map_err(|_| err("cannot write value"))
         }
         "json" => {
@@ -4833,6 +4839,7 @@ fn write_value_for_sink(
             }
             output
                 .write_all(b"\n")
+                .and_then(|()| output.flush())
                 .map_err(|_| err("cannot write value"))
         }
         "dotenv" => {
@@ -4841,23 +4848,28 @@ fn write_value_for_sink(
             serde_json::to_writer(&mut *output, text).map_err(|_| err("cannot encode value"))?;
             output
                 .write_all(b"\n")
+                .and_then(|()| output.flush())
                 .map_err(|_| err("cannot write value"))
         }
         "shell" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_shell_value(output, name, text)
+            emit_shell_value(output, name, text)?;
+            output.flush().map_err(|_| err("cannot write value"))
         }
         "pwsh" | "powershell" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_powershell_value(output, name, text)
+            emit_powershell_value(output, name, text)?;
+            output.flush().map_err(|_| err("cannot write value"))
         }
         "github-actions" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_github_actions_value(output, name, text)
+            emit_github_actions_value(output, name, text)?;
+            output.flush().map_err(|_| err("cannot write value"))
         }
         "azure-devops" => {
             let (name, text) = named_text(format, name, value)?;
-            emit_azure_devops_value(output, name, text, is_output)
+            emit_azure_devops_value(output, name, text, is_output)?;
+            output.flush().map_err(|_| err("cannot write value"))
         }
         _ => Err(err("invalid output format")),
     }
@@ -4880,7 +4892,10 @@ fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
         cfg!(target_os = "linux"),
         |duration| {
             if cfg!(target_os = "linux") {
-                eprintln!("nkp: keeping clipboard available for up to 30 seconds");
+                let _ = writeln!(
+                    io::stderr(),
+                    "nkp: keeping clipboard available for up to 30 seconds"
+                );
             }
             std::thread::sleep(duration);
         },
@@ -4901,7 +4916,10 @@ fn copy_secret_to_clipboard(value: Zeroizing<String>) -> Result<()> {
         ClipboardCopyOutcome::Copied => {}
     }
     if !cfg!(windows) && !cfg!(target_os = "linux") {
-        eprintln!("nkp: clipboard may retain the secret; this platform cannot safely clear it");
+        let _ = writeln!(
+            io::stderr(),
+            "nkp: clipboard may retain the secret; this platform cannot safely clear it"
+        );
     }
     Ok(())
 }
@@ -5712,9 +5730,11 @@ fn get_many(
             if let Some(output) = opts.output {
                 write_private_output(output, encrypted.as_bytes())
             } else {
-                io::stdout()
+                let mut output = io::stdout().lock();
+                output
                     .write_all(encrypted.as_bytes())
-                    .and_then(|()| io::stdout().write_all(b"\n"))
+                    .and_then(|()| output.write_all(b"\n"))
+                    .and_then(|()| output.flush())
                     .map_err(|_| err("cannot write encrypted output"))
             }
         } else {
@@ -6051,9 +6071,11 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                 if let Some(path) = opts.output {
                     write_private_output(path, encrypted.as_bytes())
                 } else {
-                    io::stdout()
+                    let mut output = io::stdout().lock();
+                    output
                         .write_all(encrypted.as_bytes())
-                        .and_then(|()| io::stdout().write_all(b"\n"))
+                        .and_then(|()| output.write_all(b"\n"))
+                        .and_then(|()| output.flush())
                         .map_err(|_| err("cannot write encrypted output"))
                 }
             } else if opts.clipboard {
@@ -6268,12 +6290,12 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             if !io::stdin().is_terminal() {
                 return Err(err("value input requires a terminal or an explicit source"));
             }
-            eprint!("Value (hidden; 60 second timeout): ");
+            let _ = write!(io::stderr(), "Value (hidden; 60 second timeout): ");
             io::stderr()
                 .flush()
                 .map_err(|_| err("cannot write prompt"))?;
             let value = terminal_password::read(std::time::Duration::from_secs(60));
-            eprintln!();
+            let _ = writeln!(io::stderr());
             updates.push(FieldUpdate {
                 key: name.to_owned(),
                 value: value.map_err(|error| err(error.to_string()))?,
@@ -6901,7 +6923,7 @@ fn write_environment_for_sink(
                     .write_all(value.as_slice())
                     .map_err(|_| err("cannot write value"))?;
             }
-            Ok(())
+            output.flush().map_err(|_| err("cannot write value"))
         }
         "null" => {
             for (name, value) in bindings {
@@ -6916,7 +6938,7 @@ fn write_environment_for_sink(
                     .and_then(|()| output.write_all(b"\0"))
                     .map_err(|_| err("cannot write value"))?;
             }
-            Ok(())
+            output.flush().map_err(|_| err("cannot write value"))
         }
         "json" => {
             if stdout_is_tty {
@@ -6947,6 +6969,7 @@ fn write_environment_for_sink(
             }
             output
                 .write_all(b"\n")
+                .and_then(|()| output.flush())
                 .map_err(|_| err("cannot write output"))
         }
         _ => Err(err("invalid output format")),
@@ -7513,7 +7536,8 @@ fn warn_otp_expiring(name: &str, timestamp: u64, period: u64) {
         && remaining <= OTP_EXPIRY_WARNING_SECONDS
     {
         let safe_name = sanitize_terminal_text(name);
-        eprintln!(
+        let _ = writeln!(
+            io::stderr(),
             "nkp: warning: the code bound to {safe_name} expires in {remaining}s; \
              a server that started its window early may already reject it"
         );
@@ -8670,7 +8694,8 @@ fn trust_command(args: &[String]) -> Result<()> {
 
     if prune {
         let removed = nkeepass::trust::prune_missing(&store_dir).map_err(trust_cli_error)?;
-        eprintln!(
+        let _ = writeln!(
+            io::stderr(),
             "nkp: pruned {removed} missing trusted {}",
             if removed == 1 { "entry" } else { "entries" }
         );
@@ -8683,7 +8708,12 @@ fn trust_command(args: &[String]) -> Result<()> {
         .map_err(trust_cli_error)?;
     for entry in &entries {
         if nkeepass::template::is_safe_display_text(&entry.path) {
-            eprintln!("nkp: trusted {} ({})", entry.path, &entry.sha256[..12]);
+            let _ = writeln!(
+                io::stderr(),
+                "nkp: trusted {} ({})",
+                entry.path,
+                &entry.sha256[..12]
+            );
         }
     }
     Ok(())
@@ -8720,7 +8750,8 @@ fn untrust_command(args: &[String]) -> Result<()> {
     let store_dir = data_dir()?;
     if all {
         let count = nkeepass::trust::untrust_all(&store_dir).map_err(trust_cli_error)?;
-        eprintln!(
+        let _ = writeln!(
+            io::stderr(),
             "nkp: revoked {count} trusted {}",
             if count == 1 { "entry" } else { "entries" }
         );
@@ -8753,9 +8784,10 @@ fn untrust_command(args: &[String]) -> Result<()> {
     }
 
     if removed_count == 0 {
-        eprintln!("nkp: no matching trusted entry");
+        let _ = writeln!(io::stderr(), "nkp: no matching trusted entry");
     } else {
-        eprintln!(
+        let _ = writeln!(
+            io::stderr(),
             "nkp: revoked {removed_count} trusted {}",
             if removed_count == 1 {
                 "entry"
@@ -9121,7 +9153,7 @@ fn emit_hook_outcome(
     outcome: &nkeepass::hook::TransitionOutcome,
 ) -> Result<()> {
     if outcome.discarded_corrupt_state {
-        eprintln!("nkp: warning: discarded invalid hook state");
+        let _ = writeln!(io::stderr(), "nkp: warning: discarded invalid hook state");
     }
     if outcome.emit_patch {
         let script = nkeepass::hook::emit_hook_patch(shell, &outcome.patch)
@@ -9148,7 +9180,7 @@ fn emit_blocked_or_fail(
     )
     .map_err(|e| err(e.to_string()))?;
     if !outcome.suppress_duplicate_warning {
-        eprintln!("{message}");
+        let _ = writeln!(io::stderr(), "{message}");
     }
     emit_hook_outcome(shell, &outcome)
 }
@@ -9252,11 +9284,11 @@ fn read_hook_tty_password() -> Result<Zeroizing<String>> {
         .map_err(|_| err("password source required for non-interactive input"))?;
     #[cfg(not(unix))]
     let pw = {
-        eprint!("Master password: ");
+        let _ = write!(io::stderr(), "Master password: ");
         let _ = io::stderr().flush();
         let value = terminal_password::read(timeout)
             .map_err(|_| err("password source required for non-interactive input"))?;
-        eprintln!();
+        let _ = writeln!(io::stderr());
         value
     };
     if pw.is_empty() {
@@ -9400,7 +9432,7 @@ fn run_hook_with_mode(
                     |name| env::var_os(name),
                 )
                 .map_err(|e| err(e.to_string()))?;
-                eprintln!("nkp: {error}");
+                let _ = writeln!(io::stderr(), "nkp: {error}");
                 return emit_hook_outcome(shell, &outcome);
             }
         };
@@ -9454,7 +9486,7 @@ fn run_hook_with_mode(
                 |name| env::var_os(name),
             )
             .map_err(|e| err(e.to_string()))?;
-            eprintln!("nkp: {error}");
+            let _ = writeln!(io::stderr(), "nkp: {error}");
             return emit_hook_outcome(shell, &outcome);
         }
     };
@@ -9663,7 +9695,7 @@ fn run_hook_with_mode(
                     .map_err(|e| err(e.to_string()))?;
                 write_stdout(script.as_bytes(), "cannot write hook output")?;
             }
-            eprintln!("nkp: {error}");
+            let _ = writeln!(io::stderr(), "nkp: {error}");
             Ok(())
         }
     }

@@ -309,7 +309,9 @@ fn emit_candidates(candidates: impl IntoIterator<Item = String>) -> Result<()> {
     for candidate in candidates {
         writeln!(output, "{candidate}").map_err(|_| err("cannot write completion candidates"))?;
     }
-    Ok(())
+    output
+        .flush()
+        .map_err(|_| err("cannot write completion candidates"))
 }
 
 fn alias_candidates(config: &Config, prefix: &str, kind: Option<Kind>) -> Vec<String> {

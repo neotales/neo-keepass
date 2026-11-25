@@ -18,9 +18,9 @@ nkp files ls (ENTRY | --key ENTRY) [--format json|human]
 
 Lists attachment names, byte sizes, and protection flags for the selected entry
 as JSON Lines (`--format json`, the default) or bounded human-readable columns
-(`--format human`, marking protected attachments `[protected]` and empty lists
-`(no attachments)`). `list` aliases `ls`. The entry selector may be positional
-or supplied with `-k` / `--key`; do not supply both.
+(`--format human`, marking attachments `[protected]` or `[plain]` and empty
+lists `(no attachments)`). `list` aliases `ls`. The entry selector may be
+positional or supplied with `-k` / `--key`; do not supply both.
 
 ### `files add`
 

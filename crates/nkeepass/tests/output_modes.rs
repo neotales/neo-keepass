@@ -1951,6 +1951,10 @@ fn human_format_is_rejected_on_secret_and_interchange_routes() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "covers pre-closed stdout/stderr and mid-stream broken-pipe cases"
+)]
 fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
     use std::io::Read;
 
@@ -1958,9 +1962,11 @@ fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
     let vault = tmp.path().join("pipe-test.kdbx");
     let mut database = KeePassDatabase::default();
     for index in 0..2_000 {
-        database
-            .root
-            .add_entry(Entry::new(format!("entry-{index:04}")));
+        let mut entry = Entry::new(format!("entry-{index:04}"));
+        if index == 0 {
+            entry.password = ProtectedValue::from_text("short-pw");
+        }
+        database.root.add_entry(entry);
     }
     KdbxFile::save(
         &database,
@@ -1974,14 +1980,30 @@ fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
     )
     .unwrap();
 
-    let cases: &[(&[&str], bool)] = &[
-        (&["--help"], false),
-        (&["version"], false),
-        (&["--version"], false),
-        (&["completion", "bash"], false),
-        (&["shell", "init", "bash"], false),
-        (&["shell", "completions", "bash"], false),
-        (&["ls", "--password-env", "NKEEPASS_TEST_PASSWORD"], true),
+    let stdout_cases: &[(&[&str], bool, &[u8])] = &[
+        (&["--help"], false, b"nkp: cannot write output\n"),
+        (&["version"], false, b"nkp: cannot write output\n"),
+        (&["--version"], false, b"nkp: cannot write output\n"),
+        (
+            &["completion", "bash"],
+            false,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &["shell", "init", "bash"],
+            false,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &["shell", "completions", "bash"],
+            false,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &["ls", "--password-env", "NKEEPASS_TEST_PASSWORD"],
+            true,
+            b"nkp: cannot write output\n",
+        ),
         (
             &[
                 "ls",
@@ -1991,10 +2013,54 @@ fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
                 "NKEEPASS_TEST_PASSWORD",
             ],
             true,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &[
+                "get",
+                "entry-0000",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+            true,
+            b"nkp: cannot write value\n",
+        ),
+        (
+            &[
+                "get",
+                "entry-0000",
+                "--format",
+                "null",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+            true,
+            b"nkp: cannot write value\n",
+        ),
+        (
+            &[
+                "env",
+                "-k",
+                "entry-0000",
+                "-F",
+                "Password",
+                "-n",
+                "PW",
+                "--format",
+                "null",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+            true,
+            b"nkp: cannot write value\n",
         ),
     ];
 
-    for (args, needs_vault) in cases {
+    for (args, needs_vault, expected_stderr) in stdout_cases {
+        // Close read end deterministically BEFORE spawn() so there is no spawn-vs-drop race.
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+
         let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
         command
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
@@ -2004,15 +2070,12 @@ fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
             command.args(["--vault", vault.to_str().unwrap()]);
         }
         command.args(*args);
-        let mut child = command
+        let output = command
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::from(writer))
             .stderr(Stdio::piped())
-            .spawn()
+            .output()
             .unwrap();
-        // Close read end immediately to trigger BrokenPipe on stdout writes.
-        drop(child.stdout.take());
-        let output = child.wait_with_output().unwrap();
         let stderr_text = String::from_utf8_lossy(&output.stderr);
         assert!(
             !stderr_text.contains("panicked at")
@@ -2022,9 +2085,32 @@ fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
         );
         assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr_text:?}");
         assert_eq!(
-            output.stderr, b"nkp: cannot write output\n",
+            output.stderr.as_slice(),
+            *expected_stderr,
             "{args:?}: {stderr_text:?}"
         );
+    }
+
+    // Pre-closed stderr must never panic either (status != 101).
+    for (args, expected_code) in [
+        (&["trust", "--prune"][..], 0),
+        (&["untrust", "--all"][..], 0),
+        (&["unknown-command"][..], 2),
+    ] {
+        let (err_reader, err_writer) = std::io::pipe().unwrap();
+        drop(err_reader);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(err_writer))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_code), "{args:?}");
     }
 
     // Also close the pipe partway through a multi-line listing (>64 KiB pipe buffer).
