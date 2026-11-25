@@ -785,7 +785,7 @@ _nkp_complete() {
     if [[ "$command" == use && $position -eq 1 && "$current" != -* ]]; then
         kind='vaults'
     elif [[ "$command" == tui && $position -eq 1 && "$current" != -* ]]; then
-        kind='vault-files'
+        kind='vaults'
     elif [[ "$command" == init && $position -eq 1 && "$current" != -* ]]; then
         kind='vault-files'
     elif [[ "$command" == context && "$action" == use && $position -eq 2 && "$current" != -* ]]; then
@@ -1000,8 +1000,11 @@ _nkp_complete_candidates() {
                 _nk_kind='aliases'
             fi
             ;;
-        tui|init)
-            if [ "$_nk_command" = tui ] || [ "$_nk_command" = init ]; then
+        tui)
+            _nk_kind='vaults'
+            ;;
+        init)
+            if [ "$_nk_command" = init ]; then
                 _nk_kind='vault-files'
             fi
             ;;
@@ -1020,7 +1023,9 @@ _nkp_complete_candidates() {
     esac
     if [ -z "$_nk_kind" ] && [ "$_nk_command" = use ] && [ -z "$_nk_action" ]; then
         _nk_kind='vaults'
-    elif [ -z "$_nk_kind" ] && { [ "$_nk_command" = tui ] || [ "$_nk_command" = init ]; } && [ -z "$_nk_action" ]; then
+    elif [ -z "$_nk_kind" ] && [ "$_nk_command" = tui ] && [ -z "$_nk_action" ]; then
+        _nk_kind='vaults'
+    elif [ -z "$_nk_kind" ] && [ "$_nk_command" = init ] && [ -z "$_nk_action" ]; then
         _nk_kind='vault-files'
     fi
     if [ -n "$_nk_kind" ]; then
@@ -1306,7 +1311,7 @@ _nkp() {
     if [[ "$command" == use && $position -eq 1 && "$cur" != -* ]]; then
         kind='vaults'
     elif [[ "$command" == tui && $position -eq 1 && "$cur" != -* ]]; then
-        kind='vault-files'
+        kind='vaults'
     elif [[ "$command" == init && $position -eq 1 && "$cur" != -* ]]; then
         kind='vault-files'
     elif [[ "$command" == context && "$action" == use && $position -eq 2 && "$cur" != -* ]]; then
@@ -1703,7 +1708,7 @@ complete -c nkp -n '__fish_use_subcommand' -l color -r -a 'auto always never bas
 complete -c nkp -n '__fish_use_subcommand' -l no-color
 
 complete -c nkp -n '__nkp_cmd use' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
-complete -c nkp -n '__nkp_cmd tui' -a '(nkp (__nkp_complete_vault_args) __complete vault-files (commandline -ct))'
+complete -c nkp -n '__nkp_cmd tui' -a '(nkp (__nkp_complete_vault_args) __complete vaults (commandline -ct))'
 
 complete -c nkp -n '__nkp_cmd init' -a '(nkp (__nkp_complete_vault_args) __complete vault-files (commandline -ct))'
 complete -c nkp -n '__nkp_cmd init' -l json
@@ -2026,7 +2031,7 @@ Register-ArgumentCompleter -Native -CommandName nkp -ScriptBlock {
     if ($command -eq 'use' -and $currentIndex -eq ($commandIndex + 1) -and -not $wordToComplete.StartsWith('-')) {
         $protocolKind = 'vaults'
     } elseif ($command -eq 'tui' -and $currentIndex -eq ($commandIndex + 1) -and -not $wordToComplete.StartsWith('-')) {
-        $protocolKind = 'vault-files'
+        $protocolKind = 'vaults'
     } elseif ($command -eq 'init' -and $currentIndex -eq ($commandIndex + 1) -and -not $wordToComplete.StartsWith('-')) {
         $protocolKind = 'vault-files'
     } elseif ($command -eq 'context' -and $action -eq 'use' -and $currentIndex -eq ($commandIndex + 2) -and -not $wordToComplete.StartsWith('-')) {
@@ -2436,7 +2441,7 @@ export extern nkp [
   --no-color
 ]
 export extern "nkp use" [target: string@"nu-complete nkp vaults"]
-export extern "nkp tui" [path: string@"nu-complete nkp vault-files"]
+export extern "nkp tui" [path?: string@"nu-complete nkp vaults"]
 export extern "nkp inject" [file?: string --file(-f): string --stdin --output(-o): string --format: string@"raw dotenv" --check --password: string --password-env: string --password-file: string --password-stdin --key-file: string]
 export extern "nkp trust" [path?: string --list --json --prune]
 export extern "nkp untrust" [path?: string --all]

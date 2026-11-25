@@ -22,7 +22,7 @@ Short flags normalized across CLI routes are `-h` (`--help`), `-V` (`--vault`),
 `-c` (`--chars` / `--size`), `-U` (`--upper`), `-L` (`--lower`), `-D`
 (`--digits`), `-S` (`--symbols`), `-r` (`--age-recipient`), and `-i`
 (`--age-identity`). `--version` is accepted at the root instead of a command.
-Neither `version`, `--version`, `tui`, `use`, `alias`, `config`, `completion`,
+Neither `version`, `--version`, `use`, `alias`, `config`, `completion`,
 `trust`, `untrust`, `shell`, nor `context` subcommands other than `context show`
 accept a preceding `-V` / `--vault` option.
 
@@ -140,8 +140,9 @@ positional glob or query. Other public commands do not accept positional
 arguments after `--`.
 
 `init` accepts one optional positional path and does not accept a `--`
-terminator before it. Do not combine the path with `--vault`. `tui` requires
-one positional path and does not accept `--`. `secrets ls` accepts at most
+terminator before it. Do not combine the path with `--vault`. `tui` accepts
+one optional positional path or alias (`--` may precede a dash-leading target,
+and cannot be combined with `--vault`). `secrets ls` accepts at most
 one glob, `secrets search` requires one query, and `config ls` accepts at
 most one glob. Other command arguments are named subcommands, aliases, or
 values described in their reference pages.

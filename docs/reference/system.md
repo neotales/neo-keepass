@@ -1,7 +1,7 @@
 # Configuration, child processes, completion, and root commands
 
 Every route accepts `-h` or `--help`. `-V PATH` or `--vault PATH` may precede
-vault-opening commands (it is rejected on `tui`, `use`, `alias`, `config`,
+vault-opening commands (it is rejected on `use`, `alias`, `config`,
 `completion`, `version`, `trust`, `untrust`, `shell`, and `context` subcommands
 other than `context show`). Password flags are available only on credential
 routes. See [vault credentials](credentials.md) for the exact route matrix.
@@ -60,12 +60,15 @@ the full command line: integrations must pass `true` as its optional seventh
 ## `tui`
 
 ```text
-nkp tui PATH
+nkp tui [PATH|ALIAS]
 ```
 
-Opens the interactive terminal browser for the supplied vault path. This
-command requires exactly one path argument. It does not use the active-vault
-selection and does not accept `-V` / `--vault`; pass the vault path directly.
+Opens the interactive terminal browser for the selected vault. Pass a vault
+path, a configured vault alias (`work` or `@work`), or `-V` / `--vault PATH`
+(cannot combine a positional target with `--vault`). When omitted, `nkp tui`
+resolves `NEO_KEEPASS_VAULT` / `NEO_KEEPASS_VAULT_PATH`, `current`, or
+`default_vault` from configuration, failing with an actionable error when no
+vault is configured.
 
 The UI pauses key handling below 40 columns by 12 rows. Revealed values own
 focus: Esc or Enter hides them; unrelated keys do not open hidden dialogs.
@@ -114,7 +117,7 @@ retry; a successful save completes the requested lock or exit.
 Lock drops the database session and credentials (whose owned master-password
 buffer is zeroized on drop), clears the UI's live input/reveal buffers, and
 attempts clipboard release. No saves are permitted after lock. There is no
-in-place re-unlock or cached-password retry: press `q`, then run `nkp tui PATH`
+in-place re-unlock or cached-password retry: press `q`, then run `nkp tui [PATH|ALIAS]`
 again and supply credentials afresh. Clipboard warnings remain actionable on
 the lock screen; acknowledging one does not erase an external clipboard copy.
 

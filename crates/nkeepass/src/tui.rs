@@ -452,6 +452,9 @@ struct App {
     entries_offset: usize,
     detail_scroll: usize,
     detail_max_scroll: usize,
+    compact_detail: bool,
+    compact_fields_offset: usize,
+    compact_fields_area: Rect,
     groups_area: Rect,
     entries_area: Rect,
     detail_area: Rect,
@@ -1499,6 +1502,28 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
     }
 }
 
+fn rebuild_stack_paths(root_path: &str, target_path: Option<&str>) -> Vec<String> {
+    let Some(target) = target_path else {
+        return Vec::new();
+    };
+    let parts: Vec<&str> = target.split('/').collect();
+    if root_path.is_empty() {
+        if target.is_empty() {
+            return Vec::new();
+        }
+        let mut paths = vec![String::new()];
+        for len in 1..parts.len() {
+            paths.push(parts[..len].join("/"));
+        }
+        paths
+    } else {
+        if parts.len() <= 1 {
+            return Vec::new();
+        }
+        (1..parts.len()).map(|len| parts[..len].join("/")).collect()
+    }
+}
+
 fn create_group_or_entry(app: &mut App, action: Action, name: &str) {
     let Some(parent) = app.pending_group.take() else {
         app.status = "No parent group selected".into();
@@ -1512,9 +1537,14 @@ fn create_group_or_entry(app: &mut App, action: Action, name: &str) {
         app.status = "Name must be a non-empty path component".into();
         return;
     }
+    let root_path = app
+        .service
+        .root_group(app.session)
+        .and_then(|root| app.service.group_path(&root))
+        .unwrap_or_default();
     let active_path = app.service.group_path(&app.tree_parent).ok();
     let parent_path = app.service.group_path(&parent).ok();
-    let mut stack_paths: Vec<String> = app
+    let stack_paths: Vec<String> = app
         .tree_stack
         .iter()
         .filter_map(|group| app.service.group_path(group).ok())
@@ -1540,18 +1570,21 @@ fn create_group_or_entry(app: &mut App, action: Action, name: &str) {
             app.entry = None;
             app.detail.clear();
             app.fields.clear();
-            let target_path = if matches!(created, Created::Entry(_))
-                && parent_path.is_some()
-                && parent_path != active_path
-            {
-                if let Some(active) = active_path.clone() {
-                    stack_paths.push(active);
+            let (target_path, target_stack_paths) = match &created {
+                Created::Entry(_) => {
+                    app.query.zeroize();
+                    app.query_before_input.zeroize();
+                    let chosen = if parent_path.is_some() && parent_path != active_path {
+                        parent_path
+                    } else {
+                        active_path
+                    };
+                    let rebuilt = rebuild_stack_paths(&root_path, chosen.as_deref());
+                    (chosen, rebuilt)
                 }
-                parent_path
-            } else {
-                active_path
+                Created::Group => (active_path, stack_paths),
             };
-            app.re_resolve_tree_after_mutation(target_path.as_deref(), &stack_paths);
+            app.re_resolve_tree_after_mutation(target_path.as_deref(), &target_stack_paths);
             app.refresh();
             match created {
                 Created::Group => {
@@ -2471,6 +2504,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.groups_area = Rect::default();
         app.entries_area = Rect::default();
         app.detail_area = Rect::default();
+        app.compact_detail = false;
+        app.compact_fields_area = Rect::default();
         frame.render_widget(
             Paragraph::new("Resize terminal to at least 40 columns by 12 rows. Input paused.")
                 .wrap(Wrap { trim: false }),
@@ -2820,8 +2855,15 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         );
     }
     if !app.locked && app.entry.is_some() && (areas[1].width < 72 || areas[1].height < 10) {
+        app.groups_area = Rect::default();
+        app.entries_area = Rect::default();
         app.detail_area = areas[1];
+        app.compact_detail = true;
         draw_compact_entry(frame, app, areas[1]);
+    } else {
+        app.compact_detail = false;
+        app.compact_fields_area = Rect::default();
+        app.compact_fields_offset = 0;
     }
     if let Some(modal @ Modal::ClipboardWarning { .. }) = &app.modal {
         draw_modal(frame, modal, &app.aliases, &app.theme);
@@ -2904,7 +2946,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
-fn draw_compact_entry(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_compact_entry(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // On small screens metadata headings used to occupy every visible row.
     // Give fields the full width and let List keep the selected row in view.
     frame.render_widget(Clear, area);
@@ -2915,6 +2957,7 @@ fn draw_compact_entry(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    app.compact_fields_area = chunks[1];
     let title_line = match (app.detail.first(), app.entry_icon) {
         (Some(title), Some((icon_id, _))) => {
             let icon = standard_icon(icon_id);
@@ -2936,13 +2979,14 @@ fn draw_compact_entry(frame: &mut Frame<'_>, app: &App, area: Rect) {
             ListItem::new(field_row(name, *protected, index == app.selected_field))
         })
         .collect::<Vec<_>>();
-    let mut state = ListState::default();
+    let mut state = ListState::default().with_offset(app.compact_fields_offset);
     state.select((!rows.is_empty()).then_some(app.selected_field));
     frame.render_stateful_widget(
         List::new(rows).highlight_style(app.theme.selection),
         chunks[1],
         &mut state,
     );
+    app.compact_fields_offset = state.offset();
 }
 
 fn usable_size(area: Rect) -> bool {
@@ -3712,7 +3756,16 @@ fn handle_mouse_left_click(app: &mut App, column: u16, row: u16) {
     }
     if rect_contains(app.detail_area, column, row) {
         app.clear_reveal();
-        if app.entry.is_none() && app.hits.get(app.entry_selected).is_some() {
+        if app.compact_detail {
+            if rect_contains(app.compact_fields_area, column, row) {
+                let idx = app
+                    .compact_fields_offset
+                    .saturating_add(usize::from(row - app.compact_fields_area.y));
+                if idx < app.fields.len() {
+                    app.selected_field = idx;
+                }
+            }
+        } else if app.entry.is_none() && app.hits.get(app.entry_selected).is_some() {
             app.focus = FocusPane::Entries;
             app.select();
         }
@@ -3729,6 +3782,9 @@ fn handle_mouse_scroll(app: &mut App, column: u16, row: u16, down: bool) {
             app.group_selected.saturating_sub(1)
         };
     } else if rect_contains(app.entries_area, column, row) {
+        app.entry = None;
+        app.focus = FocusPane::Entries;
+        app.clear_reveal();
         app.entry_selected = if down {
             app.entry_selected
                 .saturating_add(1)
@@ -3739,7 +3795,7 @@ fn handle_mouse_scroll(app: &mut App, column: u16, row: u16, down: bool) {
         app.detail_scroll = 0;
         app.load_entry_preview();
     } else if rect_contains(app.detail_area, column, row) {
-        if app.entry.is_some() && (app.detail_area.width < 32 || app.detail_area.height < 10) {
+        if app.compact_detail {
             move_field_selection(&mut app.selected_field, app.fields.len(), down);
         } else {
             app.detail_scroll = if down {
@@ -3757,21 +3813,33 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
     if app.locked || app.pending_decision.is_some() || app.reveal.is_some() || app.input_mode {
         return;
     }
-    app.last_activity = Instant::now();
     if let Some(modal) = app.modal.as_mut() {
         match mouse.kind {
-            MouseEventKind::ScrollUp => scroll_modal(modal, false),
-            MouseEventKind::ScrollDown => scroll_modal(modal, true),
+            MouseEventKind::ScrollUp => {
+                app.last_activity = Instant::now();
+                scroll_modal(modal, false);
+            }
+            MouseEventKind::ScrollDown => {
+                app.last_activity = Instant::now();
+                scroll_modal(modal, true);
+            }
             _ => {}
         }
         return;
     }
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            app.last_activity = Instant::now();
             handle_mouse_left_click(app, mouse.column, mouse.row);
         }
-        MouseEventKind::ScrollUp => handle_mouse_scroll(app, mouse.column, mouse.row, false),
-        MouseEventKind::ScrollDown => handle_mouse_scroll(app, mouse.column, mouse.row, true),
+        MouseEventKind::ScrollUp => {
+            app.last_activity = Instant::now();
+            handle_mouse_scroll(app, mouse.column, mouse.row, false);
+        }
+        MouseEventKind::ScrollDown => {
+            app.last_activity = Instant::now();
+            handle_mouse_scroll(app, mouse.column, mouse.row, true);
+        }
         _ => {}
     }
 }
@@ -4054,7 +4122,6 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
 }
 
 fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Result<()> {
-    let mut mouse_guard = MouseCaptureGuard::enter()?;
     let mut reveal_was_drawn = false;
     loop {
         let was_revealed = reveal_was_drawn;
@@ -4108,7 +4175,7 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
         }
     }
     app.lock_vault();
-    mouse_guard.disable()
+    Ok(())
 }
 
 /// Starts the explicitly selected TUI command.
@@ -4141,23 +4208,36 @@ pub fn launch(path: &Path, aliases: Vec<String>, color_override: ColorOverride) 
     let result = run_terminal(&mut app, path);
     #[cfg(not(unix))]
     let result = ratatui::run(|terminal| {
-        app_result_before_teardown(&mut app, |app| run_ui(terminal, app, path))
+        let mut mouse_guard = MouseCaptureGuard::enter()?;
+        let result = app_result_before_teardown(&mut app, |app| run_ui(terminal, app, path));
+        finish_terminal(result, mouse_guard.disable())
     });
     app.lock_vault();
     result
+}
+
+struct LockOnDrop<'a>(&'a mut App);
+
+impl Drop for LockOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.lock_vault();
+    }
 }
 
 fn app_result_before_teardown(
     app: &mut App,
     run: impl FnOnce(&mut App) -> io::Result<()>,
 ) -> io::Result<()> {
-    let result = run(app);
-    // Normal run_ui completion already locks the vault. Escaping errors must
-    // do so too, before screen writes or mode restoration can block/fail.
-    // Recoverable save errors stay inside run_ui and never cross this boundary.
+    let guard = LockOnDrop(app);
+    let result = run(guard.0);
+    // Normal run_ui completion already locks the vault. Escaping errors and
+    // unwinding panics must do so too, before screen writes, MouseCaptureGuard,
+    // or mode restoration can block/fail. Recoverable save errors stay inside
+    // run_ui and never cross this boundary.
     if result.is_err() {
-        app.lock_vault();
+        guard.0.lock_vault();
     }
+    std::mem::forget(guard);
     result
 }
 
@@ -4199,11 +4279,22 @@ fn run_terminal(app: &mut App, path: &Path) -> io::Result<()> {
             .open("/dev/tty")?
     };
     let mut modes = terminal_password::QuietTerminal::new(terminal)?;
+    // Declare MouseCaptureGuard outside run_initialized_terminal /
+    // app_result_before_teardown so app.lock_vault() always drops credentials
+    // before DisableMouseCapture writes to stdout, including during panics.
+    let mut mouse_guard = None;
     // Ratatui's panic hook also restores its QUIET snapshot, before unwinding
     // reaches modes. It cannot replay input under the original echo/ISIG bits.
     let result = run_initialized_terminal(app, ratatui::try_init(), |terminal, app| {
+        mouse_guard = Some(MouseCaptureGuard::enter()?);
         run_ui(terminal, app, path)
     });
+    let result = finish_terminal(
+        result,
+        mouse_guard
+            .as_mut()
+            .map_or(Ok(()), MouseCaptureGuard::disable),
+    );
     restore_terminal_with(
         result,
         crossterm::terminal::disable_raw_mode,
@@ -4231,7 +4322,6 @@ fn restore_terminal_with(
     finish_terminal(result, restore_modes())
 }
 
-#[cfg(unix)]
 fn finish_terminal(result: io::Result<()>, cleanup: io::Result<()>) -> io::Result<()> {
     match (result, cleanup) {
         (Err(primary), Err(cleanup)) => Err(io::Error::new(
@@ -4290,6 +4380,9 @@ fn new_app_with_theme(
         entries_offset: 0,
         detail_scroll: 0,
         detail_max_scroll: 0,
+        compact_detail: false,
+        compact_fields_offset: 0,
+        compact_fields_area: Rect::default(),
         groups_area: Rect::default(),
         entries_area: Rect::default(),
         detail_area: Rect::default(),
@@ -6302,6 +6395,108 @@ mod tests {
             },
         );
         assert!(matches!(app.modal, Some(super::Modal::Help { scroll: 0 })));
+        app.modal = None;
+
+        // Passive MouseEventKind::Moved must NOT reset last_activity.
+        let stale_activity = std::time::Instant::now() - std::time::Duration::from_secs(120);
+        app.last_activity = stale_activity;
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 5,
+                row: 5,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.last_activity, stale_activity);
+
+        // Scrolling entries_area while an entry is open clears app.entry and syncs preview.
+        app.focus = super::FocusPane::Entries;
+        app.entry_selected = 0;
+        app.select();
+        assert!(app.entry.is_some());
+        assert_eq!(app.focus, super::FocusPane::Detail);
+        let _ = screen(&mut app, 100, 24);
+        let entries_x = app.entries_area.x;
+        let entries_y = app.entries_area.y;
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: entries_x + 2,
+                row: entries_y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(app.entry.is_none());
+        assert_eq!(app.focus, super::FocusPane::Entries);
+        assert_eq!(app.entry_selected, 1);
+        assert!(
+            app.detail
+                .first()
+                .is_some_and(|line| line.contains("SecondEntry"))
+        );
+    }
+
+    #[test]
+    fn compact_entry_overlay_clears_hidden_hit_rects_and_routes_mouse_to_fields() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        for (width, height) in [(60, 16), (40, 12)] {
+            let (_dir, mut app) = app_fixture();
+            let root = app.service.root_group(app.session).unwrap();
+            app.service.add_group(&root, "Work").unwrap();
+            let root = app.service.root_group(app.session).unwrap();
+            app.service
+                .create_entry_in_group(&root, "SecondEntry")
+                .unwrap();
+            app.reset_tree_after_mutation();
+            app.refresh();
+
+            app.focus = super::FocusPane::Entries;
+            app.entry_selected = 0;
+            app.select();
+            assert!(app.entry.is_some());
+            assert_eq!(app.selected_field, 0);
+
+            let _ = screen(&mut app, width, height);
+            assert!(app.compact_detail);
+            assert_eq!(app.groups_area, super::Rect::default());
+            assert_eq!(app.entries_area, super::Rect::default());
+            assert!(app.compact_fields_area.height >= 2);
+
+            // Clicking on the left side (where hidden groups/entries used to live) hits compact detail fields, never hidden lists.
+            let click_x = app.compact_fields_area.x + 1;
+            let click_y = app.compact_fields_area.y + 1;
+            super::handle_mouse_event(
+                &mut app,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: click_x,
+                    row: click_y,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+            );
+            assert_eq!(app.selected_field, 1);
+            assert_eq!(app.entry_selected, 0);
+            assert_eq!(app.group_selected, 0);
+            assert!(app.entry.is_some());
+
+            // Scrolling on the left side of detail_area moves selected_field cleanly.
+            super::handle_mouse_event(
+                &mut app,
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: click_x,
+                    row: click_y,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+            );
+            assert_eq!(app.selected_field, 2);
+            assert_eq!(app.entry_selected, 0);
+            assert!(app.entry.is_some());
+        }
     }
 
     #[test]
@@ -6346,6 +6541,21 @@ mod tests {
         assert!(wide.contains("ProdDb"));
         assert!(wide.contains("/Work/Infra"));
         assert!(wide.contains("[UNSAVED · Ctrl+S]"));
+
+        // Creating an entry while a `/` search filter is active clears the filter and rebuilds ancestors.
+        app.query.push_str("nonexistent-filter");
+        app.refresh();
+        assert!(app.hits.is_empty());
+        super::begin_add(&mut app, super::Action::AddEntry);
+        for ch in "StagingDb".chars() {
+            super::handle_input_mode_key(&mut app, crossterm::event::KeyCode::Char(ch));
+        }
+        super::handle_input_mode_key(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(app.query.is_empty());
+        assert_eq!(app.tree_stack.len(), 2);
+        assert_eq!(app.display_group_path(), "/Work/Infra");
+        assert!(app.hits.iter().any(|hit| hit.title() == "StagingDb"));
+        assert_eq!(app.hits[app.entry_selected].title(), "StagingDb");
     }
 
     #[test]
