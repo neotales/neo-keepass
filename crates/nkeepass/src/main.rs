@@ -1208,9 +1208,14 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command_with(
         "tui",
-        "tui PATH",
+        "tui [PATH|ALIAS]",
         "Open the interactive private-terminal browser.",
-        &["tui \"$HOME/vaults/work.kdbx\""],
+        &[
+            "tui",
+            "tui work",
+            "tui @work",
+            "tui \"$HOME/vaults/work.kdbx\"",
+        ],
         NO_NOTES,
         NO_OPTIONS,
         NO_COMMANDS,
@@ -2102,6 +2107,79 @@ fn active_vault<'a>(
         return Ok((resolve_vault(path, config)?, "default"));
     }
     Ok((data_vault()?, "data-directory"))
+}
+
+fn resolve_tui_vault(
+    positional: Option<&str>,
+    vault_flag: Option<&str>,
+    config: &Config,
+) -> Result<PathBuf> {
+    resolve_tui_vault_with(positional, vault_flag, config, || {
+        active_vault(None, config)
+    })
+}
+
+fn resolve_tui_vault_with<'a>(
+    positional: Option<&'a str>,
+    vault_flag: Option<&'a str>,
+    config: &'a Config,
+    fallback: impl FnOnce() -> Result<(PathBuf, &'static str)>,
+) -> Result<PathBuf> {
+    let explicit = match (positional, vault_flag) {
+        (Some(_), Some(_)) => {
+            return Err(err(
+                "usage: nkp tui [PATH|ALIAS] (pass either positional PATH|ALIAS or --vault, not both)",
+            ));
+        }
+        (Some(target), None) | (None, Some(target)) => Some(target),
+        (None, None) => None,
+    };
+    if let Some(target) = explicit {
+        if target.is_empty() || !safe_metadata(target) {
+            return Err(err("vault path cannot contain terminal-control bytes"));
+        }
+        if Path::new(target).is_absolute() {
+            return vault_path(target);
+        }
+        if let Some(alias_name) = target.strip_prefix('@') {
+            return match config.aliases.get(alias_name) {
+                Some(Alias {
+                    kind: Kind::Vault,
+                    target: alias_target,
+                    ..
+                }) => vault_path(alias_target),
+                _ if Path::new(target).exists()
+                    || target.contains('/')
+                    || target.contains('\\') =>
+                {
+                    Ok(PathBuf::from(target))
+                }
+                _ => Err(err("vault alias not found")),
+            };
+        }
+        if let Some(Alias {
+            kind: Kind::Vault,
+            target: alias_target,
+            ..
+        }) = config.aliases.get(target)
+        {
+            return vault_path(alias_target);
+        }
+        if Path::new(target).exists()
+            || target.contains('/')
+            || target.contains('\\')
+            || target.contains('.')
+        {
+            return Ok(PathBuf::from(target));
+        }
+        return Err(err("vault alias not found"));
+    }
+    match fallback()? {
+        (path, "data-directory") if !path.exists() => Err(err(
+            "no vault specified and no default vault configured; pass a path/alias or run 'nkp init' / 'nkp use'",
+        )),
+        (path, _) => Ok(path),
+    }
 }
 
 struct TtyJsonFormatter;
@@ -10045,8 +10123,7 @@ fn uses_vault_option(route: &[String]) -> bool {
     !route.first().is_some_and(|cmd| {
         matches!(
             cmd.as_str(),
-            "tui"
-                | "completion"
+            "completion"
                 | "version"
                 | "use"
                 | "alias"
@@ -10472,11 +10549,6 @@ fn run(args: &[String], program: &str, color: ColorOption) -> Result<()> {
     let rest = command_args.as_ref();
     if vault.is_some() {
         match command {
-            "tui" => {
-                return Err(err(
-                    "--vault is not supported for tui; pass the vault path directly: nkp tui PATH",
-                ));
-            }
             "completion" | "version" | "--version" | "use" | "alias" | "config" | "trust"
             | "untrust" | "shell" | "__hook" => {
                 return Err(err("this command does not accept --vault"));
@@ -10492,10 +10564,29 @@ fn run(args: &[String], program: &str, color: ColorOption) -> Result<()> {
     // it skips option values, honors the `--` boundary, and exempts the private
     // `__complete` protocol.
     if command == "tui" {
-        let [path] = rest else {
-            return Err(err("usage: nkp tui PATH"));
-        };
-        let aliases = load_config()?
+        let opts =
+            options(rest, Positional::Path).map_err(|_| err("usage: nkp tui [PATH|ALIAS]"))?;
+        validate_allowed_options(
+            &opts,
+            &AllowedOptions {
+                allow_path: true,
+                ..AllowedOptions::none()
+            },
+            "invalid or duplicate option",
+            None,
+            "this command does not accept age options",
+        )?;
+        if opts.password.is_some()
+            || opts.password_env.is_some()
+            || opts.password_file.is_some()
+            || opts.key_file.is_some()
+            || opts.password_stdin
+        {
+            return Err(err("this command does not accept credential options"));
+        }
+        let config = load_config()?;
+        let path = resolve_tui_vault(opts.path, vault, &config)?;
+        let aliases = config
             .aliases
             .iter()
             .map(|(name, alias)| {
@@ -10514,7 +10605,7 @@ fn run(args: &[String], program: &str, color: ColorOption) -> Result<()> {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        return tui::launch(Path::new(path), aliases, color.into_tui_override())
+        return tui::launch(&path, aliases, color.into_tui_override())
             .map_err(|_| err("TUI operation failed"));
     }
     match command {
@@ -15454,12 +15545,11 @@ mod tests {
             );
         }
 
-        // Verify non-vault routes omit -V, --vault, and context show keeps it.
+        // Verify non-vault routes omit -V, --vault, and tui + context show keep it.
         for non_vault in [
             vec!["trust"],
             vec!["untrust"],
             vec!["use"],
-            vec!["tui"],
             vec!["version"],
             vec!["completion"],
             vec!["shell"],
@@ -15489,6 +15579,9 @@ mod tests {
             render_help("nkp", &["context".into(), "show".into()], HELP_WIDTH)
                 .contains("-V, --vault PATH")
         );
+        let tui_help = render_help("nkp", &["tui".into()], HELP_WIDTH);
+        assert!(tui_help.contains("-V, --vault PATH"));
+        assert!(tui_help.contains("tui [PATH|ALIAS]"));
 
         // Verify every advertised flag on operation() routes is accepted by the parser.
         let operation_routes: &[(&str, &[&str])] = &[
@@ -15775,5 +15868,97 @@ mod tests {
         let wide = render_aliases_human(&[(&name, &alias)], 88, 0);
         assert!(wide[1].contains("\\u{202e}"));
         assert!(!wide[1].contains('\u{202E}'));
+    }
+
+    #[test]
+    fn tui_vault_resolution_supports_aliases_vault_flag_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_path = dir.path().join("work.kdbx");
+        let work_str = normalized_vault_text(&work_path);
+        let default_path = dir.path().join("default.kdbx");
+        let default_str = normalized_vault_text(&default_path);
+        let missing_data = dir.path().join("missing-data.kdbx");
+
+        let mut config = Config::default();
+        config.aliases.insert(
+            "work".to_owned(),
+            Alias {
+                kind: Kind::Vault,
+                target: work_str.clone(),
+                field: None,
+            },
+        );
+        config.aliases.insert(
+            "mail".to_owned(),
+            Alias {
+                kind: Kind::Entry,
+                target: "Services/mail".to_owned(),
+                field: None,
+            },
+        );
+
+        // Positional alias with and without '@'
+        assert_eq!(
+            resolve_tui_vault(Some("work"), None, &config).unwrap(),
+            work_path
+        );
+        assert_eq!(
+            resolve_tui_vault(Some("@work"), None, &config).unwrap(),
+            work_path
+        );
+        // --vault alias with and without '@' and absolute path
+        assert_eq!(
+            resolve_tui_vault(None, Some("work"), &config).unwrap(),
+            work_path
+        );
+        assert_eq!(
+            resolve_tui_vault(None, Some("@work"), &config).unwrap(),
+            work_path
+        );
+        assert_eq!(
+            resolve_tui_vault(None, Some(&work_str), &config).unwrap(),
+            work_path
+        );
+        // Relative/path-like fallback
+        assert_eq!(
+            resolve_tui_vault(Some("./local.kdbx"), None, &config).unwrap(),
+            PathBuf::from("./local.kdbx")
+        );
+        // Entry alias / unknown alias rejected cleanly
+        assert!(resolve_tui_vault(Some("@mail"), None, &config).is_err());
+        assert!(resolve_tui_vault(Some("missing"), None, &config).is_err());
+        // Both positional and --vault rejected cleanly
+        let both_err = resolve_tui_vault(Some("work"), Some(&work_str), &config).unwrap_err();
+        assert!(both_err.0.contains("tui [PATH|ALIAS]"));
+
+        // Missing default when data-directory vault does not exist
+        let missing_err = resolve_tui_vault_with(None, None, &config, || {
+            Ok((missing_data.clone(), "data-directory"))
+        })
+        .unwrap_err();
+        assert!(missing_err.0.contains("no vault specified"));
+        assert!(missing_err.0.contains("nkp init"));
+
+        // Configured current / default_vault resolves via fallback
+        config.current = Some("work".to_owned());
+        assert_eq!(
+            resolve_tui_vault_with(None, None, &config, || {
+                Ok((resolve_vault("work", &config)?, "context"))
+            })
+            .unwrap(),
+            work_path
+        );
+        config.current = None;
+        config.default_vault = Some(default_str);
+        assert_eq!(
+            resolve_tui_vault_with(None, None, &config, || {
+                Ok((
+                    resolve_vault(config.default_vault.as_deref().unwrap(), &config)?,
+                    "default",
+                ))
+            })
+            .unwrap(),
+            default_path
+        );
     }
 }

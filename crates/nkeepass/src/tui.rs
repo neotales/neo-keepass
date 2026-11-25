@@ -13,7 +13,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::clipboard::{ArboardAdapter, ClipboardCopyOutcome, ClipboardLease};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use neotales_keepass::KdbxCredentials;
 use nkeepass::{
     CustomIconId, KDBX_LIMITS, SearchHit, VaultService,
@@ -124,6 +127,8 @@ struct TuiTheme {
     dirty: Style,
     error: Style,
     warning: Style,
+    focused_border: Style,
+    unfocused_border: Style,
     cat_security: Style,
     cat_network: Style,
     cat_system: Style,
@@ -134,6 +139,10 @@ struct TuiTheme {
 }
 
 impl TuiTheme {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "defines all four adaptive color tiers in one table"
+    )]
     fn from_tier(tier: ColorTier) -> Self {
         match tier {
             ColorTier::TrueColor => Self {
@@ -152,6 +161,10 @@ impl TuiTheme {
                     .fg(Color::Rgb(255, 90, 90))
                     .add_modifier(Modifier::BOLD),
                 warning: Style::default().fg(Color::Rgb(240, 190, 70)),
+                focused_border: Style::default()
+                    .fg(Color::Rgb(80, 190, 255))
+                    .add_modifier(Modifier::BOLD),
+                unfocused_border: Style::default().fg(Color::Rgb(90, 100, 115)),
                 cat_security: Style::default().fg(Color::Rgb(240, 190, 70)),
                 cat_network: Style::default().fg(Color::Rgb(80, 190, 255)),
                 cat_system: Style::default().fg(Color::Rgb(175, 135, 255)),
@@ -176,6 +189,10 @@ impl TuiTheme {
                     .fg(Color::Indexed(203))
                     .add_modifier(Modifier::BOLD),
                 warning: Style::default().fg(Color::Indexed(220)),
+                focused_border: Style::default()
+                    .fg(Color::Indexed(39))
+                    .add_modifier(Modifier::BOLD),
+                unfocused_border: Style::default().fg(Color::Indexed(240)),
                 cat_security: Style::default().fg(Color::Indexed(220)),
                 cat_network: Style::default().fg(Color::Indexed(39)),
                 cat_system: Style::default().fg(Color::Indexed(141)),
@@ -198,6 +215,10 @@ impl TuiTheme {
                     .add_modifier(Modifier::BOLD),
                 error: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 warning: Style::default().fg(Color::Yellow),
+                focused_border: Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+                unfocused_border: Style::default().fg(Color::DarkGray),
                 cat_security: Style::default().fg(Color::Yellow),
                 cat_network: Style::default().fg(Color::Cyan),
                 cat_system: Style::default().fg(Color::LightBlue),
@@ -214,6 +235,8 @@ impl TuiTheme {
                 dirty: Style::default().add_modifier(Modifier::BOLD),
                 error: Style::default().add_modifier(Modifier::BOLD),
                 warning: Style::default().add_modifier(Modifier::BOLD),
+                focused_border: Style::default().add_modifier(Modifier::BOLD),
+                unfocused_border: Style::default().add_modifier(Modifier::DIM),
                 cat_security: Style::default(),
                 cat_network: Style::default(),
                 cat_system: Style::default(),
@@ -396,11 +419,26 @@ fn needs_decision(dirty: bool, uncommitted_edit: bool) -> bool {
     dirty || uncommitted_edit
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusPane {
+    Groups,
+    Entries,
+    Detail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyOutcome {
+    Continue,
+    Exit,
+}
+
 struct App {
     service: VaultService,
     session: nkeepass::SessionId,
     // No outer launch/run_ui borrow may keep these alive after lock.
     credentials: Option<KdbxCredentials>,
+    vault_name: String,
+    focus: FocusPane,
     hits: Vec<SearchHit>,
     groups: Vec<UiGroup>,
     tree_parent: GroupRef,
@@ -408,7 +446,15 @@ struct App {
     tree_cursor: Option<TreeCursor>,
     list_cursor: Option<ListCursor>,
     page_failure: Option<String>,
-    selected: usize,
+    group_selected: usize,
+    entry_selected: usize,
+    groups_offset: usize,
+    entries_offset: usize,
+    detail_scroll: usize,
+    detail_max_scroll: usize,
+    groups_area: Rect,
+    entries_area: Rect,
+    detail_area: Rect,
     query: Zeroizing<String>,
     query_before_input: Zeroizing<String>,
     entry: Option<EntryRef>,
@@ -472,6 +518,7 @@ fn cancel_live_query(
     input.zeroize();
 }
 
+#[cfg(test)]
 fn entry_index_for_selection(
     searching: bool,
     group_count: usize,
@@ -640,11 +687,11 @@ fn confirm_generation(app: &mut App, value: &str) {
     {
         Ok(()) => {
             app.dirty = true;
-            app.reset_tree_after_mutation();
+            app.re_resolve_current_tree();
             app.entry = None;
             app.detail.clear();
             app.refresh();
-            app.status = "Password replaced in memory; save to persist".into();
+            app.status = "Password replaced in memory; press Ctrl+S or s to save".into();
         }
         Err(error) => app.status = clean(error.message()),
     }
@@ -731,7 +778,9 @@ fn move_target_offset(offset: usize, target: &str, key: KeyCode) -> usize {
 
 fn selected_group(app: &App) -> Option<GroupRef> {
     if app.entry.is_none()
-        && let Some(group) = app.groups.get(app.selected)
+        && app.focus == FocusPane::Groups
+        && let Some(idx) = app.group_index_for_row(app.group_selected)
+        && let Some(group) = app.groups.get(idx)
     {
         return group
             .reference
@@ -742,10 +791,7 @@ fn selected_group(app: &App) -> Option<GroupRef> {
 }
 
 fn begin_delete_entry(app: &mut App) {
-    let selected = app
-        .selected
-        .checked_sub(app.groups.len())
-        .and_then(|index| app.hits.get(index));
+    let selected = app.hits.get(app.entry_selected);
     let reference = app
         .entry
         .clone()
@@ -759,8 +805,8 @@ fn begin_delete_entry(app: &mut App) {
         kind: DeleteKind::Entry,
         path: format!(
             "Entry row {}/{}: {path}",
-            app.selected + 1,
-            app.visible_row_count()
+            app.entry_selected + 1,
+            app.hits.len().max(1)
         ),
         entry: Some(reference),
         group: None,
@@ -770,7 +816,14 @@ fn begin_delete_entry(app: &mut App) {
 }
 
 fn begin_delete_group(app: &mut App) {
-    let Some(group) = app.groups.get(app.selected) else {
+    let Some(group_idx) = (app.focus == FocusPane::Groups)
+        .then(|| app.group_index_for_row(app.group_selected))
+        .flatten()
+    else {
+        app.status = "Select a child group in Groups pane before choosing Remove group".into();
+        return;
+    };
+    let Some(group) = app.groups.get(group_idx) else {
         app.status = "Select a group before choosing Remove group".into();
         return;
     };
@@ -786,8 +839,8 @@ fn begin_delete_group(app: &mut App) {
         kind: DeleteKind::Group,
         path: format!(
             "Group row {}/{}: {}",
-            app.selected + 1,
-            app.visible_row_count(),
+            group_idx + 1,
+            app.groups.len(),
             group.path
         ),
         entry: None,
@@ -925,12 +978,9 @@ fn validate_totp_uri(value: &str) -> Result<(), &'static str> {
 }
 
 fn selected_entry_ref(app: &App) -> Option<EntryRef> {
-    app.entry.clone().or_else(|| {
-        app.selected
-            .checked_sub(app.groups.len())
-            .and_then(|index| app.hits.get(index))
-            .map(SearchHit::reference)
-    })
+    app.entry
+        .clone()
+        .or_else(|| app.hits.get(app.entry_selected).map(SearchHit::reference))
 }
 
 fn begin_icon_picker(app: &mut App, prefer_group: Option<bool>) {
@@ -952,9 +1002,9 @@ fn begin_icon_picker(app: &mut App, prefer_group: Option<bool>) {
                 app.status = "Select a group before choosing Change group icon".into();
                 return;
             };
-            let icon_id = if app.entry.is_none() {
-                app.groups
-                    .get(app.selected)
+            let icon_id = if app.entry.is_none() && app.focus == FocusPane::Groups {
+                app.group_index_for_row(app.group_selected)
+                    .and_then(|idx| app.groups.get(idx))
                     .map_or(DEFAULT_GROUP_ICON_ID, |group| group.icon_id)
             } else {
                 DEFAULT_GROUP_ICON_ID
@@ -968,21 +1018,27 @@ fn begin_icon_picker(app: &mut App, prefer_group: Option<bool>) {
                     .selected_entry(&reference)
                     .map_or(0, |view| view.icon_id());
                 (IconTarget::EntryItem(reference), icon_id)
-            } else if let Some(group) = app.groups.get(app.selected) {
-                let reference = group
-                    .reference
-                    .clone()
-                    .or_else(|| app.service.resolve_group(app.session, &group.path).ok());
-                let Some(reference) = reference else {
-                    app.status = "Cannot select group for icon change".into();
-                    return;
-                };
-                (IconTarget::GroupItem(reference), group.icon_id)
-            } else if let Some(hit) = app
-                .selected
-                .checked_sub(app.groups.len())
-                .and_then(|index| app.hits.get(index))
-            {
+            } else if app.focus == FocusPane::Groups {
+                if let Some(group) = app
+                    .group_index_for_row(app.group_selected)
+                    .and_then(|idx| app.groups.get(idx))
+                {
+                    let reference = group
+                        .reference
+                        .clone()
+                        .or_else(|| app.service.resolve_group(app.session, &group.path).ok());
+                    let Some(reference) = reference else {
+                        app.status = "Cannot select group for icon change".into();
+                        return;
+                    };
+                    (IconTarget::GroupItem(reference), group.icon_id)
+                } else {
+                    (
+                        IconTarget::GroupItem(app.tree_parent.clone()),
+                        DEFAULT_GROUP_ICON_ID,
+                    )
+                }
+            } else if let Some(hit) = app.hits.get(app.entry_selected) {
                 (IconTarget::EntryItem(hit.reference()), hit.icon_id())
             } else {
                 (
@@ -1050,14 +1106,14 @@ fn apply_icon_selection(app: &mut App, target: &IconTarget, icon: &StandardIcon)
     match result {
         Ok(()) => {
             app.dirty = true;
-            app.reset_tree_after_mutation();
+            app.re_resolve_current_tree();
             app.entry = None;
             app.entry_icon = None;
             app.detail.clear();
             app.fields.clear();
             app.refresh();
             app.status = format!(
-                "Icon set to {} {} ({}) in memory; press s to save",
+                "Icon set to {} {} ({}) in memory; press Ctrl+S or s to save",
                 icon.glyph, icon.name, icon.id
             );
         }
@@ -1118,11 +1174,21 @@ fn finish_delete(
             app.entry = None;
             app.detail.clear();
             app.fields.clear();
-            app.reset_tree_after_mutation();
+            app.re_resolve_current_tree();
             app.refresh();
             app.status = match kind {
-                DeleteKind::Entry => "Entry removed in memory; press s to save".into(),
-                DeleteKind::Group => "Group removed in memory; press s to save".into(),
+                DeleteKind::Entry => {
+                    format!(
+                        "Entry removed in memory — press Ctrl+S or s to save to {}",
+                        app.vault_name
+                    )
+                }
+                DeleteKind::Group => {
+                    format!(
+                        "Group removed in memory — press Ctrl+S or s to save to {}",
+                        app.vault_name
+                    )
+                }
             };
         }
         Err(error) => app.status = clean(error.message()),
@@ -1446,31 +1512,90 @@ fn create_group_or_entry(app: &mut App, action: Action, name: &str) {
         app.status = "Name must be a non-empty path component".into();
         return;
     }
+    let active_path = app.service.group_path(&app.tree_parent).ok();
+    let parent_path = app.service.group_path(&parent).ok();
+    let mut stack_paths: Vec<String> = app
+        .tree_stack
+        .iter()
+        .filter_map(|group| app.service.group_path(group).ok())
+        .collect();
+    enum Created {
+        Group,
+        Entry(EntryRef),
+    }
     let result = match action {
-        Action::AddGroup => app.service.add_group(&parent, name).map(|()| true),
-        Action::AddEntry => match app.service.group_path(&parent) {
-            Ok(path) => {
-                app.service
-                    .ensure_entry(app.session, &format!("{path}/{name}"), None, false)
-            }
-            Err(error) => Err(error),
-        },
+        Action::AddGroup => app
+            .service
+            .add_group(&parent, name)
+            .map(|()| Created::Group),
+        Action::AddEntry => app
+            .service
+            .create_entry_in_group(&parent, name)
+            .map(Created::Entry),
         _ => return,
     };
     match result {
-        Ok(true) => {
+        Ok(created) => {
             app.dirty = true;
-            app.reset_tree_after_mutation();
             app.entry = None;
             app.detail.clear();
-            app.refresh();
-            app.status = match action {
-                Action::AddGroup => "Group added in memory; press s to save".into(),
-                Action::AddEntry => "Entry added in memory; press s to save".into(),
-                _ => unreachable!(),
+            app.fields.clear();
+            let target_path = if matches!(created, Created::Entry(_))
+                && parent_path.is_some()
+                && parent_path != active_path
+            {
+                if let Some(active) = active_path.clone() {
+                    stack_paths.push(active);
+                }
+                parent_path
+            } else {
+                active_path
             };
+            app.re_resolve_tree_after_mutation(target_path.as_deref(), &stack_paths);
+            app.refresh();
+            match created {
+                Created::Group => {
+                    if let Some(idx) = app
+                        .groups
+                        .iter()
+                        .position(|group| group.label.eq_ignore_ascii_case(name))
+                    {
+                        app.group_selected = idx + usize::from(app.has_parent_row());
+                        app.focus = FocusPane::Groups;
+                    }
+                    app.status = format!(
+                        "Group added in memory — press Ctrl+S or s to save to {}",
+                        app.vault_name
+                    );
+                }
+                Created::Entry(entry_ref) => {
+                    if let Some(idx) = app
+                        .hits
+                        .iter()
+                        .position(|hit| hit.reference() == entry_ref)
+                        .or_else(|| {
+                            app.hits
+                                .iter()
+                                .position(|hit| hit.title().eq_ignore_ascii_case(name))
+                        })
+                    {
+                        app.entry_selected = idx;
+                    }
+                    app.focus = FocusPane::Entries;
+                    app.load_entry_preview();
+                    if app.hits.get(app.entry_selected).is_none() {
+                        app.load_entry_from_ref(&entry_ref);
+                    }
+                    app.status = format!(
+                        "Entry added in memory — press Ctrl+S or s to save to {}",
+                        app.vault_name
+                    );
+                }
+            }
         }
-        Ok(false) => app.status = "An entry with that title already exists".into(),
+        Err(nkeepass::ServiceError::Ambiguous) => {
+            app.status = "An entry with that title already exists".into();
+        }
         Err(error) => app.status = clean(error.message()),
     }
 }
@@ -1583,11 +1708,11 @@ fn attachment_add(app: &mut App, text: &str) {
         Ok(bytes) => match app.service.add_attachment(&reference, name, bytes) {
             Ok(()) => {
                 app.dirty = true;
-                app.reset_tree_after_mutation();
+                app.re_resolve_current_tree();
                 app.entry = None;
                 app.detail.clear();
                 app.refresh();
-                app.status = "Attachment added; save to persist".into();
+                app.status = "Attachment added; press Ctrl+S or s to save".into();
             }
             Err(error) => app.status = clean(error.message()),
         },
@@ -1630,11 +1755,11 @@ fn attachment_remove(app: &mut App, name: &str) {
     match app.service.remove_attachment(&reference, name) {
         Ok(()) => {
             app.dirty = true;
-            app.reset_tree_after_mutation();
+            app.re_resolve_current_tree();
             app.entry = None;
             app.detail.clear();
             app.refresh();
-            app.status = "Attachment removed; save to persist".into();
+            app.status = "Attachment removed; press Ctrl+S or s to save".into();
         }
         Err(error) => app.status = clean(error.message()),
     }
@@ -1730,6 +1855,46 @@ impl App {
             .map_err(|error| clean(error.message()))
     }
 
+    fn save_with_status(&mut self, path: &Path) {
+        match self.save(path) {
+            Ok(()) => {
+                self.dirty = false;
+                self.status = format!("Saved to {}", self.vault_name);
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn has_parent_row(&self) -> bool {
+        self.query.is_empty() && !self.tree_stack.is_empty()
+    }
+
+    fn group_row_count(&self) -> usize {
+        usize::from(self.has_parent_row()).saturating_add(self.groups.len())
+    }
+
+    fn group_index_for_row(&self, row: usize) -> Option<usize> {
+        row.checked_sub(usize::from(self.has_parent_row()))
+            .filter(|&index| index < self.groups.len())
+    }
+
+    fn display_group_path(&self) -> String {
+        if self.tree_stack.is_empty() {
+            return "/".to_owned();
+        }
+        match self.service.group_path(&self.tree_parent) {
+            Ok(path) => {
+                let rel = path.split_once('/').map_or(path.as_str(), |(_, rest)| rest);
+                if rel.is_empty() {
+                    "/".to_owned()
+                } else {
+                    format!("/{}", clean(rel))
+                }
+            }
+            Err(_) => "/".to_owned(),
+        }
+    }
+
     // The real decision path is shared with lifecycle tests: failed saves and
     // cancelled decisions must keep the unlocked credentials for retry.
     fn resolve_pending_decision(&mut self, input: DecisionInput, path: &Path) -> DecisionEffect {
@@ -1748,7 +1913,7 @@ impl App {
             match self.save(path) {
                 Ok(()) => {
                     self.dirty = false;
-                    self.status = "Saved".into();
+                    self.status = format!("Saved to {}", self.vault_name);
                     DecisionInput::SaveSucceeded
                 }
                 Err(error) => {
@@ -1807,10 +1972,6 @@ impl App {
         );
     }
 
-    fn visible_row_count(&self) -> usize {
-        self.groups.len().saturating_add(self.hits.len())
-    }
-
     fn list_groups(&mut self, tree_groups: Vec<TreeGroup>) {
         self.groups = tree_groups
             .into_iter()
@@ -1846,6 +2007,7 @@ impl App {
         self.entry_icon = None;
         self.detail.clear();
         self.fields.clear();
+        self.detail_scroll = 0;
         self.clear_reveal();
         self.hits.clear();
         self.groups.clear();
@@ -1889,11 +2051,22 @@ impl App {
         match page {
             Ok(hits) => {
                 self.hits = hits;
-                self.selected = self
-                    .selected
-                    .min(self.visible_row_count().saturating_sub(1));
+                self.group_selected = self
+                    .group_selected
+                    .min(self.group_row_count().saturating_sub(1));
+                self.entry_selected = self.entry_selected.min(self.hits.len().saturating_sub(1));
+                if self.focus == FocusPane::Detail {
+                    self.focus = FocusPane::Entries;
+                }
+                if self.hits.is_empty()
+                    && self.group_row_count() > 0
+                    && self.focus == FocusPane::Entries
+                {
+                    self.focus = FocusPane::Groups;
+                }
+                self.load_entry_preview();
                 self.status = format!(
-                    "{} groups, {} entries{} · / path glob · g toggle groups · ? help · Ctrl-P palette · q quit",
+                    "{} groups, {} entries{} · Tab pane · / search · ? help · Ctrl-P palette · q quit",
                     self.groups.len(),
                     self.hits.len(),
                     if self.tree_cursor.is_some() || self.list_cursor.is_some() {
@@ -1916,6 +2089,95 @@ impl App {
         }
         if let Ok(root) = self.service.root_group(self.session) {
             reset_tree_location(&mut self.tree_parent, &mut self.tree_stack, root);
+        }
+    }
+
+    fn re_resolve_current_tree(&mut self) {
+        let active_path = self.service.group_path(&self.tree_parent).ok();
+        let stack_paths: Vec<String> = self
+            .tree_stack
+            .iter()
+            .filter_map(|group| self.service.group_path(group).ok())
+            .collect();
+        self.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+    }
+
+    fn re_resolve_tree_after_mutation(
+        &mut self,
+        target_path: Option<&str>,
+        stack_paths: &[String],
+    ) {
+        if let Some(cursor) = self.tree_cursor.take() {
+            let _ = self.service.release_tree_cursor(cursor);
+        }
+        let Ok(root) = self.service.root_group(self.session) else {
+            return;
+        };
+        if stack_paths.is_empty() {
+            reset_tree_location(&mut self.tree_parent, &mut self.tree_stack, root);
+            return;
+        }
+        let Some(target) = target_path else {
+            reset_tree_location(&mut self.tree_parent, &mut self.tree_stack, root);
+            return;
+        };
+        let Ok(resolved_parent) = self.service.resolve_group(self.session, target) else {
+            reset_tree_location(&mut self.tree_parent, &mut self.tree_stack, root);
+            return;
+        };
+        let mut resolved_stack = Vec::with_capacity(stack_paths.len());
+        for (idx, path) in stack_paths.iter().enumerate() {
+            if idx == 0 {
+                resolved_stack.push(root.clone());
+            } else if let Ok(group) = self.service.resolve_group(self.session, path) {
+                resolved_stack.push(group);
+            } else {
+                reset_tree_location(&mut self.tree_parent, &mut self.tree_stack, root);
+                return;
+            }
+        }
+        self.tree_parent = resolved_parent;
+        self.tree_stack = resolved_stack;
+    }
+
+    fn navigate_up(&mut self) {
+        if let Some(parent) = self.tree_stack.pop() {
+            self.clear_reveal();
+            self.entry = None;
+            self.tree_parent = parent;
+            self.group_selected = 0;
+            self.entry_selected = 0;
+            self.detail_scroll = 0;
+            self.focus = FocusPane::Groups;
+            self.refresh();
+        }
+    }
+
+    fn enter_group(&mut self, group_idx: usize) {
+        let Some(ui_group) = self.groups.get(group_idx) else {
+            return;
+        };
+        let path = ui_group.path.clone();
+        let group = ui_group
+            .reference
+            .clone()
+            .or_else(|| self.service.resolve_group(self.session, &path).ok());
+        let Some(group) = group else {
+            self.status = "Cannot open selected group".into();
+            return;
+        };
+        self.tree_stack.push(self.tree_parent.clone());
+        self.tree_parent = group;
+        self.query.zeroize();
+        self.group_selected = 0;
+        self.entry_selected = 0;
+        self.detail_scroll = 0;
+        self.entry = None;
+        self.refresh();
+        if self.groups.is_empty() && !self.hits.is_empty() {
+            self.focus = FocusPane::Entries;
+        } else {
+            self.focus = FocusPane::Groups;
         }
     }
 
@@ -1954,8 +2216,10 @@ impl App {
         };
         match page {
             Ok(Some(TreeOrListPage::Tree(hits))) => {
-                self.selected = 0;
+                self.group_selected = 0;
+                self.entry_selected = 0;
                 self.hits = hits;
+                self.load_entry_preview();
                 self.status = format!(
                     "{} groups, {} entries{} · n next page · Enter open · ? help · q quit",
                     self.groups.len(),
@@ -1968,8 +2232,9 @@ impl App {
                 );
             }
             Ok(Some(TreeOrListPage::List(page))) => {
-                self.selected = self.groups.len();
+                self.entry_selected = 0;
                 self.hits = page.hits;
+                self.load_entry_preview();
                 self.status = format!(
                     "{} groups, {} entries{} · n next page · Enter open · q quit",
                     self.groups.len(),
@@ -1996,36 +2261,8 @@ impl App {
         self.page_failure = Some(self.status.clone());
     }
 
-    fn select(&mut self) {
-        self.clear_reveal();
-        self.attachment_selected = 0;
-        if self.selected < self.groups.len() {
-            let path = self.groups[self.selected].path.clone();
-            let group = self.groups[self.selected]
-                .reference
-                .clone()
-                .or_else(|| self.service.resolve_group(self.session, &path).ok());
-            let Some(group) = group else {
-                self.status = "Cannot open selected group".into();
-                return;
-            };
-            self.tree_stack.push(self.tree_parent.clone());
-            self.tree_parent = group;
-            self.query.zeroize();
-            self.selected = 0;
-            self.refresh();
-            return;
-        }
-        let Some(entry_index) =
-            entry_index_for_selection(false, self.groups.len(), self.selected, self.hits.len())
-        else {
-            return;
-        };
-        let Some(hit) = self.hits.get(entry_index) else {
-            return;
-        };
-        let reference = hit.reference();
-        match self.service.selected_entry(&reference) {
+    fn load_entry_from_ref(&mut self, reference: &EntryRef) -> bool {
+        match self.service.selected_entry(reference) {
             Ok(view) => {
                 let icon = standard_icon(view.icon_id());
                 self.entry_icon = Some((view.icon_id(), view.custom_icon_id()));
@@ -2068,10 +2305,46 @@ impl App {
                     .collect();
                 self.selected_field = self.selected_field.min(self.fields.len().saturating_sub(1));
                 self.detail.push("Attachments:".to_owned());
-                self.entry = Some(reference);
-                self.status = "↑/↓ select field · e edit value · r reveal password for 15s · I icon · s save · Esc back".into();
+                true
             }
-            Err(error) => self.status = clean(error.message()),
+            Err(error) => {
+                self.status = clean(error.message());
+                false
+            }
+        }
+    }
+
+    fn load_entry_preview(&mut self) {
+        let Some(hit) = self.hits.get(self.entry_selected) else {
+            self.entry_icon = None;
+            self.detail.clear();
+            self.fields.clear();
+            return;
+        };
+        let reference = hit.reference();
+        self.load_entry_from_ref(&reference);
+    }
+
+    fn select(&mut self) {
+        self.clear_reveal();
+        self.attachment_selected = 0;
+        if self.focus == FocusPane::Groups {
+            if self.has_parent_row() && self.group_selected == 0 {
+                self.navigate_up();
+            } else if let Some(group_idx) = self.group_index_for_row(self.group_selected) {
+                self.enter_group(group_idx);
+            }
+            return;
+        }
+        let Some(hit) = self.hits.get(self.entry_selected) else {
+            return;
+        };
+        let reference = hit.reference();
+        if self.load_entry_from_ref(&reference) {
+            self.entry = Some(reference);
+            self.focus = FocusPane::Detail;
+            self.detail_scroll = 0;
+            self.status = "↑/↓ select field · e edit value · r reveal password for 15s · I icon · Ctrl+S/s save · Esc back".into();
         }
     }
 
@@ -2191,10 +2464,13 @@ impl App {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "keeps the compact two-pane Ratatui projection together"
+    reason = "keeps the three-pane Ratatui projection and rect tracking together"
 )]
-fn draw(frame: &mut Frame<'_>, app: &App) {
+fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if !usable_size(frame.area()) {
+        app.groups_area = Rect::default();
+        app.entries_area = Rect::default();
+        app.detail_area = Rect::default();
         frame.render_widget(
             Paragraph::new("Resize terminal to at least 40 columns by 12 rows. Input paused.")
                 .wrap(Wrap { trim: false }),
@@ -2211,33 +2487,89 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             Constraint::Length(5),
         ])
         .split(frame.area());
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(areas[1]);
-    let groups_state = if app.include_groups {
-        "groups included"
-    } else {
-        "entries only"
-    };
-    let path_filter = if app.query.is_empty() {
-        "(none)".to_owned()
-    } else {
-        clean(&app.query)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("nkp", app.theme.header),
-            Span::raw(format!(
-                " · Path: {path_filter} · {groups_state} · / edit · g groups"
-            )),
-        ])),
-        areas[0],
+
+    let is_dirty = needs_decision(
+        app.dirty,
+        app.input_mode && app.edit_mode && !app.input.is_empty(),
     );
-    let items = app
-        .groups
-        .iter()
-        .map(|group| {
+    let group_path = app.display_group_path();
+    let header_line = if frame.area().width >= 72 {
+        let mut spans = vec![
+            Span::styled("nkp", app.theme.header),
+            Span::raw(format!(" · {} · {}", app.vault_name, group_path)),
+        ];
+        if is_dirty {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled("[UNSAVED · Ctrl+S]", app.theme.dirty));
+        }
+        if app.query.is_empty() {
+            spans.push(Span::styled(
+                " · Tab pane · / search · ? help",
+                app.theme.muted,
+            ));
+        } else {
+            spans.push(Span::raw(format!(" · Filter: {}", clean(&app.query))));
+        }
+        Line::from(spans)
+    } else if is_dirty {
+        Line::from(vec![
+            Span::styled("nkp", app.theme.header),
+            Span::raw(format!(" · {}", app.vault_name)),
+            Span::raw(" "),
+            Span::styled("[UNSAVED · Ctrl+S]", app.theme.dirty),
+        ])
+    } else {
+        let mut spans = vec![
+            Span::styled("nkp", app.theme.header),
+            Span::raw(format!(" · {} · {}", app.vault_name, group_path)),
+        ];
+        if !app.query.is_empty() {
+            spans.push(Span::raw(format!(" · /{}", clean(&app.query))));
+        }
+        Line::from(spans)
+    };
+    frame.render_widget(Paragraph::new(header_line), areas[0]);
+
+    let (groups_area, entries_area, detail_area) = if areas[1].width >= 72 {
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(22),
+                Constraint::Percentage(30),
+                Constraint::Percentage(48),
+            ])
+            .split(areas[1]);
+        (panes[0], panes[1], panes[2])
+    } else if !app.groups.is_empty() || !app.tree_stack.is_empty() {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(areas[1]);
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(3)])
+            .split(body[0]);
+        (left[0], left[1], body[1])
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(areas[1]);
+        (Rect::default(), body[0], body[1])
+    };
+    app.groups_area = groups_area;
+    app.entries_area = entries_area;
+    app.detail_area = detail_area;
+
+    if groups_area.width > 0 && groups_area.height > 0 {
+        let mut group_items = Vec::new();
+        if app.has_parent_row() {
+            group_items.push(ListItem::new(Line::from(vec![
+                Span::styled("..", app.theme.header),
+                Span::styled(" (parent)", app.theme.muted),
+            ])));
+        }
+        group_items.extend(app.groups.iter().map(|group| {
             let icon = standard_icon(group.icon_id);
             let mut spans = vec![
                 Span::styled(icon.glyph, app.theme.category_style(icon.category)),
@@ -2252,8 +2584,43 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 spans.push(Span::styled(" [custom]", app.theme.muted));
             }
             ListItem::new(Line::from(spans))
-        })
-        .chain(app.hits.iter().map(|hit| {
+        }));
+        let mut group_state = ListState::default().with_offset(app.groups_offset);
+        group_state.select(
+            (!app.locked && !group_items.is_empty())
+                .then_some(app.group_selected.min(group_items.len().saturating_sub(1))),
+        );
+        let groups_focused = !app.locked && app.focus == FocusPane::Groups;
+        let groups_title = if app.locked {
+            "Groups · LOCKED".to_owned()
+        } else {
+            format!("Groups ({})", app.groups.len())
+        };
+        frame.render_stateful_widget(
+            List::new(group_items)
+                .block(
+                    Block::default()
+                        .title(groups_title)
+                        .borders(Borders::ALL)
+                        .border_style(if groups_focused {
+                            app.theme.focused_border
+                        } else {
+                            app.theme.unfocused_border
+                        }),
+                )
+                .highlight_style(app.theme.selection),
+            groups_area,
+            &mut group_state,
+        );
+        app.groups_offset = group_state.offset();
+    } else {
+        app.groups_offset = 0;
+    }
+
+    let entry_items = app
+        .hits
+        .iter()
+        .map(|hit| {
             let icon = standard_icon(hit.icon_id());
             ListItem::new(Line::from(vec![
                 Span::styled(icon.glyph, app.theme.category_style(icon.category)),
@@ -2261,97 +2628,124 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 Span::raw(clean(hit.title())),
                 Span::styled(format!("  {}", clean(hit.path())), app.theme.muted),
             ]))
-        }))
-        .collect::<Vec<_>>();
-    let mut state = ListState::default();
-    state.select((!app.locked && app.entry.is_none()).then_some(app.selected));
-    let title = if app.locked {
-        "nkp · LOCKED".to_owned()
-    } else if app.query.is_empty() {
-        let path = app
-            .service
-            .group_path(&app.tree_parent)
-            .map_or_else(|_| "current folder".to_owned(), |path| clean(&path));
-        format!("nkp · Vault tree · ▾ {path} · ▸ child folders")
-    } else {
-        "nkp · Path matches · Enter opens group/entry".to_owned()
-    };
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().title(title).borders(Borders::ALL))
-            .highlight_style(app.theme.selection),
-        body[0],
-        &mut state,
-    );
-    let mut detail = app
-        .detail
-        .iter()
-        .flat_map(|line| {
-            let styled_line = if line.starts_with("Title: ")
-                && let Some((icon_id, _)) = app.entry_icon
-            {
-                let icon = standard_icon(icon_id);
-                Line::from(vec![
-                    Span::styled(icon.glyph, app.theme.category_style(icon.category)),
-                    Span::raw(" "),
-                    Span::raw(line.clone()),
-                ])
-            } else if line.starts_with("Icon: ")
-                && let Some((icon_id, custom_icon_id)) = app.entry_icon
-            {
-                let icon = standard_icon(icon_id);
-                Line::from(vec![
-                    Span::raw("Icon: "),
-                    Span::styled(icon.glyph, app.theme.category_style(icon.category)),
-                    Span::raw(format!(
-                        " {}{}",
-                        icon.name,
-                        if custom_icon_id.is_some() {
-                            " [custom]"
-                        } else {
-                            ""
-                        }
-                    )),
-                ])
-            } else {
-                Line::from(line.clone())
-            };
-            let mut rows = vec![styled_line];
-            if line == "Fields (values hidden):" {
-                rows.extend(
-                    app.fields
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (name, protected))| {
-                            let text = field_row(name, *protected, index == app.selected_field);
-                            if index == app.selected_field {
-                                Line::from(Span::styled(text, app.theme.selection))
-                            } else {
-                                Line::from(text)
-                            }
-                        }),
-                );
-            }
-            if line == "Attachments:"
-                && let Some(reference) = &app.entry
-                && let Ok(items) = app.service.attachment_metadata(reference)
-            {
-                rows.extend(items.iter().enumerate().map(|(index, item)| {
-                    Line::from(format!(
-                        "{} {} ({} bytes)",
-                        if index == app.attachment_selected {
-                            ">"
-                        } else {
-                            " "
-                        },
-                        clean(item.name()),
-                        item.size()
-                    ))
-                }));
-            }
-            rows
         })
         .collect::<Vec<_>>();
+    let mut entry_state = ListState::default().with_offset(app.entries_offset);
+    entry_state.select(
+        (!app.locked && !entry_items.is_empty())
+            .then_some(app.entry_selected.min(entry_items.len().saturating_sub(1))),
+    );
+    let entries_focused = !app.locked && app.focus == FocusPane::Entries;
+    let entries_title = if app.locked {
+        "Entries · LOCKED".to_owned()
+    } else if app.query.is_empty() {
+        format!("Entries ({})", app.hits.len())
+    } else {
+        format!("Matches ({})", app.hits.len())
+    };
+    frame.render_stateful_widget(
+        List::new(entry_items)
+            .block(
+                Block::default()
+                    .title(entries_title)
+                    .borders(Borders::ALL)
+                    .border_style(if entries_focused {
+                        app.theme.focused_border
+                    } else {
+                        app.theme.unfocused_border
+                    }),
+            )
+            .highlight_style(app.theme.selection),
+        entries_area,
+        &mut entry_state,
+    );
+    app.entries_offset = entry_state.offset();
+
+    let show_detail_body = !app.locked
+        && (app.entry.is_some() || (detail_area.width >= 32 && detail_area.height >= 10));
+    let preview_ref = app
+        .entry
+        .clone()
+        .or_else(|| app.hits.get(app.entry_selected).map(SearchHit::reference));
+    let mut detail =
+        if show_detail_body {
+            app.detail
+                .iter()
+                .flat_map(|line| {
+                    let styled_line = if line.starts_with("Title: ")
+                        && let Some((icon_id, _)) = app.entry_icon
+                    {
+                        let icon = standard_icon(icon_id);
+                        Line::from(vec![
+                            Span::styled(icon.glyph, app.theme.category_style(icon.category)),
+                            Span::raw(" "),
+                            Span::raw(line.clone()),
+                        ])
+                    } else if line.starts_with("Icon: ")
+                        && let Some((icon_id, custom_icon_id)) = app.entry_icon
+                    {
+                        let icon = standard_icon(icon_id);
+                        Line::from(vec![
+                            Span::raw("Icon: "),
+                            Span::styled(icon.glyph, app.theme.category_style(icon.category)),
+                            Span::raw(format!(
+                                " {}{}",
+                                icon.name,
+                                if custom_icon_id.is_some() {
+                                    " [custom]"
+                                } else {
+                                    ""
+                                }
+                            )),
+                        ])
+                    } else {
+                        Line::from(line.clone())
+                    };
+                    let mut rows = vec![styled_line];
+                    if line == "Fields (values hidden):" {
+                        rows.extend(app.fields.iter().enumerate().map(
+                            |(index, (name, protected))| {
+                                let text = field_row(
+                                    name,
+                                    *protected,
+                                    app.entry.is_some() && index == app.selected_field,
+                                );
+                                if app.entry.is_some() && index == app.selected_field {
+                                    Line::from(Span::styled(text, app.theme.selection))
+                                } else {
+                                    Line::from(text)
+                                }
+                            },
+                        ));
+                    }
+                    if line == "Attachments:"
+                        && let Some(reference) = &preview_ref
+                        && let Ok(items) = app.service.attachment_metadata(reference)
+                    {
+                        rows.extend(items.iter().enumerate().map(|(index, item)| {
+                            Line::from(format!(
+                                "{} {} ({} bytes)",
+                                if app.entry.is_some() && index == app.attachment_selected {
+                                    ">"
+                                } else {
+                                    " "
+                                },
+                                clean(item.name()),
+                                item.size()
+                            ))
+                        }));
+                    }
+                    rows
+                })
+                .collect::<Vec<_>>()
+        } else if !app.locked {
+            vec![Line::from(Span::styled(
+                "Enter: open · Tab: pane",
+                app.theme.muted,
+            ))]
+        } else {
+            Vec::new()
+        };
     if app.input_mode && !app.locked {
         detail.push(Line::from(if app.edit_mode {
             format!("Edit: {}", "•".repeat(app.input.len()))
@@ -2369,31 +2763,43 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         detail.push(Line::from(
             "Warning: terminal scrollback and screenshots persist.",
         ));
-    } else if !app.locked && app.entry.is_some() {
+    } else if show_detail_body && preview_ref.is_some() {
         detail.push(Line::from("Password: ••••••••"));
     }
-    if needs_decision(
-        app.dirty,
-        app.input_mode && app.edit_mode && !app.input.is_empty(),
-    ) {
-        detail.push(Line::from(Span::styled("UNSAVED CHANGES", app.theme.dirty)));
+    if is_dirty {
+        detail.push(Line::from(Span::styled(
+            "UNSAVED CHANGES · Ctrl+S or s to save",
+            app.theme.dirty,
+        )));
     }
     if !app.locked && app.entry.is_some() {
-        detail.push(Line::from("↑/↓ select field · e edit selected (value only) · r reveal · c copy password · t TOTP · g generate · I icon · a add attachment · n/p attachment · x export · d remove · o export · i import · s save"));
+        detail.push(Line::from("↑/↓ select field · e edit · r reveal · c copy · t TOTP · g generate · I icon · a/n/p/x/d attachments · Ctrl+S/s save · Esc back"));
     }
+    let detail_inner_height = usize::from(detail_area.height.saturating_sub(2));
+    app.detail_max_scroll = detail.len().saturating_sub(detail_inner_height);
+    let detail_scroll = app.detail_scroll.min(app.detail_max_scroll);
+    app.detail_scroll = detail_scroll;
+    let detail_focused = !app.locked && app.focus == FocusPane::Detail;
     frame.render_widget(
-        Paragraph::new(detail).block(
-            Block::default()
-                .title(if app.locked {
-                    "LOCKED"
-                } else if app.pending_decision == Some(PendingDecision::Lock) {
-                    "IDLE LOCK PENDING · unsaved changes"
-                } else {
-                    "Entry detail · secrets masked"
-                })
-                .borders(Borders::ALL),
-        ),
-        body[1],
+        Paragraph::new(detail)
+            .scroll((u16::try_from(detail_scroll).unwrap_or(u16::MAX), 0))
+            .block(
+                Block::default()
+                    .title(if app.locked {
+                        "LOCKED"
+                    } else if app.pending_decision == Some(PendingDecision::Lock) {
+                        "IDLE LOCK PENDING · unsaved changes"
+                    } else {
+                        "Entry detail · secrets masked"
+                    })
+                    .borders(Borders::ALL)
+                    .border_style(if detail_focused {
+                        app.theme.focused_border
+                    } else {
+                        app.theme.unfocused_border
+                    }),
+            ),
+        detail_area,
     );
     if app.clipboard_warning_pending {
         let footer = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(areas[2]);
@@ -2413,7 +2819,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             areas[2],
         );
     }
-    if !app.locked && app.entry.is_some() && (body[1].height < 12 || body[1].width < 40) {
+    if !app.locked && app.entry.is_some() && (areas[1].width < 72 || areas[1].height < 10) {
+        app.detail_area = areas[1];
         draw_compact_entry(frame, app, areas[1]);
     }
     if let Some(modal @ Modal::ClipboardWarning { .. }) = &app.modal {
@@ -2503,7 +2910,8 @@ fn draw_compact_entry(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title("Entry detail · secrets masked")
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(app.theme.focused_border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
@@ -2614,14 +3022,16 @@ fn help_lines() -> Vec<Line<'static>> {
         "Ctrl-P            Open nkp command palette",
         "/                 Search paths with glob patterns; Enter applies",
         "g (tree)          Toggle matching groups in path results",
+        "Tab / Shift-Tab   Switch focus between Groups and Entries",
         "Up/Down or j/k    Move selection",
-        "Enter             Open selected group or entry",
-        "Backspace         Go to parent group (when path filter is empty)",
+        "Enter / Right     Open selected group or entry",
+        "Backspace / Left  Go to parent group / return from detail",
         "n                 Load next result page",
         "a / e             Add group / entry beneath selected or current group",
         "x / X             Remove selected entry / group (type YES to confirm)",
         "I                 Change KeePass icon (entry or group; 0..=68)",
-        "s                 Save unsaved vault changes",
+        "Ctrl+S / s        Save unsaved vault changes",
+        "Mouse             Click group/entry to select or open; wheel scrolls",
         "d                 Discard unsaved changes in exit prompt",
         "c                 Cancel an exit prompt",
         "Ctrl-P palette    Add/remove entry or group, change icon, rename title,",
@@ -2877,6 +3287,10 @@ fn draw_target_dialog(
     frame.render_widget(Paragraph::new(keys).wrap(Wrap { trim: false }), chunks[3]);
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeps input-mode submission and key handling together"
+)]
 fn handle_input_mode_key(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc => {
@@ -2928,13 +3342,14 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
                             app.edit_mode = false;
                             app.pending_entry = None;
                             app.dirty = true;
-                            app.reset_tree_after_mutation();
+                            app.re_resolve_current_tree();
                             app.entry = None;
                             app.entry_icon = None;
                             app.detail.clear();
                             app.fields.clear();
                             app.refresh();
-                            app.status = "OTP URI updated in memory; press s to save".into();
+                            app.status =
+                                "OTP URI updated in memory; press Ctrl+S or s to save".into();
                         }
                         Err(error) => {
                             app.status = format!(
@@ -2970,7 +3385,7 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
             if succeeded {
                 app.edit_field.clear();
                 app.dirty = true;
-                app.reset_tree_after_mutation();
+                app.re_resolve_current_tree();
                 app.entry = None;
                 app.entry_icon = None;
                 app.detail.clear();
@@ -2987,14 +3402,15 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
                         match app.service.set_title(&reference, &value) {
                             Ok(()) => {
                                 app.dirty = true;
-                                app.reset_tree_after_mutation();
+                                app.re_resolve_current_tree();
                                 app.entry = None;
                                 app.entry_icon = None;
                                 app.detail.clear();
                                 app.fields.clear();
                                 app.refresh();
                                 app.status =
-                                    "Entry title renamed in memory; press s to save".into();
+                                    "Entry title renamed in memory; press Ctrl+S or s to save"
+                                        .into();
                             }
                             Err(error) => app.status = clean(error.message()),
                         }
@@ -3014,13 +3430,15 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
                         match app.service.set_tags(&reference, tags) {
                             Ok(()) => {
                                 app.dirty = true;
-                                app.reset_tree_after_mutation();
+                                app.re_resolve_current_tree();
                                 app.entry = None;
                                 app.entry_icon = None;
                                 app.detail.clear();
                                 app.fields.clear();
                                 app.refresh();
-                                app.status = "Entry tags updated in memory; press s to save".into();
+                                app.status =
+                                    "Entry tags updated in memory; press Ctrl+S or s to save"
+                                        .into();
                             }
                             Err(error) => app.status = clean(error.message()),
                         }
@@ -3127,11 +3545,516 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
     }
 }
 
+struct MouseCaptureGuard {
+    active: bool,
+}
+
+impl MouseCaptureGuard {
+    fn enter() -> io::Result<Self> {
+        crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+        Ok(Self { active: true })
+    }
+
+    fn disable(&mut self) -> io::Result<()> {
+        if self.active {
+            self.active = false;
+            crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MouseCaptureGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
+        }
+    }
+}
+
+fn should_handle_key_event(kind: KeyEventKind, code: KeyCode) -> bool {
+    match kind {
+        KeyEventKind::Press => true,
+        KeyEventKind::Repeat => matches!(
+            code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        ),
+        KeyEventKind::Release => false,
+    }
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.x
+        && column < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+fn list_row_at(area: Rect, column: u16, row: u16, offset: usize, count: usize) -> Option<usize> {
+    if area.width < 3 || area.height < 3 {
+        return None;
+    }
+    let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
+    if !rect_contains(inner, column, row) {
+        return None;
+    }
+    let idx = offset.saturating_add(usize::from(row - inner.y));
+    (idx < count).then_some(idx)
+}
+
+fn scroll_modal(modal: &mut Modal, down: bool) {
+    match modal {
+        Modal::Help { scroll } | Modal::Aliases { scroll } => {
+            *scroll = if down {
+                scroll.saturating_add(1)
+            } else {
+                scroll.saturating_sub(1)
+            };
+        }
+        Modal::Palette { selected, scroll } => {
+            *selected = if down {
+                selected
+                    .saturating_add(1)
+                    .min(PALETTE_CHOICES.len().saturating_sub(1))
+            } else {
+                selected.saturating_sub(1)
+            };
+            *scroll = selected.saturating_sub(3);
+        }
+        Modal::IconPicker {
+            filter,
+            selected,
+            scroll,
+            ..
+        } => {
+            let count = filtered_standard_icons(filter).len();
+            *selected = if down {
+                selected.saturating_add(1).min(count.saturating_sub(1))
+            } else {
+                selected.saturating_sub(1)
+            };
+            *scroll = selected.saturating_sub(3);
+        }
+        Modal::Target { target, offset, .. } => {
+            let key = if down { KeyCode::Down } else { KeyCode::Up };
+            *offset = move_target_offset(*offset, target, key);
+        }
+        Modal::ConfirmDelete { path, offset, .. } => {
+            let key = if down { KeyCode::Down } else { KeyCode::Up };
+            *offset = move_target_offset(*offset, path, key);
+        }
+        Modal::ClipboardWarning { .. } => {}
+    }
+}
+
+fn handle_mouse_left_click(app: &mut App, column: u16, row: u16) {
+    if let Some(row_idx) = list_row_at(
+        app.groups_area,
+        column,
+        row,
+        app.groups_offset,
+        app.group_row_count(),
+    ) {
+        app.entry = None;
+        app.clear_reveal();
+        if app.has_parent_row() && row_idx == 0 {
+            app.focus = FocusPane::Groups;
+            app.navigate_up();
+        } else if let Some(group_idx) = app.group_index_for_row(row_idx) {
+            if app.focus == FocusPane::Groups && app.group_selected == row_idx {
+                app.enter_group(group_idx);
+            } else {
+                app.focus = FocusPane::Groups;
+                app.group_selected = row_idx;
+            }
+        }
+        return;
+    }
+    if rect_contains(app.groups_area, column, row) {
+        app.entry = None;
+        app.clear_reveal();
+        app.focus = FocusPane::Groups;
+        return;
+    }
+    if let Some(entry_idx) = list_row_at(
+        app.entries_area,
+        column,
+        row,
+        app.entries_offset,
+        app.hits.len(),
+    ) {
+        app.clear_reveal();
+        if app.focus == FocusPane::Entries && app.entry_selected == entry_idx && app.entry.is_none()
+        {
+            app.select();
+        } else {
+            app.entry = None;
+            app.focus = FocusPane::Entries;
+            app.entry_selected = entry_idx;
+            app.detail_scroll = 0;
+            app.load_entry_preview();
+        }
+        return;
+    }
+    if rect_contains(app.entries_area, column, row) {
+        app.entry = None;
+        app.clear_reveal();
+        app.focus = FocusPane::Entries;
+        return;
+    }
+    if rect_contains(app.detail_area, column, row) {
+        app.clear_reveal();
+        if app.entry.is_none() && app.hits.get(app.entry_selected).is_some() {
+            app.focus = FocusPane::Entries;
+            app.select();
+        }
+    }
+}
+
+fn handle_mouse_scroll(app: &mut App, column: u16, row: u16, down: bool) {
+    if rect_contains(app.groups_area, column, row) {
+        app.group_selected = if down {
+            app.group_selected
+                .saturating_add(1)
+                .min(app.group_row_count().saturating_sub(1))
+        } else {
+            app.group_selected.saturating_sub(1)
+        };
+    } else if rect_contains(app.entries_area, column, row) {
+        app.entry_selected = if down {
+            app.entry_selected
+                .saturating_add(1)
+                .min(app.hits.len().saturating_sub(1))
+        } else {
+            app.entry_selected.saturating_sub(1)
+        };
+        app.detail_scroll = 0;
+        app.load_entry_preview();
+    } else if rect_contains(app.detail_area, column, row) {
+        if app.entry.is_some() && (app.detail_area.width < 32 || app.detail_area.height < 10) {
+            move_field_selection(&mut app.selected_field, app.fields.len(), down);
+        } else {
+            app.detail_scroll = if down {
+                app.detail_scroll
+                    .saturating_add(1)
+                    .min(app.detail_max_scroll)
+            } else {
+                app.detail_scroll.saturating_sub(1)
+            };
+        }
+    }
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
+    if app.locked || app.pending_decision.is_some() || app.reveal.is_some() || app.input_mode {
+        return;
+    }
+    app.last_activity = Instant::now();
+    if let Some(modal) = app.modal.as_mut() {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => scroll_modal(modal, false),
+            MouseEventKind::ScrollDown => scroll_modal(modal, true),
+            _ => {}
+        }
+        return;
+    }
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_mouse_left_click(app, mouse.column, mouse.row);
+        }
+        MouseEventKind::ScrollUp => handle_mouse_scroll(app, mouse.column, mouse.row, false),
+        MouseEventKind::ScrollDown => handle_mouse_scroll(app, mouse.column, mouse.row, true),
+        _ => {}
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "keeps the compact reducer and terminal lifecycle together"
+    reason = "keeps key event dispatch and focus routing together"
 )]
+fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
+    if !should_handle_key_event(key.kind, key.code) {
+        return KeyOutcome::Continue;
+    }
+    app.last_activity = Instant::now();
+    // Warning inspection/acknowledgement is independent of an action,
+    // unsaved decision, disclosure, or lock screen. Other keys cannot
+    // accidentally acknowledge it or submit the interaction beneath it.
+    if key.code == KeyCode::F(3) && app.clipboard_warning_pending {
+        open_clipboard_warning(app);
+        return KeyOutcome::Continue;
+    }
+    if matches!(&app.modal, Some(Modal::ClipboardWarning { .. })) {
+        handle_modal_key(app, key.code);
+        return KeyOutcome::Continue;
+    }
+    if app.locked {
+        if key.code == KeyCode::Char('q') {
+            return KeyOutcome::Exit;
+        }
+        return KeyOutcome::Continue;
+    }
+    // Disclosure owns focus: other interactions must not open invisibly
+    // behind it and consume the one Escape needed to hide the value.
+    if app.reveal.is_some() {
+        app.modal = None;
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            app.clear_reveal();
+            app.status = "Revealed value hidden".into();
+        }
+        return KeyOutcome::Continue;
+    }
+    if app.pending_decision.is_some() {
+        let input = match key.code {
+            KeyCode::Char('s') => DecisionInput::SaveSucceeded,
+            KeyCode::Char('d') => DecisionInput::Discard,
+            KeyCode::Char('c') | KeyCode::Esc => DecisionInput::Cancel,
+            _ => return KeyOutcome::Continue,
+        };
+        if app.resolve_pending_decision(input, path) == DecisionEffect::Exit {
+            return KeyOutcome::Exit;
+        }
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode && key.code == KeyCode::Char('q') {
+        let (pending, effect) = reduce_decision(
+            app.pending_decision,
+            needs_decision(
+                app.dirty,
+                app.input_mode && app.edit_mode && !app.input.is_empty(),
+            ),
+            DecisionInput::RequestExit,
+        );
+        app.pending_decision = pending;
+        if effect == DecisionEffect::Exit {
+            return KeyOutcome::Exit;
+        }
+        app.status = "Unsaved changes: s save · d discard · c cancel".into();
+        return KeyOutcome::Continue;
+    }
+    if app.modal.is_some() {
+        handle_modal_key(app, key.code);
+        return KeyOutcome::Continue;
+    }
+    if key.code == KeyCode::F(2)
+        && app.entry.is_some()
+        && (!app.input_mode || app.action_target.is_some() || app.action == Action::RevealField)
+    {
+        inspect_action_target(app);
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode
+        && key.code == KeyCode::Char('p')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.modal = Some(Modal::Palette {
+            selected: 0,
+            scroll: 0,
+        });
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode
+        && key.code == KeyCode::Char('s')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.save_with_status(path);
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode && key.code == KeyCode::Char('?') {
+        app.modal = Some(Modal::Help { scroll: 0 });
+        return KeyOutcome::Continue;
+    }
+    if app.input_mode {
+        handle_input_mode_key(app, key.code);
+        return KeyOutcome::Continue;
+    }
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        app.clear_reveal();
+        app.entry = None;
+        app.focus = match app.focus {
+            FocusPane::Groups => FocusPane::Entries,
+            FocusPane::Entries | FocusPane::Detail => FocusPane::Groups,
+        };
+        if app.focus == FocusPane::Entries {
+            app.load_entry_preview();
+        }
+        return KeyOutcome::Continue;
+    }
+    if app.entry.is_none() {
+        match key.code {
+            KeyCode::Char('n') => app.next_page(),
+            KeyCode::Char('s') => app.save_with_status(path),
+            KeyCode::Char('a') => begin_add(app, Action::AddGroup),
+            KeyCode::Char('e') => begin_add(app, Action::AddEntry),
+            KeyCode::Char('x') => begin_delete_entry(app),
+            KeyCode::Char('X') => begin_delete_group(app),
+            KeyCode::Char('I') => begin_icon_picker(app, None),
+            KeyCode::Char('g') => {
+                app.include_groups = !app.include_groups;
+                if app.query.is_empty() {
+                    app.status = if app.include_groups {
+                        "Path results will include matching groups".into()
+                    } else {
+                        "Path results will include entries only".into()
+                    };
+                } else {
+                    app.refresh();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.clear_reveal();
+                if app.focus == FocusPane::Groups {
+                    app.group_selected = app
+                        .group_selected
+                        .saturating_add(1)
+                        .min(app.group_row_count().saturating_sub(1));
+                } else {
+                    app.entry_selected = app
+                        .entry_selected
+                        .saturating_add(1)
+                        .min(app.hits.len().saturating_sub(1));
+                    app.detail_scroll = 0;
+                    app.load_entry_preview();
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.clear_reveal();
+                if app.focus == FocusPane::Groups {
+                    app.group_selected = app.group_selected.saturating_sub(1);
+                } else {
+                    app.entry_selected = app.entry_selected.saturating_sub(1);
+                    app.detail_scroll = 0;
+                    app.load_entry_preview();
+                }
+            }
+            KeyCode::Right => {
+                if app.focus == FocusPane::Groups || app.hits.get(app.entry_selected).is_some() {
+                    app.select();
+                }
+            }
+            KeyCode::Left => {
+                if app.focus == FocusPane::Groups && app.query.is_empty() {
+                    app.navigate_up();
+                } else if app.focus == FocusPane::Entries {
+                    app.focus = FocusPane::Groups;
+                }
+            }
+            KeyCode::Enter => app.select(),
+            KeyCode::Backspace if app.query.is_empty() => app.navigate_up(),
+            KeyCode::Char('/') => {
+                app.clear_reveal();
+                app.input_mode = true;
+                clear_input(&mut app.input);
+                app.query_before_input.zeroize();
+                app.query_before_input.push_str(&app.query);
+                app.action = Action::Query;
+                app.edit_mode = false;
+                app.input.push_str(&app.query);
+                app.status =
+                    "Path glob (max 1024 bytes); type to filter · Enter done · Esc cancel".into();
+            }
+            _ => {}
+        }
+    } else {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Left => {
+                app.entry = None;
+                app.focus = FocusPane::Entries;
+                app.clear_reveal();
+                app.load_entry_preview();
+            }
+            KeyCode::Char('I') => begin_icon_picker(app, None),
+            KeyCode::Char('e') => {
+                app.clear_reveal();
+                let Some((field, _)) = app.fields.get(app.selected_field) else {
+                    app.status = "No field selected".into();
+                    return KeyOutcome::Continue;
+                };
+                if field == "Title" {
+                    app.status = "Title cannot be edited as a field".into();
+                    return KeyOutcome::Continue;
+                }
+                field.clone_into(&mut app.edit_field);
+                let prompt = format!(
+                    "Edit {} value; input is masked · Enter apply · Esc cancel",
+                    clean(&app.edit_field)
+                );
+                begin_action(app, Action::Edit, &prompt);
+                app.edit_mode = true;
+            }
+            KeyCode::Char('g') => {
+                begin_action(
+                    app,
+                    Action::Generate,
+                    "Enter new password length (1..=4096). Confirming replaces the old password; save persists it.",
+                );
+            }
+            KeyCode::Char('r') => {
+                begin_action(
+                    app,
+                    Action::PasswordReveal,
+                    "Reveal password? Type YES. WARNING: terminal scrollback and screenshots may retain it; shown for 15s.",
+                );
+            }
+            KeyCode::Char('c') => begin_action(
+                app,
+                Action::ClipboardCopy,
+                if app.clipboard.supports_atomic_ownership_clear() {
+                    "Copy password? Other apps can read it. Windows will attempt an ownership-safe clear in 30s, but it may remain. Type YES to confirm."
+                } else if app.clipboard.supports_timed_clear() {
+                    "Copy password? Other apps can read it. nkp will attempt a best-effort compare-and-clear in 30s (verify manually; clipboard history or concurrent copies may retain it). Type YES to confirm."
+                } else {
+                    "Copy password? Other apps can read it. This platform cannot safely auto-clear; clear manually when done. Type YES to confirm."
+                },
+            ),
+            KeyCode::Char('t') => begin_action(
+                app,
+                Action::TotpReveal,
+                "Reveal current TOTP? Type YES. HOTP is unsupported. WARNING: terminal scrollback may retain the code.",
+            ),
+            KeyCode::Char('v') => begin_field_reveal(app),
+            KeyCode::Char('a') => begin_action(
+                app,
+                Action::AddAttachment,
+                "Add attachment as name=source-path (bounded to 16 MiB)",
+            ),
+            KeyCode::Char('x') => begin_attachment_action(app, Action::ExportAttachment),
+            KeyCode::Char('d') => begin_attachment_action(app, Action::RemoveAttachment),
+            KeyCode::Char('o') => begin_action(
+                app,
+                Action::ExportInterchange,
+                "Export interchange to a new owner-only path; no overwrite. Enter destination.",
+            ),
+            KeyCode::Char('i') => begin_action(
+                app,
+                Action::ImportInterchange,
+                "Import interchange from path (max 16 MiB); existing non-empty vaults are refused.",
+            ),
+            KeyCode::Char('n') => app.move_attachment(true),
+            KeyCode::Char('p') => app.move_attachment(false),
+            KeyCode::Down | KeyCode::Char('j') => {
+                move_field_selection(&mut app.selected_field, app.fields.len(), true);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                move_field_selection(&mut app.selected_field, app.fields.len(), false);
+            }
+            KeyCode::Char('s') => app.save_with_status(path),
+            _ => {}
+        }
+    }
+    KeyOutcome::Continue
+}
+
 fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Result<()> {
+    let mut mouse_guard = MouseCaptureGuard::enter()?;
     let mut reveal_was_drawn = false;
     loop {
         let was_revealed = reveal_was_drawn;
@@ -3170,256 +4093,22 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
             }
             continue;
         }
-        let Event::Key(key) = event else { continue };
         if !usable_size(terminal.size()?.into()) {
             app.clear_reveal();
             continue;
         }
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        app.last_activity = Instant::now();
-        // Warning inspection/acknowledgement is independent of an action,
-        // unsaved decision, disclosure, or lock screen. Other keys cannot
-        // accidentally acknowledge it or submit the interaction beneath it.
-        if key.code == KeyCode::F(3) && app.clipboard_warning_pending {
-            open_clipboard_warning(app);
-            continue;
-        }
-        if matches!(&app.modal, Some(Modal::ClipboardWarning { .. })) {
-            handle_modal_key(app, key.code);
-            continue;
-        }
-        if app.locked {
-            if key.code == KeyCode::Char('q') {
-                break;
+        match event {
+            Event::Key(key) => {
+                if handle_key_event(app, key, path) == KeyOutcome::Exit {
+                    break;
+                }
             }
-            continue;
-        }
-        // Disclosure owns focus: other interactions must not open invisibly
-        // behind it and consume the one Escape needed to hide the value.
-        if app.reveal.is_some() {
-            app.modal = None;
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-                app.clear_reveal();
-                app.status = "Revealed value hidden".into();
-            }
-            continue;
-        }
-        if app.pending_decision.is_some() {
-            let input = match key.code {
-                KeyCode::Char('s') => DecisionInput::SaveSucceeded,
-                KeyCode::Char('d') => DecisionInput::Discard,
-                KeyCode::Char('c') | KeyCode::Esc => DecisionInput::Cancel,
-                _ => continue,
-            };
-            if app.resolve_pending_decision(input, path) == DecisionEffect::Exit {
-                break;
-            }
-            continue;
-        }
-        if !app.input_mode && key.code == KeyCode::Char('q') {
-            let (pending, effect) = reduce_decision(
-                app.pending_decision,
-                needs_decision(
-                    app.dirty,
-                    app.input_mode && app.edit_mode && !app.input.is_empty(),
-                ),
-                DecisionInput::RequestExit,
-            );
-            app.pending_decision = pending;
-            if effect == DecisionEffect::Exit {
-                break;
-            }
-            app.status = "Unsaved changes: s save · d discard · c cancel".into();
-            continue;
-        }
-        if app.modal.is_some() {
-            handle_modal_key(app, key.code);
-            continue;
-        }
-        if key.code == KeyCode::F(2)
-            && app.entry.is_some()
-            && (!app.input_mode || app.action_target.is_some() || app.action == Action::RevealField)
-        {
-            inspect_action_target(app);
-            continue;
-        }
-        if !app.input_mode
-            && key.code == KeyCode::Char('p')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            app.modal = Some(Modal::Palette {
-                selected: 0,
-                scroll: 0,
-            });
-            continue;
-        }
-        if !app.input_mode && key.code == KeyCode::Char('?') {
-            app.modal = Some(Modal::Help { scroll: 0 });
-            continue;
-        }
-        if app.input_mode {
-            handle_input_mode_key(app, key.code);
-        } else if app.entry.is_none() {
-            match key.code {
-                KeyCode::Char('n') => app.next_page(),
-                KeyCode::Char('s') => match app.save(path) {
-                    Ok(()) => {
-                        app.dirty = false;
-                        app.status = "Saved".into();
-                    }
-                    Err(error) => app.status = error,
-                },
-                KeyCode::Char('a') => begin_add(app, Action::AddGroup),
-                KeyCode::Char('e') => begin_add(app, Action::AddEntry),
-                KeyCode::Char('x') => begin_delete_entry(app),
-                KeyCode::Char('X') => begin_delete_group(app),
-                KeyCode::Char('I') => begin_icon_picker(app, None),
-                KeyCode::Char('g') => {
-                    app.include_groups = !app.include_groups;
-                    if app.query.is_empty() {
-                        app.status = if app.include_groups {
-                            "Path results will include matching groups".into()
-                        } else {
-                            "Path results will include entries only".into()
-                        };
-                    } else {
-                        app.refresh();
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    app.clear_reveal();
-                    app.selected = app
-                        .selected
-                        .saturating_add(1)
-                        .min(app.visible_row_count().saturating_sub(1));
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    app.clear_reveal();
-                    app.selected = app.selected.saturating_sub(1);
-                }
-                KeyCode::Enter => app.select(),
-                KeyCode::Backspace if app.query.is_empty() => {
-                    if let Some(parent) = app.tree_stack.pop() {
-                        app.clear_reveal();
-                        app.tree_parent = parent;
-                        app.selected = 0;
-                        app.refresh();
-                    }
-                }
-                KeyCode::Char('/') => {
-                    app.clear_reveal();
-                    app.input_mode = true;
-                    clear_input(&mut app.input);
-                    app.query_before_input.zeroize();
-                    app.query_before_input.push_str(&app.query);
-                    app.action = Action::Query;
-                    app.edit_mode = false;
-                    app.input.push_str(&app.query);
-                    app.status =
-                        "Path glob (max 1024 bytes); type to filter · Enter done · Esc cancel"
-                            .into();
-                }
-                _ => {}
-            }
-        } else {
-            match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    app.entry = None;
-                    app.entry_icon = None;
-                    app.detail.clear();
-                    app.fields.clear();
-                    app.clear_reveal();
-                }
-                KeyCode::Char('I') => begin_icon_picker(app, None),
-                KeyCode::Char('e') => {
-                    app.clear_reveal();
-                    let Some((field, _)) = app.fields.get(app.selected_field) else {
-                        app.status = "No field selected".into();
-                        continue;
-                    };
-                    if field == "Title" {
-                        app.status = "Title cannot be edited as a field".into();
-                        continue;
-                    }
-                    field.clone_into(&mut app.edit_field);
-                    let prompt = format!(
-                        "Edit {} value; input is masked · Enter apply · Esc cancel",
-                        clean(&app.edit_field)
-                    );
-                    begin_action(app, Action::Edit, &prompt);
-                    app.edit_mode = true;
-                }
-                KeyCode::Char('g') => {
-                    begin_action(
-                        app,
-                        Action::Generate,
-                        "Enter new password length (1..=4096). Confirming replaces the old password; save persists it.",
-                    );
-                }
-                KeyCode::Char('r') => {
-                    begin_action(
-                        app,
-                        Action::PasswordReveal,
-                        "Reveal password? Type YES. WARNING: terminal scrollback and screenshots may retain it; shown for 15s.",
-                    );
-                }
-                KeyCode::Char('c') => begin_action(
-                    app,
-                    Action::ClipboardCopy,
-                    if app.clipboard.supports_atomic_ownership_clear() {
-                        "Copy password? Other apps can read it. Windows will attempt an ownership-safe clear in 30s, but it may remain. Type YES to confirm."
-                    } else if app.clipboard.supports_timed_clear() {
-                        "Copy password? Other apps can read it. nkp will attempt a best-effort compare-and-clear in 30s (verify manually; clipboard history or concurrent copies may retain it). Type YES to confirm."
-                    } else {
-                        "Copy password? Other apps can read it. This platform cannot safely auto-clear; clear manually when done. Type YES to confirm."
-                    },
-                ),
-                KeyCode::Char('t') => begin_action(
-                    app,
-                    Action::TotpReveal,
-                    "Reveal current TOTP? Type YES. HOTP is unsupported. WARNING: terminal scrollback may retain the code.",
-                ),
-                KeyCode::Char('v') => begin_field_reveal(app),
-                KeyCode::Char('a') => begin_action(
-                    app,
-                    Action::AddAttachment,
-                    "Add attachment as name=source-path (bounded to 16 MiB)",
-                ),
-                KeyCode::Char('x') => begin_attachment_action(app, Action::ExportAttachment),
-                KeyCode::Char('d') => begin_attachment_action(app, Action::RemoveAttachment),
-                KeyCode::Char('o') => begin_action(
-                    app,
-                    Action::ExportInterchange,
-                    "Export interchange to a new owner-only path; no overwrite. Enter destination.",
-                ),
-                KeyCode::Char('i') => begin_action(
-                    app,
-                    Action::ImportInterchange,
-                    "Import interchange from path (max 16 MiB); existing non-empty vaults are refused.",
-                ),
-                KeyCode::Char('n') => app.move_attachment(true),
-                KeyCode::Char('p') => app.move_attachment(false),
-                KeyCode::Down | KeyCode::Char('j') => {
-                    move_field_selection(&mut app.selected_field, app.fields.len(), true);
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    move_field_selection(&mut app.selected_field, app.fields.len(), false);
-                }
-                KeyCode::Char('s') => match app.save(path) {
-                    Ok(()) => {
-                        app.dirty = false;
-                        app.status = "Saved".into();
-                    }
-                    Err(error) => app.status = error,
-                },
-                _ => {}
-            }
+            Event::Mouse(mouse) => handle_mouse_event(app, mouse),
+            _ => {}
         }
     }
     app.lock_vault();
-    Ok(())
+    mouse_guard.disable()
 }
 
 /// Starts the explicitly selected TUI command.
@@ -3442,7 +4131,11 @@ pub fn launch(path: &Path, aliases: Vec<String>, color_override: ColorOverride) 
         .open(path, &mut credentials, &KDBX_LIMITS)
         .map_err(|_| io::Error::other("cannot unlock vault"))?;
     let theme = TuiTheme::from_tier(detect_color_tier_from_env(color_override));
-    let mut app = new_app_with_theme(service, session, credentials, aliases, theme)?;
+    let vault_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map_or_else(|| "vault.kdbx".to_owned(), clean);
+    let mut app = new_app_with_theme(service, session, credentials, aliases, theme, vault_name)?;
     app.refresh();
     #[cfg(unix)]
     let result = run_terminal(&mut app, path);
@@ -3563,6 +4256,7 @@ fn new_app(
         credentials,
         aliases,
         TuiTheme::from_tier(ColorTier::Basic16),
+        "vault.kdbx".to_owned(),
     )
 }
 
@@ -3572,6 +4266,7 @@ fn new_app_with_theme(
     credentials: KdbxCredentials,
     aliases: Vec<String>,
     theme: TuiTheme,
+    vault_name: String,
 ) -> io::Result<App> {
     let tree_parent = service
         .root_group(session)
@@ -3580,6 +4275,8 @@ fn new_app_with_theme(
         service,
         session,
         credentials: Some(credentials),
+        vault_name,
+        focus: FocusPane::Entries,
         hits: Vec::new(),
         groups: Vec::new(),
         tree_parent,
@@ -3587,7 +4284,15 @@ fn new_app_with_theme(
         tree_cursor: None,
         list_cursor: None,
         page_failure: None,
-        selected: 0,
+        group_selected: 0,
+        entry_selected: 0,
+        groups_offset: 0,
+        entries_offset: 0,
+        detail_scroll: 0,
+        detail_max_scroll: 0,
+        groups_area: Rect::default(),
+        entries_area: Rect::default(),
+        detail_area: Rect::default(),
         query: Zeroizing::new(String::new()),
         query_before_input: Zeroizing::new(String::new()),
         entry: None,
@@ -4135,7 +4840,7 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used, reason = "in-memory test renderer must succeed")]
-    fn screen(app: &super::App, width: u16, height: u16) -> String {
+    fn screen(app: &mut super::App, width: u16, height: u16) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| super::draw(frame, app)).unwrap();
@@ -4245,7 +4950,7 @@ mod tests {
         for decision in [super::PendingDecision::Exit, super::PendingDecision::Lock] {
             app.pending_decision = Some(decision);
             app.status = "Unsaved changes: s save · d discard · c cancel".into();
-            let text = screen(&app, 40, 12);
+            let text = screen(&mut app, 40, 12);
             for required in ["s save", "d discard", "c cancel", "F3 clipboard warning"] {
                 assert!(text.contains(required));
             }
@@ -4265,7 +4970,7 @@ mod tests {
         for (selected, suffix) in ["FIRST-FIELD", "SECOND-FIELD"].into_iter().enumerate() {
             app.selected_field = selected;
             super::begin_field_reveal(&mut app);
-            let text = screen(&app, 40, 12);
+            let text = screen(&mut app, 40, 12);
             for required in [
                 "Type YES",
                 "WARNING:",
@@ -4276,12 +4981,12 @@ mod tests {
             }
             super::inspect_action_target(&mut app);
             super::handle_modal_key(&mut app, super::KeyCode::End);
-            let text = screen(&app, 40, 12);
+            let text = screen(&mut app, 40, 12);
             assert!(text.contains(suffix));
             assert!(text.contains(&format!("Field {}/2", selected + 1)));
             super::handle_modal_key(&mut app, super::KeyCode::Esc);
             assert!(app.input_mode);
-            assert!(screen(&app, 40, 12).contains("Type YES"));
+            assert!(screen(&mut app, 40, 12).contains("Type YES"));
         }
     }
 
@@ -4299,7 +5004,7 @@ mod tests {
         app.apply_clipboard_tick(Err(crate::clipboard::ClipboardError));
         assert!(app.clipboard_warning_pending);
         super::open_clipboard_warning(&mut app);
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         for required in [
             "Clear it manually.",
             "Acknowledging",
@@ -4315,21 +5020,21 @@ mod tests {
         app.input_mode = false;
         assert!(app.dirty);
         assert!(app.status.contains("Password replaced in memory"));
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Clear it manually."));
         assert!(text.contains("F3"));
         app.status = "Saved".into();
         app.refresh();
         assert!(app.clipboard_warning_pending);
         super::open_clipboard_warning(&mut app);
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Clear it manually."));
         assert!(text.contains("Acknowledging"));
         super::handle_modal_key(&mut app, super::KeyCode::Enter);
         assert!(app.clipboard_warning_pending); // Enter is not acknowledgement.
         app.lock_vault();
         assert!(app.clipboard_warning_pending);
-        assert!(screen(&app, 40, 12).contains("Clear it manually."));
+        assert!(screen(&mut app, 40, 12).contains("Clear it manually."));
         super::open_clipboard_warning(&mut app);
         super::handle_modal_key(&mut app, super::KeyCode::Char('a'));
         assert!(!app.clipboard_warning_pending);
@@ -4344,11 +5049,11 @@ mod tests {
         assert_eq!(app.fields.len(), 5);
         for selected in 0..app.fields.len() {
             app.selected_field = selected;
-            let text = screen(&app, 40, 12);
+            let text = screen(&mut app, 40, 12);
             assert!(text.contains(&format!("> {}", app.fields[selected].0)));
             let name = app.fields[selected].0.clone();
             super::begin_field_reveal(&mut app);
-            let text = screen(&app, 40, 12);
+            let text = screen(&mut app, 40, 12);
             assert!(text.contains(&format!("Reveal field: {name}")));
             assert!(text.contains("Type YES"));
             assert_eq!(app.field_to_reveal.as_str(), name);
@@ -4403,7 +5108,7 @@ mod tests {
             } else {
                 "Clear it manually"
             }));
-            let text = screen(&app, 40, 12);
+            let text = screen(&mut app, 40, 12);
             assert!(text.contains("This replaces the current password."));
             assert!(text.contains("Type YES"));
             assert!(text.contains("Notice: Clipboard"));
@@ -4415,7 +5120,7 @@ mod tests {
     fn status_warning_and_action_confirmation_are_visible_at_narrow_size() {
         let (_directory, mut app) = app_fixture();
         app.status = "Clipboard expiry could not safely clear it; it may still contain the password. Clear it manually.".into();
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Clipboard expiry"));
         assert!(text.contains("Clear it manually."));
         super::begin_action(
@@ -4423,26 +5128,26 @@ mod tests {
             super::Action::PasswordReveal,
             "Reveal password? Type YES. WARNING: terminal scrollback and screenshots may retain it; shown for 15s.",
         );
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Type YES."));
         assert!(text.contains("WARNING:"));
         assert!(text.contains("Esc cancel"));
         app.input_mode = false;
         app.pending_decision = Some(super::PendingDecision::Exit);
         app.status = "Save failed: cannot save vault.".into();
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         for expected in ["Save failed:", "s save", "d discard", "c cancel"] {
             assert!(text.contains(expected));
         }
         app.pending_decision = Some(super::PendingDecision::Lock);
         app.status = "Idle lock requested. Unsaved changes: s save · d discard · c cancel".into();
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Idle lock requested."));
         assert!(text.contains("d discard"));
         app.pending_decision = None;
         app.clipboard_may_contain_password = true;
         app.lock_vault();
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Vault locked; clipboard"));
         assert!(text.contains("Press q to exit."));
     }
@@ -4520,20 +5225,20 @@ mod tests {
             input: zeroize::Zeroizing::new(String::new()),
             offset: 0,
         });
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Type YES"));
         assert!(text.contains("Esc cancel"));
         super::handle_modal_key(&mut app, super::KeyCode::End);
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("TAIL"));
         assert!(text.contains("Group row 2/2"));
         app.modal = None;
         app.reveal = Some(zeroize::Zeroizing::new("disposable-render-marker".into()));
         app.detail = vec!["metadata".into(); 100];
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("WARNING:"));
         assert!(text.contains("disposable-render-marker"));
-        let text = screen(&app, 30, 8);
+        let text = screen(&mut app, 30, 8);
         assert!(text.contains("Resize terminal"));
         assert!(!text.contains("disposable-render-marker"));
     }
@@ -4547,12 +5252,12 @@ mod tests {
         let (directory, mut app) = app_fixture();
         app.select();
         app.move_attachment(true);
-        let text = screen(&app, 120, 40);
+        let text = screen(&mut app, 120, 40);
         assert!(text.contains("> second.bin"));
         assert!(!text.contains("> first.bin"));
         super::begin_attachment_action(&mut app, super::Action::ExportAttachment);
         super::inspect_action_target(&mut app);
-        let text = screen(&app, 40, 12);
+        let text = screen(&mut app, 40, 12);
         assert!(text.contains("Attachment 2/2"));
         assert!(text.contains("second.bin"));
         super::handle_modal_key(&mut app, super::KeyCode::Esc);
@@ -4566,7 +5271,7 @@ mod tests {
         );
         app.input_mode = false;
         app.move_attachment(false);
-        let text = screen(&app, 120, 40);
+        let text = screen(&mut app, 120, 40);
         assert!(text.contains("> first.bin"));
         assert!(!text.contains("> second.bin"));
     }
@@ -5258,15 +5963,17 @@ mod tests {
         assert_eq!(app.groups.len(), 1);
         assert_eq!(app.groups[0].icon_id, 48);
 
-        let rendered_tree = screen(&app, 80, 20);
+        let rendered_tree = screen(&mut app, 80, 20);
         assert!(rendered_tree.contains(standard_icon(48).glyph));
         assert!(rendered_tree.contains(standard_icon(0).glyph));
         assert!(rendered_tree.contains("nkp"));
 
         // Open IconPicker on group row (selected == 0), filter for "Email" (19), apply.
+        app.focus = super::FocusPane::Groups;
+        app.group_selected = 0;
         super::begin_icon_picker(&mut app, Some(true));
         assert!(matches!(app.modal, Some(super::Modal::IconPicker { .. })));
-        let picker_screen = screen(&app, 40, 12);
+        let picker_screen = screen(&mut app, 40, 12);
         assert!(picker_screen.contains("nkp Icons"));
 
         super::handle_modal_key(&mut app, KeyCode::Char('/'));
@@ -5289,20 +5996,21 @@ mod tests {
         super::handle_modal_key(&mut app, KeyCode::Enter);
         assert!(app.dirty);
         assert_eq!(app.groups[0].icon_id, 19);
-        let rendered_updated = screen(&app, 80, 20);
+        let rendered_updated = screen(&mut app, 80, 20);
         assert!(rendered_updated.contains(standard_icon(19).glyph));
 
-        // Select entry (row 1 after 1 group) and open detail view; verify Icon header.
-        app.selected = 1;
+        // Select entry and open detail view; verify Icon header.
+        app.focus = super::FocusPane::Entries;
+        app.entry_selected = 0;
         app.select();
-        let detail_screen = screen(&app, 80, 24);
+        let detail_screen = screen(&mut app, 80, 24);
         assert!(detail_screen.contains("Icon: ⚷ Key"));
         assert!(!detail_screen.contains("[custom]"));
 
         // Simulate custom icon indicator on selected entry header.
         app.entry_icon = Some((19, nkeepass::CustomIconId::from_bytes([0x22; 16])));
         app.detail[1] = "Icon: ✉ Email [custom]".to_owned();
-        let custom_detail_screen = screen(&app, 80, 24);
+        let custom_detail_screen = screen(&mut app, 80, 24);
         assert!(custom_detail_screen.contains("Icon: ✉ Email [custom]"));
     }
 
@@ -5374,7 +6082,7 @@ mod tests {
         assert!(!app.edit_mode);
         assert!(app.pending_entry.is_some());
         assert_eq!(app.input.as_str(), "Example");
-        let rename_screen = screen(&app, 80, 24);
+        let rename_screen = screen(&mut app, 80, 24);
         assert!(rename_screen.contains("Rename entry title"));
         assert!(rename_screen.contains("Example"));
 
@@ -5405,7 +6113,7 @@ mod tests {
         for ch in "ops, prod".chars() {
             super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
         }
-        let tags_screen = screen(&app, 80, 24);
+        let tags_screen = screen(&mut app, 80, 24);
         assert!(tags_screen.contains("Edit tags"));
         assert!(tags_screen.contains("ops, prod"));
         super::handle_input_mode_key(&mut app, KeyCode::Enter);
@@ -5421,7 +6129,7 @@ mod tests {
         for ch in "bad-otp".chars() {
             super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
         }
-        let masked_screen = screen(&app, 80, 24);
+        let masked_screen = screen(&mut app, 80, 24);
         assert!(masked_screen.contains("Set/update OTP URI"));
         assert!(masked_screen.contains(&"•".repeat("bad-otp".len())));
         assert!(!masked_screen.contains("bad-otp"));
@@ -5440,7 +6148,7 @@ mod tests {
         for ch in uri.chars() {
             super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
         }
-        let masked_valid = screen(&app, 80, 24);
+        let masked_valid = screen(&mut app, 80, 24);
         assert!(!masked_valid.contains("GEZDGNBVGY3TQOJQ"));
         assert!(masked_valid.contains(&"•".repeat(64)));
 
@@ -5457,7 +6165,236 @@ mod tests {
         // Also verify IconPicker 40x12 filtering footer fits without clipping.
         super::begin_icon_picker(&mut app, Some(false));
         super::handle_modal_key(&mut app, KeyCode::Char('/'));
-        let picker_40x12 = screen(&app, 40, 12);
+        let picker_40x12 = screen(&mut app, 40, 12);
         assert!(picker_40x12.contains("Type filter · Enter · Esc"));
+    }
+
+    #[test]
+    fn mouse_click_and_wheel_scroll_work_across_panes_and_modals() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (_dir, mut app) = app_fixture();
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.add_group(&root, "Work").unwrap();
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.add_group(&root, "Personal").unwrap();
+        let work_ref = app.service.resolve_group(app.session, "Root/Work").unwrap();
+        app.service
+            .create_entry_in_group(&work_ref, "WorkSecret")
+            .unwrap();
+        let root_after = app.service.root_group(app.session).unwrap();
+        app.service
+            .create_entry_in_group(&root_after, "SecondEntry")
+            .unwrap();
+        app.reset_tree_after_mutation();
+        app.refresh();
+
+        // Render at 100x24 so Groups, Entries, and Detail areas are recorded.
+        let rendered = screen(&mut app, 100, 24);
+        assert!(rendered.contains("Work"));
+        assert!(rendered.contains("Personal"));
+        assert!(rendered.contains("SecondEntry"));
+        assert!(app.groups_area.width > 0);
+        assert!(app.entries_area.width > 0);
+        assert!(app.detail_area.width > 0);
+
+        // Left-click second entry row in entries_area: switches focus to Entries, selects it, loads detail.
+        app.focus = super::FocusPane::Groups;
+        let entries_x = app.entries_area.x;
+        let entries_y = app.entries_area.y;
+        let groups_x = app.groups_area.x;
+        let groups_y = app.groups_area.y;
+        let second_entry_y = entries_y + 2;
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: entries_x + 2,
+                row: second_entry_y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.focus, super::FocusPane::Entries);
+        assert_eq!(app.entry_selected, 1);
+        assert!(
+            app.detail
+                .first()
+                .is_some_and(|line| line.contains("SecondEntry"))
+        );
+
+        // Mouse scroll up over entries_area selects previous entry.
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: entries_x + 2,
+                row: entries_y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.entry_selected, 0);
+
+        // Left-click first group row ("Work") in groups_area: first click selects, second enters!
+        let work_row_y = groups_y + 1;
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: groups_x + 2,
+                row: work_row_y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.focus, super::FocusPane::Groups);
+        assert_eq!(app.group_selected, 0);
+        assert!(app.tree_stack.is_empty());
+
+        // Second click on already-selected "Work" navigates into it.
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: groups_x + 2,
+                row: work_row_y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.tree_stack.len(), 1);
+        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.hits[0].title(), "WorkSecret");
+        let work_screen = screen(&mut app, 100, 24);
+        assert!(work_screen.contains("/Work"));
+        assert!(work_screen.contains(".. (parent)"));
+        let work_groups_x = app.groups_area.x;
+        let work_groups_y = app.groups_area.y;
+
+        // Clicking ".." parent row navigates back up to root.
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: work_groups_x + 2,
+                row: work_groups_y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(app.tree_stack.is_empty());
+
+        // Mouse scroll wheel over an open modal scrolls smoothly.
+        app.modal = Some(super::Modal::Help { scroll: 0 });
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 5,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(matches!(app.modal, Some(super::Modal::Help { scroll: 1 })));
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 10,
+                row: 5,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(matches!(app.modal, Some(super::Modal::Help { scroll: 0 })));
+    }
+
+    #[test]
+    fn creating_entry_inside_nested_subgroup_stays_in_subgroup_and_auto_selects() {
+        let (_dir, mut app) = app_fixture();
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.add_group(&root, "Work").unwrap();
+        let work_ref = app.service.resolve_group(app.session, "Root/Work").unwrap();
+        app.service.add_group(&work_ref, "Infra").unwrap();
+        app.reset_tree_after_mutation();
+        app.refresh();
+
+        // Navigate into Work -> Infra.
+        app.focus = super::FocusPane::Groups;
+        app.enter_group(0);
+        app.enter_group(0);
+        assert_eq!(app.tree_stack.len(), 2);
+        assert_eq!(app.display_group_path(), "/Work/Infra");
+
+        // Create a new entry inside /Work/Infra via the real input flow ('e' -> type -> Enter).
+        super::begin_add(&mut app, super::Action::AddEntry);
+        for ch in "ProdDb".chars() {
+            super::handle_input_mode_key(&mut app, crossterm::event::KeyCode::Char(ch));
+        }
+        super::handle_input_mode_key(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(!app.input_mode);
+        assert!(app.dirty);
+        assert_eq!(app.tree_stack.len(), 2);
+        assert_eq!(app.display_group_path(), "/Work/Infra");
+        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.hits[0].title(), "ProdDb");
+        assert_eq!(app.entry_selected, 0);
+        assert_eq!(app.focus, super::FocusPane::Entries);
+        assert!(
+            app.detail
+                .first()
+                .is_some_and(|line| line == "Title: ProdDb")
+        );
+        assert!(app.status.contains("Entry added in memory"));
+
+        let wide = screen(&mut app, 100, 24);
+        assert!(wide.contains("ProdDb"));
+        assert!(wide.contains("/Work/Infra"));
+        assert!(wide.contains("[UNSAVED · Ctrl+S]"));
+    }
+
+    #[test]
+    fn ctrl_s_saves_vault_and_shows_filename_and_release_events_are_ignored() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+        let (dir, mut app) = app_fixture();
+        let vault_path = dir.path().join("work.kdbx");
+        app.vault_name = "work.kdbx".to_owned();
+        app.refresh();
+
+        // Save initial state to work.kdbx first via `Ctrl+S`.
+        app.dirty = true;
+        let dirty_screen = screen(&mut app, 80, 20);
+        assert!(dirty_screen.contains("[UNSAVED · Ctrl+S]"));
+        assert!(dirty_screen.contains("work.kdbx"));
+
+        // `KeyEventKind::Release` for Ctrl+S or 'j' must be ignored cleanly.
+        let release_save = KeyEvent::new_with_kind(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        );
+        super::handle_key_event(&mut app, release_save, &vault_path);
+        assert!(app.dirty);
+
+        // `KeyEventKind::Repeat` for non-navigation keys must be ignored; allowed for arrows.
+        let repeat_quit =
+            KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Repeat);
+        let outcome = super::handle_key_event(&mut app, repeat_quit, &vault_path);
+        assert_eq!(outcome, super::KeyOutcome::Continue);
+        assert!(super::should_handle_key_event(
+            KeyEventKind::Repeat,
+            KeyCode::Down
+        ));
+        assert!(!super::should_handle_key_event(
+            KeyEventKind::Release,
+            KeyCode::Down
+        ));
+
+        // `KeyEventKind::Press` for `Ctrl+S` saves and shows `"Saved to work.kdbx"`.
+        let press_save = KeyEvent::new_with_kind(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        super::handle_key_event(&mut app, press_save, &vault_path);
+        assert!(!app.dirty);
+        assert!(app.status.contains("Saved to work.kdbx"));
+        assert!(vault_path.exists());
     }
 }

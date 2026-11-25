@@ -5229,8 +5229,8 @@ fn p1_a_use_shorthand_non_consuming_vault_rejection_and_init_separator() {
     let tui_with_v = cli(tmp.path(), &["-V", vault_a_str, "tui", vault_b_str]);
     assert!(!tui_with_v.status.success());
     assert!(
-        String::from_utf8_lossy(&tui_with_v.stderr).contains("nkp tui PATH"),
-        "tui -V diagnostic did not point to nkp tui PATH: {}",
+        String::from_utf8_lossy(&tui_with_v.stderr).contains("nkp tui [PATH|ALIAS]"),
+        "tui -V diagnostic did not point to nkp tui [PATH|ALIAS]: {}",
         String::from_utf8_lossy(&tui_with_v.stderr)
     );
 
@@ -5289,4 +5289,195 @@ fn p1_a_use_shorthand_non_consuming_vault_rejection_and_init_separator() {
         .output()
         .unwrap();
     assert!(!dup_init.status.success());
+}
+
+#[test]
+fn tui_cli_help_missing_default_alias_and_current_vault_resolution() {
+    use neotales_keepass::{
+        Entry, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxWriteOptions, KeePassDatabase,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config_home = tmp.path().join("cfg");
+    let data_home = tmp.path().join("data");
+    std::fs::create_dir_all(&config_home).unwrap();
+    std::fs::create_dir_all(&data_home).unwrap();
+
+    // 1. `nkp tui --help` advertises `tui [PATH|ALIAS]` and `-V, --vault PATH`.
+    let help = cli(&config_home, &["tui", "--help"]);
+    assert!(help.status.success(), "tui --help failed");
+    let help_stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help_stdout.contains("tui [PATH|ALIAS]"),
+        "missing tui [PATH|ALIAS] in help:\n{help_stdout}"
+    );
+    assert!(
+        help_stdout.contains("-V, --vault PATH"),
+        "missing -V, --vault PATH in help:\n{help_stdout}"
+    );
+
+    // 2. `nkp tui` with no configured vault fails with an actionable error.
+    let no_default = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args(["tui"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!no_default.status.success());
+    let no_default_err = String::from_utf8_lossy(&no_default.stderr);
+    assert!(
+        no_default_err.contains("no vault specified and no default vault configured"),
+        "unexpected missing-default error: {no_default_err}"
+    );
+
+    // 3. Unknown alias fails cleanly before prompting.
+    for bad in ["unknown", "@unknown"] {
+        let out = cli(&config_home, &["tui", bad]);
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("vault alias not found"),
+            "unexpected error for {bad}: {stderr}"
+        );
+    }
+
+    // 4. Create two vaults with distinct markers and register aliases + current/default_vault.
+    let create_vault = |filename: &str, title: &str| {
+        let path = tmp.path().join(filename);
+        let mut db = KeePassDatabase::default();
+        db.add_entry(Entry::new(title));
+        KdbxFile::save(
+            &db,
+            std::fs::File::create(&path).unwrap(),
+            &mut KdbxCredentials::password("tui-cli-pass").unwrap(),
+            KdbxWriteOptions {
+                aes_kdf_rounds: 8,
+                ..KdbxWriteOptions::default()
+            },
+            &KdbxReadLimits::default(),
+        )
+        .unwrap();
+        path
+    };
+    let work_vault = create_vault("work.kdbx", "WorkEntryMarker");
+    let home_vault = create_vault("home.kdbx", "HomeEntryMarker");
+    let work_str = work_vault.to_str().unwrap();
+    let home_str = home_vault.to_str().unwrap();
+
+    assert!(
+        cli(&config_home, &["alias", "set", "work", work_str])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&config_home, &["alias", "set", "home", home_str])
+            .status
+            .success()
+    );
+
+    let run_pty_tui = |args: &[&str], expect_marker: &str| {
+        let script = r#"
+import codecs, fcntl, os, pty, select, signal, struct, subprocess, sys, termios, time
+
+binary = sys.argv[1]
+expect_marker = sys.argv[2]
+tui_args = sys.argv[3:]
+master, slave = pty.openpty()
+
+def preexec():
+    os.setsid()
+    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+os.set_blocking(master, False)
+proc = subprocess.Popen(
+    [binary] + tui_args,
+    stdin=slave, stdout=slave, stderr=slave,
+    preexec_fn=preexec,
+    close_fds=True,
+    env=dict(os.environ, TERM="xterm-256color"),
+)
+os.close(slave)
+
+buf = bytearray()
+deadline = time.monotonic() + 10.0
+
+def pump_until(needle):
+    while needle.encode() not in buf:
+        if time.monotonic() >= deadline:
+            proc.kill()
+            raise AssertionError(f"timed out waiting for {needle!r}; saw={buf.decode('utf-8', 'replace')!r}")
+        if proc.poll() is not None:
+            raise AssertionError(f"process exited early rc={proc.returncode}; saw={buf.decode('utf-8', 'replace')!r}")
+        if select.select([master], [], [], 0.05)[0]:
+            try:
+                chunk = os.read(master, 65536)
+                if chunk:
+                    buf.extend(chunk)
+            except BlockingIOError:
+                pass
+
+try:
+    pump_until("Vault password:")
+    os.write(master, b"tui-cli-pass\n")
+    pump_until(expect_marker)
+    os.write(master, b"q")
+    while proc.poll() is None:
+        if time.monotonic() >= deadline:
+            proc.kill()
+            raise AssertionError("timed out waiting for exit")
+        if select.select([master], [], [], 0.05)[0]:
+            try:
+                chunk = os.read(master, 65536)
+                if not chunk:
+                    break
+            except OSError:
+                break
+    rc = proc.wait(timeout=2)
+    assert rc == 0, f"unexpected rc={rc}"
+finally:
+    os.close(master)
+"#;
+        let out = Command::new("python3")
+            .isolate_application_environment()
+            .args(["-c", script, env!("CARGO_BIN_EXE_nkp"), expect_marker])
+            .args(args)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_DATA_HOME", &data_home)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "PTY tui {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // Alias resolution: `nkp tui work`, `nkp tui @work`, `nkp --vault work tui`, `nkp --vault @work tui`.
+    run_pty_tui(&["tui", "work"], "WorkEntryMarker");
+    run_pty_tui(&["tui", "@work"], "WorkEntryMarker");
+    run_pty_tui(&["--vault", "work", "tui"], "WorkEntryMarker");
+    run_pty_tui(&["--vault", "@work", "tui"], "WorkEntryMarker");
+
+    // `nkp use work` sets `current`, so `nkp tui` with no args opens `work.kdbx`.
+    assert!(cli(&config_home, &["use", "work"]).status.success());
+    run_pty_tui(&["tui"], "WorkEntryMarker");
+
+    // Clearing `current` and setting `default_vault = home` opens `home.kdbx` via `nkp tui`.
+    assert!(
+        cli(&config_home, &["config", "rm", "current"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&config_home, &["config", "set", "default_vault", "home"])
+            .status
+            .success()
+    );
+    run_pty_tui(&["tui"], "HomeEntryMarker");
 }
