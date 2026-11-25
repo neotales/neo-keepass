@@ -925,6 +925,7 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     assert!(nu_init.contains("error make --unspanned"));
 
     // Syntax-check generated Bash scripts if `bash` is available on the host
+    #[cfg(unix)]
     if let Ok(output) = std::process::Command::new("bash")
         .arg("-n")
         .stdin(std::process::Stdio::piped())
