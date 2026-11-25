@@ -115,13 +115,14 @@ fn timed_out() -> io::Error {
 #[cfg(unix)]
 mod platform {
     use super::*;
+    #[cfg(not(target_vendor = "apple"))]
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
     use nix::sys::termios::{
         FlushArg, LocalFlags, SetArg, SpecialCharacterIndices, Termios, tcflush, tcgetattr,
         tcsetattr,
     };
-    use std::os::fd::AsFd;
+    use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -137,6 +138,93 @@ mod platform {
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(timed_out)
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Readiness {
+        Ready,
+        Timeout,
+        Interrupted,
+    }
+
+    fn validate_select_fd(raw: RawFd) -> io::Result<()> {
+        let Ok(index) = usize::try_from(raw) else {
+            return Err(io::Error::other("terminal descriptor out of select range"));
+        };
+        if index >= nix::sys::select::FD_SETSIZE {
+            return Err(io::Error::other("terminal descriptor out of select range"));
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    fn wait_fd_select(
+        fd: BorrowedFd<'_>,
+        writable: bool,
+        slice: Duration,
+    ) -> io::Result<Readiness> {
+        use nix::sys::select::{FdSet, select};
+        use nix::sys::time::{TimeVal, suseconds_t};
+
+        validate_select_fd(fd.as_raw_fd())?;
+        let clamped = slice.min(Duration::from_millis(100));
+        let micros = if clamped.is_zero() {
+            0
+        } else {
+            clamped.as_micros().max(1)
+        };
+        let usec = suseconds_t::try_from(micros).unwrap_or(100_000);
+        let mut timeout = TimeVal::new(0, usec);
+
+        let mut fds = FdSet::new();
+        fds.insert(fd);
+        let (read_fds, write_fds) = if writable {
+            (None, Some(&mut fds))
+        } else {
+            (Some(&mut fds), None)
+        };
+        match select(
+            None,
+            read_fds,
+            write_fds,
+            None::<&mut FdSet<'_>>,
+            Some(&mut timeout),
+        ) {
+            Ok(0) => Ok(Readiness::Timeout),
+            Ok(_) => Ok(Readiness::Ready),
+            Err(nix::errno::Errno::EINTR) => Ok(Readiness::Interrupted),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn wait_output(output: &impl AsFd, slice: Duration) -> io::Result<()> {
+        #[cfg(target_vendor = "apple")]
+        {
+            match wait_fd_select(output.as_fd(), true, slice)? {
+                Readiness::Ready | Readiness::Timeout | Readiness::Interrupted => Ok(()),
+            }
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let mut fds = [PollFd::new(output.as_fd(), PollFlags::POLLOUT)];
+            let timeout = PollTimeout::try_from(slice.min(Duration::from_millis(100)))
+                .unwrap_or(PollTimeout::MAX);
+            match poll(&mut fds, timeout) {
+                Ok(0) | Err(nix::errno::Errno::EINTR) => return Ok(()),
+                Err(error) => return Err(error.into()),
+                _ => {}
+            }
+            let events = fds[0]
+                .revents()
+                .ok_or_else(|| io::Error::other("invalid terminal output readiness event"))?;
+            if events.intersects(PollFlags::POLLNVAL | PollFlags::POLLHUP | PollFlags::POLLERR) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "terminal prompt output failed",
+                ));
+            }
+            Ok(())
+        }
     }
 
     pub(super) fn write_prompt(
@@ -164,24 +252,7 @@ mod platform {
                 Err(nix::errno::Errno::EAGAIN) => {}
                 Err(error) => return Err(error.into()),
             }
-            let mut fds = [PollFd::new(output.as_fd(), PollFlags::POLLOUT)];
-            let timeout =
-                PollTimeout::try_from(remaining(deadline)?.min(Duration::from_millis(100)))
-                    .unwrap_or(PollTimeout::MAX);
-            match poll(&mut fds, timeout) {
-                Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
-                Err(error) => return Err(error.into()),
-                _ => {}
-            }
-            let events = fds[0]
-                .revents()
-                .ok_or_else(|| io::Error::other("invalid terminal output readiness event"))?;
-            if events.intersects(PollFlags::POLLNVAL | PollFlags::POLLHUP | PollFlags::POLLERR) {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "terminal prompt output failed",
-                ));
-            }
+            wait_output(output, remaining(deadline)?)?;
         }
         remaining(deadline).map(|_| ())
     }
@@ -306,6 +377,66 @@ mod platform {
         read_from_handoff(stdin, deadline, ready, || Ok(()))
     }
 
+    // XNU poll(2) rejects /dev/tty with POLLNVAL; select(2) supports it.
+    // select has no POLLHUP bit, so Ok(0) after Ready is EOF/hangup, not EAGAIN.
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    fn read_input_byte_select(stdin: &impl AsFd, slice: Duration) -> io::Result<Option<u8>> {
+        match wait_fd_select(stdin.as_fd(), false, slice)? {
+            Readiness::Timeout | Readiness::Interrupted => return Ok(None),
+            Readiness::Ready => {}
+        }
+        let mut byte = [0];
+        match nix::unistd::read(stdin, &mut byte) {
+            Ok(0) => Err(cancelled()),
+            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => Ok(None),
+            Err(error) => Err(error.into()),
+            Ok(_) => Ok(Some(byte[0])),
+        }
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    fn read_input_byte_poll(stdin: &impl AsFd, slice: Duration) -> io::Result<Option<u8>> {
+        let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
+        let timeout = PollTimeout::try_from(slice.min(Duration::from_millis(100)))
+            .unwrap_or(PollTimeout::MAX);
+        match poll(&mut fds, timeout) {
+            Ok(0) | Err(nix::errno::Errno::EINTR) => return Ok(None),
+            Err(error) => return Err(error.into()),
+            _ => {}
+        }
+        let events = fds[0]
+            .revents()
+            .ok_or_else(|| io::Error::other("invalid terminal readiness event"))?;
+        if events.contains(PollFlags::POLLNVAL) {
+            return Err(io::Error::other("invalid terminal input descriptor"));
+        }
+        if !events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR) {
+            return Ok(None);
+        }
+        let mut byte = [0];
+        match nix::unistd::read(stdin, &mut byte) {
+            Ok(0) if events.contains(PollFlags::POLLHUP) => Err(cancelled()),
+            Ok(0) if events.contains(PollFlags::POLLERR) => {
+                Err(io::Error::other("terminal input failed"))
+            }
+            Ok(0) => Ok(None), // Empty nonblocking read, not EOF.
+            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => Ok(None),
+            Err(error) => Err(error.into()),
+            Ok(_) => Ok(Some(byte[0])),
+        }
+    }
+
+    fn read_input_byte(stdin: &impl AsFd, slice: Duration) -> io::Result<Option<u8>> {
+        #[cfg(target_vendor = "apple")]
+        {
+            read_input_byte_select(stdin, slice)
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            read_input_byte_poll(stdin, slice)
+        }
+    }
+
     // Private deterministic handoff seam; production supplies a no-op. Keeping
     // this after mode restoration exercises signals in the actual late window,
     // not merely a signal already observed by the input loop.
@@ -353,36 +484,10 @@ mod platform {
             let mut bytes = Zeroizing::new(Vec::new());
             loop {
                 let remaining = remaining(deadline)?;
-                let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
-                let timeout = PollTimeout::try_from(remaining.min(Duration::from_millis(100)))
-                    .unwrap_or(PollTimeout::MAX);
-                match poll(&mut fds, timeout) {
-                    Ok(0) => continue,
-                    Err(nix::errno::Errno::EINTR) => continue,
-                    Err(error) => return Err(error.into()),
-                    _ => {}
-                }
-                let events = fds[0]
-                    .revents()
-                    .ok_or_else(|| io::Error::other("invalid terminal readiness event"))?;
-                if events.contains(PollFlags::POLLNVAL) {
-                    return Err(io::Error::other("invalid terminal input descriptor"));
-                }
-                if !events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR) {
+                let Some(byte) = read_input_byte(stdin, remaining)? else {
                     continue;
-                }
-                let mut byte = [0];
-                match nix::unistd::read(stdin, &mut byte) {
-                    Ok(0) if events.contains(PollFlags::POLLHUP) => return Err(cancelled()),
-                    Ok(0) if events.contains(PollFlags::POLLERR) => {
-                        return Err(io::Error::other("terminal input failed"));
-                    }
-                    Ok(0) => continue, // Empty nonblocking read, not EOF.
-                    Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => continue,
-                    Err(error) => return Err(error.into()),
-                    Ok(_) => {}
-                }
-                match byte[0] {
+                };
+                match byte {
                     b'\r' | b'\n' => {
                         return std::str::from_utf8(&bytes)
                             .map(|text| Zeroizing::new(text.to_owned()))
@@ -422,7 +527,7 @@ mod platform {
         use nix::fcntl::{FcntlArg, OFlag, fcntl};
         use nix::pty::openpty;
         use std::io::{Read, Write};
-        use std::os::fd::{AsRawFd, OwnedFd};
+        use std::os::fd::OwnedFd;
 
         // Private readiness/error branch: verify prompt publication is inside
         // the real quiet-mode guard and a failed prompt restores exact modes.
@@ -686,6 +791,87 @@ mod platform {
                 );
                 assert!(!original_enabled);
             }
+        }
+
+        #[test]
+        fn wait_fd_select_pipe_readiness_and_hangup() {
+            let (read_end, write_end) = nix::unistd::pipe().unwrap();
+            assert_eq!(
+                wait_fd_select(read_end.as_fd(), false, Duration::from_millis(10)).unwrap(),
+                Readiness::Timeout
+            );
+            assert_eq!(
+                read_input_byte_select(&read_end, Duration::from_millis(10)).unwrap(),
+                None
+            );
+            assert_eq!(
+                wait_fd_select(write_end.as_fd(), true, Duration::from_millis(10)).unwrap(),
+                Readiness::Ready
+            );
+
+            nix::unistd::write(&write_end, b"xk").unwrap();
+            assert_eq!(
+                wait_fd_select(read_end.as_fd(), false, Duration::from_secs(1)).unwrap(),
+                Readiness::Ready
+            );
+            let mut byte = [0u8; 1];
+            assert_eq!(nix::unistd::read(&read_end, &mut byte).unwrap(), 1);
+            assert_eq!(byte, *b"x");
+            assert_eq!(
+                read_input_byte_select(&read_end, Duration::from_millis(10)).unwrap(),
+                Some(b'k')
+            );
+            assert_eq!(
+                wait_fd_select(read_end.as_fd(), false, Duration::ZERO).unwrap(),
+                Readiness::Timeout
+            );
+
+            drop(write_end);
+            assert_eq!(
+                wait_fd_select(read_end.as_fd(), false, Duration::from_millis(10)).unwrap(),
+                Readiness::Ready
+            );
+            assert_eq!(nix::unistd::read(&read_end, &mut byte).unwrap(), 0);
+            assert_eq!(
+                read_input_byte_select(&read_end, Duration::from_millis(10))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::Interrupted
+            );
+        }
+
+        #[test]
+        fn wait_fd_select_pty_readiness_and_range_guard() {
+            let pty = openpty(None, None).unwrap();
+            assert_eq!(
+                wait_fd_select(pty.slave.as_fd(), false, Duration::from_millis(10)).unwrap(),
+                Readiness::Timeout
+            );
+            assert_eq!(
+                wait_fd_select(pty.slave.as_fd(), true, Duration::from_millis(10)).unwrap(),
+                Readiness::Ready
+            );
+            let mut master = std::fs::File::from(pty.master);
+            master.write_all(b"p\n").unwrap();
+            assert_eq!(
+                wait_fd_select(pty.slave.as_fd(), false, Duration::from_millis(200)).unwrap(),
+                Readiness::Ready
+            );
+            assert_eq!(
+                read_input_byte_select(&pty.slave, Duration::from_millis(10)).unwrap(),
+                Some(b'p')
+            );
+
+            assert!(validate_select_fd(0).is_ok());
+            assert_eq!(
+                validate_select_fd(-1).unwrap_err().to_string(),
+                "terminal descriptor out of select range"
+            );
+            let out_of_range = RawFd::try_from(nix::sys::select::FD_SETSIZE).unwrap();
+            assert_eq!(
+                validate_select_fd(out_of_range).unwrap_err().to_string(),
+                "terminal descriptor out of select range"
+            );
         }
     }
 }
