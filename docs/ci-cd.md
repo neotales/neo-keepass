@@ -2,7 +2,7 @@
 
 Workflows live in `.github/workflows/`. All actions are pinned to commit SHAs
 (tag noted in a comment); runners are pinned to specific images. Toolchain is
-pinned to Rust 1.98.1 via `rust-toolchain.toml` — do not use `stable` here.
+pinned to Rust 1.100.0 via `rust-toolchain.toml` — do not use `stable` here.
 
 All build and CI jobs run with `contents: read` and upload workflow artifacts
 only; `.github/workflows/release.yml` grants `contents: write` strictly to its
@@ -17,14 +17,10 @@ are conservative caps chosen relative to each job's cost drivers (cold
 compiles, interpreter runs, advisory-DB fetches); they are not multiples of
 measured CI runs, and no CI timing baseline was used. Steps that *execute*
 compiled test/binary code also carry a tighter step bound (test step 30,
-`nkpui` test step 20, completion test 15, packaging self-tests 20, RSA lane 30,
-bench 45) because
-that is the class that can block forever on an unread prompt — run
+`nkpui` test step 20, completion test 15, packaging self-tests 20, bench 45)
+because that is the class that can block forever on an unread prompt — run
 134478538047 (macos-15) hung >75m in a Bash completion PTY test under the
-360 default. The RSA lane round-trips against a committed 16,384-bit test
-vector — no key generation happens at test time (see the fixture header in
-`crates/neotales-age/tests/rsa_16384.rs`) — so its cost is deterministic,
-slow-by-design crypto. Compile, build, and package steps get no step-level
+360 default. Compile, build, and package steps get no step-level
 timeout on purpose: the job bound covers them, and a slow cold build must
 never trip a premature step bound. Windows packaging steps additionally
 enforce their own internal deadlines. Bounds cap a hang; they do not
@@ -37,8 +33,7 @@ Triggered on push to `main`/`dev`, pull requests, and manual dispatch.
 | Job | Runner | Runs |
 |-----|--------|------|
 | `completion-interpreters` | `ubuntu-24.04` | generated zsh (`5.9`) and PowerShell (`7.6.10`) syntax tests |
-| `rsa-slow-lane` | `ubuntu-24.04` | ignored 16,384-bit RSA SSH round-trip fixture test |
-| `keepassxc-interop` | `ubuntu-24.04` | installs `keepassxc` (`keepassxc-cli`) and runs ignored KeePassXC interop tests for `neotales-keepass` (`cli_interop`) and `nkeepass` (`keepassxc_interop`) |
+| `keepassxc-interop` | `ubuntu-24.04` | installs `keepassxc` (`keepassxc-cli`) and runs ignored KeePassXC interop tests for `nkeepass` (`keepassxc_interop`) |
 | `test` | `ubuntu-24.04`, `macos-15`, `windows-2025` | `cargo test --locked --workspace` |
 | `lint` | `ubuntu-24.04` | `cargo fmt --check`, `cargo clippy --locked --workspace --all-targets`, `scripts/check-workflows.sh` |
 | `nkpui` | `ubuntu-24.04` | installs `libxkbcommon-dev` (`DEBIAN_FRONTEND=noninteractive`) and runs `fmt --check`, `clippy --locked --all-targets --no-deps -- -D warnings`, `test --locked`, and `check --locked --release` in `crates/nkpui/` |
@@ -46,13 +41,12 @@ Triggered on push to `main`/`dev`, pull requests, and manual dispatch.
 | `audit` | `ubuntu-24.04` | `cargo audit` against the pinned root `Cargo.lock` and `crates/nkpui/Cargo.lock` |
 
 **KeePassXC interop lane (`keepassxc-interop`):** runs on `ubuntu-24.04`
-(30-minute job timeout, 15-minute bound on each test step). Ubuntu 24.04
+(30-minute job timeout, 15-minute bound on the test step). Ubuntu 24.04
 (Noble) ships `keepassxc-cli` inside the `keepassxc` package
 (`keepassxc-minimal` is only packaged in later Debian/Ubuntu releases), so the
 job installs `keepassxc` non-interactively with `--no-install-recommends`,
 verifies `keepassxc-cli` is on `PATH`, logs `keepassxc-cli --version`, and runs
-`cargo +1.98.1 test --locked -p neotales-keepass --test cli_interop -- --ignored`
-and `cargo +1.98.1 test --locked -p nkeepass --test keepassxc_interop -- --ignored`.
+`cargo +1.100.0 test --locked -p nkeepass --test keepassxc_interop -- --ignored`.
 Failure mode: if `keepassxc-cli` is missing or exits non-zero, the tests fail
 closed rather than skipping silently.
 
@@ -73,10 +67,10 @@ Required commands after installation, from an isolated checkout:
 
 ```sh
 export NEO_KEEPASS_REQUIRE_COMPLETION_SHELLS=1
-cargo +1.98.1 test --locked -p nkeepass --bin nkp \
+cargo +1.100.0 test --locked -p nkeepass --bin nkp \
   completion::tests::fish_native_color_prefix_forwards_vault_and_stops_child_completion \
   -- --exact --nocapture
-cargo +1.98.1 test --locked -p nkeepass --bin nkp \
+cargo +1.100.0 test --locked -p nkeepass --bin nkp \
   completion::tests::nushell_native_vault_completers_decode_escaped_quotes \
   -- --exact --nocapture
 ```
@@ -114,9 +108,9 @@ evidence that these tests passed on Windows. Do not silence failures with
 `crates/nkpui/Cargo.lock` that is excluded from root `--workspace` commands.
 It installs `libxkbcommon-dev` non-interactively with `--no-install-recommends`
 (required at link time because `rune` links `-lxkbcommon`) and runs
-`cargo +1.98.1 fmt --check`,
-`cargo +1.98.1 clippy --locked --all-targets --no-deps -- -D warnings`,
-`cargo +1.98.1 test --locked`, and `cargo +1.98.1 check --locked --release`
+`cargo +1.100.0 fmt --check`,
+`cargo +1.100.0 clippy --locked --all-targets --no-deps -- -D warnings`,
+`cargo +1.100.0 test --locked`, and `cargo +1.100.0 check --locked --release`
 inside `crates/nkpui/`.
 
 **Audit:** `cargo audit` scans both the pinned root `Cargo.lock` and
@@ -492,7 +486,7 @@ private-write tests passed.
 
 Triggered by manual dispatch and pull requests. Builds the neo-keepass CLI
 (executable `nkp`) for `x86_64-pc-windows-msvc` on `windows-2025` with the
-pinned toolchain (1.98.1) and `--locked`, so the produced `nkp.exe` links
+pinned toolchain (1.100.0) and `--locked`, so the produced `nkp.exe` links
 exactly the committed `Cargo.lock` dependency set. Locked dependencies pin
 what is built; they do not make the build reproducible (compiler, runner
 image and toolchain are not pinned bit-for-bit), and no byte-identical
@@ -776,8 +770,7 @@ inside every container is shipped as `nkp` / `nkp.exe` and installed as
 
 ## Verified locally vs. not
 
-Verified on this machine (Rust 1.98.1 via `rustup run`; the local default
-toolchain env is 1.100.0, so every cargo invocation here pins explicitly):
+Verified on this machine (Rust 1.100.0):
 full `cargo test --workspace`, `cargo fmt --check`, clippy, `cargo bench
 --bench vault` execution, archive build + re-run idempotency, packaging
 self-tests (`packaging/test.sh`: positive validation incl. real `makepkg`

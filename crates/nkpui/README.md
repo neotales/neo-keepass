@@ -14,11 +14,10 @@ Isolated nested Cargo workspace for the `neo-keepass` desktop UI built on
   - `serde_json`: read-only parsing of non-secret vault aliases from `nkp`'s `config.json`.
 - **Workspace isolation:** `crates/nkpui/Cargo.toml` declares `[workspace]` and owns `crates/nkpui/Cargo.lock`, mirroring all 8 `[patch.crates-io]` overrides from Rune's root `Cargo.toml` (`wgpu-hal`, `naga`, `winit`, `sctk-adwaita`, `parley_engine`, `accesskit_windows`, `accesskit_atspi_common`, `accesskit_macos`) without altering the root `neo-keepass` workspace.
 
-## Rust `1.98.1` vs `1.99.1` Finding
+## Rust Toolchain (`1.100.0`)
 
-- Upstream `anomalyco/rune` (`rev = 761fd132a286b9e87756d8a0889c8957b93c86be`) pins `channel = "1.99.1"` in its `rust-toolchain.toml`.
-- `neo-keepass` pins `channel = "1.98.1"` in the root `rust-toolchain.toml`.
-- **Verified empirically:** `rustc 1.98.1 (48a229cea 2026-09-01)` compiles `nkpui`, `rune`, `rune-kit`, `nkeepass`, and `neotales-keepass` cleanly (`cargo check --all-targets`, `cargo clippy --all-targets --no-deps -- -D warnings`, and `cargo check --release` all pass with zero warnings in `nkpui`). No root toolchain bump was required.
+- `neo-keepass` pins `channel = "1.100.0"` in the root `rust-toolchain.toml` (matching `neotales-keepass` `0.0.0-alpha.2`'s `rust-version = "1.100"`).
+- `nkpui`, `rune`, `rune-kit`, `nkeepass`, and `neotales-keepass` compile cleanly under `1.100.0` (`cargo fmt --check`, `cargo clippy --all-targets --no-deps -- -D warnings`, `cargo test`, and `cargo build --release`).
 
 ## Licensing & Third-Party Dependencies
 

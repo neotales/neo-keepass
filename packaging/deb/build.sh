@@ -48,7 +48,7 @@ Architecture: ${deb_arch}
 Maintainer: Neotales <maintainers@neotales.invalid>
 Description: Headless KeePass automation CLI and TUI
  KeePass CLI/TUI for vault navigation and entry operations. KDBX parsing is
- delegated to the vendored neotales-keepass crate.
+ delegated to the neotales-keepass crate.
  Built from source; not published to any apt repository.
 EOF
 

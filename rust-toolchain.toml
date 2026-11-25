@@ -1,25 +1,14 @@
 # The toolchain every developer and CI job uses.
 #
-# Pinned to an exact version rather than the stable channel, and the same
-# version as `rust-version` in Cargo.toml. Following stable meant the compiler
-# moved under us without a pull request, which is fine for an application and
-# wrong for the vendored libraries: a change in behaviour or in a lint is then
-# something a consumer discovers rather than something we decided.
+# Pinned to an exact version rather than the stable channel, and aligned with
+# `rust-version` in Cargo.toml (`neotales-keepass`, `neotales-age`, and
+# `neotales-x509` declare `rust-version = "1.100"`).
 #
-# The cost is that a compiler security release waits for a deliberate bump here.
-# That is the right trade while the dependency is vendored, and it is a one-line
-# change.
-#
-# This file is read by rustup. Machines that get their toolchain from mise read
-# mise.toml instead, which is why the version appears in both.
+# This file is read by rustup.
 [toolchain]
-channel = "1.98.1"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
 profile = "minimal"
 
 [env]
-# The dependency is compiled from source in-tree on every build, so an
-# incremental cache is large and buys nothing. This is the single biggest lever
-# on how much disk `target/` takes, and disk is the constraint that decides how
-# often this repository can be worked in.
 CARGO_INCREMENTAL = "0"

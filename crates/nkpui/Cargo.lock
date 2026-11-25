@@ -1111,9 +1111,6 @@ name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "derive_more"
@@ -2419,7 +2416,9 @@ dependencies = [
 
 [[package]]
 name = "neotales-age"
-version = "0.0.0-alpha.1"
+version = "0.0.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "560b2aac116e19169d9bbd2cc83dc5b1d88ad8e3ccf297131058d577b0835c4c"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2446,7 +2445,9 @@ dependencies = [
 
 [[package]]
 name = "neotales-keepass"
-version = "0.0.0-alpha.3"
+version = "0.0.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "472090c41bebf86b17c5d9fd4c596a4bfa87649b577ffa04538c231e3b5b5fa2"
 dependencies = [
  "aes",
  "argon2",
@@ -2468,7 +2469,9 @@ dependencies = [
 
 [[package]]
 name = "neotales-x509"
-version = "0.0.0-alpha.1"
+version = "0.0.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e109c8c60fca694b5400cf7d9c8d2273c820082c3fd09921176ce3c4d5c33041"
 dependencies = [
  "aes",
  "base64 0.22.1",

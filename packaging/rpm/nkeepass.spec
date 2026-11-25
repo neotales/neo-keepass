@@ -24,7 +24,7 @@ BuildArch:      x86_64
 
 %description
 KeePass CLI/TUI for vault navigation and entry operations. KDBX parsing is
-delegated to the vendored neotales-keepass crate.
+delegated to the neotales-keepass crate.
 
 %prep
 %setup -q -n nkp-%{crate_version}-x86_64-unknown-linux-gnu

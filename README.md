@@ -44,10 +44,8 @@ with the corresponding `NEO_KEEPASS_*` name (or its `NKP_*` alias). Explicit
 
 The CLI and interactive terminal browser cover vault navigation and entry
 operations; `crates/nkeepass/tests/` exercises the imported application
-behavior. KDBX parsing and writing are delegated to the vendored
-`neotales-keepass` crate. The `neotales-age` implementation and its required
-`neotales-x509` dependency are also vendored under `crates/`, with MIT license
-files.
+behavior. KDBX parsing and writing are delegated to the `neotales-keepass`
+crate, and age encryption/decryption to `neotales-age` (published on crates.io).
 
 The experimental desktop application (`nkpui`) in `crates/nkpui/` is built with
 Rune (`rune` / `rune-kit`) rather than GPUI and lives alongside the `nkp` CLI/TUI
@@ -160,14 +158,11 @@ limits and security behavior.
 - `crates/nkeepass/` — CLI/TUI application and integration tests.
 - `crates/nkpui/` — experimental Rune-based desktop application crate.
 - [`crates/terminal-password/`](crates/terminal-password/README.md) — bounded hidden terminal input and platform restoration tests.
-- `crates/neotales-keepass/` — KDBX library.
-- `crates/neotales-age/` — age file-encryption library vendored from plab.
-- `crates/neotales-x509/` — local dependency required by `neotales-age`.
 - Root `Cargo.toml` and `Cargo.lock` — workspace configuration and resolution.
 
 ## Build and test
 
-Rust 1.98.1 is pinned in `rust-toolchain.toml`.
+Rust 1.100.0 is pinned in `rust-toolchain.toml`.
 
 ```sh
 cargo build --workspace
