@@ -173,13 +173,15 @@ Other subcommands have no command-specific options.
 ## `alias`
 
 ```text
-nkp alias ls
+nkp alias ls [--format json|human]
 nkp alias set NAME TARGET [--kind vault|entry] [-F FIELD | --field FIELD]
 nkp alias resolve NAME
 nkp alias rm NAME
 ```
 
-`ls` lists aliases. `set` creates or replaces one. If `--kind` is omitted,
+`ls` lists aliases as JSON Lines (`--format json`, the default) or bounded
+human-readable columns (`--format human`, or `(no aliases)` when empty). `set`
+creates or replaces one. If `--kind` is omitted,
 the command infers the target kind. Use `-F` / `--field` to bind an entry alias
 to a field. `resolve` prints the configured target. `rm` removes the alias.
 

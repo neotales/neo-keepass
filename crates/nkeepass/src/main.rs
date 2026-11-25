@@ -109,7 +109,7 @@ const GLOBAL_VAULT_OPTION: HelpOption = HelpOption {
 };
 const GLOBAL_COLOR_OPTION: HelpOption = HelpOption {
     label: "--color MODE, --no-color",
-    summary: "Style human help and diagnostics: auto, always, never, basic, or truecolor.",
+    summary: "Style human help, --format human, and diagnostics: auto, always, never, basic, or truecolor.",
 };
 const GLOBAL_CREDENTIAL_OPTIONS: &[HelpOption] = &[
     HelpOption {
@@ -212,6 +212,10 @@ const ENV_FORMAT_OPTION: HelpOption = HelpOption {
     label: "--format FORMAT",
     summary: "Choose shell (default), dotenv, pwsh, powershell, github-actions, azure-devops, json, or null.",
 };
+const METADATA_FORMAT_OPTION: HelpOption = HelpOption {
+    label: "--format json|human",
+    summary: "Choose JSON (default) or bounded human-readable output.",
+};
 const IS_OUTPUT_OPTION: HelpOption = HelpOption {
     label: "--is-output",
     summary: "Mark Azure DevOps output as an output variable.",
@@ -292,14 +296,15 @@ const ALIAS_SET_OPTIONS: &[HelpOption] = &[
         summary: "Bind an entry alias to a default field.",
     },
 ];
+const ALIAS_LS_OPTIONS: &[HelpOption] = &[METADATA_FORMAT_OPTION];
 const ALIAS_COMMANDS: &[HelpCommand] = &[
     help_command_with(
         "ls|list",
-        "ls",
-        "List configured aliases as JSON lines.",
-        &["alias ls"],
+        "ls [--format json|human]",
+        "List configured aliases as JSON lines or bounded human columns.",
+        &["alias ls", "alias ls --format human"],
         NO_NOTES,
-        NO_OPTIONS,
+        ALIAS_LS_OPTIONS,
         NO_COMMANDS,
     ),
     help_command_with(
@@ -375,9 +380,9 @@ const CONFIG_COMMANDS: &[HelpCommand] = &[
         NO_COMMANDS,
     ),
 ];
-const COMMON_LIST_OPTIONS: &[HelpOption] = &[];
-const SEARCH_OPTIONS: &[HelpOption] = &[];
-const SHOW_OPTIONS: &[HelpOption] = &[ENTRY_KEY_OPTION];
+const COMMON_LIST_OPTIONS: &[HelpOption] = &[METADATA_FORMAT_OPTION];
+const SEARCH_OPTIONS: &[HelpOption] = &[METADATA_FORMAT_OPTION];
+const SHOW_OPTIONS: &[HelpOption] = &[ENTRY_KEY_OPTION, METADATA_FORMAT_OPTION];
 const GET_OPTIONS: &[HelpOption] = &[
     ENTRY_KEY_OPTION,
     ENTRY_FIELD_OPTION,
@@ -590,7 +595,7 @@ const ATTACHMENT_FIELD_OPTION: HelpOption = HelpOption {
     label: "-F, --field NAME",
     summary: "Compatibility alias for --name; selects the attachment name (no default).",
 };
-const ATTACHMENT_LS_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION];
+const ATTACHMENT_LS_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION, METADATA_FORMAT_OPTION];
 const ATTACHMENT_ADD_OPTIONS: &[HelpOption] = &[
     ENTRY_ONLY_KEY_OPTION,
     ATTACHMENT_NAME_OPTION,
@@ -619,7 +624,7 @@ const ATTACHMENT_RM_OPTIONS: &[HelpOption] = &[
     ATTACHMENT_FIELD_OPTION,
     YES_OPTION,
 ];
-const FIELD_LS_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION];
+const FIELD_LS_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION, METADATA_FORMAT_OPTION];
 const FIELD_GET_OPTIONS: &[HelpOption] = &[
     ENTRY_ONLY_KEY_OPTION,
     CUSTOM_FIELD_OPTION,
@@ -643,18 +648,18 @@ const FIELD_RM_OPTIONS: &[HelpOption] = &[ENTRY_ONLY_KEY_OPTION, CUSTOM_FIELD_OP
 const SECRETS_COMMANDS: &[HelpCommand] = &[
     help_command_with(
         "ls|list",
-        "ls [--] [GLOB]",
-        "List redacted entry metadata as JSON lines.",
-        &["ls", "ls 'Services/*'"],
+        "ls [--] [GLOB] [--format json|human]",
+        "List redacted entry metadata as JSON lines or bounded human columns.",
+        &["ls", "ls 'Services/*'", "ls --format human"],
         NO_NOTES,
         COMMON_LIST_OPTIONS,
         NO_COMMANDS,
     ),
     help_command_with(
         "search",
-        "search [--] QUERY",
+        "search [--] QUERY [--format json|human]",
         "Search bounded, allowlisted entry metadata.",
-        &["search mail"],
+        &["search mail", "search mail --format human"],
         NO_NOTES,
         SEARCH_OPTIONS,
         NO_COMMANDS,
@@ -670,9 +675,9 @@ const SECRETS_COMMANDS: &[HelpCommand] = &[
     ),
     help_command_with(
         "show",
-        "show PATH",
+        "show PATH [--format json|human]",
         "Show redacted descriptors for one entry.",
-        &["show mail"],
+        &["show mail", "show mail --format human"],
         NO_NOTES,
         SHOW_OPTIONS,
         NO_COMMANDS,
@@ -786,9 +791,9 @@ const AUTOMATION_COMMANDS: &[HelpCommand] = &[
 const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
     help_command_with(
         "ls|list",
-        "ls (ENTRY | --key ENTRY)",
+        "ls (ENTRY | --key ENTRY) [--format json|human]",
         "List attachment metadata for one entry.",
-        &["files ls mail"],
+        &["files ls mail", "files ls mail --format human"],
         NO_NOTES,
         ATTACHMENT_LS_OPTIONS,
         NO_COMMANDS,
@@ -824,9 +829,9 @@ const ATTACHMENT_COMMANDS: &[HelpCommand] = &[
 const FIELD_COMMANDS: &[HelpCommand] = &[
     help_command_with(
         "ls|list",
-        "ls (ENTRY | --key ENTRY)",
+        "ls (ENTRY | --key ENTRY) [--format json|human]",
         "List field names present on one entry.",
-        &["field ls mail"],
+        &["field ls mail", "field ls mail --format human"],
         NO_NOTES,
         FIELD_LS_OPTIONS,
         NO_COMMANDS,
@@ -1063,18 +1068,18 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     // Daily secrets & execution
     help_command_with(
         "list|ls",
-        "ls [--] [GLOB]",
+        "ls [--] [GLOB] [--format json|human]",
         "Shortcut for secrets ls.",
-        &["ls", "ls 'Services/*'"],
+        &["ls", "ls 'Services/*'", "ls --format human"],
         NO_NOTES,
         COMMON_LIST_OPTIONS,
         NO_COMMANDS,
     ),
     help_command_with(
         "show",
-        "show PATH",
+        "show PATH [--format json|human]",
         "Shortcut for secrets show.",
-        &["show mail"],
+        &["show mail", "show mail --format human"],
         NO_NOTES,
         SHOW_OPTIONS,
         NO_COMMANDS,
@@ -1148,9 +1153,9 @@ const ROOT_COMMANDS: &[HelpCommand] = &[
     ),
     help_command_with(
         "search",
-        "search [--] QUERY",
+        "search [--] QUERY [--format json|human]",
         "Shortcut for secrets search.",
-        &["search mail"],
+        &["search mail", "search mail --format human"],
         NO_NOTES,
         SEARCH_OPTIONS,
         NO_COMMANDS,
@@ -2158,11 +2163,175 @@ fn write_json_for_sink<T: Serialize>(
     text.push(b'\n');
     output
         .write_all(&text)
+        .and_then(|()| output.flush())
         .map_err(|_| err("cannot write output"))
 }
 
 fn json<T: Serialize>(value: &T) -> Result<()> {
     write_json_for_sink(&mut io::stdout().lock(), value, io::stdout().is_terminal())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MetadataFormat {
+    Json,
+    Human,
+}
+
+impl MetadataFormat {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("json") => Ok(Self::Json),
+            Some("human") => Ok(Self::Human),
+            Some(_) => Err(err("invalid output format")),
+        }
+    }
+}
+
+fn sanitize_human_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_control() || nkeepass::template::is_bidi_or_line_separator(ch) {
+            for escaped in ch.escape_default() {
+                out.push(escaped);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn human_display_width(text: &str) -> usize {
+    ratatui::text::Span::raw(text).width()
+}
+
+fn truncate_human_cell(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if human_display_width(text) <= max_width {
+        return text.to_owned();
+    }
+    let target = max_width.saturating_sub(1);
+    let mut best_end = 0;
+    for (idx, ch) in text.char_indices() {
+        let next_end = idx + ch.len_utf8();
+        if human_display_width(&text[..next_end]) > target {
+            break;
+        }
+        best_end = next_end;
+    }
+    let mut out = String::with_capacity(best_end + 3);
+    out.push_str(&text[..best_end]);
+    out.push('…');
+    out
+}
+
+fn pad_human_cell(text: &str, width: usize) -> String {
+    let current = human_display_width(text);
+    if current >= width {
+        text.to_owned()
+    } else {
+        let mut out = String::with_capacity(text.len() + (width - current));
+        out.push_str(text);
+        out.extend(std::iter::repeat_n(' ', width - current));
+        out
+    }
+}
+
+fn human_output_width() -> usize {
+    if io::stdout().is_terminal()
+        && let Ok((cols, _)) = crossterm::terminal::size()
+        && cols > 0
+    {
+        return usize::from(cols).clamp(40, 120);
+    }
+    HELP_WIDTH
+}
+
+fn current_stdout_style() -> u8 {
+    COLOR_STYLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn style_human_header(text: &str, style: u8) -> String {
+    match style {
+        1 => format!("\x1b[1;36m{text}\x1b[0m"),
+        2 => format!("\x1b[1;38;2;80;190;255m{text}\x1b[0m"),
+        _ => text.to_owned(),
+    }
+}
+
+fn style_human_badge(badge: &str, style: u8, protected_tone: bool) -> String {
+    match (style, protected_tone) {
+        (1, true) => format!("\x1b[33m{badge}\x1b[0m"),
+        (2, true) => format!("\x1b[38;2;240;190;70m{badge}\x1b[0m"),
+        (1, false) => format!("\x1b[32m{badge}\x1b[0m"),
+        (2, false) => format!("\x1b[38;2;90;210;130m{badge}\x1b[0m"),
+        _ => badge.to_owned(),
+    }
+}
+
+fn fit_column_widths(
+    natural: &[usize],
+    mins: &[usize],
+    caps: &[usize],
+    total_width: usize,
+    gap: usize,
+) -> Vec<usize> {
+    let total_gap = gap.saturating_mul(natural.len().saturating_sub(1));
+    let budget = total_width.saturating_sub(total_gap).max(natural.len());
+    let mut widths: Vec<usize> = natural
+        .iter()
+        .zip(caps)
+        .map(|(n, c)| (*n).min(*c).max(1))
+        .collect();
+    while widths.iter().sum::<usize>() > budget {
+        let candidate = widths
+            .iter()
+            .enumerate()
+            .filter(|(i, w)| **w > mins[*i])
+            .max_by_key(|(i, w)| *w - mins[*i]);
+        let Some((idx, _)) = candidate else {
+            let Some((wide_idx, _)) = widths
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| **w > 1)
+                .max_by_key(|(_, w)| **w)
+            else {
+                break;
+            };
+            widths[wide_idx] -= 1;
+            continue;
+        };
+        widths[idx] -= 1;
+    }
+    widths
+}
+
+fn render_table_header(headers: &[&str], widths: &[usize], style: u8) -> String {
+    let mut line = String::new();
+    for (idx, (header, width)) in headers.iter().zip(widths).enumerate() {
+        if idx > 0 {
+            line.push_str("  ");
+        }
+        let truncated = truncate_human_cell(header, *width);
+        let styled = style_human_header(&truncated, style);
+        if idx + 1 < headers.len() {
+            let pad = width.saturating_sub(human_display_width(&truncated));
+            line.push_str(&styled);
+            line.extend(std::iter::repeat_n(' ', pad));
+        } else {
+            line.push_str(&styled);
+        }
+    }
+    line
+}
+
+fn write_human_lines(lines: &[String]) -> Result<()> {
+    for line in lines {
+        print_line(line)?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -2183,6 +2352,77 @@ fn write_search_hit(hit: &SearchHit) -> Result<()> {
     })
 }
 
+fn render_search_hits_human(
+    hits: &[SearchHit],
+    empty_label: &str,
+    max_width: usize,
+    style: u8,
+) -> Vec<String> {
+    if hits.is_empty() {
+        return vec![empty_label.to_owned()];
+    }
+    let rows: Vec<([String; 4], bool)> = hits
+        .iter()
+        .map(|hit| {
+            let path = sanitize_human_text(hit.path());
+            let title = if hit.title().is_empty() {
+                "-".to_owned()
+            } else {
+                sanitize_human_text(hit.title())
+            };
+            let tags = if hit.tags().is_empty() {
+                "-".to_owned()
+            } else {
+                hit.tags()
+                    .iter()
+                    .map(|tag| sanitize_human_text(tag))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let has_otp = hit.field_names().iter().any(|name| name == "otp");
+            let joined_fields = if hit.field_names().is_empty() {
+                "-".to_owned()
+            } else {
+                hit.field_names()
+                    .iter()
+                    .map(|name| sanitize_human_text(name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let fields = if has_otp {
+                format!("[otp] {joined_fields}")
+            } else {
+                joined_fields
+            };
+            ([path, title, tags, fields], has_otp)
+        })
+        .collect();
+    let headers = ["PATH", "TITLE", "TAGS", "FIELDS"];
+    let mut natural = headers.map(human_display_width);
+    for (cols, _) in &rows {
+        for (i, cell) in cols.iter().enumerate() {
+            natural[i] = natural[i].max(human_display_width(cell));
+        }
+    }
+    let widths = fit_column_widths(&natural, &[8, 8, 6, 10], &[36, 24, 16, 40], max_width, 2);
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(render_table_header(&headers, &widths, style));
+    for (cols, has_otp) in &rows {
+        let path = pad_human_cell(&truncate_human_cell(&cols[0], widths[0]), widths[0]);
+        let title = pad_human_cell(&truncate_human_cell(&cols[1], widths[1]), widths[1]);
+        let tags = pad_human_cell(&truncate_human_cell(&cols[2], widths[2]), widths[2]);
+        let mut fields = truncate_human_cell(&cols[3], widths[3]);
+        if *has_otp
+            && style > 0
+            && let Some(rest) = fields.strip_prefix("[otp]")
+        {
+            fields = format!("{}{rest}", style_human_badge("[otp]", style, false));
+        }
+        lines.push(format!("{path}  {title}  {tags}  {fields}"));
+    }
+    lines
+}
+
 /// Writes one text line, reporting a failed write rather than panicking.
 ///
 /// `println!` aborts on a write error, so a listing consumed by a pipeline that
@@ -2190,7 +2430,9 @@ fn write_search_hit(hit: &SearchHit) -> Result<()> {
 /// message on stderr instead of stopping. `json` already returns the refusal
 /// for a closed pipe, and this is the same contract for the text form.
 fn print_line(line: &str) -> Result<()> {
-    writeln!(io::stdout().lock(), "{line}").map_err(|_| err("cannot write output"))
+    let mut output = io::stdout().lock();
+    writeln!(output, "{line}").map_err(|_| err("cannot write output"))?;
+    output.flush().map_err(|_| err("cannot write output"))
 }
 
 fn take_arg(args: &[String], index: usize) -> Result<&str> {
@@ -2239,7 +2481,8 @@ fn safe_metadata(value: &str) -> bool {
 /// message quoting the title would undo that.
 fn report_withheld(withheld: usize) {
     if withheld > 0 {
-        eprintln!(
+        let _ = writeln!(
+            io::stderr(),
             "nkp: {withheld} record(s) withheld: vault metadata contains \
              terminal-control bytes"
         );
@@ -2257,18 +2500,178 @@ fn compile_glob(pattern: &str) -> Result<Glob> {
     Ok(Glob::new(pattern))
 }
 
-fn write_selected_fields(fields: &[nkeepass::FieldMetadata]) -> Result<()> {
-    for field in fields {
-        json(&serde_json::json!({
-            "name": field.name(),
-            "protected": field.protected(),
-            "protect_in_memory": field.protect_in_memory(),
-        }))?;
+fn format_field_flags(field: &nkeepass::FieldMetadata, style: u8) -> String {
+    let mut parts = Vec::new();
+    if field.protected() {
+        parts.push(style_human_badge("[protected]", style, true));
+    } else {
+        parts.push("[plain]".to_owned());
     }
-    Ok(())
+    if field.protect_in_memory() {
+        parts.push("[in-memory]".to_owned());
+    }
+    if field.name() == "otp" {
+        parts.push(style_human_badge("[otp]", style, false));
+    }
+    parts.join(" ")
 }
 
-fn write_selected_entry(selected: &nkeepass::SelectedEntry, path: &str) -> Result<()> {
+fn render_fields_human(
+    fields: &[nkeepass::FieldMetadata],
+    max_width: usize,
+    style: u8,
+) -> Vec<String> {
+    if fields.is_empty() {
+        return vec!["(no fields)".to_owned()];
+    }
+    let rows: Vec<(String, String, &nkeepass::FieldMetadata)> = fields
+        .iter()
+        .map(|field| {
+            (
+                sanitize_human_text(field.name()),
+                format_field_flags(field, 0),
+                field,
+            )
+        })
+        .collect();
+    let headers = ["NAME", "FLAGS"];
+    let mut natural = headers.map(human_display_width);
+    for (name, flags, _) in &rows {
+        natural[0] = natural[0].max(human_display_width(name));
+        natural[1] = natural[1].max(human_display_width(flags));
+    }
+    let widths = fit_column_widths(&natural, &[8, 12], &[40, 36], max_width, 2);
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(render_table_header(&headers, &widths, style));
+    for (name, _, field) in &rows {
+        let name_cell = pad_human_cell(&truncate_human_cell(name, widths[0]), widths[0]);
+        let flags_plain = format_field_flags(field, 0);
+        let flags_cell = if human_display_width(&flags_plain) <= widths[1] {
+            format_field_flags(field, style)
+        } else {
+            truncate_human_cell(&flags_plain, widths[1])
+        };
+        lines.push(format!("{name_cell}  {flags_cell}"));
+    }
+    lines
+}
+
+fn write_selected_fields(fields: &[nkeepass::FieldMetadata], format: MetadataFormat) -> Result<()> {
+    match format {
+        MetadataFormat::Json => {
+            for field in fields {
+                json(&serde_json::json!({
+                    "name": field.name(),
+                    "protected": field.protected(),
+                    "protect_in_memory": field.protect_in_memory(),
+                }))?;
+            }
+            Ok(())
+        }
+        MetadataFormat::Human => {
+            let lines = render_fields_human(fields, human_output_width(), current_stdout_style());
+            write_human_lines(&lines)
+        }
+    }
+}
+
+fn render_selected_entry_human(
+    selected: &nkeepass::SelectedEntry,
+    path: &str,
+    has_otp: bool,
+    max_width: usize,
+    style: u8,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let label = |name: &str| style_human_header(name, style);
+    let safe_path = truncate_human_cell(&sanitize_human_text(path), max_width.saturating_sub(7));
+    let safe_title = if selected.title().is_empty() {
+        "(none)".to_owned()
+    } else {
+        truncate_human_cell(
+            &sanitize_human_text(selected.title()),
+            max_width.saturating_sub(7),
+        )
+    };
+    let safe_tags = if selected.tags().is_empty() {
+        "(none)".to_owned()
+    } else {
+        let joined = selected
+            .tags()
+            .iter()
+            .map(|tag| sanitize_human_text(tag))
+            .collect::<Vec<_>>()
+            .join(", ");
+        truncate_human_cell(&joined, max_width.saturating_sub(6))
+    };
+    lines.push(format!("{} {safe_path}", label("Entry:")));
+    lines.push(format!("{} {safe_title}", label("Title:")));
+    lines.push(format!("{} {safe_tags}", label("Tags:")));
+    if has_otp {
+        lines.push(format!(
+            "{} {} configured",
+            label("OTP:"),
+            style_human_badge("[otp]", style, false)
+        ));
+    } else {
+        lines.push(format!("{} none", label("OTP:")));
+    }
+    let auto_state = if selected.auto_type_enabled() {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let assoc_count = selected.auto_type_associations();
+    let assoc_word = if assoc_count == 1 {
+        "association"
+    } else {
+        "associations"
+    };
+    lines.push(format!(
+        "{} {auto_state} ({assoc_count} {assoc_word})",
+        label("Auto-type:")
+    ));
+    lines.push(label("Fields:"));
+    if selected.fields().is_empty() {
+        lines.push("  (no fields)".to_owned());
+    } else {
+        let field_names: Vec<String> = selected
+            .fields()
+            .iter()
+            .map(|field| sanitize_human_text(field.name()))
+            .collect();
+        let name_col = field_names
+            .iter()
+            .map(|name| human_display_width(name))
+            .max()
+            .unwrap_or(8)
+            .clamp(8, max_width.saturating_sub(28).clamp(8, 36));
+        for (field, safe_name) in selected.fields().iter().zip(&field_names) {
+            let name_cell = pad_human_cell(&truncate_human_cell(safe_name, name_col), name_col);
+            let flags = format_field_flags(field, style);
+            lines.push(format!("  {name_cell}  {flags}"));
+        }
+    }
+    lines.push(label("Attachments:"));
+    if selected.attachments().is_empty() {
+        lines.push("  (no attachments)".to_owned());
+    } else {
+        let att_budget = max_width.saturating_sub(2);
+        for attachment in selected.attachments() {
+            lines.push(format!(
+                "  {}",
+                truncate_human_cell(&sanitize_human_text(attachment.name()), att_budget)
+            ));
+        }
+    }
+    lines
+}
+
+fn write_selected_entry(
+    selected: &nkeepass::SelectedEntry,
+    path: &str,
+    format: MetadataFormat,
+) -> Result<()> {
     if selected
         .fields()
         .iter()
@@ -2278,39 +2681,141 @@ fn write_selected_entry(selected: &nkeepass::SelectedEntry, path: &str) -> Resul
     {
         return Err(err("ambiguous field name"));
     }
-    let fields = selected
-        .fields()
-        .iter()
-        .map(|field| {
-            serde_json::json!({
-                "name": field.name(),
-                "protected": field.protected(),
-                "protect_in_memory": field.protect_in_memory(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let attachments = selected
-        .attachments()
-        .iter()
-        .map(|attachment| serde_json::json!({"name": attachment.name()}))
-        .collect::<Vec<_>>();
     let has_otp = selected
         .fields()
         .iter()
         .find(|field| field.name() == "otp")
         .is_some_and(nkeepass::FieldMetadata::protected);
-    json(&serde_json::json!({
-        "path": path,
-        "title": selected.title(),
-        "tags": selected.tags(),
-        "fields": fields,
-        "attachments": attachments,
-        "has_otp": has_otp,
-        "auto_type": {
-            "enabled": selected.auto_type_enabled(),
-            "associations": selected.auto_type_associations(),
-        },
-    }))
+    match format {
+        MetadataFormat::Json => {
+            let fields = selected
+                .fields()
+                .iter()
+                .map(|field| {
+                    serde_json::json!({
+                        "name": field.name(),
+                        "protected": field.protected(),
+                        "protect_in_memory": field.protect_in_memory(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let attachments = selected
+                .attachments()
+                .iter()
+                .map(|attachment| serde_json::json!({"name": attachment.name()}))
+                .collect::<Vec<_>>();
+            json(&serde_json::json!({
+                "path": path,
+                "title": selected.title(),
+                "tags": selected.tags(),
+                "fields": fields,
+                "attachments": attachments,
+                "has_otp": has_otp,
+                "auto_type": {
+                    "enabled": selected.auto_type_enabled(),
+                    "associations": selected.auto_type_associations(),
+                },
+            }))
+        }
+        MetadataFormat::Human => {
+            let lines = render_selected_entry_human(
+                selected,
+                path,
+                has_otp,
+                human_output_width(),
+                current_stdout_style(),
+            );
+            write_human_lines(&lines)
+        }
+    }
+}
+
+fn render_attachments_human(
+    attachments: &[nkeepass::AttachmentDescriptor],
+    max_width: usize,
+    style: u8,
+) -> Vec<String> {
+    if attachments.is_empty() {
+        return vec!["(no attachments)".to_owned()];
+    }
+    let rows: Vec<(String, String, bool)> = attachments
+        .iter()
+        .map(|attachment| {
+            (
+                sanitize_human_text(attachment.name()),
+                format!("{} B", attachment.size()),
+                attachment.protected(),
+            )
+        })
+        .collect();
+    let headers = ["NAME", "BYTES", "FLAGS"];
+    let mut natural = headers.map(human_display_width);
+    for (name, bytes, protected) in &rows {
+        natural[0] = natural[0].max(human_display_width(name));
+        natural[1] = natural[1].max(human_display_width(bytes));
+        natural[2] = natural[2].max(if *protected { 11 } else { 7 });
+    }
+    let widths = fit_column_widths(&natural, &[8, 6, 7], &[44, 14, 12], max_width, 2);
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(render_table_header(&headers, &widths, style));
+    for (name, bytes, protected) in &rows {
+        let name_cell = pad_human_cell(&truncate_human_cell(name, widths[0]), widths[0]);
+        let bytes_cell = pad_human_cell(&truncate_human_cell(bytes, widths[1]), widths[1]);
+        let badge_plain = if *protected { "[protected]" } else { "[plain]" };
+        let badge_cell = if human_display_width(badge_plain) <= widths[2] {
+            if *protected {
+                style_human_badge("[protected]", style, true)
+            } else {
+                "[plain]".to_owned()
+            }
+        } else {
+            truncate_human_cell(badge_plain, widths[2])
+        };
+        lines.push(format!("{name_cell}  {bytes_cell}  {badge_cell}"));
+    }
+    lines
+}
+
+fn render_aliases_human(aliases: &[(&String, &Alias)], max_width: usize, style: u8) -> Vec<String> {
+    if aliases.is_empty() {
+        return vec!["(no aliases)".to_owned()];
+    }
+    let rows: Vec<[String; 4]> = aliases
+        .iter()
+        .map(|(name, alias)| {
+            let kind = match alias.kind {
+                Kind::Vault => "[vault]",
+                Kind::Entry => "[entry]",
+            };
+            [
+                sanitize_human_text(name),
+                kind.to_owned(),
+                sanitize_human_text(&alias.target),
+                alias
+                    .field
+                    .as_deref()
+                    .map_or_else(|| "-".to_owned(), sanitize_human_text),
+            ]
+        })
+        .collect();
+    let headers = ["NAME", "KIND", "TARGET", "FIELD"];
+    let mut natural = headers.map(human_display_width);
+    for cols in &rows {
+        for (i, cell) in cols.iter().enumerate() {
+            natural[i] = natural[i].max(human_display_width(cell));
+        }
+    }
+    let widths = fit_column_widths(&natural, &[6, 7, 10, 6], &[20, 8, 42, 20], max_width, 2);
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(render_table_header(&headers, &widths, style));
+    for cols in &rows {
+        let name = pad_human_cell(&truncate_human_cell(&cols[0], widths[0]), widths[0]);
+        let kind = pad_human_cell(&truncate_human_cell(&cols[1], widths[1]), widths[1]);
+        let target = pad_human_cell(&truncate_human_cell(&cols[2], widths[2]), widths[2]);
+        let field = truncate_human_cell(&cols[3], widths[3]);
+        lines.push(format!("{name}  {kind}  {target}  {field}"));
+    }
+    lines
 }
 
 /// Whether a command accepts a bare positional word.
@@ -4035,7 +4540,9 @@ fn password_index(byte: u8) -> Option<usize> {
 }
 
 fn write_stdout(bytes: &[u8], error: &'static str) -> Result<()> {
-    io::stdout().write_all(bytes).map_err(|_| err(error))
+    let mut output = io::stdout().lock();
+    output.write_all(bytes).map_err(|_| err(error))?;
+    output.flush().map_err(|_| err(error))
 }
 
 // Formatted output is commonly redirected to a terminal or evaluated by a
@@ -4670,11 +5177,13 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
     let allowed = match action {
         "ls" | "search" => AllowedOptions {
             allow_glob: true,
+            allow_format: true,
             ..AllowedOptions::none()
         },
         "group-ls" => AllowedOptions::none(),
         "show" | "field-ls" | "attachment-ls" => AllowedOptions {
             allow_key: true,
+            allow_format: true,
             ..AllowedOptions::none()
         },
         "get" => AllowedOptions {
@@ -4806,6 +5315,7 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
 
     match action {
         "ls" => {
+            MetadataFormat::parse(opts.format)?;
             if opts
                 .glob
                 .is_some_and(|pattern| pattern.len() > nkeepass::MAX_LIST_PATTERN_BYTES)
@@ -4818,12 +5328,16 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
             }
         }
         "search" => {
+            MetadataFormat::parse(opts.format)?;
             let query = opts.glob.ok_or_else(|| err("search query required"))?;
             if query.is_empty() || query.len() > MAX_SEARCH_QUERY_BYTES {
                 return Err(err("invalid search query"));
             }
         }
         "show" | "group-add" | "group-rm" => {
+            if action == "show" {
+                MetadataFormat::parse(opts.format)?;
+            }
             if opts.key.is_none() {
                 return Err(err("invalid operation option"));
             }
@@ -4991,6 +5505,9 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
             }
         }
         "ensure" | "field-ls" | "attachment-ls" => {
+            if matches!(action, "field-ls" | "attachment-ls") {
+                MetadataFormat::parse(opts.format)?;
+            }
             opts.key.ok_or_else(|| err("--key required"))?;
         }
         _ => {}
@@ -5281,6 +5798,7 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         if opts.key.is_some() || opts.field.is_some() || opts.name.is_some() {
             return Err(err("invalid search option"));
         }
+        let format = MetadataFormat::parse(opts.format)?;
         let query = opts
             .glob
             .as_ref()
@@ -5295,36 +5813,53 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
         let mut cursor = None;
         let mut emitted = 0usize;
         let mut withheld = 0usize;
-        loop {
-            let page = service
-                .search_page(session, query, cursor)
-                .map_err(|error| err(error.message()))?;
-            withheld = withheld.saturating_add(page.withheld);
-            for hit in page.hits {
-                write_search_hit(&hit)?;
-                emitted += 1;
+        let mut human_hits = Vec::new();
+        let outcome = (|| -> Result<()> {
+            loop {
+                let page = service
+                    .search_page(session, query, cursor)
+                    .map_err(|error| err(error.message()))?;
+                withheld = withheld.saturating_add(page.withheld);
+                for hit in page.hits {
+                    match format {
+                        MetadataFormat::Json => write_search_hit(&hit)?,
+                        MetadataFormat::Human => human_hits.push(hit),
+                    }
+                    emitted += 1;
+                    if emitted == 1_000 {
+                        break;
+                    }
+                }
                 if emitted == 1_000 {
                     break;
                 }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
             }
-            if emitted == 1_000 {
-                break;
+            if format == MetadataFormat::Human {
+                let lines = render_search_hits_human(
+                    &human_hits,
+                    "(no matches)",
+                    human_output_width(),
+                    current_stdout_style(),
+                );
+                write_human_lines(&lines)?;
             }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
+            Ok(())
+        })();
         report_withheld(withheld);
-        service
-            .lock(session)
-            .map_err(|error| err(error.message()))?;
+        let locked = service.lock(session).map_err(|error| err(error.message()));
+        outcome?;
+        locked?;
         return Ok(());
     }
     if action == "ls" {
         if opts.key.is_some() || opts.field.is_some() || opts.name.is_some() {
             return Err(err("invalid list option"));
         }
+        let format = MetadataFormat::parse(opts.format)?;
         if opts
             .glob
             .is_some_and(|pattern| pattern.len() > nkeepass::MAX_LIST_PATTERN_BYTES)
@@ -5341,27 +5876,48 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             .map_err(|error| err(error.message()))?;
         let mut cursor = None;
         let mut withheld = 0usize;
-        loop {
-            let page = service
-                .list_page(session, opts.glob, cursor)
-                .map_err(|error| err(error.message()))?;
-            withheld = withheld.saturating_add(page.withheld);
-            for hit in &page.hits {
-                write_search_hit(hit)?;
+        let mut human_hits = Vec::new();
+        let outcome = (|| -> Result<()> {
+            loop {
+                let page = service
+                    .list_page(session, opts.glob, cursor)
+                    .map_err(|error| err(error.message()))?;
+                withheld = withheld.saturating_add(page.withheld);
+                match format {
+                    MetadataFormat::Json => {
+                        for hit in &page.hits {
+                            write_search_hit(hit)?;
+                        }
+                    }
+                    MetadataFormat::Human => {
+                        human_hits.extend(page.hits);
+                    }
+                }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
             }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
+            if format == MetadataFormat::Human {
+                let lines = render_search_hits_human(
+                    &human_hits,
+                    "(no entries)",
+                    human_output_width(),
+                    current_stdout_style(),
+                );
+                write_human_lines(&lines)?;
             }
-        }
+            Ok(())
+        })();
         report_withheld(withheld);
-        service
-            .lock(session)
-            .map_err(|error| err(error.message()))?;
+        let locked = service.lock(session).map_err(|error| err(error.message()));
+        outcome?;
+        locked?;
         return Ok(());
     }
     if matches!(action, "show" | "field-ls") {
         let selector = selector.ok_or_else(|| err("--key required"))?;
+        let format = MetadataFormat::parse(opts.format)?;
         if action == "field-ls"
             && (opts.field.is_some() || opts.name.is_some() || opts.file.is_some() || opts.stdin)
         {
@@ -5396,12 +5952,12 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                 let selected = service
                     .selected_entry(&resolved.reference())
                     .map_err(|error| err(error.message()))?;
-                write_selected_entry(&selected, output_path)
+                write_selected_entry(&selected, output_path, format)
             } else {
                 let fields = service
                     .field_metadata(&resolved.reference())
                     .map_err(|error| err(error.message()))?;
-                write_selected_fields(&fields)
+                write_selected_fields(&fields, format)
             }
         })();
         let locked = service.lock(session).map_err(|error| err(error.message()));
@@ -5564,6 +6120,7 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                     error => err(error.message()),
                 })?;
             if action == "attachment-ls" {
+                let format = MetadataFormat::parse(opts.format)?;
                 let attachments = service.attachment_metadata(&resolved.reference()).map_err(
                     |error| match error {
                         nkeepass::ServiceError::Ambiguous => err("ambiguous attachment name"),
@@ -5574,12 +6131,24 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                         error => err(error.message()),
                     },
                 )?;
-                for attachment in attachments {
-                    json(&serde_json::json!({
-                        "name": attachment.name(),
-                        "bytes": attachment.size(),
-                        "protected": attachment.protected(),
-                    }))?;
+                match format {
+                    MetadataFormat::Json => {
+                        for attachment in attachments {
+                            json(&serde_json::json!({
+                                "name": attachment.name(),
+                                "bytes": attachment.size(),
+                                "protected": attachment.protected(),
+                            }))?;
+                        }
+                    }
+                    MetadataFormat::Human => {
+                        let lines = render_attachments_human(
+                            &attachments,
+                            human_output_width(),
+                            current_stdout_style(),
+                        );
+                        write_human_lines(&lines)?;
+                    }
                 }
             } else {
                 let name = name.expect("attachment-get selector validated above");
@@ -7129,32 +7698,53 @@ fn config_list(config: &Config, glob: Option<&str>, as_json: bool) -> Result<()>
     Ok(())
 }
 
-fn list_aliases(config: &Config) -> Result<()> {
+fn list_aliases(config: &Config, format: MetadataFormat) -> Result<()> {
     // Built before writing so one hostile record does not leave benign ones
     // already on stdout.
-    let records = config
-        .aliases
-        .iter()
-        .map(|(name, alias)| {
-            check_alias_metadata(name, alias)?;
-            Ok(serde_json::json!({
-                "name": name,
-                "kind": alias.kind,
-                "target": alias.target,
-                "field": alias.field,
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    for record in records {
-        json(&record)?;
+    for (name, alias) in &config.aliases {
+        check_alias_metadata(name, alias)?;
     }
-    Ok(())
+    match format {
+        MetadataFormat::Json => {
+            let records = config
+                .aliases
+                .iter()
+                .map(|(name, alias)| {
+                    serde_json::json!({
+                        "name": name,
+                        "kind": alias.kind,
+                        "target": alias.target,
+                        "field": alias.field,
+                    })
+                })
+                .collect::<Vec<_>>();
+            for record in records {
+                json(&record)?;
+            }
+            Ok(())
+        }
+        MetadataFormat::Human => {
+            let entries: Vec<(&String, &Alias)> = config.aliases.iter().collect();
+            let lines =
+                render_aliases_human(&entries, human_output_width(), current_stdout_style());
+            write_human_lines(&lines)
+        }
+    }
+}
+
+fn parse_alias_list_format(args: &[String]) -> Result<MetadataFormat> {
+    match args {
+        [] => Ok(MetadataFormat::Json),
+        [flag, value] if flag == "--format" => MetadataFormat::parse(Some(value)),
+        [flag] if flag == "--format" => Err(err("missing argument; see --help")),
+        _ => Err(err("invalid alias command; see --help")),
+    }
 }
 
 /// `config get` -- one key's value, in the shape a caller can use it in.
 fn config_get(config: &Config, key: ConfigKey) -> Result<()> {
     if key == ConfigKey::Aliases {
-        return list_aliases(config);
+        return list_aliases(config, MetadataFormat::Json);
     }
     let value = config.value(key).ok_or_else(|| err(CONFIG_KEY_NOT_SET))?;
     check_config_value(value)?;
@@ -8253,7 +8843,7 @@ fn shell_init_command(args: &[String]) -> Result<()> {
     let script =
         nkeepass::hook::emit_shell_init_with_bin(hook_shell, comp, !no_env, pinned.as_deref())
             .map_err(|e| err(e.to_string()))?;
-    write_stdout(script.as_bytes(), "cannot write shell init script")
+    write_stdout(script.as_bytes(), "cannot write output")
 }
 
 fn shell_completions_command(args: &[String]) -> Result<()> {
@@ -8261,7 +8851,7 @@ fn shell_completions_command(args: &[String]) -> Result<()> {
         return Err(err("unsupported completion shell"));
     };
     let script = completion::generate(shell)?;
-    write_stdout(script.as_bytes(), "cannot write completion script")
+    write_stdout(script.as_bytes(), "cannot write output")
 }
 
 fn shell_load_command(args: &[String], config: &Config) -> Result<()> {
@@ -9739,12 +10329,11 @@ fn write_paragraph(output: &mut String, text: &str, width: usize, indent: &str) 
     }
 }
 
-fn print_help(program: &str, route: &[String]) {
+fn print_help(program: &str, route: &[String]) -> Result<()> {
     let style = COLOR_STYLE.load(std::sync::atomic::Ordering::Relaxed);
-    print!(
-        "{}",
-        render_help_with_style(&sanitize_terminal_text(program), route, HELP_WIDTH, style)
-    );
+    let rendered =
+        render_help_with_style(&sanitize_terminal_text(program), route, HELP_WIDTH, style);
+    write_stdout(rendered.as_bytes(), "cannot write output")
 }
 
 static COLOR_STYLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -9805,16 +10394,13 @@ fn with_root_credentials<'a>(
 )]
 fn run(args: &[String], program: &str) -> Result<()> {
     if let Some(route) = help_request(args) {
-        print_help(program, &route);
-        return Ok(());
+        return print_help(program, &route);
     }
     if args.is_empty() {
-        print_help(program, &[]);
-        return Ok(());
+        return print_help(program, &[]);
     }
     if args == ["--version"] || args == ["version"] {
-        println!("nkp {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return print_line(&format!("nkp {}", env!("CARGO_PKG_VERSION")));
     }
     let mut vault = None;
     let mut root_credentials = Vec::new();
@@ -9895,8 +10481,10 @@ fn run(args: &[String], program: &str) -> Result<()> {
             let [shell] = rest else {
                 return Err(err("unsupported completion shell"));
             };
-            print!("{}", completion::generate(shell)?);
-            return Ok(());
+            return write_stdout(
+                completion::generate(shell)?.as_bytes(),
+                "cannot write output",
+            );
         }
         "trust" => return trust_command(rest),
         "untrust" => return untrust_command(rest),
@@ -10038,7 +10626,7 @@ fn run(args: &[String], program: &str) -> Result<()> {
             _ => Err(err("invalid context command; see --help")),
         },
         "alias" => match rest.first().map(String::as_str) {
-            Some("list" | "ls") if rest.len() == 1 => list_aliases(&config),
+            Some("list" | "ls") => list_aliases(&config, parse_alias_list_format(&rest[1..])?),
             Some("resolve") if rest.len() == 2 => {
                 let (name, alias) = config
                     .aliases
@@ -10199,13 +10787,13 @@ fn main() {
         .map(std::ffi::OsString::into_string)
         .collect::<std::result::Result<Vec<_>, _>>();
     let Ok(command_args) = command_args else {
-        eprintln!("nkp: arguments must be valid UTF-8");
+        let _ = writeln!(io::stderr(), "nkp: arguments must be valid UTF-8");
         std::process::exit(2);
     };
     let (command_args, color) = match extract_root_color_options(&command_args) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprintln!("nkp: {}", sanitize_terminal_text(&error.0));
+            let _ = writeln!(io::stderr(), "nkp: {}", sanitize_terminal_text(&error.0));
             std::process::exit(error.1);
         }
     };
@@ -10231,11 +10819,11 @@ fn main() {
         };
         let message = sanitize_terminal_text(&error.0);
         if style == 1 {
-            eprintln!("\x1b[1;31mnkp:\x1b[0m {message}");
+            let _ = writeln!(io::stderr(), "\x1b[1;31mnkp:\x1b[0m {message}");
         } else if style == 2 {
-            eprintln!("\x1b[1;38;2;255;90;90mnkp:\x1b[0m {message}");
+            let _ = writeln!(io::stderr(), "\x1b[1;38;2;255;90;90mnkp:\x1b[0m {message}");
         } else {
-            eprintln!("nkp: {message}");
+            let _ = writeln!(io::stderr(), "nkp: {message}");
         }
         std::process::exit(error.1);
     }
@@ -14999,5 +15587,41 @@ mod tests {
                 "{bogus:?} disguised unknown subcommand as parent help"
             );
         }
+    }
+
+    #[test]
+    fn human_metadata_helpers_sanitize_truncate_unicode_and_fit_narrow_widths() {
+        assert_eq!(
+            sanitize_human_text("a\u{1b}[31m\u{202e}b\u{2066}\nc"),
+            "a\\u{1b}[31m\\u{202e}b\\u{2066}\\nc"
+        );
+        assert_eq!(truncate_human_cell("你好世界", 5), "你好…");
+        assert_eq!(truncate_human_cell("你好世界", 4), "你…");
+        assert!(human_display_width(&truncate_human_cell("e\u{0301}xyz", 2)) <= 2);
+        assert_eq!(truncate_human_cell("abc", 1), "…");
+
+        let empty_aliases = render_aliases_human(&[], 40, 0);
+        assert_eq!(empty_aliases, vec!["(no aliases)"]);
+
+        let name = "long-alias-name-prefix".to_owned();
+        let alias = Alias {
+            kind: Kind::Entry,
+            target: format!("Group/{}", "日本語".repeat(12)),
+            field: Some("Custom\u{202E}Field".to_owned()),
+        };
+        let rendered = render_aliases_human(&[(&name, &alias)], 44, 0);
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].starts_with("NAME"));
+        assert!(rendered[1].contains('…'));
+        assert!(!rendered[1].contains('\u{202E}'));
+        for line in &rendered {
+            assert!(
+                human_display_width(line) <= 44,
+                "narrow width exceeded: {line:?}"
+            );
+        }
+        let wide = render_aliases_human(&[(&name, &alias)], 88, 0);
+        assert!(wide[1].contains("\\u{202e}"));
+        assert!(!wide[1].contains('\u{202E}'));
     }
 }
