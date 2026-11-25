@@ -269,24 +269,87 @@ fn echo_scanning_covers_split_typeahead_markers_and_retention_overflow() {
     }
 }
 
-struct Worker(std::process::Child);
+fn set_cloexec(fd: &impl std::os::fd::AsFd) {
+    let flags = FdFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFD).unwrap());
+    fcntl(fd, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
+}
+
+fn drain_nonblocking(reader: &mut impl Read, buf: &mut Vec<u8>, max_chunks: usize) {
+    let mut chunk = [0u8; 4096];
+    for _ in 0..max_chunks {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => buf.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => panic!("cannot drain worker pipe: {error}"),
+        }
+    }
+}
+
+struct Worker {
+    child: std::process::Child,
+    pty_master: Option<OwnedFd>,
+}
+
+impl Worker {
+    fn new(child: std::process::Child) -> Self {
+        Self {
+            child,
+            pty_master: None,
+        }
+    }
+
+    fn with_pty_master(child: std::process::Child, pty_master: OwnedFd) -> Self {
+        Self {
+            child,
+            pty_master: Some(pty_master),
+        }
+    }
+
+    fn close_pty_master(&mut self) {
+        self.pty_master.take();
+    }
+
+    fn reap_bounded(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
 impl std::ops::Deref for Worker {
     type Target = std::process::Child;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.child
     }
 }
+
 impl std::ops::DerefMut for Worker {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.child
     }
 }
+
 impl Drop for Worker {
     fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
         }
-        let _ = self.0.wait();
+        // Release the PTY master BEFORE reaping so an XNU session leader with a
+        // saturated output queue cannot block in Es (ttywait) during wait().
+        self.pty_master.take();
+        let _ = self.reap_bounded(Duration::from_secs(2));
     }
 }
 
@@ -359,13 +422,17 @@ fn stalled_prompt_worker() {
         elapsed < Duration::from_secs(2),
         "prompt exceeded bounded return: {elapsed:?}"
     );
+    println!("STALLED_PROMPT_DONE");
+    let _ = std::io::stdout().flush();
 }
 
 #[test]
 fn stalled_prompt_timeout_and_signal_cancel_restore_exact_modes_without_writer_threads() {
     for scenario in ["timeout", "cancel"] {
         let pty = openpty(None, None).unwrap();
-        let mut child = Worker(
+        set_cloexec(&pty.master);
+        set_cloexec(&pty.slave);
+        let mut child = Worker::with_pty_master(
             Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "stalled_prompt_worker", "--nocapture"])
                 .env("TERMINAL_PASSWORD_STALLED_PROMPT", scenario)
@@ -375,10 +442,12 @@ fn stalled_prompt_timeout_and_signal_cancel_restore_exact_modes_without_writer_t
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap(),
+            pty.master,
         );
+        let mut pty_slave = Some(pty.slave);
         let deadline = Instant::now() + Duration::from_secs(5);
         if scenario == "cancel" {
-            while tcgetattr(&pty.slave)
+            while tcgetattr(pty_slave.as_ref().unwrap())
                 .unwrap()
                 .local_flags
                 .contains(LocalFlags::ECHO)
@@ -396,34 +465,67 @@ fn stalled_prompt_timeout_and_signal_cancel_restore_exact_modes_without_writer_t
             )
             .unwrap();
         }
+        let mut stdout = child.stdout.take().unwrap();
+        let stdout_flags = OFlag::from_bits_retain(fcntl(&stdout, FcntlArg::F_GETFL).unwrap());
+        fcntl(&stdout, FcntlArg::F_SETFL(stdout_flags | OFlag::O_NONBLOCK)).unwrap();
+        let mut stdout_buf = Vec::new();
+        let mut early_status = None;
+        let mut timed_out = false;
         loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                let mut diagnostic = String::new();
-                child
-                    .stdout
-                    .take()
-                    .unwrap()
-                    .read_to_string(&mut diagnostic)
-                    .unwrap();
-                child
-                    .stderr
-                    .take()
-                    .unwrap()
-                    .read_to_string(&mut diagnostic)
-                    .unwrap();
-                assert!(status.success(), "stalled prompt {scenario}: {diagnostic}");
+            drain_nonblocking(&mut stdout, &mut stdout_buf, 16);
+            if String::from_utf8_lossy(&stdout_buf).contains("STALLED_PROMPT_DONE") {
                 break;
             }
-            // Worker guard kills/reaps on a blocked-writer regression.
-            assert!(
-                Instant::now() < deadline,
-                "stalled prompt {scenario} exceeded outer bound"
-            );
+            if let Some(status) = child.try_wait().unwrap() {
+                drain_nonblocking(&mut stdout, &mut stdout_buf, usize::MAX);
+                early_status = Some(status);
+                break;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
-        // The worker verifies modes before session-leader exit: Darwin revokes
-        // the PTY at that exit, so a parent-side ioctl afterwards is invalid.
-        drop(pty.master);
+        // Release the PTY master (and slave) BEFORE reaping the session-leader
+        // worker: on XNU, exit1() -> ptsclose -> ttywflush -> ttywait blocks in
+        // unkillable Es while the master remains open on a saturated output queue.
+        child.close_pty_master();
+        pty_slave.take();
+        let mut status = early_status;
+        if !timed_out && status.is_none() {
+            loop {
+                if let Some(exited) = child.try_wait().unwrap() {
+                    status = Some(exited);
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        if timed_out {
+            let _ = child.kill();
+            let _ = child.reap_bounded(Duration::from_secs(2));
+            drain_nonblocking(&mut stdout, &mut stdout_buf, usize::MAX);
+            let mut diagnostic = String::from_utf8_lossy(&stdout_buf).into_owned();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut diagnostic);
+            }
+            panic!("stalled prompt {scenario} exceeded outer bound: {diagnostic}");
+        }
+        let status = status.unwrap();
+        drain_nonblocking(&mut stdout, &mut stdout_buf, usize::MAX);
+        let mut diagnostic = String::from_utf8_lossy(&stdout_buf).into_owned();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut diagnostic)
+            .unwrap();
+        assert!(status.success(), "stalled prompt {scenario}: {diagnostic}");
     }
 }
 
@@ -551,16 +653,13 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
             fcntl(&pty.slave, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
         }
         let original_flags = fcntl(&pty.slave, FcntlArg::F_GETFL).unwrap();
-        for fd in [&pty.master, &pty.slave] {
-            let flags = FdFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFD).unwrap());
-            fcntl(fd, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
-        }
+        set_cloexec(&pty.master);
+        set_cloexec(&pty.slave);
         let original_descriptor_flags = fcntl(&pty.slave, FcntlArg::F_GETFD).unwrap();
         let output = worker_output(&pty.slave);
         let flags = OFlag::from_bits_retain(fcntl(&pty.master, FcntlArg::F_GETFL).unwrap());
         fcntl(&pty.master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
-        let mut master = std::fs::File::from(pty.master);
-        let mut child = Worker(
+        let mut child = Worker::new(
             Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "worker", "--nocapture"])
                 .env("TERMINAL_PASSWORD_TEST", scenario)
@@ -578,6 +677,8 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
                 .spawn()
                 .unwrap(),
         );
+        // Declare master after child so an unwinding panic closes master before Worker::drop.
+        let mut master = std::fs::File::from(pty.master);
         let started = Instant::now();
         let deadline = started + Duration::from_secs(5);
         let mut transcript = Transcript::default();
@@ -596,7 +697,7 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = child.reap_bounded(Duration::from_secs(2));
                 transcript.drain(&mut master);
                 panic!(
                     "worker did not enter no-echo mode: scenario={scenario}, elapsed={:?}, transcript={}",
@@ -629,7 +730,7 @@ fn submission_cancellation_and_timeout_restore_exact_modes_without_echo() {
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = child.reap_bounded(Duration::from_secs(2));
                 transcript.drain(&mut master);
                 panic!(
                     "worker leaked or stalled: scenario={scenario}, pid={}, elapsed={:?}, mode={:?}, parent_pgrp={}, tty_pgrp={:?}, captured_bytes={}, transcript={}",
