@@ -276,7 +276,7 @@ jobs:
 
           if [ "$VERIFY_FULL" = "true" ]; then
             pwsh -NoProfile -File packaging/scripts/windows-verify-artifact.ps1 \
-              -Zip "dist/nkeepass-$version-$TARGET.zip" \
+              -Zip "dist/nkp-$version-$TARGET.zip" \
               -BuiltExe "$nkp_exe" \
               -Version "$version" -Triple "$TARGET" -Smoke
           else

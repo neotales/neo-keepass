@@ -133,7 +133,7 @@ bash "$repo/packaging/scripts/archive.sh" "$binary" "$version" x86_64-unknown-li
 build_positive_deb "$pos"
 if command -v makepkg >/dev/null; then
     bash "$repo/packaging/pacman/build.sh" \
-        "$pos/nkeepass-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+        "$pos/nkp-${version}-x86_64-unknown-linux-gnu.tar.gz" \
         x86_64-unknown-linux-gnu "$pos" >/dev/null
 else
     echo "SKIP (makepkg not available): positive pacman package build"
@@ -176,11 +176,11 @@ echo "== negative: tar member is a symlink, not a regular file"
 neg="$work/symlink"
 bash "$repo/packaging/scripts/archive.sh" "$binary" "$version" x86_64-unknown-linux-gnu "$neg" >/dev/null
 build_positive_deb "$neg"
-link_stage="$neg/nkeepass-${version}-x86_64-unknown-linux-gnu"
+link_stage="$neg/nkp-${version}-x86_64-unknown-linux-gnu"
 mkdir -p "$link_stage"
 ln -s "$binary" "$link_stage/nkp"
 cp "$repo/README.md" "$repo/LICENSE.md" "$link_stage/"
-tar -czf "$neg/nkeepass-${version}-x86_64-unknown-linux-gnu.tar.gz" -C "$neg" "nkeepass-${version}-x86_64-unknown-linux-gnu"
+tar -czf "$neg/nkp-${version}-x86_64-unknown-linux-gnu.tar.gz" -C "$neg" "nkp-${version}-x86_64-unknown-linux-gnu"
 expect_fail "is a symlink" "symlink tar member is rejected" \
     bash "$repo/packaging/validate.sh" "$neg" "$version" x86_64-unknown-linux-gnu
 expect_smoke_skipped "symlink member prevents smoke execution"
@@ -189,8 +189,8 @@ echo "== negative: missing zip format (deb left in place)"
 neg="$work/missing-formats"
 bash "$repo/packaging/scripts/archive.sh" "$binary" "$version" x86_64-unknown-linux-gnu "$neg" >/dev/null
 build_positive_deb "$neg"
-rm "$neg/nkeepass-${version}-x86_64-unknown-linux-gnu.zip"
-expect_fail "missing nkeepass-${version}-x86_64-unknown-linux-gnu.zip" \
+rm "$neg/nkp-${version}-x86_64-unknown-linux-gnu.zip"
+expect_fail "missing nkp-${version}-x86_64-unknown-linux-gnu.zip" \
     "missing zip is rejected" \
     bash "$repo/packaging/validate.sh" "$neg" "$version" x86_64-unknown-linux-gnu
 
@@ -214,7 +214,7 @@ if command -v makepkg >/dev/null; then
     # the name and never run the payload.
     marker="pwned-marker-$$"
     hostile="$neg/evil\"\$(touch $marker)\".tar.gz"
-    cp "$pos/nkeepass-${version}-x86_64-unknown-linux-gnu.tar.gz" "$hostile"
+    cp "$pos/nkp-${version}-x86_64-unknown-linux-gnu.tar.gz" "$hostile"
     expect_fail "tarball must be named" \
         "hostile pacman filename is rejected" \
         bash "$repo/packaging/pacman/build.sh" "$hostile" x86_64-unknown-linux-gnu "$neg/out"

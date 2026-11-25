@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 # Self-tests for windows-validate.ps1, windows-package.ps1 and
 # windows-verify-artifact.ps1. Runs under pwsh on any host (the PE check
 # reads bytes, so no Windows is needed; smoke fixtures are pwsh-based, so
@@ -384,7 +384,7 @@ try {
     $verify = Join-Path $scripts 'windows-verify-artifact.ps1'
     $triple = 'x86_64-pc-windows-msvc'
     $version = '9.9.9-test'
-    $name = "nkeepass-$version-$triple"
+    $name = "nkp-$version-$triple"
 
     # ---- windows-validate.ps1 -------------------------------------------------
     $peX64 = Join-Path $work 'fake-x64.exe'

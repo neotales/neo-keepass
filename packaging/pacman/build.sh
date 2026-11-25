@@ -36,8 +36,8 @@ sum=$(sha256sum "$tarball" | cut -d' ' -f1)
 # Never embed the caller-supplied tarball name in the generated PKGBUILD: a
 # crafted filename could inject shell into it. The source entry always uses a
 # canonical, script-derived name; the tarball is copied to that name.
-canonical="nkeepass-${version}-${triple}.tar.gz"
-if [ "$(basename "$tarball")" != "$canonical" ] && [ "$(basename "$tarball")" != "nkeepass-${pkgver}-${triple}.tar.gz" ]; then
+canonical="nkp-${version}-${triple}.tar.gz"
+if [ "$(basename "$tarball")" != "$canonical" ] && [ "$(basename "$tarball")" != "nkp-${pkgver}-${triple}.tar.gz" ]; then
     echo "pacman/build.sh: tarball must be named $canonical (got $(basename "$tarball"))" >&2
     exit 1
 fi
@@ -69,7 +69,7 @@ package() {
     # pacman package identifier itself stays nkeepass for compatibility).
     # !strip keeps the payload byte-identical to the tarball binary, which
     # validate.sh asserts by hash.
-    local src="\$srcdir/nkeepass-${version}-${triple}"
+    local src="\$srcdir/nkp-${version}-${triple}"
     install -D -m 755 "\$src/nkp" "\${pkgdir}/usr/bin/nkp"
     install -D -m 644 "\$src/README.md" "\${pkgdir}/usr/share/doc/nkeepass/README.md"
     install -D -m 644 "\$src/LICENSE.md" "\${pkgdir}/usr/share/licenses/nkeepass/LICENSE"

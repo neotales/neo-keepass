@@ -19,7 +19,7 @@ Release:        1%{?dist}
 Summary:        Headless KeePass automation CLI and TUI
 License:        MIT
 URL:            https://github.com/neotales/neo-keepass
-Source0:        nkeepass-%{crate_version}-x86_64-unknown-linux-gnu.tar.gz
+Source0:        nkp-%{crate_version}-x86_64-unknown-linux-gnu.tar.gz
 BuildArch:      x86_64
 
 %description
@@ -27,7 +27,7 @@ KeePass CLI/TUI for vault navigation and entry operations. KDBX parsing is
 delegated to the vendored neotales-keepass crate.
 
 %prep
-%setup -q -n nkeepass-%{crate_version}-x86_64-unknown-linux-gnu
+%setup -q -n nkp-%{crate_version}-x86_64-unknown-linux-gnu
 
 %install
 install -D -m 755 nkp %{buildroot}%{_bindir}/nkp

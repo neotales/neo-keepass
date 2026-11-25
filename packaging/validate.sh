@@ -6,9 +6,11 @@
 #
 # With no arguments, only manifest syntax and version consistency are checked.
 # With arguments, every listed target triple must have a complete set
-# (tar.gz, zip, .deb) named nkeepass-<version>-<triple> /
-# nkeepass-<version>-<deb-arch>.deb — the archive/package names keep the
-# historical `nkeepass` identifier for compatibility. The executable shipped
+# (tar.gz, zip, .deb) named nkp-<version>-<triple>.{tar.gz,zip} /
+# nkeepass-<version>-<deb-arch>.deb — CLI distribution archives use the `nkp`
+# basename (matching `nkpui` and the `nkp` binary name), while distro package
+# identifiers (.deb, pacman, rpm) keep the historical `nkeepass` identifier for
+# compatibility. The executable shipped
 # inside every container is the real `nkp` binary name; that binary is
 # extracted and checked in each container: regular file, not a symlink, ELF
 # architecture matching the triple, and a sha256 equal across all containers
@@ -111,6 +113,11 @@ check_manifests() {
         record ok "rpm spec crate_version is ${version}"
     else
         record fail "rpm spec crate_version does not match ${version}"
+    fi
+    if grep -qE -- '^Source0:[[:space:]]+nkp-%\{crate_version\}-x86_64-unknown-linux-gnu\.tar\.gz$' "$manifest_root/rpm/nkeepass.spec" 2>/dev/null; then
+        record ok "rpm spec Source0 uses nkp archive basename"
+    else
+        record fail "rpm spec Source0 does not use nkp-%{crate_version}-x86_64-unknown-linux-gnu.tar.gz"
     fi
 
     if grep -q -- "$version" "$manifest_root/choco/nkeepass.nuspec" 2>/dev/null; then
@@ -342,7 +349,7 @@ check_artifacts() {
         local machine debarch base
         machine=$(elf_machine_for_triple "$triple")
         debarch=$(deb_arch_for_triple "$triple")
-        base="nkeepass-${version}-${triple}"
+        base="nkp-${version}-${triple}"
 
         local tarball="$dir/$base.tar.gz" zipfile="$dir/$base.zip"
         local deb="$dir/nkeepass-${version}-${debarch}.deb"

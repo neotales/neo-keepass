@@ -1,8 +1,8 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 # Packages an already-built Windows release binary for distribution:
 #
-#   <OutputDir>/nkeepass-<version>-<triple>.zip
-#       one entry root "nkeepass-<version>-<triple>/" containing
+#   <OutputDir>/nkp-<version>-<triple>.zip
+#       one entry root "nkp-<version>-<triple>/" containing
 #       nkp.exe (the product's executable name), README.md, LICENSE.md,
 #       WINDOWS-LIMITATIONS.txt
 #   <OutputDir>/nkp.exe                    (raw, for direct download)
@@ -59,7 +59,7 @@ foreach ($required in @((Join-Path $repoRoot 'README.md'), (Join-Path $repoRoot 
     }
 }
 
-$name = "nkeepass-$Version-$Triple"
+$name = "nkp-$Version-$Triple"
 if (-not (Test-Path -LiteralPath $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
 }
@@ -70,7 +70,7 @@ try {
     # Stage the archive payload in a fresh private temp directory. The
     # directory itself is passed to Compress-Archive — NOT "$pkgDir\*",
     # which would flatten the payload and drop the enclosing
-    # nkeepass-<version>-<triple>/ root from the entry names.
+    # nkp-<version>-<triple>/ root from the entry names.
     $pkgDir = Join-Path $stage $name
     New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
     Copy-Item -LiteralPath $Binary -Destination (Join-Path $pkgDir 'nkp.exe')
