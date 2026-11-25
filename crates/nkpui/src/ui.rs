@@ -17,7 +17,8 @@ use crate::controller::{
     EditableCustomField, EntryDetailState, EntryEditorState, InjectMode, LockCleanup,
     LockErrorField, LockMode, LockTrigger, SaveOutcome, TotpDisplay, UnlockOutcome,
     VaultController, VaultPhase, WorkspaceTab, create_and_open_vault_blocking,
-    current_unix_seconds, format_byte_size, open_vault_blocking, save_vault_blocking,
+    current_unix_seconds, format_byte_size, open_vault_blocking, sanitize_attachment_prefill,
+    save_vault_blocking,
 };
 
 const SECRET_CLIPBOARD_TTL: Duration = Duration::from_secs(30);
@@ -1583,39 +1584,45 @@ fn entry_list_items(k: &Kit, state: &AppState) -> El {
         );
     }
 
+    let saving = state.controller.is_saving();
     for (idx, hit) in state.controller.entries.iter().enumerate() {
         let selected = state.controller.selected_index == Some(idx);
-        list = list.child(
-            col()
-                .key(format!("entry-row-{idx}"))
-                .w_full()
-                .padding(8.0)
-                .gap(2.0)
-                .radius(k.radius.md)
-                .fill(if selected { k.c.layer_03 } else { k.c.layer_01 })
+        let mut row_el = col()
+            .key(format!("entry-row-{idx}"))
+            .w_full()
+            .padding(8.0)
+            .gap(2.0)
+            .radius(k.radius.md)
+            .fill(if selected { k.c.layer_03 } else { k.c.layer_01 })
+            .child(
+                text(hit.title().to_owned())
+                    .w_full()
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_base)
+                    .truncate(),
+            )
+            .child(
+                text(hit.path().to_owned())
+                    .w_full()
+                    .font(k.ty.text_xsmall)
+                    .color(k.c.text_muted)
+                    .truncate(),
+            );
+        if !saving {
+            row_el = row_el
                 .focusable(true)
                 .hover(k.c.hover)
                 .press(k.c.pressed)
                 .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
+                    if s.controller.is_saving() {
+                        return;
+                    }
                     s.controller.select_entry(idx, current_unix_seconds());
                     s.wipe_editor_widgets();
-                })
-                .child(
-                    text(hit.title().to_owned())
-                        .w_full()
-                        .font(k.ty.ui_medium)
-                        .color(k.c.text_base)
-                        .truncate(),
-                )
-                .child(
-                    text(hit.path().to_owned())
-                        .w_full()
-                        .font(k.ty.text_xsmall)
-                        .color(k.c.text_muted)
-                        .truncate(),
-                ),
-        );
+                });
+        }
+        list = list.child(row_el);
     }
     list
 }
@@ -2498,13 +2505,14 @@ fn attachment_item_row(
         );
     }
 
-    let extract_name = name.to_owned();
+    let prefill_name = sanitize_attachment_prefill(name);
+    let extract_name = prefill_name.clone();
     let extract_btn = Button::new("Save As…")
         .control_size(ControlSize::Small)
         .disabled(saving)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
-            s.extract_path_edit.replace_text(extract_name.clone());
+            s.extract_path_edit.replace_text(prefill_name.clone());
             s.extract_dialog = Some(ExtractDialogState {
                 index: idx,
                 name: extract_name.clone(),
