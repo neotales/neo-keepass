@@ -913,4 +913,103 @@ fn wildcard_glob_search_and_binary_search_path_completion() {
     let _ = root;
     let bulk = svc.complete_path(sess, "bulk-", 100).unwrap();
     assert_eq!(bulk.len(), 50);
+
+    // Oversized glob pattern in complete_path fails with InvalidInput.
+    let too_long_glob = format!("{}*", "a".repeat(nkeepass::MAX_LIST_PATTERN_BYTES));
+    assert_eq!(
+        svc.complete_path(sess, &too_long_glob, 10),
+        Err(ServiceError::InvalidInput)
+    );
+}
+
+#[test]
+fn recycle_and_restore_reject_oversized_colliding_title_without_dropping_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("no-drop-collision.kdbx");
+    let max_title = "x".repeat(4096);
+
+    let mut db = KeePassDatabase::default();
+    db.meta.recycle_bin_enabled = true;
+    let mut work = Group::new("Work");
+    work.add_entry(Entry::new(max_title.clone()));
+    let mut bin = Group::new("Recycle Bin");
+    bin.icon_id = 43;
+    bin.add_entry(Entry::new(max_title.clone()));
+    db.meta.recycle_bin_uuid = bin.id;
+    db.add_group(work);
+    db.add_group(bin);
+    save_raw(&path, &db, fast_options());
+
+    let (mut svc, sess) = reopen(&path);
+    let work_entry = svc
+        .resolve_entry(sess, &format!("Work/{max_title}"))
+        .unwrap()
+        .reference();
+    assert_eq!(
+        svc.recycle_entry(&work_entry),
+        Err(ServiceError::InvalidInput)
+    );
+    // Original entry MUST still be intact in Work.
+    assert!(
+        svc.resolve_entry(sess, &format!("Work/{max_title}"))
+            .is_ok()
+    );
+
+    // Also verify restore_entry does not drop the recycled entry if Work already has max_title.
+    let mut db2 = KeePassDatabase::default();
+    db2.meta.recycle_bin_enabled = true;
+    let mut work2 = Group::new("Work");
+    work2.add_entry(Entry::new(max_title.clone()));
+    let work2_id = work2.id;
+    let mut bin2 = Group::new("Recycle Bin");
+    bin2.icon_id = 43;
+    let mut trashed = Entry::new(max_title.clone());
+    trashed.previous_parent_group_id = work2_id;
+    bin2.add_entry(trashed);
+    db2.meta.recycle_bin_uuid = bin2.id;
+    db2.add_group(work2);
+    db2.add_group(bin2);
+    let path2 = dir.path().join("no-drop-restore.kdbx");
+    save_raw(&path2, &db2, fast_options());
+
+    let (mut svc2, sess2) = reopen(&path2);
+    let bin_entry = svc2
+        .resolve_entry(sess2, &format!("Recycle Bin/{max_title}"))
+        .unwrap()
+        .reference();
+    assert_eq!(
+        svc2.restore_entry(&bin_entry).err(),
+        Some(ServiceError::InvalidInput)
+    );
+    // Recycled entry MUST still be intact in Recycle Bin.
+    assert!(
+        svc2.resolve_entry(sess2, &format!("Recycle Bin/{max_title}"))
+            .is_ok()
+    );
+}
+
+#[test]
+fn update_database_settings_rejects_argon2_memory_below_8_times_lanes() {
+    let (_dir, _path, mut svc, sess) = create_and_open();
+    assert_eq!(
+        svc.update_database_settings(
+            sess,
+            DatabaseSettingsUpdate {
+                name: "ok".into(),
+                description: String::new(),
+                default_username: String::new(),
+                recycle_bin_enabled: true,
+                history_max_items: 10,
+                history_max_size: 1024,
+                outer_cipher: VaultCipher::Aes,
+                compression: VaultCompression::GZip,
+                kdf: VaultKdfSummary::Argon2id {
+                    memory_kib: 15,
+                    iterations: 1,
+                    lanes: 2,
+                },
+            },
+        ),
+        Err(ServiceError::InvalidInput)
+    );
 }

@@ -4039,8 +4039,8 @@ impl VaultService {
             .map_or(&[][..], |(_, parent)| parent);
         let target = resolve_group_locator(&live.database, &target_group.locator, target_group.id)?;
         let entry_depth = entry_relative_depth(source_entry);
-        // Root sits at XML depth 3; each group locator step adds 1.
-        if 3usize
+        // Entry starts at XML depth 4 + target_group.locator.len(), matching validate_xml_depth.
+        if 4usize
             .saturating_add(target_group.locator.len())
             .saturating_add(entry_depth)
             > crate::KDBX_LIMITS.max_xml_depth
@@ -4223,27 +4223,43 @@ impl VaultService {
             return Ok(false);
         }
 
-        let projected_bin_depth = existing_bin.as_ref().map_or(1, Vec::len);
-        if 3usize
+        let target_bin_locator = existing_bin.or_else(|| {
+            live.database
+                .root
+                .groups
+                .iter()
+                .position(|group| group.name == "Recycle Bin")
+                .map(|idx| vec![idx])
+        });
+        let projected_bin_depth = target_bin_locator.as_ref().map_or(1, Vec::len);
+        if 4usize
             .saturating_add(projected_bin_depth)
             .saturating_add(entry_depth)
             > crate::KDBX_LIMITS.max_xml_depth
         {
             return Err(ServiceError::XmlDepth);
         }
+        let unique_title = if let Some(bin_loc) = &target_bin_locator {
+            let bin_group = group_at_locator(&live.database.root, bin_loc)?;
+            let title = next_disambiguated_title(bin_group, &source_entry.title)?;
+            if title != source_entry.title {
+                validate_entry_title(&title)?;
+            }
+            title
+        } else {
+            source_entry.title.clone()
+        };
         let bin_locator = ensure_recycle_bin_group(&mut live.database);
         let mut moved =
             remove_entry_at(&mut live.database.root, source_parent_locator, entry_index)?;
         moved.previous_parent_group_id = source_parent_id;
-        let bin_group = group_at_locator_mut(&mut live.database.root, &bin_locator)?;
-        let unique_title = next_disambiguated_title(bin_group, &moved.title)?;
         if unique_title != moved.title {
-            validate_entry_title(&unique_title)?;
             moved.title.clone_from(&unique_title);
             if let Some(field) = moved.fields.iter_mut().find(|f| f.key == "Title") {
                 field.value = ProtectedValue::from_text(unique_title);
             }
         }
+        let bin_group = group_at_locator_mut(&mut live.database.root, &bin_locator)?;
         bin_group.entries.push(moved);
         self.invalidate_references();
         Ok(true)
@@ -4255,7 +4271,8 @@ impl VaultService {
     /// # Errors
     ///
     /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
-    /// [`ServiceError::InvalidInput`] if the entry is not in the Recycle Bin,
+    /// [`ServiceError::InvalidInput`] if the entry is not in the Recycle Bin
+    /// or a disambiguated title exceeds title bounds,
     /// [`ServiceError::XmlDepth`], [`ServiceError::DuplicateIds`], or
     /// [`ServiceError::DuplicateFields`].
     pub fn restore_entry(&mut self, entry: &EntryRef) -> Result<EntryRef, ServiceError> {
@@ -4283,27 +4300,30 @@ impl VaultService {
         if !prev_parent.is_zero()
             && let Some(candidate) = find_group_locator_by_uuid(&live.database.root, prev_parent)
             && !candidate.starts_with(&bin_locator)
-            && 3usize
+            && 4usize
                 .saturating_add(candidate.len())
                 .saturating_add(entry_depth)
                 <= crate::KDBX_LIMITS.max_xml_depth
         {
             target_locator = candidate;
         }
+        let target_group = group_at_locator(&live.database.root, &target_locator)?;
+        let unique_title = next_disambiguated_title(target_group, &source_entry.title)?;
+        if unique_title != source_entry.title {
+            validate_entry_title(&unique_title)?;
+        }
         let mut restored =
             remove_entry_at(&mut live.database.root, source_parent_locator, entry_index)?;
         restored.previous_parent_group_id = KdbxUuid::ZERO;
-        let target_group = group_at_locator_mut(&mut live.database.root, &target_locator)?;
-        let unique_title = next_disambiguated_title(target_group, &restored.title)?;
         if unique_title != restored.title {
-            validate_entry_title(&unique_title)?;
             restored.title.clone_from(&unique_title);
             if let Some(field) = restored.fields.iter_mut().find(|f| f.key == "Title") {
                 field.value = ProtectedValue::from_text(unique_title);
             }
         }
-        let new_index = target_group.entries.len();
-        target_group.entries.push(restored);
+        let target_group_mut = group_at_locator_mut(&mut live.database.root, &target_locator)?;
+        let new_index = target_group_mut.entries.len();
+        target_group_mut.entries.push(restored);
         target_locator.push(new_index);
         let session = live.id;
         let id = entry.id;
@@ -4488,6 +4508,7 @@ impl VaultService {
                     || iterations > crate::KDBX_LIMITS.max_argon2_time
                     || lanes == 0
                     || lanes > crate::KDBX_LIMITS.max_argon2_lanes
+                    || u64::from(memory_kib) < u64::from(lanes).saturating_mul(8)
                     || work > crate::KDBX_LIMITS.max_argon2_work_kib_passes
                 {
                     return Err(ServiceError::InvalidInput);
@@ -4673,9 +4694,22 @@ impl VaultService {
         let normalized = prefix.trim_start_matches('/').to_lowercase();
         let root_lower = live.database.root.name.to_lowercase();
         if normalized.contains('*') || normalized.contains('?') {
+            if normalized.len() > MAX_LIST_PATTERN_BYTES {
+                return Err(ServiceError::InvalidInput);
+            }
             let glob = Glob::new(&normalized);
+            let mut glob_work = 0usize;
             let mut results = Vec::new();
             for item in index {
+                let g_cost = glob
+                    .work_bound(item.rel_key.len().saturating_add(item.full_key.len()))
+                    .ok_or(ServiceError::ResourceLimit)?;
+                glob_work = glob_work
+                    .checked_add(g_cost)
+                    .ok_or(ServiceError::ResourceLimit)?;
+                if glob_work > MAX_PAGE_GLOB_WORK {
+                    return Err(ServiceError::ResourceLimit);
+                }
                 if glob.is_match(&item.rel_key) || glob.is_match(&item.full_key) {
                     results.push(item.completion);
                     if results.len() == cap {
@@ -6584,15 +6618,11 @@ fn scan_page(root: &Group, state: &mut SearchState) -> Result<SearchPage, Servic
                 if path_matches {
                     true
                 } else {
-                    let group_path = path_for(
-                        root,
-                        &state.stack,
-                        state.stack[frame_index].path_bytes,
-                        state.stack[frame_index].path_safe,
-                    );
-                    let entry_path = render_path(&group_path, &entry.title);
-                    let total_candidate_bytes = entry_path
-                        .len()
+                    let entry_path_len = state.stack[frame_index]
+                        .path_bytes
+                        .saturating_add(1)
+                        .saturating_add(entry.title.len());
+                    let total_candidate_bytes = entry_path_len
                         .saturating_add(entry.title.len())
                         .saturating_add(entry.username.len())
                         .saturating_add(entry.url.len())
@@ -6610,6 +6640,13 @@ fn scan_page(root: &Group, state: &mut SearchState) -> Result<SearchPage, Servic
                     }
                     glob_work += g_cost;
                     state.total_glob_work += g_cost;
+                    let group_path = path_for(
+                        root,
+                        &state.stack,
+                        state.stack[frame_index].path_bytes,
+                        state.stack[frame_index].path_safe,
+                    );
+                    let entry_path = render_path(&group_path, &entry.title);
                     glob.is_match(&entry_path.to_lowercase())
                         || [&entry.title, &entry.username, &entry.url]
                             .into_iter()

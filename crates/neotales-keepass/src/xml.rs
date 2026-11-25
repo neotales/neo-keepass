@@ -479,6 +479,26 @@ fn parse_meta(
     let mut meta = KeePassMeta::default();
     let mut seen = std::collections::BTreeSet::new();
     for child_node in &node.children {
+        match child_node.name.as_str() {
+            "CustomIcons" => {
+                for icon in children(child_node, "Icon") {
+                    meta.custom_icons
+                        .push(parse_custom_icon(icon, stream, limits)?);
+                }
+                continue;
+            }
+            "Binaries" => {
+                meta.legacy_binaries.extend(parse_legacy_binaries(
+                    child_node,
+                    stream,
+                    database,
+                    legacy_references,
+                    limits,
+                )?);
+                continue;
+            }
+            _ => {}
+        }
         if !seen.insert(child_node.name.as_str()) {
             continue;
         }
@@ -555,16 +575,6 @@ fn parse_meta(
             }
             "RecycleBinEnabled" => meta.recycle_bin_enabled = value == "True",
             "CustomData" => meta.custom_data = parse_custom_data(child_node, true)?,
-            "CustomIcons" => {
-                for icon in children(child_node, "Icon") {
-                    meta.custom_icons
-                        .push(parse_custom_icon(icon, stream, limits)?);
-                }
-            }
-            "Binaries" => {
-                meta.legacy_binaries =
-                    parse_legacy_binaries(child_node, stream, database, legacy_references, limits)?;
-            }
             _ => {}
         }
     }
@@ -974,6 +984,18 @@ fn parse_entry(
                 };
                 entry.attachments.push(Attachment { name, reference });
             }
+            "History" => {
+                for snapshot in children(child_node, "Entry") {
+                    entry.history.push(parse_entry(
+                        snapshot,
+                        stream,
+                        pool,
+                        legacy_references,
+                        legacy_binary_references,
+                        limits,
+                    )?);
+                }
+            }
             other => {
                 if !seen.insert(other) {
                     continue;
@@ -1026,18 +1048,6 @@ fn parse_entry(
                                 .into(),
                             associations,
                         };
-                    }
-                    "History" => {
-                        for snapshot in children(child_node, "Entry") {
-                            entry.history.push(parse_entry(
-                                snapshot,
-                                stream,
-                                pool,
-                                legacy_references,
-                                legacy_binary_references,
-                                limits,
-                            )?);
-                        }
                     }
                     _ => {}
                 }

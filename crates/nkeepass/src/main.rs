@@ -2698,11 +2698,7 @@ fn write_selected_entry(
     {
         return Err(err("ambiguous field name"));
     }
-    let has_otp = selected
-        .fields()
-        .iter()
-        .find(|field| field.name() == "otp")
-        .is_some_and(nkeepass::FieldMetadata::protected);
+    let has_otp = selected.has_otp();
     match format {
         MetadataFormat::Json => {
             let fields = selected

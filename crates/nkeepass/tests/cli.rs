@@ -2740,7 +2740,9 @@ fn show_and_field_ls_resolve_through_service_without_changing_json_schemas() {
     });
     entry.fields.push(Field {
         key: "otp".into(),
-        value: neotales_keepass::ProtectedValue::from_text("not-an-otp-uri"),
+        value: neotales_keepass::ProtectedValue::from_text(
+            "otpauth://totp/Login?secret=JBSWY3DPEHPK3PXP",
+        ),
         protected: true,
         protect_in_memory: false,
     });

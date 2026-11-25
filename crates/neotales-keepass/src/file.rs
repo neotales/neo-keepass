@@ -1659,4 +1659,148 @@ mod tests {
             "current-secret"
         );
     }
+
+    #[test]
+    fn repeated_history_and_custom_icons_keep_inner_stream_in_sync_for_later_entry() {
+        let limits = KdbxReadLimits::default();
+        let master_seed = [0x21; 32];
+        let transform_seed = [0x32; 32];
+        let kdf_salt = [0x43; 32];
+        let iv = [0x54; 16];
+        let inner_stream_key = [0x65; 64];
+        let options = KdbxWriteOptions {
+            cipher: KdbxOuterCipher::Aes,
+            compression: KdbxCompression::None,
+            kdf: KdbxKdf::Aes,
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        };
+        let header = create_header(
+            &master_seed,
+            &transform_seed,
+            &kdf_salt,
+            &iv,
+            &VariantDictionary::default(),
+            options,
+        )
+        .unwrap();
+        let composite = KdbxCredentials::password("pw")
+            .unwrap()
+            .composite_key()
+            .unwrap();
+        let transformed =
+            derive_transformed_key(&composite, &transform_seed, &kdf_salt, options, &limits)
+                .unwrap();
+        let mut cipher_input = master_seed.to_vec();
+        cipher_input.extend_from_slice(&transformed[..]);
+        let cipher_key = crypto::sha256(&cipher_input);
+        let mut hmac_input = master_seed.to_vec();
+        hmac_input.extend_from_slice(&transformed[..]);
+        hmac_input.push(1);
+        let base_hmac = crypto::sha512(&hmac_input);
+
+        let mut inner = InnerCipher::new(2, &inner_stream_key).unwrap();
+        let inner_header = crate::xml::write_inner_header(2, &inner_stream_key, &[], &mut inner);
+
+        let mut icon1 = b"icon-one".to_vec();
+        inner.transform(&mut icon1);
+        let mut icon2 = b"icon-two".to_vec();
+        inner.transform(&mut icon2);
+        let mut h1_pw = b"hist-one".to_vec();
+        inner.transform(&mut h1_pw);
+        let mut h2_pw = b"hist-two".to_vec();
+        inner.transform(&mut h2_pw);
+        let mut e1_pw = b"first-entry-pw".to_vec();
+        inner.transform(&mut e1_pw);
+        let mut e2_pw = b"later-entry-pw".to_vec();
+        inner.transform(&mut e2_pw);
+
+        let icon1_uuid = crate::primitives::KdbxUuid::from_bytes([0x01; 16]).to_base64();
+        let icon2_uuid = crate::primitives::KdbxUuid::from_bytes([0x02; 16]).to_base64();
+        let e1_uuid = crate::primitives::KdbxUuid::from_bytes([0x11; 16]).to_base64();
+        let h1_uuid = crate::primitives::KdbxUuid::from_bytes([0x12; 16]).to_base64();
+        let h2_uuid = crate::primitives::KdbxUuid::from_bytes([0x13; 16]).to_base64();
+        let e2_uuid = crate::primitives::KdbxUuid::from_bytes([0x14; 16]).to_base64();
+
+        let xml = format!(
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile>",
+                "<Meta>",
+                "<CustomIcons><Icon><UUID>{}</UUID><Data Protected=\"True\">{}</Data></Icon></CustomIcons>",
+                "<CustomIcons><Icon><UUID>{}</UUID><Data Protected=\"True\">{}</Data></Icon></CustomIcons>",
+                "</Meta>",
+                "<Root><Group><UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>Root</Name>",
+                "<Entry><UUID>{}</UUID><Name>first</Name>",
+                "<History><Entry><UUID>{}</UUID><Name>first</Name><String><Key>Password</Key><Value Protected=\"True\">{}</Value></String></Entry></History>",
+                "<History><Entry><UUID>{}</UUID><Name>first</Name><String><Key>Password</Key><Value Protected=\"True\">{}</Value></String></Entry></History>",
+                "<String><Key>Password</Key><Value Protected=\"True\">{}</Value></String>",
+                "</Entry>",
+                "<Entry><UUID>{}</UUID><Name>later</Name>",
+                "<String><Key>Password</Key><Value Protected=\"True\">{}</Value></String>",
+                "</Entry>",
+                "</Group></Root></KeePassFile>"
+            ),
+            icon1_uuid,
+            STANDARD.encode(&icon1),
+            icon2_uuid,
+            STANDARD.encode(&icon2),
+            e1_uuid,
+            h1_uuid,
+            STANDARD.encode(&h1_pw),
+            h2_uuid,
+            STANDARD.encode(&h2_pw),
+            STANDARD.encode(&e1_pw),
+            e2_uuid,
+            STANDARD.encode(&e2_pw),
+        );
+
+        let mut payload = inner_header;
+        payload.extend_from_slice(xml.as_bytes());
+        let ciphertext = crypto::aes_cbc_encrypt(&cipher_key, &iv, &payload).unwrap();
+        let blocks =
+            wire::write_hmac_blocks(&ciphertext, &base_hmac, 1024 * 1024, &limits).unwrap();
+        let mut file_bytes = header.clone();
+        file_bytes.extend_from_slice(&crypto::sha256(&header));
+        file_bytes.extend_from_slice(&wire::header_hmac(&header, &base_hmac).unwrap());
+        file_bytes.extend_from_slice(&blocks);
+
+        let loaded = KdbxFile::load_password(file_bytes.as_slice(), "pw", &limits).unwrap();
+        assert!(!loaded.can_save_losslessly);
+        assert_eq!(loaded.meta.custom_icons.len(), 2);
+        assert_eq!(loaded.meta.custom_icons[0].data, b"icon-one");
+        assert_eq!(loaded.meta.custom_icons[1].data, b"icon-two");
+        assert_eq!(loaded.root.entries[0].history.len(), 2);
+        assert_eq!(
+            loaded.root.entries[0].history[0]
+                .password
+                .reveal_text()
+                .unwrap()
+                .as_str(),
+            "hist-one"
+        );
+        assert_eq!(
+            loaded.root.entries[0].history[1]
+                .password
+                .reveal_text()
+                .unwrap()
+                .as_str(),
+            "hist-two"
+        );
+        assert_eq!(
+            loaded.root.entries[0]
+                .password
+                .reveal_text()
+                .unwrap()
+                .as_str(),
+            "first-entry-pw"
+        );
+        assert_eq!(
+            loaded.root.entries[1]
+                .password
+                .reveal_text()
+                .unwrap()
+                .as_str(),
+            "later-entry-pw"
+        );
+    }
 }
