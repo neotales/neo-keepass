@@ -483,6 +483,7 @@ fn editor_otp_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El 
 
     let mut card = col()
         .key("editor-otp-field")
+        .instant_changes()
         .w_full()
         .padding(8.0)
         .gap(8.0)

@@ -525,6 +525,9 @@ fn apply_picked_standard_icon(state: &mut AppState, target: &IconPickerTarget, i
     if let Err(err) = res {
         state.controller.set_browser_error(err);
     }
+    if !matches!(target, IconPickerTarget::EntryEditor) && state.controller.editor.is_none() {
+        state.wipe_editor_widgets();
+    }
     state.icon_picker = None;
     state.icon_search_edit.replace_text("");
 }
@@ -552,6 +555,9 @@ fn apply_picked_custom_icon(state: &mut AppState, target: &IconPickerTarget, id:
     };
     if let Err(err) = res {
         state.controller.set_browser_error(err);
+    }
+    if !matches!(target, IconPickerTarget::EntryEditor) && state.controller.editor.is_none() {
+        state.wipe_editor_widgets();
     }
     state.icon_picker = None;
     state.icon_search_edit.replace_text("");
@@ -1126,7 +1132,7 @@ fn build_move_entry_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
 }
 
 fn settings_kdf_params(k: &Kit, state: &AppState, kdf_choice: KdfChoice) -> El {
-    let mut kdf_params = row().w_full().gap(8.0);
+    let mut kdf_params = row().instant_changes().w_full().gap(8.0);
     if matches!(kdf_choice, KdfChoice::Argon2id | KdfChoice::Argon2d) {
         let mem_in = TextInput::new(&state.settings_kdf_memory_mib)
             .label("Memory (MiB)")

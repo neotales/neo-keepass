@@ -103,6 +103,9 @@ fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<
                 s.clear_transient_overlays();
                 s.controller
                     .select_group_by_path(&g_new_entry_path, current_unix_seconds());
+                if s.controller.editor.is_none() {
+                    s.wipe_editor_widgets();
+                }
                 s.create_new_entry();
             },
         ),

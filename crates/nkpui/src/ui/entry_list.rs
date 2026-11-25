@@ -231,6 +231,7 @@ fn select_entry_by_ref(s: &mut AppState, target_ref: &EntryRef) -> bool {
         return false;
     };
     s.controller.select_entry(idx, current_unix_seconds());
+    s.wipe_editor_widgets();
     true
 }
 
@@ -715,6 +716,7 @@ fn entry_row(k: &Kit, state: &AppState, idx: usize, hit: &SearchHit, overlays: &
 fn entry_list_items(k: &Kit, state: &AppState, overlays: &mut Vec<El>) -> El {
     let mut list = col()
         .key("entry-list")
+        .instant_changes()
         .w_full()
         .grow(1.0)
         .min_h(0.0)

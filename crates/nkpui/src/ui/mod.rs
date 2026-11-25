@@ -779,7 +779,7 @@ impl AppState {
         self.mask_all_reveals();
         self.master_input.replace_text("");
         self.confirm_master_edit.replace_text("");
-        self.drag_state = None;
+        self.clear_transient_overlays();
         if self.file_dialog_active || !self.controller.lock_on_focus_loss {
             return None;
         }
@@ -1178,7 +1178,12 @@ impl AppState {
                 self.sync_editor_widgets_from_controller();
                 self.sync_path_bar_from_controller();
             }
-            Err(err) => self.controller.set_browser_error(err),
+            Err(err) => {
+                if self.controller.editor.is_none() {
+                    self.wipe_editor_widgets();
+                }
+                self.controller.set_browser_error(err);
+            }
         }
     }
 
@@ -1408,6 +1413,9 @@ impl AppState {
         if idle_cleanup.locked_active_session
             || (!had_pending && self.controller.pending_lock_decision.is_some())
         {
+            if !had_pending && self.controller.pending_lock_decision.is_some() {
+                self.clear_transient_overlays();
+            }
             self.apply_lock_cleanup(idle_cleanup, tx);
             changed = true;
         }

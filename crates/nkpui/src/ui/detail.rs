@@ -926,6 +926,7 @@ fn entry_detail_scroll_body(k: &Kit, detail: &EntryDetailState, saving: bool) ->
 pub(super) fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
     let mut pane = col()
         .key("entry-detail-pane")
+        .instant_changes()
         .w_full()
         .h_full()
         .min_w(0.0)
@@ -952,6 +953,7 @@ pub(super) fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
     if let Some(editor) = &state.controller.editor {
         let mut scroll_body = col()
             .key("entry-editor-scroll")
+            .instant_changes()
             .w_full()
             .grow(1.0)
             .min_h(0.0)
