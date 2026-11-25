@@ -12,8 +12,9 @@ description = "Desktop UI for neo-keepass built with Rune"
 [dependencies]
 neotales-keepass = { path = "../neotales-keepass" }
 nkeepass = { path = "../nkeepass" }
-rune = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be", default-features = false, features = ["accessibility", "embedded-fonts", "metal-backend", "svg"] }
+rune = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be", default-features = false, features = ["accessibility", "embedded-fonts", "metal-backend", "native-file-dialog", "svg"] }
 rune-kit = { git = "https://github.com/anomalyco/rune.git", rev = "761fd132a286b9e87756d8a0889c8957b93c86be", default-features = false }
+serde_json = "1.0"
 zeroize = { version = "=1.9.1", features = ["derive"] }
 
 [dev-dependencies]
