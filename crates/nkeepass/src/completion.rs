@@ -7242,25 +7242,39 @@ _nkp_complete
         std::fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NKP_COMPLETION_LOG\"\nprintf 'prefix-entry\\n'\n").unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
         let driver = r#"
-import os, pty, select, signal, sys, time
+import os, pty, select, shutil, signal, sys, time
 directory, bash = sys.argv[1:]
+bash_exec = shutil.which(bash) or bash
 pid, master = pty.fork()
 if pid == 0:
     os.environ.clear()
     os.environ.update(PATH=directory + ":/usr/bin:/bin", HOME=directory,
-        TERM="xterm", NKP_COMPLETION_LOG=directory + "/query")
-    os.execvp(bash, [bash, "--noprofile", "--norc", "-i"])
+        TERM="xterm", NKP_COMPLETION_LOG=directory + "/query",
+        BASH_SILENCE_DEPRECATION_WARNING="1")
+    os.execvp(bash_exec, [bash_exec, "--noprofile", "--norc", "-i"])
+buf = b""
 def wait_for(needle):
-    data = b""
+    global buf
     deadline = time.monotonic() + 8
-    while needle not in data:
+    while needle not in buf:
         remaining = deadline - time.monotonic()
-        assert remaining > 0, (needle, data)
-        assert select.select([master], [], [], remaining)[0], (needle, data)
-        data += os.read(master, 4096)
-    return data
+        assert remaining > 0, (needle, buf)
+        assert select.select([master], [], [], remaining)[0], (needle, buf)
+        buf += os.read(master, 4096)
+    idx = buf.index(needle) + len(needle)
+    matched = buf[:idx]
+    buf = buf[idx:]
+    return matched
 try:
-    os.write(master, b"source '" + directory.encode() + b"/completion.bash'; PS1='READY>'; bind 'set bell-style none'\n")
+    os.write(
+        master,
+        b"source '"
+        + directory.encode()
+        + b"/completion.bash'; PS1='READY>'; bind 'set bell-style none'; "
+        + b"printf '\\nREADY_BOUND:%s\\n' \"${BASH_VERSINFO[0]}\"\n",
+    )
+    wait_for(b"\r\nREADY_BOUND:")
+    bash_major = int(wait_for(b"\r\n")[:-2])
     wait_for(b"READY>")
     os.write(master, b"nkp --color=al\t")
     wait_for(b"ways")
@@ -7271,19 +7285,34 @@ try:
     os.unlink(directory + "/query")
     # Capture the line after a real Tab, not synthetic COMP_WORDS. These
     # option-looking tokens were already consumed as root option values.
-    os.write(master, b"\x15bind -x '\"\\C-x\\C-e\": printf \"LINE<%s>END\\\\n\" \"$READLINE_LINE\"'; printf '\\nCAPTURE_BOUND\\n'\n")
-    wait_for(b"\r\nCAPTURE_BOUND\r\n")
+    # Bash 3.2 predates `bind -x` and `$READLINE_LINE` (added in Bash 4.0),
+    # so fall back to a synchronous printf sentinel after Ctrl-U there.
+    if bash_major >= 4:
+        os.write(master, b"\x15bind -x '\"\\C-x\\C-e\": printf \"LINE<%s>END\\\\n\" \"$READLINE_LINE\"'; printf '\\nCAPTURE_BOUND\\n'\n")
+        wait_for(b"\r\nCAPTURE_BOUND\r\n")
+        wait_for(b"READY>")
+        capture_trigger = b"\x18\x05"
+    else:
+        os.write(master, b"\x15printf '\\nCAPTURE_BOUND\\n'\n")
+        wait_for(b"\r\nCAPTURE_BOUND\r\n")
+        wait_for(b"READY>")
+        capture_trigger = b"\x15printf '\\nLINE<>END\\n'\n"
+    def wait_capture():
+        actual = wait_for(b">END\r\n")
+        if bash_major < 4:
+            wait_for(b"READY>")
+        return actual
     for line in [b"nkp -V --color ", b"nkp --password-env -V "]:
-        os.write(master, line + b"\t\t\x18\x05")
-        actual = wait_for(b">END")
+        os.write(master, line + b"\t\t" + capture_trigger)
+        actual = wait_capture()
         assert b"truecolor" not in actual and b"always" not in actual, actual
         assert not os.path.exists(directory + "/query"), (line, "queried vault for an owned value")
         os.write(master, b"\x15")
     for flag in [b"--password", b"--password-file", b"--key-file"]:
         for suffix in [b" get pre", b" get --key pre"]:
             line = b"nkp " + flag + b" placeholder" + suffix
-            os.write(master, line + b"\t\x18\x05")
-            wait_for(b">END")
+            os.write(master, line + b"\t" + capture_trigger)
+            wait_capture()
             assert not os.path.exists(directory + "/query"), (line, "queried metadata for invalid root option")
             os.write(master, b"\x15")
     for prefix in [b"--password-env PLACEHOLDER ", b"--password-stdin ",
@@ -7291,8 +7320,8 @@ try:
                    b"get --key-file placeholder "]:
         line = b"nkp " + prefix
         if not prefix.startswith(b"get "): line += b"get "
-        os.write(master, line + b"pre\t\x18\x05")
-        wait_for(b">END")
+        os.write(master, line + b"pre\t" + capture_trigger)
+        wait_capture()
         with open(directory + "/query") as query:
             assert query.read().splitlines() == ["__complete", "keys", "pre"], line
         os.unlink(directory + "/query")
