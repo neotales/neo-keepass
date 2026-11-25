@@ -11,9 +11,10 @@ use zeroize::Zeroizing;
 use crate::glob::Glob;
 use crate::{automation, interchange};
 use neotales_keepass::{
-    Entry, Field, Group, KdbxCredentials, KdbxFile, KdbxReadLimits, KdbxUuid, KdbxWriteOptions,
-    KdbxXml, KeePassDatabase, KeePassXcOtp, OtpKind, OtpSecret, ProtectedValue, SecretBytes, Totp,
-    TotpParameters,
+    DeletedObject, Entry, Field, Group, Hotp, HotpParameters, KdbxCompression, KdbxCredentials,
+    KdbxFile, KdbxKdf, KdbxOuterCipher, KdbxReadLimits, KdbxTimestamp, KdbxUuid, KdbxWriteOptions,
+    KdbxXml, KeePassDatabase, KeePassXcOtp, OtpAlgorithm, OtpDigits, OtpEncoder, OtpKind,
+    OtpSecret, OtpUri, OtpUriParams, ProtectedValue, SecretBytes,
 };
 
 const MAX_QUERY_BYTES: usize = 4096;
@@ -843,6 +844,238 @@ pub struct CompletionMetadata {
     pub keys: Vec<String>,
 }
 
+const MAX_CUSTOM_ICON_LIST: usize = 512;
+const MAX_PATH_COMPLETIONS: usize = 50;
+
+/// Safe hierarchical group node projection with its opaque handle and children.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GroupTreeNode {
+    /// Session-bound opaque group handle.
+    pub reference: GroupRef,
+    /// Safe group label.
+    pub label: String,
+    /// Root-prefixed group path.
+    pub path: String,
+    /// Standard `KeePass` 2.x icon identifier.
+    pub icon_id: u32,
+    /// Optional non-zero custom icon identifier.
+    pub custom_icon_id: Option<CustomIconId>,
+    /// Number of entries directly inside this group.
+    pub entry_count: usize,
+    /// Whether this group is the database's configured Recycle Bin.
+    pub is_recycle_bin: bool,
+    /// Ordered direct child groups.
+    pub children: Vec<GroupTreeNode>,
+}
+
+impl std::fmt::Debug for GroupTreeNode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GroupTreeNode")
+            .field("label", &self.label)
+            .field("path", &self.path)
+            .field("icon_id", &self.icon_id)
+            .field("custom_icon_id", &self.custom_icon_id)
+            .field("entry_count", &self.entry_count)
+            .field("is_recycle_bin", &self.is_recycle_bin)
+            .field("children", &self.children)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Safe metadata summary for an embedded custom icon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomIconSummary {
+    /// Opaque custom icon identifier.
+    pub id: CustomIconId,
+    /// Safe display name (empty if omitted in KDBX metadata).
+    pub name: String,
+    /// Raw payload size in bytes.
+    pub size: usize,
+}
+
+/// Outer cipher configured for saving the vault.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultCipher {
+    /// AES-256-CBC.
+    Aes,
+    /// `ChaCha20`.
+    ChaCha20,
+}
+
+/// Payload compression configured for saving the vault.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultCompression {
+    /// Uncompressed XML payload.
+    None,
+    /// `GZip`-compressed XML payload.
+    GZip,
+}
+
+/// Key derivation function and parameters configured for saving the vault.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultKdfSummary {
+    /// Legacy AES-KDF with transform round count.
+    Aes {
+        /// Number of AES-KDF rounds.
+        rounds: u64,
+    },
+    /// Argon2d with memory, time, and parallelism parameters.
+    Argon2d {
+        /// Memory cost in KiB.
+        memory_kib: u32,
+        /// Iteration count.
+        iterations: u32,
+        /// Parallelism lanes.
+        lanes: u32,
+    },
+    /// Argon2id with memory, time, and parallelism parameters.
+    Argon2id {
+        /// Memory cost in KiB.
+        memory_kib: u32,
+        /// Iteration count.
+        iterations: u32,
+        /// Parallelism lanes.
+        lanes: u32,
+    },
+}
+
+/// Safe database-level settings projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseSettings {
+    /// Database display name.
+    pub name: String,
+    /// Database description.
+    pub description: String,
+    /// Default username for new entries.
+    pub default_username: String,
+    /// Whether deleted entries move to the Recycle Bin.
+    pub recycle_bin_enabled: bool,
+    /// Maximum entry history items (`-1` means unlimited).
+    pub history_max_items: i32,
+    /// Maximum total entry history size in bytes (`-1` means unlimited).
+    pub history_max_size: i64,
+    /// Outer KDBX 4 cipher.
+    pub outer_cipher: VaultCipher,
+    /// Payload compression.
+    pub compression: VaultCompression,
+    /// Key derivation function and parameters.
+    pub kdf: VaultKdfSummary,
+}
+
+/// Editable database-level settings update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseSettingsUpdate {
+    /// Database display name.
+    pub name: String,
+    /// Database description.
+    pub description: String,
+    /// Default username for new entries.
+    pub default_username: String,
+    /// Whether deleted entries move to the Recycle Bin.
+    pub recycle_bin_enabled: bool,
+    /// Maximum entry history items (`-1` means unlimited).
+    pub history_max_items: i32,
+    /// Maximum total entry history size in bytes (`-1` means unlimited).
+    pub history_max_size: i64,
+    /// Outer KDBX 4 cipher.
+    pub outer_cipher: VaultCipher,
+    /// Payload compression.
+    pub compression: VaultCompression,
+    /// Key derivation function and parameters.
+    pub kdf: VaultKdfSummary,
+}
+
+/// Service-level OTP family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceOtpKind {
+    /// Time-based OTP (RFC 6238).
+    Totp,
+    /// Counter-based HOTP (RFC 4226).
+    Hotp,
+}
+
+/// Service-level HMAC algorithm for OTP generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceOtpAlgorithm {
+    /// HMAC-SHA-1.
+    Sha1,
+    /// HMAC-SHA-256.
+    Sha256,
+    /// HMAC-SHA-512.
+    Sha512,
+}
+
+/// Non-sensitive OTP configuration metadata for an entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OtpMetadata {
+    /// OTP family (`Totp` or `Hotp`).
+    pub kind: ServiceOtpKind,
+    /// HMAC algorithm.
+    pub algorithm: ServiceOtpAlgorithm,
+    /// Number of digits/characters in generated codes (`5`, `6`, or `8`).
+    pub digits: u8,
+    /// Time step in seconds (present for TOTP).
+    pub period: Option<u64>,
+    /// Current counter (present for HOTP).
+    pub counter: Option<u64>,
+    /// Whether Steam Guard 5-character encoding is active.
+    pub steam: bool,
+}
+
+/// Structured configuration for building or assigning an OTP field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OtpConfig {
+    /// OTP family (`Totp` or `Hotp`).
+    pub kind: ServiceOtpKind,
+    /// Account label.
+    pub account: String,
+    /// Optional issuer label.
+    pub issuer: Option<String>,
+    /// HMAC algorithm.
+    pub algorithm: ServiceOtpAlgorithm,
+    /// Number of digits (`5` for Steam, `6` or `8` for standard).
+    pub digits: u8,
+    /// TOTP period in seconds (defaults to 30 when `None`).
+    pub period: Option<u64>,
+    /// HOTP counter (required for `Hotp`).
+    pub counter: Option<u64>,
+    /// Whether to use Steam Guard encoding.
+    pub steam: bool,
+}
+
+/// Safe path-completion candidate for groups and entries.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PathCompletion {
+    /// Normalized root-prefixed path (e.g. `"Root/Work/mail"`).
+    pub path: String,
+    /// Leaf label (group name or entry title).
+    pub label: String,
+    /// `true` for a group, `false` for an entry.
+    pub is_group: bool,
+    /// Standard `KeePass` 2.x icon identifier.
+    pub icon_id: u32,
+    /// Optional non-zero custom icon identifier.
+    pub custom_icon_id: Option<CustomIconId>,
+    /// Opaque group handle when `is_group` is `true`.
+    pub group_ref: Option<GroupRef>,
+    /// Opaque entry handle when `is_group` is `false`.
+    pub entry_ref: Option<EntryRef>,
+}
+
+impl std::fmt::Debug for PathCompletion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PathCompletion")
+            .field("path", &self.path)
+            .field("label", &self.label)
+            .field("is_group", &self.is_group)
+            .field("icon_id", &self.icon_id)
+            .field("custom_icon_id", &self.custom_icon_id)
+            .finish_non_exhaustive()
+    }
+}
+
 struct LiveSession {
     id: SessionId,
     generation: u64,
@@ -925,6 +1158,26 @@ impl VaultService {
             )
             .map_err(|_| ServiceError::CreateWrite)
         })
+    }
+
+    /// Creates and installs a new empty vault using [`KdbxWriteOptions::recommended`]
+    /// (`Argon2id` + `GZip` + AES-256).
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::create`].
+    pub fn create_recommended(
+        &self,
+        path: &Path,
+        credentials: &mut KdbxCredentials,
+        generated_password_size: Option<usize>,
+    ) -> Result<(), ServiceError> {
+        self.create(
+            path,
+            credentials,
+            KdbxWriteOptions::recommended(),
+            generated_password_size,
+        )
     }
 
     /// Opens and loads a vault using the caller's pinned reader policy.
@@ -1112,29 +1365,14 @@ impl VaultService {
         }
         validate_unique_object_ids(&live.database)?;
         let entry = resolve_locator(&live.database, &reference.locator, reference.id)?;
-        if entry
-            .fields
-            .iter()
-            .filter(|field| field.key == "otp")
-            .count()
-            > 1
-        {
-            return Err(ServiceError::AmbiguousField);
-        }
+        check_otp_field_uniqueness(entry)?;
         validate_unique_field_names(&live.database)?;
-        let uri = KeePassXcOtp::read(entry).map_err(|_| ServiceError::InvalidOtp)?;
-        let secret = OtpSecret::from_base32(&uri.secret).map_err(|_| ServiceError::InvalidOtp)?;
+        let uri = KeePassXcOtp::read_entry_fallback(entry).map_err(|_| ServiceError::InvalidOtp)?;
         match uri.kind {
             OtpKind::Hotp => Err(ServiceError::HotpUnsupported),
-            OtpKind::Totp => Ok(Zeroizing::new(Totp::generate(
-                &TotpParameters {
-                    secret: secret.expose(),
-                    algorithm: uri.algorithm,
-                    digits: uri.digits,
-                    period: uri.period.unwrap_or(30),
-                },
-                timestamp,
-            ))),
+            OtpKind::Totp => uri
+                .generate_code(timestamp)
+                .map_err(|_| ServiceError::InvalidOtp),
         }
     }
 
@@ -1160,33 +1398,16 @@ impl VaultService {
             return Err(ServiceError::Stale);
         }
         let entry = resolve_locator(&live.database, &reference.locator, reference.id)?;
-        if entry
-            .fields
-            .iter()
-            .filter(|field| field.key == "otp")
-            .count()
-            > 1
-        {
-            return Err(ServiceError::AmbiguousField);
-        }
-        let uri = KeePassXcOtp::read(entry).map_err(|_| ServiceError::InvalidOtp)?;
-        let secret = OtpSecret::from_base32(&uri.secret).map_err(|_| ServiceError::InvalidOtp)?;
+        check_otp_field_uniqueness(entry)?;
+        let uri = KeePassXcOtp::read_entry_fallback(entry).map_err(|_| ServiceError::InvalidOtp)?;
         match uri.kind {
             OtpKind::Hotp => Err(ServiceError::HotpUnsupported),
             OtpKind::Totp => {
                 let period = uri.period.unwrap_or(30);
-                Ok(TotpCode {
-                    code: Zeroizing::new(Totp::generate(
-                        &TotpParameters {
-                            secret: secret.expose(),
-                            algorithm: uri.algorithm,
-                            digits: uri.digits,
-                            period,
-                        },
-                        timestamp,
-                    )),
-                    period,
-                })
+                let code = uri
+                    .generate_code(timestamp)
+                    .map_err(|_| ServiceError::InvalidOtp)?;
+                Ok(TotpCode { code, period })
             }
         }
     }
@@ -2271,11 +2492,15 @@ impl VaultService {
         let parent = save_parent(path);
         let mut temp = crate::private_file::new_private_temp(parent)
             .map_err(|error| stage_error(&error, ServiceError::SaveStage))?;
+        let write_options = live
+            .database
+            .write_options
+            .unwrap_or_else(KdbxWriteOptions::recommended);
         KdbxFile::save(
             &live.database,
             &mut temp,
             credentials,
-            KdbxWriteOptions::default(),
+            write_options,
             &crate::KDBX_LIMITS,
         )
         .map_err(|_| ServiceError::Save)?;
@@ -3401,7 +3626,8 @@ impl VaultService {
             attachments,
             fields,
             custom_fields,
-            has_otp: KeePassXcOtp::read(entry).is_ok(),
+            has_otp: check_otp_field_uniqueness(entry).is_ok()
+                && KeePassXcOtp::read_entry_fallback(entry).is_ok(),
             auto_type_enabled: entry.auto_type.enabled == Some(true),
             auto_type_associations: entry.auto_type.associations.len(),
             icon_id: entry.icon_id,
@@ -3598,6 +3824,1412 @@ impl VaultService {
                 |field| field.value.reveal_bytes().map_err(|_| ServiceError::Unlock),
             )
     }
+
+    /// Projects the full safe group tree starting at root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`] without an open vault,
+    /// [`ServiceError::Stale`] for a non-current session,
+    /// [`ServiceError::XmlDepth`] when the tree exceeds the KDBX depth limit,
+    /// [`ServiceError::DuplicateIds`] when UUIDs collide,
+    /// [`ServiceError::InvalidInput`] for unsafe group names, or
+    /// [`ServiceError::ResourceLimit`] when node or byte bounds are exceeded.
+    pub fn group_tree(&self, session: SessionId) -> Result<GroupTreeNode, ServiceError> {
+        let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
+        validate_xml_depth(&live.database.root)?;
+        validate_unique_object_ids(&live.database)?;
+        let recycle_uuid = if live.database.meta.recycle_bin_enabled
+            && !live.database.meta.recycle_bin_uuid.is_zero()
+        {
+            Some(live.database.meta.recycle_bin_uuid)
+        } else {
+            None
+        };
+        let mut nodes = 0usize;
+        let mut text_bytes = 0usize;
+        build_group_tree_node(
+            &live.database.root,
+            live.id,
+            live.generation,
+            &[],
+            "",
+            recycle_uuid,
+            &mut nodes,
+            &mut text_bytes,
+        )
+    }
+
+    /// Lists embedded custom icons up to 512 entries, failing closed on
+    /// duplicate icon UUIDs and skipping empty or oversized payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`] without an open vault,
+    /// [`ServiceError::Stale`] for a non-current session,
+    /// [`ServiceError::DuplicateIds`] on duplicate custom icon UUIDs, or
+    /// [`ServiceError::ResourceLimit`] when more than 512 valid icons exist.
+    pub fn list_custom_icons(
+        &self,
+        session: SessionId,
+    ) -> Result<Vec<CustomIconSummary>, ServiceError> {
+        let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
+        let mut seen = BTreeSet::new();
+        let mut summaries = Vec::new();
+        for icon in &live.database.meta.custom_icons {
+            let Some(id) = CustomIconId::from_bytes(*icon.uuid.as_bytes()) else {
+                continue;
+            };
+            if !seen.insert(id) {
+                return Err(ServiceError::DuplicateIds);
+            }
+            if icon.data.is_empty() || icon.data.len() > crate::icons::MAX_CUSTOM_ICON_BYTES {
+                continue;
+            }
+            if summaries.len() >= MAX_CUSTOM_ICON_LIST {
+                return Err(ServiceError::ResourceLimit);
+            }
+            let name = icon
+                .name
+                .as_deref()
+                .filter(|n| !n.is_empty() && n.len() <= MAX_TREE_LABEL_BYTES && safe_metadata(n))
+                .unwrap_or("")
+                .to_owned();
+            summaries.push(CustomIconSummary {
+                id,
+                name,
+                size: icon.data.len(),
+            });
+        }
+        Ok(summaries)
+    }
+
+    /// Assigns an existing embedded custom icon to a selected entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`], or
+    /// [`ServiceError::NotFound`] when `id` is not present in metadata.
+    pub fn set_entry_custom_icon(
+        &mut self,
+        reference: &EntryRef,
+        id: CustomIconId,
+    ) -> Result<(), ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        ensure_custom_icon_exists(&live.database, id)?;
+        let entry = resolve_locator_mut(&mut live.database, &reference.locator, reference.id)?;
+        entry.custom_icon_id = id.0;
+        self.invalidate_references();
+        Ok(())
+    }
+
+    /// Assigns an existing embedded custom icon to a selected group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`], or
+    /// [`ServiceError::NotFound`] when `id` is not present in metadata.
+    pub fn set_group_custom_icon(
+        &mut self,
+        reference: &GroupRef,
+        id: CustomIconId,
+    ) -> Result<(), ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        ensure_custom_icon_exists(&live.database, id)?;
+        let group =
+            resolve_group_locator_mut(&mut live.database, &reference.locator, reference.id)?;
+        group.custom_icon_id = id.0;
+        self.invalidate_references();
+        Ok(())
+    }
+
+    /// Renames a group (including root if the name is valid), rejecting empty,
+    /// unsafe, or sibling-colliding names. Invalidates all handles.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidInput`] for an unsafe or empty name,
+    /// [`ServiceError::GroupExists`] for an ASCII case-insensitive sibling collision,
+    /// [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], or [`ServiceError::DuplicateFields`].
+    pub fn rename_group(&mut self, reference: &GroupRef, name: &str) -> Result<(), ServiceError> {
+        if name.is_empty()
+            || name.len() > MAX_TREE_LABEL_BYTES
+            || name.contains('/')
+            || matches!(name, "." | "..")
+            || !safe_metadata(name)
+        {
+            return Err(ServiceError::InvalidInput);
+        }
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        resolve_group_locator(&live.database, &reference.locator, reference.id)?;
+        if let Some((&group_index, parent_locator)) = reference.locator.split_last() {
+            let parent = group_at_locator(&live.database.root, parent_locator)?;
+            if parent
+                .groups
+                .iter()
+                .enumerate()
+                .any(|(idx, sibling)| idx != group_index && sibling.name.eq_ignore_ascii_case(name))
+            {
+                return Err(ServiceError::GroupExists);
+            }
+        }
+        let group =
+            resolve_group_locator_mut(&mut live.database, &reference.locator, reference.id)?;
+        name.clone_into(&mut group.name);
+        self.invalidate_references();
+        Ok(())
+    }
+
+    /// Moves an entry into `target_group`, updating `previous_parent_group_id`,
+    /// rejecting duplicate sibling titles in the target group, invalidating
+    /// prior handles, and returning a fresh [`EntryRef`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::XmlDepth`], [`ServiceError::DuplicateIds`],
+    /// [`ServiceError::DuplicateFields`], or [`ServiceError::Ambiguous`] on
+    /// sibling title collision.
+    pub fn move_entry(
+        &mut self,
+        entry: &EntryRef,
+        target_group: &GroupRef,
+    ) -> Result<EntryRef, ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != entry.session
+            || live.generation != entry.generation
+            || live.id != target_group.session
+            || live.generation != target_group.generation
+        {
+            return Err(ServiceError::Stale);
+        }
+        validate_xml_depth(&live.database.root)?;
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let (source_parent, entry_index, source_entry) =
+            resolve_entry_with_group(&live.database, &entry.locator, entry.id)?;
+        let source_parent_id = source_parent.id;
+        let source_parent_locator = entry
+            .locator
+            .split_last()
+            .map_or(&[][..], |(_, parent)| parent);
+        let target = resolve_group_locator(&live.database, &target_group.locator, target_group.id)?;
+        let entry_depth = entry_relative_depth(source_entry);
+        // Root sits at XML depth 3; each group locator step adds 1.
+        if 3usize
+            .saturating_add(target_group.locator.len())
+            .saturating_add(entry_depth)
+            > crate::KDBX_LIMITS.max_xml_depth
+        {
+            return Err(ServiceError::XmlDepth);
+        }
+        if source_parent_locator == target_group.locator.as_slice() {
+            let locator = entry.locator.clone();
+            let id = entry.id;
+            let session = live.id;
+            self.invalidate_references();
+            return Ok(EntryRef {
+                session,
+                generation: self.generation,
+                id,
+                locator,
+            });
+        }
+        if target
+            .entries
+            .iter()
+            .any(|existing| existing.title.eq_ignore_ascii_case(&source_entry.title))
+        {
+            return Err(ServiceError::Ambiguous);
+        }
+        let mut moved =
+            remove_entry_at(&mut live.database.root, source_parent_locator, entry_index)?;
+        moved.previous_parent_group_id = source_parent_id;
+        let target_mut =
+            resolve_group_locator_mut(&mut live.database, &target_group.locator, target_group.id)?;
+        let new_index = target_mut.entries.len();
+        target_mut.entries.push(moved);
+        let mut locator = target_group.locator.clone();
+        locator.push(new_index);
+        let session = live.id;
+        let id = entry.id;
+        self.invalidate_references();
+        Ok(EntryRef {
+            session,
+            generation: self.generation,
+            id,
+            locator,
+        })
+    }
+
+    /// Moves an entry within its own parent group to `target_index.min(len - 1)`
+    /// and returns a fresh [`EntryRef`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`], or
+    /// [`ServiceError::NotFound`].
+    pub fn reorder_entry(
+        &mut self,
+        entry: &EntryRef,
+        target_index: usize,
+    ) -> Result<EntryRef, ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != entry.session || live.generation != entry.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let (entry_index, group_indices) =
+            entry.locator.split_last().ok_or(ServiceError::NotFound)?;
+        let group = group_at_locator_mut(&mut live.database.root, group_indices)?;
+        if group
+            .entries
+            .get(*entry_index)
+            .is_none_or(|found| found.id != entry.id)
+        {
+            return Err(ServiceError::Stale);
+        }
+        let clamped = target_index.min(group.entries.len() - 1);
+        let item = group.entries.remove(*entry_index);
+        group.entries.insert(clamped, item);
+        let mut locator = group_indices.to_vec();
+        locator.push(clamped);
+        let session = live.id;
+        let id = entry.id;
+        self.invalidate_references();
+        Ok(EntryRef {
+            session,
+            generation: self.generation,
+            id,
+            locator,
+        })
+    }
+
+    /// Duplicates an entry in the same group with a fresh UUID, a unique
+    /// `"<Title> (Copy)"` / `"<Title> (Copy N)"` title, preserved fields, tags,
+    /// icons, notes, attachments, and auto-type, and cleared history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::XmlDepth`], [`ServiceError::DuplicateIds`],
+    /// [`ServiceError::DuplicateFields`], [`ServiceError::InvalidAttachmentReference`],
+    /// or [`ServiceError::InvalidInput`] if the cloned title exceeds bounds.
+    pub fn clone_entry(&mut self, entry: &EntryRef) -> Result<EntryRef, ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != entry.session || live.generation != entry.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_xml_depth(&live.database.root)?;
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        validate_attachment_references(&live.database)
+            .map_err(|_| ServiceError::InvalidAttachmentReference)?;
+        let (group, _idx, source_entry) =
+            resolve_entry_with_group(&live.database, &entry.locator, entry.id)?;
+        let clone_title = next_copy_title(group, &source_entry.title)?;
+        validate_entry_title(&clone_title)?;
+        let mut cloned = source_entry.clone();
+        cloned.id = fresh_object_uuid(&live.database);
+        cloned.title.clone_from(&clone_title);
+        if let Some(field) = cloned.fields.iter_mut().find(|f| f.key == "Title") {
+            field.value = ProtectedValue::from_text(clone_title);
+        }
+        cloned.history.clear();
+        let cloned_id = cloned.id;
+        let (_, group_indices) = entry.locator.split_last().ok_or(ServiceError::NotFound)?;
+        let group_mut = group_at_locator_mut(&mut live.database.root, group_indices)?;
+        let new_index = group_mut.entries.len();
+        group_mut.entries.push(cloned);
+        let mut locator = group_indices.to_vec();
+        locator.push(new_index);
+        let session = live.id;
+        self.invalidate_references();
+        Ok(EntryRef {
+            session,
+            generation: self.generation,
+            id: cloned_id,
+            locator,
+        })
+    }
+
+    /// Moves an entry to the Recycle Bin when enabled and not already inside it
+    /// (returning `Ok(true)`), or permanently deletes it and records a
+    /// `DeletedObject` (returning `Ok(false)`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::XmlDepth`], [`ServiceError::DuplicateIds`],
+    /// [`ServiceError::DuplicateFields`], or
+    /// [`ServiceError::InvalidAttachmentReference`].
+    pub fn recycle_entry(&mut self, entry: &EntryRef) -> Result<bool, ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != entry.session || live.generation != entry.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_xml_depth(&live.database.root)?;
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        validate_attachment_references(&live.database)
+            .map_err(|_| ServiceError::InvalidAttachmentReference)?;
+        let (source_parent, entry_index, source_entry) =
+            resolve_entry_with_group(&live.database, &entry.locator, entry.id)?;
+        let source_parent_id = source_parent.id;
+        let source_parent_locator = entry
+            .locator
+            .split_last()
+            .map_or(&[][..], |(_, parent)| parent);
+        let entry_depth = entry_relative_depth(source_entry);
+        let existing_bin = find_recycle_bin_locator(&live.database);
+        let already_in_bin = existing_bin
+            .as_ref()
+            .is_some_and(|bin_loc| source_parent_locator.starts_with(bin_loc));
+
+        if !live.database.meta.recycle_bin_enabled || already_in_bin {
+            remove_locator(&mut live.database, &entry.locator, entry.id)?;
+            live.database.deleted_objects.push(DeletedObject {
+                id: entry.id,
+                deleted_at: current_timestamp(),
+            });
+            prune_attachments(&mut live.database)?;
+            self.invalidate_references();
+            return Ok(false);
+        }
+
+        let projected_bin_depth = existing_bin.as_ref().map_or(1, Vec::len);
+        if 3usize
+            .saturating_add(projected_bin_depth)
+            .saturating_add(entry_depth)
+            > crate::KDBX_LIMITS.max_xml_depth
+        {
+            return Err(ServiceError::XmlDepth);
+        }
+        let bin_locator = ensure_recycle_bin_group(&mut live.database);
+        let mut moved =
+            remove_entry_at(&mut live.database.root, source_parent_locator, entry_index)?;
+        moved.previous_parent_group_id = source_parent_id;
+        let bin_group = group_at_locator_mut(&mut live.database.root, &bin_locator)?;
+        let unique_title = next_disambiguated_title(bin_group, &moved.title)?;
+        if unique_title != moved.title {
+            validate_entry_title(&unique_title)?;
+            moved.title.clone_from(&unique_title);
+            if let Some(field) = moved.fields.iter_mut().find(|f| f.key == "Title") {
+                field.value = ProtectedValue::from_text(unique_title);
+            }
+        }
+        bin_group.entries.push(moved);
+        self.invalidate_references();
+        Ok(true)
+    }
+
+    /// Restores an entry from the Recycle Bin back to its `previous_parent_group_id`
+    /// (or root if the previous parent is missing or inside the Recycle Bin).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::InvalidInput`] if the entry is not in the Recycle Bin,
+    /// [`ServiceError::XmlDepth`], [`ServiceError::DuplicateIds`], or
+    /// [`ServiceError::DuplicateFields`].
+    pub fn restore_entry(&mut self, entry: &EntryRef) -> Result<EntryRef, ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != entry.session || live.generation != entry.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_xml_depth(&live.database.root)?;
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let (_source_parent, entry_index, source_entry) =
+            resolve_entry_with_group(&live.database, &entry.locator, entry.id)?;
+        let source_parent_locator = entry
+            .locator
+            .split_last()
+            .map_or(&[][..], |(_, parent)| parent);
+        let bin_locator =
+            find_recycle_bin_locator(&live.database).ok_or(ServiceError::InvalidInput)?;
+        if !source_parent_locator.starts_with(&bin_locator) {
+            return Err(ServiceError::InvalidInput);
+        }
+        let prev_parent = source_entry.previous_parent_group_id;
+        let entry_depth = entry_relative_depth(source_entry);
+        let mut target_locator = Vec::new();
+        if !prev_parent.is_zero()
+            && let Some(candidate) = find_group_locator_by_uuid(&live.database.root, prev_parent)
+            && !candidate.starts_with(&bin_locator)
+            && 3usize
+                .saturating_add(candidate.len())
+                .saturating_add(entry_depth)
+                <= crate::KDBX_LIMITS.max_xml_depth
+        {
+            target_locator = candidate;
+        }
+        let mut restored =
+            remove_entry_at(&mut live.database.root, source_parent_locator, entry_index)?;
+        restored.previous_parent_group_id = KdbxUuid::ZERO;
+        let target_group = group_at_locator_mut(&mut live.database.root, &target_locator)?;
+        let unique_title = next_disambiguated_title(target_group, &restored.title)?;
+        if unique_title != restored.title {
+            validate_entry_title(&unique_title)?;
+            restored.title.clone_from(&unique_title);
+            if let Some(field) = restored.fields.iter_mut().find(|f| f.key == "Title") {
+                field.value = ProtectedValue::from_text(unique_title);
+            }
+        }
+        let new_index = target_group.entries.len();
+        target_group.entries.push(restored);
+        target_locator.push(new_index);
+        let session = live.id;
+        let id = entry.id;
+        self.invalidate_references();
+        Ok(EntryRef {
+            session,
+            generation: self.generation,
+            id,
+            locator: target_locator,
+        })
+    }
+
+    /// Permanently deletes all entries and subgroups inside the Recycle Bin group,
+    /// recording `DeletedObject`s and pruning orphaned attachments, returning the
+    /// number of deleted entries and subgroups.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`], or
+    /// [`ServiceError::InvalidAttachmentReference`].
+    pub fn empty_recycle_bin(&mut self, session: SessionId) -> Result<usize, ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        validate_attachment_references(&live.database)
+            .map_err(|_| ServiceError::InvalidAttachmentReference)?;
+        let Some(bin_locator) = find_recycle_bin_locator(&live.database) else {
+            return Ok(0);
+        };
+        let now = current_timestamp();
+        let bin = group_at_locator_mut(&mut live.database.root, &bin_locator)?;
+        let mut deleted_ids = Vec::new();
+        for entry in &bin.entries {
+            deleted_ids.push(entry.id);
+        }
+        for child in &bin.groups {
+            collect_group_and_entry_ids(child, &mut deleted_ids);
+        }
+        let count = deleted_ids.len();
+        bin.entries.clear();
+        bin.groups.clear();
+        for id in deleted_ids {
+            live.database.deleted_objects.push(DeletedObject {
+                id,
+                deleted_at: now,
+            });
+        }
+        if count > 0 {
+            prune_attachments(&mut live.database)?;
+            self.invalidate_references();
+        }
+        Ok(count)
+    }
+
+    /// Returns safe database-level settings and KDF/cipher/compression parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`] or [`ServiceError::Stale`].
+    pub fn database_settings(&self, session: SessionId) -> Result<DatabaseSettings, ServiceError> {
+        let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
+        let write = live
+            .database
+            .write_options
+            .unwrap_or_else(KdbxWriteOptions::recommended);
+        let outer_cipher = match write.cipher {
+            KdbxOuterCipher::Aes => VaultCipher::Aes,
+            KdbxOuterCipher::ChaCha20 => VaultCipher::ChaCha20,
+        };
+        let compression = match write.compression {
+            KdbxCompression::None => VaultCompression::None,
+            KdbxCompression::GZip => VaultCompression::GZip,
+        };
+        let kdf = match write.kdf {
+            KdbxKdf::Aes => VaultKdfSummary::Aes {
+                rounds: write.aes_kdf_rounds,
+            },
+            KdbxKdf::Argon2d => VaultKdfSummary::Argon2d {
+                memory_kib: write.argon2_memory_kib,
+                iterations: write.argon2_time,
+                lanes: write.argon2_lanes,
+            },
+            KdbxKdf::Argon2id => VaultKdfSummary::Argon2id {
+                memory_kib: write.argon2_memory_kib,
+                iterations: write.argon2_time,
+                lanes: write.argon2_lanes,
+            },
+        };
+        Ok(DatabaseSettings {
+            name: live.database.meta.name.clone(),
+            description: live.database.meta.description.clone(),
+            default_username: live.database.meta.default_username.clone(),
+            recycle_bin_enabled: live.database.meta.recycle_bin_enabled,
+            history_max_items: live
+                .database
+                .meta
+                .history_max_items
+                .map_or(-1, |v| i32::try_from(v).unwrap_or(i32::MAX)),
+            history_max_size: live.database.meta.history_max_size.unwrap_or(-1),
+            outer_cipher,
+            compression,
+            kdf,
+        })
+    }
+
+    /// Updates database-level metadata and KDBX 4 save options, validating KDF
+    /// and history limits against the service's security bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`], or
+    /// [`ServiceError::InvalidInput`].
+    pub fn update_database_settings(
+        &mut self,
+        session: SessionId,
+        update: DatabaseSettingsUpdate,
+    ) -> Result<(), ServiceError> {
+        if update.name.len() > MAX_TREE_LABEL_BYTES
+            || (!update.name.is_empty() && !safe_metadata(&update.name))
+            || update.default_username.len() > MAX_TREE_LABEL_BYTES
+            || (!update.default_username.is_empty() && !safe_metadata(&update.default_username))
+            || update.description.len() > MAX_HIT_BYTES
+            || !is_safe_description_text(&update.description)
+            || update.history_max_items < -1
+            || update.history_max_size < -1
+        {
+            return Err(ServiceError::InvalidInput);
+        }
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let base = live
+            .database
+            .write_options
+            .unwrap_or_else(KdbxWriteOptions::recommended);
+        let cipher = match update.outer_cipher {
+            VaultCipher::Aes => KdbxOuterCipher::Aes,
+            VaultCipher::ChaCha20 => KdbxOuterCipher::ChaCha20,
+        };
+        let compression = match update.compression {
+            VaultCompression::None => KdbxCompression::None,
+            VaultCompression::GZip => KdbxCompression::GZip,
+        };
+        let next_options = match update.kdf {
+            VaultKdfSummary::Aes { rounds } => {
+                if rounds == 0 || rounds > crate::KDBX_LIMITS.max_aes_kdf_rounds {
+                    return Err(ServiceError::InvalidInput);
+                }
+                KdbxWriteOptions {
+                    cipher,
+                    compression,
+                    kdf: KdbxKdf::Aes,
+                    aes_kdf_rounds: rounds,
+                    ..base
+                }
+            }
+            VaultKdfSummary::Argon2d {
+                memory_kib,
+                iterations,
+                lanes,
+            }
+            | VaultKdfSummary::Argon2id {
+                memory_kib,
+                iterations,
+                lanes,
+            } => {
+                let work = u64::from(memory_kib).saturating_mul(u64::from(iterations));
+                if memory_kib == 0
+                    || memory_kib > crate::KDBX_LIMITS.max_argon2_memory_kib
+                    || iterations == 0
+                    || iterations > crate::KDBX_LIMITS.max_argon2_time
+                    || lanes == 0
+                    || lanes > crate::KDBX_LIMITS.max_argon2_lanes
+                    || work > crate::KDBX_LIMITS.max_argon2_work_kib_passes
+                {
+                    return Err(ServiceError::InvalidInput);
+                }
+                KdbxWriteOptions {
+                    cipher,
+                    compression,
+                    kdf: if matches!(update.kdf, VaultKdfSummary::Argon2id { .. }) {
+                        KdbxKdf::Argon2id
+                    } else {
+                        KdbxKdf::Argon2d
+                    },
+                    argon2_memory_kib: memory_kib,
+                    argon2_time: iterations,
+                    argon2_lanes: lanes,
+                    ..base
+                }
+            }
+        };
+        let now = current_timestamp();
+        live.database.meta.name = update.name;
+        live.database.meta.description = update.description;
+        live.database.meta.default_username = update.default_username;
+        live.database.meta.recycle_bin_enabled = update.recycle_bin_enabled;
+        live.database.meta.history_max_items = Some(i64::from(update.history_max_items));
+        live.database.meta.history_max_size = Some(update.history_max_size);
+        live.database.meta.settings_changed = Some(now);
+        live.database.write_options = Some(next_options);
+        self.invalidate_references();
+        Ok(())
+    }
+
+    /// Returns non-sensitive OTP metadata for an entry without exposing the secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`],
+    /// [`ServiceError::AmbiguousField`], or [`ServiceError::InvalidOtp`].
+    pub fn otp_metadata(&self, reference: &EntryRef) -> Result<Option<OtpMetadata>, ServiceError> {
+        let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let entry = resolve_locator(&live.database, &reference.locator, reference.id)?;
+        check_otp_field_uniqueness(entry)?;
+        if entry.field("otp").is_none() && entry.field("TimeOtp-Secret-Base32").is_none() {
+            return Ok(None);
+        }
+        let uri = KeePassXcOtp::read_entry_fallback(entry).map_err(|_| ServiceError::InvalidOtp)?;
+        Ok(Some(OtpMetadata {
+            kind: match uri.kind {
+                OtpKind::Totp => ServiceOtpKind::Totp,
+                OtpKind::Hotp => ServiceOtpKind::Hotp,
+            },
+            algorithm: match uri.algorithm {
+                OtpAlgorithm::Sha1 => ServiceOtpAlgorithm::Sha1,
+                OtpAlgorithm::Sha256 => ServiceOtpAlgorithm::Sha256,
+                OtpAlgorithm::Sha512 => ServiceOtpAlgorithm::Sha512,
+            },
+            digits: match uri.digits {
+                OtpDigits::Five => 5,
+                OtpDigits::Six => 6,
+                OtpDigits::Eight => 8,
+            },
+            period: uri.period,
+            counter: uri.counter,
+            steam: uri.encoder == OtpEncoder::Steam,
+        }))
+    }
+
+    /// Computes the next HOTP code at the entry's current counter, increments
+    /// the counter in the protected `"otp"` field, and invalidates handles.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`],
+    /// [`ServiceError::AmbiguousField`], or [`ServiceError::InvalidOtp`] when
+    /// the entry does not carry a valid HOTP configuration or counter overflows.
+    pub fn hotp_next_code(
+        &mut self,
+        reference: &EntryRef,
+    ) -> Result<Zeroizing<String>, ServiceError> {
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let entry = resolve_locator_mut(&mut live.database, &reference.locator, reference.id)?;
+        check_otp_field_uniqueness(entry)?;
+        let mut uri =
+            KeePassXcOtp::read_entry_fallback(entry).map_err(|_| ServiceError::InvalidOtp)?;
+        if uri.kind != OtpKind::Hotp {
+            return Err(ServiceError::InvalidOtp);
+        }
+        let counter = uri.counter.ok_or(ServiceError::InvalidOtp)?;
+        let next_counter = counter.checked_add(1).ok_or(ServiceError::InvalidOtp)?;
+        let secret = OtpSecret::from_base32(&uri.secret).map_err(|_| ServiceError::InvalidOtp)?;
+        let code = Zeroizing::new(Hotp::generate(&HotpParameters {
+            secret: secret.expose(),
+            algorithm: uri.algorithm,
+            digits: uri.digits,
+            counter,
+        }));
+        uri.counter = Some(next_counter);
+        KeePassXcOtp::write(entry, &uri);
+        self.invalidate_references();
+        Ok(code)
+    }
+
+    /// Formats a validated `otpauth://` URI from structured parameters and a
+    /// Base32 secret inside a zeroizing buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidOtp`] if any OTP parameter or secret is invalid.
+    pub fn format_otp_uri(
+        config: &OtpConfig,
+        secret: &str,
+    ) -> Result<Zeroizing<String>, ServiceError> {
+        let uri = build_otp_uri(config, secret)?;
+        Ok(Zeroizing::new(uri.to_string()))
+    }
+
+    /// Writes a validated protected `"otp"` field from structured parameters
+    /// and a Base32 secret, invalidating session handles.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::DuplicateIds`], [`ServiceError::DuplicateFields`], or
+    /// [`ServiceError::InvalidOtp`].
+    pub fn set_entry_otp_config(
+        &mut self,
+        reference: &EntryRef,
+        config: &OtpConfig,
+        secret: &str,
+    ) -> Result<(), ServiceError> {
+        let uri = build_otp_uri(config, secret)?;
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let entry = resolve_locator_mut(&mut live.database, &reference.locator, reference.id)?;
+        KeePassXcOtp::write(entry, &uri);
+        self.invalidate_references();
+        Ok(())
+    }
+
+    /// Completes safe group and entry paths using binary search (`partition_point`)
+    /// over a sorted normalized path index, returning up to `limit.min(50)` matches.
+    /// Secrets, notes, and field values are never inspected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Locked`], [`ServiceError::Stale`],
+    /// [`ServiceError::InvalidInput`] for an unsafe or oversized prefix, or
+    /// [`ServiceError::ResourceLimit`] when tree size exceeds completion bounds.
+    pub fn complete_path(
+        &self,
+        session: SessionId,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<PathCompletion>, ServiceError> {
+        if prefix.len() > MAX_HIT_BYTES || !is_safe_prefix(prefix) {
+            return Err(ServiceError::InvalidInput);
+        }
+        let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        if live.id != session {
+            return Err(ServiceError::Stale);
+        }
+        let cap = limit.min(MAX_PATH_COMPLETIONS);
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+        let index = build_path_completion_index(&live.database.root, live.id, live.generation)?;
+        let normalized = prefix.trim_start_matches('/').to_lowercase();
+        let root_lower = live.database.root.name.to_lowercase();
+        if normalized.contains('*') || normalized.contains('?') {
+            let glob = Glob::new(&normalized);
+            let mut results = Vec::new();
+            for item in index {
+                if glob.is_match(&item.rel_key) || glob.is_match(&item.full_key) {
+                    results.push(item.completion);
+                    if results.len() == cap {
+                        break;
+                    }
+                }
+            }
+            return Ok(results);
+        }
+
+        let stripped = if root_lower.is_empty() {
+            None
+        } else {
+            normalized
+                .strip_prefix(&format!("{root_lower}/"))
+                .or_else(|| (normalized == root_lower).then_some(""))
+        };
+        let mut results = Vec::new();
+        let mut seen_indices = BTreeSet::new();
+        let start = index.partition_point(|item| item.rel_key.as_str() < normalized.as_str());
+        for (offset, item) in index[start..].iter().enumerate() {
+            if !item.rel_key.starts_with(&normalized) {
+                break;
+            }
+            if seen_indices.insert(start + offset) {
+                results.push(item.completion.clone());
+                if results.len() == cap {
+                    return Ok(results);
+                }
+            }
+        }
+        if let Some(rel_prefix) = stripped {
+            let start = index.partition_point(|item| item.rel_key.as_str() < rel_prefix);
+            for (offset, item) in index[start..].iter().enumerate() {
+                if !item.rel_key.starts_with(rel_prefix) {
+                    break;
+                }
+                if seen_indices.insert(start + offset) {
+                    results.push(item.completion.clone());
+                    if results.len() == cap {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+}
+
+fn check_otp_field_uniqueness(entry: &Entry) -> Result<(), ServiceError> {
+    if entry
+        .fields
+        .iter()
+        .filter(|field| field.key == "otp")
+        .count()
+        > 1
+    {
+        return Err(ServiceError::AmbiguousField);
+    }
+    if entry.field("otp").is_none()
+        && entry
+            .fields
+            .iter()
+            .filter(|field| field.key == "TimeOtp-Secret-Base32")
+            .count()
+            > 1
+    {
+        return Err(ServiceError::AmbiguousField);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_group_tree_node(
+    group: &Group,
+    session: SessionId,
+    generation: u64,
+    locator: &[usize],
+    parent_path: &str,
+    recycle_uuid: Option<KdbxUuid>,
+    nodes: &mut usize,
+    text_bytes: &mut usize,
+) -> Result<GroupTreeNode, ServiceError> {
+    if locator.len() >= MAX_LOCATOR_DEPTH {
+        return Err(ServiceError::ResourceLimit);
+    }
+    *nodes = nodes.checked_add(1).ok_or(ServiceError::ResourceLimit)?;
+    if *nodes > MAX_COMPLETION_NODES {
+        return Err(ServiceError::ResourceLimit);
+    }
+    if group.name.is_empty()
+        || group.name.len() > MAX_TREE_LABEL_BYTES
+        || (!locator.is_empty() && group.name.contains('/'))
+        || !safe_metadata(&group.name)
+    {
+        return Err(ServiceError::InvalidInput);
+    }
+    let path = if parent_path.is_empty() {
+        group.name.clone()
+    } else {
+        format!("{parent_path}/{}", group.name)
+    };
+    if path.len() > MAX_HIT_BYTES {
+        return Err(ServiceError::ResourceLimit);
+    }
+    *text_bytes = text_bytes
+        .checked_add(group.name.len())
+        .and_then(|total| total.checked_add(path.len()))
+        .ok_or(ServiceError::ResourceLimit)?;
+    if *text_bytes > MAX_COMPLETION_BYTES {
+        return Err(ServiceError::ResourceLimit);
+    }
+    let mut children = Vec::with_capacity(group.groups.len());
+    for (idx, child) in group.groups.iter().enumerate() {
+        let mut child_locator = Vec::with_capacity(locator.len() + 1);
+        child_locator.extend_from_slice(locator);
+        child_locator.push(idx);
+        children.push(build_group_tree_node(
+            child,
+            session,
+            generation,
+            &child_locator,
+            &path,
+            recycle_uuid,
+            nodes,
+            text_bytes,
+        )?);
+    }
+    Ok(GroupTreeNode {
+        reference: GroupRef {
+            session,
+            generation,
+            id: group.id,
+            locator: locator.to_vec(),
+        },
+        label: group.name.clone(),
+        path,
+        icon_id: group.icon_id,
+        custom_icon_id: nonzero_custom_icon(group.custom_icon_id),
+        entry_count: group.entries.len(),
+        is_recycle_bin: recycle_uuid.is_some_and(|uuid| group.id == uuid),
+        children,
+    })
+}
+
+fn ensure_custom_icon_exists(
+    database: &KeePassDatabase,
+    id: CustomIconId,
+) -> Result<(), ServiceError> {
+    let mut found = false;
+    for icon in &database.meta.custom_icons {
+        if icon.uuid == id.0 {
+            if found {
+                return Err(ServiceError::DuplicateIds);
+            }
+            found = true;
+        }
+    }
+    if found {
+        Ok(())
+    } else {
+        Err(ServiceError::NotFound)
+    }
+}
+
+fn group_at_locator<'a>(root: &'a Group, locator: &[usize]) -> Result<&'a Group, ServiceError> {
+    let mut group = root;
+    for &index in locator {
+        group = group.groups.get(index).ok_or(ServiceError::Stale)?;
+    }
+    Ok(group)
+}
+
+fn group_at_locator_mut<'a>(
+    root: &'a mut Group,
+    locator: &[usize],
+) -> Result<&'a mut Group, ServiceError> {
+    let mut group = root;
+    for &index in locator {
+        group = group.groups.get_mut(index).ok_or(ServiceError::Stale)?;
+    }
+    Ok(group)
+}
+
+fn entry_relative_depth(entry: &Entry) -> usize {
+    let own = if entry.custom_data.items().is_empty() && entry.auto_type.associations.is_empty() {
+        2
+    } else {
+        3
+    };
+    let history_max = entry
+        .history
+        .iter()
+        .map(|snapshot| 2usize.saturating_add(entry_relative_depth(snapshot)))
+        .max()
+        .unwrap_or(0);
+    own.max(history_max)
+}
+
+fn remove_entry_at(
+    root: &mut Group,
+    group_locator: &[usize],
+    entry_index: usize,
+) -> Result<Entry, ServiceError> {
+    let group = group_at_locator_mut(root, group_locator)?;
+    if entry_index >= group.entries.len() {
+        return Err(ServiceError::Stale);
+    }
+    Ok(group.entries.remove(entry_index))
+}
+
+fn next_copy_title(group: &Group, base_title: &str) -> Result<String, ServiceError> {
+    let first = format!("{base_title} (Copy)");
+    if !group
+        .entries
+        .iter()
+        .any(|entry| entry.title.eq_ignore_ascii_case(&first))
+    {
+        return Ok(first);
+    }
+    for n in 2usize..=10_000 {
+        let candidate = format!("{base_title} (Copy {n})");
+        if !group
+            .entries
+            .iter()
+            .any(|entry| entry.title.eq_ignore_ascii_case(&candidate))
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(ServiceError::ResourceLimit)
+}
+
+fn next_disambiguated_title(group: &Group, title: &str) -> Result<String, ServiceError> {
+    if !group
+        .entries
+        .iter()
+        .any(|entry| entry.title.eq_ignore_ascii_case(title))
+    {
+        return Ok(title.to_owned());
+    }
+    for n in 2usize..=10_000 {
+        let candidate = format!("{title} ({n})");
+        if !group
+            .entries
+            .iter()
+            .any(|entry| entry.title.eq_ignore_ascii_case(&candidate))
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(ServiceError::ResourceLimit)
+}
+
+fn fresh_object_uuid(database: &KeePassDatabase) -> KdbxUuid {
+    loop {
+        let candidate = KdbxUuid::new_random();
+        if !candidate.is_zero()
+            && database.find_entry(candidate).is_none()
+            && database.find_group(candidate).is_none()
+        {
+            return candidate;
+        }
+    }
+}
+
+fn find_group_locator_by_uuid(group: &Group, target: KdbxUuid) -> Option<Vec<usize>> {
+    fn walk(current: &Group, target: KdbxUuid, locator: &mut Vec<usize>) -> bool {
+        if current.id == target {
+            return true;
+        }
+        for (idx, child) in current.groups.iter().enumerate() {
+            locator.push(idx);
+            if walk(child, target, locator) {
+                return true;
+            }
+            locator.pop();
+        }
+        false
+    }
+    let mut locator = Vec::new();
+    if walk(group, target, &mut locator) {
+        Some(locator)
+    } else {
+        None
+    }
+}
+
+fn find_recycle_bin_locator(database: &KeePassDatabase) -> Option<Vec<usize>> {
+    if database.meta.recycle_bin_uuid.is_zero() {
+        return None;
+    }
+    find_group_locator_by_uuid(&database.root, database.meta.recycle_bin_uuid)
+}
+
+fn ensure_recycle_bin_group(database: &mut KeePassDatabase) -> Vec<usize> {
+    if let Some(locator) = find_recycle_bin_locator(database) {
+        return locator;
+    }
+    if let Some(idx) = database
+        .root
+        .groups
+        .iter()
+        .position(|group| group.name == "Recycle Bin")
+    {
+        let bin_id = database.root.groups[idx].id;
+        database.meta.recycle_bin_uuid = bin_id;
+        database.meta.recycle_bin_changed = Some(current_timestamp());
+        return vec![idx];
+    }
+    let mut bin = Group::new("Recycle Bin");
+    bin.id = fresh_object_uuid(database);
+    bin.icon_id = 43;
+    let bin_id = bin.id;
+    let idx = database.root.groups.len();
+    database.root.groups.push(bin);
+    database.meta.recycle_bin_uuid = bin_id;
+    database.meta.recycle_bin_changed = Some(current_timestamp());
+    vec![idx]
+}
+
+fn collect_group_and_entry_ids(group: &Group, out: &mut Vec<KdbxUuid>) {
+    out.push(group.id);
+    for entry in &group.entries {
+        out.push(entry.id);
+    }
+    for child in &group.groups {
+        collect_group_and_entry_ids(child, out);
+    }
+}
+
+fn current_timestamp() -> KdbxTimestamp {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        });
+    KdbxTimestamp::from_unix_seconds(seconds)
+}
+
+fn is_safe_description_text(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\n' | '\r' | '\t')
+            || (!character.is_control()
+                && !matches!(
+                    character,
+                    '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+                ))
+    })
+}
+
+fn build_otp_uri(config: &OtpConfig, secret: &str) -> Result<OtpUri, ServiceError> {
+    let kind = match config.kind {
+        ServiceOtpKind::Totp => OtpKind::Totp,
+        ServiceOtpKind::Hotp => OtpKind::Hotp,
+    };
+    let algorithm = match config.algorithm {
+        ServiceOtpAlgorithm::Sha1 => OtpAlgorithm::Sha1,
+        ServiceOtpAlgorithm::Sha256 => OtpAlgorithm::Sha256,
+        ServiceOtpAlgorithm::Sha512 => OtpAlgorithm::Sha512,
+    };
+    let digits = match config.digits {
+        5 => OtpDigits::Five,
+        6 => OtpDigits::Six,
+        8 => OtpDigits::Eight,
+        _ => return Err(ServiceError::InvalidOtp),
+    };
+    let encoder = if config.steam {
+        OtpEncoder::Steam
+    } else {
+        OtpEncoder::Standard
+    };
+    OtpUri::from_params(OtpUriParams {
+        kind,
+        account: &config.account,
+        issuer: config.issuer.as_deref(),
+        secret,
+        algorithm,
+        digits,
+        counter: config.counter,
+        period: config.period,
+        encoder,
+    })
+    .map_err(|_| ServiceError::InvalidOtp)
+}
+
+fn is_safe_prefix(value: &str) -> bool {
+    !value.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )
+    })
+}
+
+struct PathCompletionIndexEntry {
+    rel_key: String,
+    full_key: String,
+    completion: PathCompletion,
+}
+
+fn build_path_completion_index(
+    root: &Group,
+    session: SessionId,
+    generation: u64,
+) -> Result<Vec<PathCompletionIndexEntry>, ServiceError> {
+    fn visit(
+        group: &Group,
+        locator: &[usize],
+        parent_full: &str,
+        parent_rel: &str,
+        session: SessionId,
+        generation: u64,
+        nodes: &mut usize,
+        bytes: &mut usize,
+        out: &mut Vec<PathCompletionIndexEntry>,
+    ) -> Result<(), ServiceError> {
+        if locator.len() >= MAX_LOCATOR_DEPTH {
+            return Err(ServiceError::ResourceLimit);
+        }
+        *nodes = nodes.checked_add(1).ok_or(ServiceError::ResourceLimit)?;
+        if *nodes > MAX_COMPLETION_NODES {
+            return Err(ServiceError::ResourceLimit);
+        }
+        let group_safe = !group.name.is_empty()
+            && group.name.len() <= MAX_TREE_LABEL_BYTES
+            && (locator.is_empty() || !group.name.contains('/'))
+            && safe_metadata(&group.name);
+        if !group_safe {
+            return Ok(());
+        }
+        let full_path = if parent_full.is_empty() {
+            group.name.clone()
+        } else {
+            format!("{parent_full}/{}", group.name)
+        };
+        let rel_path = if locator.is_empty() {
+            String::new()
+        } else if parent_rel.is_empty() {
+            group.name.clone()
+        } else {
+            format!("{parent_rel}/{}", group.name)
+        };
+        if full_path.len() > MAX_COMPLETION_PATH_BYTES {
+            return Err(ServiceError::ResourceLimit);
+        }
+        if !locator.is_empty() {
+            account_completion_text(bytes, full_path.len())?;
+            out.push(PathCompletionIndexEntry {
+                rel_key: rel_path.to_lowercase(),
+                full_key: full_path.to_lowercase(),
+                completion: PathCompletion {
+                    path: full_path.clone(),
+                    label: group.name.clone(),
+                    is_group: true,
+                    icon_id: group.icon_id,
+                    custom_icon_id: nonzero_custom_icon(group.custom_icon_id),
+                    group_ref: Some(GroupRef {
+                        session,
+                        generation,
+                        id: group.id,
+                        locator: locator.to_vec(),
+                    }),
+                    entry_ref: None,
+                },
+            });
+        }
+        for (entry_idx, entry) in group.entries.iter().enumerate() {
+            *nodes = nodes.checked_add(1).ok_or(ServiceError::ResourceLimit)?;
+            if *nodes > MAX_COMPLETION_NODES {
+                return Err(ServiceError::ResourceLimit);
+            }
+            if entry.title.is_empty()
+                || entry.title.len() > MAX_TREE_LABEL_BYTES
+                || entry.title.contains('/')
+                || !safe_metadata(&entry.title)
+            {
+                continue;
+            }
+            let entry_full = format!("{full_path}/{}", entry.title);
+            let entry_rel = if rel_path.is_empty() {
+                entry.title.clone()
+            } else {
+                format!("{rel_path}/{}", entry.title)
+            };
+            account_completion_text(bytes, entry_full.len())?;
+            let mut entry_locator = Vec::with_capacity(locator.len() + 1);
+            entry_locator.extend_from_slice(locator);
+            entry_locator.push(entry_idx);
+            out.push(PathCompletionIndexEntry {
+                rel_key: entry_rel.to_lowercase(),
+                full_key: entry_full.to_lowercase(),
+                completion: PathCompletion {
+                    path: entry_full,
+                    label: entry.title.clone(),
+                    is_group: false,
+                    icon_id: entry.icon_id,
+                    custom_icon_id: nonzero_custom_icon(entry.custom_icon_id),
+                    group_ref: None,
+                    entry_ref: Some(EntryRef {
+                        session,
+                        generation,
+                        id: entry.id,
+                        locator: entry_locator,
+                    }),
+                },
+            });
+        }
+        for (child_idx, child) in group.groups.iter().enumerate() {
+            let mut child_locator = Vec::with_capacity(locator.len() + 1);
+            child_locator.extend_from_slice(locator);
+            child_locator.push(child_idx);
+            visit(
+                child,
+                &child_locator,
+                &full_path,
+                &rel_path,
+                session,
+                generation,
+                nodes,
+                bytes,
+                out,
+            )?;
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    let mut nodes = 0usize;
+    let mut bytes = 0usize;
+    visit(
+        root,
+        &[],
+        "",
+        "",
+        session,
+        generation,
+        &mut nodes,
+        &mut bytes,
+        &mut out,
+    )?;
+    out.sort_by(|left, right| {
+        left.rel_key
+            .cmp(&right.rel_key)
+            .then_with(|| {
+                left.completion
+                    .is_group
+                    .cmp(&right.completion.is_group)
+                    .reverse()
+            })
+            .then_with(|| left.completion.path.cmp(&right.completion.path))
+    });
+    Ok(out)
 }
 
 fn install_new_vault(
@@ -4752,11 +6384,13 @@ struct SearchState {
     query: String,
     needle: Vec<char>,
     failure: Vec<usize>,
+    glob: Option<Glob>,
     stack: Vec<GroupFrame>,
     session: SessionId,
     generation: u64,
     total_work: usize,
     total_text_work: usize,
+    total_glob_work: usize,
 }
 
 struct ListState {
@@ -4799,12 +6433,20 @@ impl ListState {
 
 impl SearchState {
     fn new(query: &str, session: SessionId, generation: u64) -> Self {
-        let needle = query.to_lowercase().chars().collect::<Vec<_>>();
-        let failure = failure_table(&needle);
+        let lower = query.to_lowercase();
+        let is_glob = query.contains('*') || query.contains('?');
+        let (needle, failure, glob) = if is_glob {
+            (Vec::new(), Vec::new(), Some(Glob::new(&lower)))
+        } else {
+            let needle = lower.chars().collect::<Vec<_>>();
+            let failure = failure_table(&needle);
+            (needle, failure, None)
+        };
         Self {
             query: query.to_owned(),
             needle,
             failure,
+            glob,
             stack: vec![GroupFrame {
                 group_index: None,
                 next_entry: 0,
@@ -4818,6 +6460,7 @@ impl SearchState {
             generation,
             total_work: 0,
             total_text_work: 0,
+            total_glob_work: 0,
         }
     }
 
@@ -4858,6 +6501,7 @@ fn scan_page(root: &Group, state: &mut SearchState) -> Result<SearchPage, Servic
     let mut bytes = hit_capacity_bytes;
     let mut work = 0usize;
     let mut text_work = 0usize;
+    let mut glob_work = 0usize;
     while !state.stack.is_empty() && work < MAX_PAGE_WORK {
         if state.total_work >= MAX_SEARCH_WORK {
             return Err(ServiceError::ResourceLimit);
@@ -4874,27 +6518,54 @@ fn scan_page(root: &Group, state: &mut SearchState) -> Result<SearchPage, Servic
             if text_work.saturating_add(cost) > MAX_PAGE_TEXT_WORK {
                 break;
             }
-            text_work += cost;
-            state.total_text_work += cost;
-            let parent_matches = state.stack[..frame_index]
-                .last()
-                .is_some_and(|parent| parent.path_matches);
-            let parent_path_safe = state.stack[..frame_index]
-                .last()
-                .is_none_or(|parent| parent.path_safe);
-            state.stack[frame_index].path_matches =
-                parent_matches || contains_lowercase(&group.name, &state.needle, &state.failure);
-            // Validate each vault-controlled path component once, when its
-            // frame is entered. This is covered by the group's existing text
-            // work charge and avoids rescanning shared ancestors per entry.
-            state.stack[frame_index].path_safe = parent_path_safe && safe_metadata(&group.name);
             let parent_path_bytes = state.stack[..frame_index]
                 .last()
                 .map_or(0, |parent| parent.path_bytes);
-            state.stack[frame_index].path_bytes = parent_path_bytes
+            let next_path_bytes = parent_path_bytes
                 .checked_add(usize::from(frame_index > 0))
                 .and_then(|bytes| bytes.checked_add(group.name.len()))
                 .ok_or(ServiceError::ResourceLimit)?;
+            let parent_path_safe = state.stack[..frame_index]
+                .last()
+                .is_none_or(|parent| parent.path_safe);
+            let next_path_safe = parent_path_safe && safe_metadata(&group.name);
+            let parent_matches = state.stack[..frame_index]
+                .last()
+                .is_some_and(|parent| parent.path_matches);
+            let path_matches = if let Some(glob) = &state.glob {
+                if parent_matches {
+                    true
+                } else {
+                    let g_cost = glob
+                        .work_bound(group.name.len().saturating_add(next_path_bytes))
+                        .ok_or(ServiceError::ResourceLimit)?;
+                    if g_cost > MAX_PAGE_GLOB_WORK
+                        || g_cost > MAX_SEARCH_TEXT_WORK.saturating_sub(state.total_glob_work)
+                    {
+                        return Err(ServiceError::ResourceLimit);
+                    }
+                    if glob_work.saturating_add(g_cost) > MAX_PAGE_GLOB_WORK {
+                        break;
+                    }
+                    glob_work += g_cost;
+                    state.total_glob_work += g_cost;
+                    let group_path = path_for(root, &state.stack, next_path_bytes, next_path_safe)
+                        .parts
+                        .join("/");
+                    glob.is_match(&group.name.to_lowercase())
+                        || (!group_path.is_empty() && glob.is_match(&group_path.to_lowercase()))
+                }
+            } else {
+                parent_matches || contains_lowercase(&group.name, &state.needle, &state.failure)
+            };
+            text_work += cost;
+            state.total_text_work += cost;
+            state.stack[frame_index].path_matches = path_matches;
+            // Validate each vault-controlled path component once, when its
+            // frame is entered. This is covered by the group's existing text
+            // work charge and avoids rescanning shared ancestors per entry.
+            state.stack[frame_index].path_safe = next_path_safe;
+            state.stack[frame_index].path_bytes = next_path_bytes;
             state.stack[frame_index].entered = true;
             work += 1;
             state.total_work += 1;
@@ -4908,17 +6579,57 @@ fn scan_page(root: &Group, state: &mut SearchState) -> Result<SearchPage, Servic
                 MAX_SEARCH_TEXT_WORK.saturating_sub(state.total_text_work),
             )?;
             let Some(cost) = cost else { break };
+            let path_matches = state.stack[frame_index].path_matches;
+            let matched = if let Some(glob) = &state.glob {
+                if path_matches {
+                    true
+                } else {
+                    let group_path = path_for(
+                        root,
+                        &state.stack,
+                        state.stack[frame_index].path_bytes,
+                        state.stack[frame_index].path_safe,
+                    );
+                    let entry_path = render_path(&group_path, &entry.title);
+                    let total_candidate_bytes = entry_path
+                        .len()
+                        .saturating_add(entry.title.len())
+                        .saturating_add(entry.username.len())
+                        .saturating_add(entry.url.len())
+                        .saturating_add(entry.tags.iter().map(String::len).sum());
+                    let g_cost = glob
+                        .work_bound(total_candidate_bytes)
+                        .ok_or(ServiceError::ResourceLimit)?;
+                    if g_cost > MAX_PAGE_GLOB_WORK
+                        || g_cost > MAX_SEARCH_TEXT_WORK.saturating_sub(state.total_glob_work)
+                    {
+                        return Err(ServiceError::ResourceLimit);
+                    }
+                    if glob_work.saturating_add(g_cost) > MAX_PAGE_GLOB_WORK {
+                        break;
+                    }
+                    glob_work += g_cost;
+                    state.total_glob_work += g_cost;
+                    glob.is_match(&entry_path.to_lowercase())
+                        || [&entry.title, &entry.username, &entry.url]
+                            .into_iter()
+                            .chain(entry.tags.iter())
+                            .any(|candidate| glob.is_match(&candidate.to_lowercase()))
+                }
+            } else {
+                path_matches
+                    || [&entry.title, &entry.username, &entry.url]
+                        .into_iter()
+                        .chain(entry.tags.iter())
+                        .any(|candidate| {
+                            contains_lowercase(candidate, &state.needle, &state.failure)
+                        })
+            };
             text_work += cost;
             state.total_text_work += cost;
             state.stack[frame_index].next_entry += 1;
             work += 1;
             state.total_work += 1;
-            let path_matches = state.stack[frame_index].path_matches;
-            let matched = path_matches
-                || [&entry.title, &entry.username, &entry.url]
-                    .into_iter()
-                    .chain(entry.tags.iter())
-                    .any(|candidate| contains_lowercase(candidate, &state.needle, &state.failure));
             if !matched {
                 continue;
             }

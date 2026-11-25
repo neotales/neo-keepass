@@ -59,8 +59,8 @@ pub use model::{
     VariantDictionaryItem, VariantValue, history_limits_valid,
 };
 pub use otp::{
-    Hotp, HotpParameters, KeePassXcOtp, OtpAlgorithm, OtpDigits, OtpKind, OtpSecret, OtpUri, Totp,
-    TotpParameters,
+    Hotp, HotpParameters, KeePassXcOtp, OtpAlgorithm, OtpDigits, OtpEncoder, OtpKind, OtpSecret,
+    OtpUri, OtpUriParams, Totp, TotpParameters,
 };
 pub use path::{Comparison, PathError, PathOptions};
 pub use primitives::{KdbxColor, KdbxTimestamp, KdbxUuid};

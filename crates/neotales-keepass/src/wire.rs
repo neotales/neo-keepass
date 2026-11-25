@@ -859,18 +859,10 @@ pub(crate) fn parse_xml_payload(
     header: &InnerHeader,
     _limits: &KdbxReadLimits,
 ) -> Result<(Vec<(Vec<u8>, bool)>, usize), KdbxError> {
-    let mut stream = crypto::InnerCipher::new(header.stream_id, &header.stream_key)?;
-    let mut binaries = Vec::with_capacity(header.binaries.len());
-    let mut inner_stream_offset = 0usize;
-    for (value, protected) in &header.binaries {
-        let mut value = value.clone();
-        if *protected {
-            stream.transform(&mut value);
-            inner_stream_offset = inner_stream_offset.saturating_add(value.len());
-        }
-        binaries.push((value, *protected));
-    }
-    Ok((binaries, inner_stream_offset))
+    // KDBX 4 InnerHeader binary records (id == 0x03) store 1 flag byte
+    // (bit 0 = ProtectInMemory hint) followed by raw unencrypted bytes
+    // protected by the outer cipher. They never consume the InnerCipher stream.
+    Ok((header.binaries.clone(), 0))
 }
 
 #[cfg(test)]

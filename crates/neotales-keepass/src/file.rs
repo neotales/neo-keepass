@@ -105,6 +105,23 @@ impl Default for KdbxWriteOptions {
     }
 }
 
+impl KdbxWriteOptions {
+    /// Recommended modern KDBX 4.1 writer settings (Argon2id + GZip + AES-256).
+    #[must_use]
+    pub const fn recommended() -> Self {
+        Self {
+            cipher: KdbxOuterCipher::Aes,
+            compression: KdbxCompression::GZip,
+            kdf: KdbxKdf::Argon2id,
+            aes_kdf_rounds: 600_000,
+            argon2_memory_kib: 64 * 1024,
+            argon2_time: 2,
+            argon2_lanes: 1,
+            hmac_block_bytes: 1024 * 1024,
+        }
+    }
+}
+
 /// An incremental, block-authenticated KDBX 4 payload reader.
 ///
 /// This type authenticates one KDBX 4 HMAC block at a time and returns only
@@ -518,6 +535,7 @@ impl KdbxFile {
         )?;
         apply_public_custom_data(&mut database, header.public_custom_data.as_ref());
         database.can_save_losslessly &= !header.has_unknown_fields;
+        database.write_options = Some(write_options_from_header(&header));
         cancellation.checkpoint()?;
         Ok(database)
     }
@@ -927,6 +945,46 @@ impl KdbxFile {
     ) -> Result<KeePassDatabase, KdbxError> {
         let mut credentials = KdbxCredentials::password(password)?;
         Self::load(source, &mut credentials, limits)
+    }
+}
+
+fn write_options_from_header(header: &wire::OuterHeader) -> KdbxWriteOptions {
+    let defaults = KdbxWriteOptions::default();
+    let cipher = match header.cipher {
+        OuterCipher::Aes => KdbxOuterCipher::Aes,
+        OuterCipher::ChaCha20 => KdbxOuterCipher::ChaCha20,
+    };
+    let compression = match header.compression {
+        WireCompression::None => KdbxCompression::None,
+        WireCompression::GZip => KdbxCompression::GZip,
+    };
+    match &header.kdf {
+        wire::KdfSpec::Aes { rounds, .. } => KdbxWriteOptions {
+            cipher,
+            compression,
+            kdf: KdbxKdf::Aes,
+            aes_kdf_rounds: *rounds,
+            ..defaults
+        },
+        wire::KdfSpec::Argon2 {
+            argon2id,
+            memory,
+            iterations,
+            lanes,
+            ..
+        } => KdbxWriteOptions {
+            cipher,
+            compression,
+            kdf: if *argon2id {
+                KdbxKdf::Argon2id
+            } else {
+                KdbxKdf::Argon2d
+            },
+            argon2_memory_kib: *memory,
+            argon2_time: *iterations,
+            argon2_lanes: *lanes,
+            ..defaults
+        },
     }
 }
 
@@ -1490,6 +1548,115 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "password after binaries"
+        );
+    }
+
+    #[test]
+    fn kdbx4_inner_header_protected_binary_and_history_before_string_keep_inner_stream_in_sync() {
+        let limits = KdbxReadLimits::default();
+        let master_seed = [0x11; 32];
+        let transform_seed = [0x22; 32];
+        let kdf_salt = [0x33; 32];
+        let iv = [0x44; 16];
+        let inner_stream_key = [0x55; 64];
+        let options = KdbxWriteOptions {
+            cipher: KdbxOuterCipher::Aes,
+            compression: KdbxCompression::None,
+            kdf: KdbxKdf::Aes,
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        };
+        let header = create_header(
+            &master_seed,
+            &transform_seed,
+            &kdf_salt,
+            &iv,
+            &VariantDictionary::default(),
+            options,
+        )
+        .unwrap();
+        let composite = KdbxCredentials::password("pw")
+            .unwrap()
+            .composite_key()
+            .unwrap();
+        let transformed =
+            derive_transformed_key(&composite, &transform_seed, &kdf_salt, options, &limits)
+                .unwrap();
+        let mut cipher_input = master_seed.to_vec();
+        cipher_input.extend_from_slice(&transformed[..]);
+        let cipher_key = crypto::sha256(&cipher_input);
+        let mut hmac_input = master_seed.to_vec();
+        hmac_input.extend_from_slice(&transformed[..]);
+        hmac_input.push(1);
+        let base_hmac = crypto::sha512(&hmac_input);
+
+        // InnerCipher stream must NOT be consumed by InnerHeader binary (id == 3),
+        // even when ProtectInMemory flag bit 0 is set.
+        let mut inner = InnerCipher::new(2, &inner_stream_key).unwrap();
+        let raw_attachment = b"raw-unencrypted-attachment-bytes".to_vec();
+        let inner_header = crate::xml::write_inner_header(
+            2,
+            &inner_stream_key,
+            &[(raw_attachment.clone(), true)],
+            &mut inner,
+        );
+
+        // Encrypt in strict document order: <Binaries> (none) / <CustomIcons> protected icon,
+        // then <Entry> with <History> BEFORE <String><Key>Password</Key>.
+        let mut icon_bytes = b"icon-data".to_vec();
+        inner.transform(&mut icon_bytes);
+        let mut hist_pw = b"history-secret".to_vec();
+        inner.transform(&mut hist_pw);
+        let mut cur_pw = b"current-secret".to_vec();
+        inner.transform(&mut cur_pw);
+
+        let icon_uuid = crate::primitives::KdbxUuid::from_bytes([0xaa; 16]).to_base64();
+        let entry_uuid = crate::primitives::KdbxUuid::from_bytes([0xbb; 16]).to_base64();
+        let hist_uuid = crate::primitives::KdbxUuid::from_bytes([0xcc; 16]).to_base64();
+
+        let xml = format!(
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><KeePassFile>",
+                "<Meta><CustomIcons><Icon><UUID>{}</UUID><Data Protected=\"True\">{}</Data></Icon></CustomIcons></Meta>",
+                "<Root><Group><UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>Root</Name>",
+                "<Entry><UUID>{}</UUID><Name>ordered</Name>",
+                "<History><Entry><UUID>{}</UUID><Name>ordered</Name>",
+                "<String><Key>Password</Key><Value Protected=\"True\">{}</Value></String>",
+                "</Entry></History>",
+                "<String><Key>Password</Key><Value Protected=\"True\">{}</Value></String>",
+                "<Binary><Key>secret.bin</Key><Value Ref=\"0\"/></Binary>",
+                "</Entry></Group></Root></KeePassFile>"
+            ),
+            icon_uuid,
+            STANDARD.encode(&icon_bytes),
+            entry_uuid,
+            hist_uuid,
+            STANDARD.encode(&hist_pw),
+            STANDARD.encode(&cur_pw),
+        );
+
+        let mut payload = inner_header;
+        payload.extend_from_slice(xml.as_bytes());
+        let ciphertext = crypto::aes_cbc_encrypt(&cipher_key, &iv, &payload).unwrap();
+        let blocks =
+            wire::write_hmac_blocks(&ciphertext, &base_hmac, 1024 * 1024, &limits).unwrap();
+        let mut file_bytes = header.clone();
+        file_bytes.extend_from_slice(&crypto::sha256(&header));
+        file_bytes.extend_from_slice(&wire::header_hmac(&header, &base_hmac).unwrap());
+        file_bytes.extend_from_slice(&blocks);
+
+        let loaded = KdbxFile::load_password(file_bytes.as_slice(), "pw", &limits).unwrap();
+        assert_eq!(loaded.meta.custom_icons[0].data, b"icon-data");
+        assert_eq!(loaded.binary_pool.records()[0].data, raw_attachment);
+        assert!(loaded.binary_pool.records()[0].protected);
+        let entry = &loaded.root.entries[0];
+        assert_eq!(
+            entry.history[0].password.reveal_text().unwrap().as_str(),
+            "history-secret"
+        );
+        assert_eq!(
+            entry.password.reveal_text().unwrap().as_str(),
+            "current-secret"
         );
     }
 }

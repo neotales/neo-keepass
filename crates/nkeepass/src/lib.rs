@@ -19,11 +19,13 @@ pub mod trust;
 
 pub use service::{
     AttachmentDescriptor, AttachmentMetadata, AttachmentRef, AutomationError,
-    CustomFieldDescriptor, CustomFieldRef, CustomIconId, EntryRef, ExportSnapshot, FieldMetadata,
-    GroupRef, IconInfo, ImportOptions, ImportReport, ListCursor, ListPage, MAX_LIST_PATTERN_BYTES,
-    ResolvedEntry, SearchCursor, SearchHit, SearchPage, SelectedEntry, SelectorError, ServiceError,
-    SessionId, SyncOptions, SyncReport, SyncStrategy, TotpCode, TreeCursor, TreeGroup, TreePage,
-    VaultService,
+    CustomFieldDescriptor, CustomFieldRef, CustomIconId, CustomIconSummary, DatabaseSettings,
+    DatabaseSettingsUpdate, EntryRef, ExportSnapshot, FieldMetadata, GroupRef, GroupTreeNode,
+    IconInfo, ImportOptions, ImportReport, ListCursor, ListPage, MAX_LIST_PATTERN_BYTES, OtpConfig,
+    OtpMetadata, PathCompletion, ResolvedEntry, SearchCursor, SearchHit, SearchPage, SelectedEntry,
+    SelectorError, ServiceError, ServiceOtpAlgorithm, ServiceOtpKind, SessionId, SyncOptions,
+    SyncReport, SyncStrategy, TotpCode, TreeCursor, TreeGroup, TreePage, VaultCipher,
+    VaultCompression, VaultKdfSummary, VaultService,
 };
 
 use neotales_keepass::KdbxReadLimits;

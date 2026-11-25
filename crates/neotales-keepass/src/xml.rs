@@ -476,117 +476,102 @@ fn parse_meta(
     expected_header_hash: Option<&[u8]>,
     limits: &KdbxReadLimits,
 ) -> Result<(), KdbxError> {
-    let mut meta = KeePassMeta {
-        generator: text(node, "Generator").unwrap_or_default().into(),
-        name: text(node, "DatabaseName").unwrap_or_default().into(),
-        description: text(node, "DatabaseDescription").unwrap_or_default().into(),
-        default_username: text(node, "DefaultUserName").unwrap_or_default().into(),
-        ..KeePassMeta::default()
-    };
-    if let Some(value) = text(node, "HeaderHash") {
-        let actual = STANDARD
-            .decode(value)
-            .map_err(|_| KdbxError::malformed("invalid KDBX HeaderHash"))?;
-        if let Some(expected) = expected_header_hash {
-            if !constant_time_equal(&actual, expected) {
-                return Err(KdbxError::new(
-                    crate::KdbxFailureKind::Authentication,
-                    "KDBX 3 header hash validation failed",
-                ));
-            }
+    let mut meta = KeePassMeta::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for child_node in &node.children {
+        if !seen.insert(child_node.name.as_str()) {
+            continue;
         }
-    } else if expected_header_hash.is_some() {
+        let value = child_node.text.as_str();
+        match child_node.name.as_str() {
+            "Generator" => meta.generator = value.into(),
+            "DatabaseName" => meta.name = value.into(),
+            "DatabaseDescription" => meta.description = value.into(),
+            "DefaultUserName" => meta.default_username = value.into(),
+            "HeaderHash" => {
+                let actual = STANDARD
+                    .decode(value)
+                    .map_err(|_| KdbxError::malformed("invalid KDBX HeaderHash"))?;
+                if let Some(expected) = expected_header_hash {
+                    if !constant_time_equal(&actual, expected) {
+                        return Err(KdbxError::new(
+                            crate::KdbxFailureKind::Authentication,
+                            "KDBX 3 header hash validation failed",
+                        ));
+                    }
+                }
+            }
+            "Times" => meta.times = parse_times(child_node)?,
+            "SettingsChanged" => meta.settings_changed = Some(parse_timestamp(value)?),
+            "DatabaseNameChanged" => meta.database_name_changed = Some(parse_timestamp(value)?),
+            "DatabaseDescriptionChanged" => {
+                meta.database_description_changed = Some(parse_timestamp(value)?);
+            }
+            "DefaultUserNameChanged" => {
+                meta.default_username_changed = Some(parse_timestamp(value)?);
+            }
+            "MasterKeyChanged" => meta.master_key_changed = Some(parse_timestamp(value)?),
+            "MaintenanceHistoryDays" => {
+                meta.maintenance_history_days = value
+                    .parse()
+                    .map_err(|_| KdbxError::malformed("invalid MaintenanceHistoryDays"))?;
+            }
+            "Color" => meta.color = KdbxColor::parse(value)?,
+            "MasterKeyChangeRec" => {
+                meta.master_key_change_rec = value
+                    .parse()
+                    .map_err(|_| KdbxError::malformed("invalid MasterKeyChangeRec"))?;
+            }
+            "MasterKeyChangeForce" => {
+                meta.master_key_change_force = value
+                    .parse()
+                    .map_err(|_| KdbxError::malformed("invalid MasterKeyChangeForce"))?;
+            }
+            "MasterKeyChangeForceOnce" => meta.master_key_change_force_once = value == "True",
+            "RecycleBinUUID" => meta.recycle_bin_uuid = KdbxUuid::from_base64(value)?,
+            "RecycleBinChanged" => meta.recycle_bin_changed = Some(parse_timestamp(value)?),
+            "EntryTemplatesGroup" => meta.templates_uuid = KdbxUuid::from_base64(value)?,
+            "EntryTemplatesGroupChanged" => meta.templates_changed = Some(parse_timestamp(value)?),
+            "LastSelectedGroup" => meta.selected_group_uuid = KdbxUuid::from_base64(value)?,
+            "LastTopVisibleGroup" => meta.top_visible_group_uuid = KdbxUuid::from_base64(value)?,
+            "MemoryProtection" => {
+                meta.memory_protection = true;
+                meta.protect_password =
+                    memory_protection_value(child_node, "ProtectPassword", None)?;
+                meta.protect_title = memory_protection_value(child_node, "ProtectTitle", None)?;
+                meta.protect_username = memory_protection_value(
+                    child_node,
+                    "ProtectUserName",
+                    Some("ProtectUsername"),
+                )?;
+                meta.protect_url = memory_protection_value(child_node, "ProtectURL", None)?;
+                meta.protect_notes = memory_protection_value(child_node, "ProtectNotes", None)?;
+            }
+            "HistoryMaxItems" => {
+                meta.history_max_items = Some(parse_history_limit(value, i64::from(i32::MAX))?);
+            }
+            "HistoryMaxSize" => {
+                meta.history_max_size = Some(parse_history_limit(value, i64::MAX)?);
+            }
+            "RecycleBinEnabled" => meta.recycle_bin_enabled = value == "True",
+            "CustomData" => meta.custom_data = parse_custom_data(child_node, true)?,
+            "CustomIcons" => {
+                for icon in children(child_node, "Icon") {
+                    meta.custom_icons
+                        .push(parse_custom_icon(icon, stream, limits)?);
+                }
+            }
+            "Binaries" => {
+                meta.legacy_binaries =
+                    parse_legacy_binaries(child_node, stream, database, legacy_references, limits)?;
+            }
+            _ => {}
+        }
+    }
+    if expected_header_hash.is_some() && !seen.contains("HeaderHash") {
         return Err(KdbxError::malformed(
             "KDBX 3 XML is missing the required HeaderHash",
         ));
-    }
-    if let Some(times) = child(node, "Times") {
-        meta.times = parse_times(times)?;
-    }
-    if let Some(value) = text(node, "SettingsChanged") {
-        meta.settings_changed = Some(parse_timestamp(value)?);
-    }
-    if let Some(value) = text(node, "DatabaseNameChanged") {
-        meta.database_name_changed = Some(parse_timestamp(value)?);
-    }
-    if let Some(value) = text(node, "DatabaseDescriptionChanged") {
-        meta.database_description_changed = Some(parse_timestamp(value)?);
-    }
-    if let Some(value) = text(node, "DefaultUserNameChanged") {
-        meta.default_username_changed = Some(parse_timestamp(value)?);
-    }
-    if let Some(value) = text(node, "MasterKeyChanged") {
-        meta.master_key_changed = Some(parse_timestamp(value)?);
-    }
-    if let Some(value) = text(node, "MaintenanceHistoryDays") {
-        meta.maintenance_history_days = value
-            .parse()
-            .map_err(|_| KdbxError::malformed("invalid MaintenanceHistoryDays"))?;
-    }
-    if let Some(value) = text(node, "Color") {
-        meta.color = KdbxColor::parse(value)?;
-    }
-    if let Some(value) = text(node, "MasterKeyChangeRec") {
-        meta.master_key_change_rec = value
-            .parse()
-            .map_err(|_| KdbxError::malformed("invalid MasterKeyChangeRec"))?;
-    }
-    if let Some(value) = text(node, "MasterKeyChangeForce") {
-        meta.master_key_change_force = value
-            .parse()
-            .map_err(|_| KdbxError::malformed("invalid MasterKeyChangeForce"))?;
-    }
-    if let Some(value) = text(node, "MasterKeyChangeForceOnce") {
-        meta.master_key_change_force_once = value == "True";
-    }
-    if let Some(value) = text(node, "RecycleBinUUID") {
-        meta.recycle_bin_uuid = KdbxUuid::from_base64(value)?;
-    }
-    if let Some(value) = text(node, "RecycleBinChanged") {
-        meta.recycle_bin_changed = Some(parse_timestamp(value)?);
-    }
-    if let Some(value) = text(node, "EntryTemplatesGroup") {
-        meta.templates_uuid = KdbxUuid::from_base64(value)?;
-    }
-    if let Some(value) = text(node, "EntryTemplatesGroupChanged") {
-        meta.templates_changed = Some(parse_timestamp(value)?);
-    }
-    if let Some(value) = text(node, "LastSelectedGroup") {
-        meta.selected_group_uuid = KdbxUuid::from_base64(value)?;
-    }
-    if let Some(value) = text(node, "LastTopVisibleGroup") {
-        meta.top_visible_group_uuid = KdbxUuid::from_base64(value)?;
-    }
-    if let Some(memory) = child(node, "MemoryProtection") {
-        meta.memory_protection = true;
-        meta.protect_password = memory_protection_value(memory, "ProtectPassword", None)?;
-        meta.protect_title = memory_protection_value(memory, "ProtectTitle", None)?;
-        meta.protect_username =
-            memory_protection_value(memory, "ProtectUserName", Some("ProtectUsername"))?;
-        meta.protect_url = memory_protection_value(memory, "ProtectURL", None)?;
-        meta.protect_notes = memory_protection_value(memory, "ProtectNotes", None)?;
-    }
-    if let Some(value) = text(node, "HistoryMaxItems") {
-        meta.history_max_items = Some(parse_history_limit(value, i64::from(i32::MAX))?);
-    }
-    if let Some(value) = text(node, "HistoryMaxSize") {
-        meta.history_max_size = Some(parse_history_limit(value, i64::MAX)?);
-    }
-    if let Some(value) = text(node, "RecycleBinEnabled") {
-        meta.recycle_bin_enabled = value == "True";
-    }
-    if let Some(custom_data) = child(node, "CustomData") {
-        meta.custom_data = parse_custom_data(custom_data, true)?;
-    }
-    if let Some(icons) = child(node, "CustomIcons") {
-        for icon in children(icons, "Icon") {
-            meta.custom_icons
-                .push(parse_custom_icon(icon, stream, limits)?);
-        }
-    }
-    if let Some(binaries) = child(node, "Binaries") {
-        meta.legacy_binaries =
-            parse_legacy_binaries(binaries, stream, database, legacy_references, limits)?;
     }
     database.meta = meta;
     Ok(())
@@ -939,122 +924,124 @@ fn parse_entry(
         ],
     )?;
     let mut entry = Entry::new(text(node, "Name").unwrap_or("Entry"));
-    if let Some(value) = text(node, "UUID") {
-        entry.id = KdbxUuid::from_base64(value)?;
-    }
-    if let Some(value) = text(node, "OverrideURL") {
-        entry.override_url = value.into();
-    }
-    if let Some(value) = text(node, "IconID") {
-        entry.icon_id = value
-            .parse()
-            .map_err(|_| KdbxError::malformed("invalid entry IconID"))?;
-    }
-    if let Some(value) = text(node, "CustomIconUUID") {
-        entry.custom_icon_id = KdbxUuid::from_base64(value)?;
-    }
-    if let Some(value) = text(node, "ForegroundColor") {
-        entry.foreground_color = KdbxColor::parse(value)?;
-    }
-    if let Some(value) = text(node, "BackgroundColor") {
-        entry.background_color = KdbxColor::parse(value)?;
-    }
-    if let Some(value) = text(node, "QualityCheck") {
-        entry.quality_check = Some(value == "True");
-    }
-    if let Some(value) = text(node, "PreviousParentGroup") {
-        entry.previous_parent_group_id = KdbxUuid::from_base64(value)?;
-    }
-    if let Some(custom) = child(node, "CustomData") {
-        entry.custom_data = parse_custom_data(custom, false)?;
-    }
-    if let Some(value) = text(node, "Tags") {
-        entry.tags = value
-            .split(';')
-            .filter(|tag| !tag.is_empty())
-            .map(str::to_owned)
-            .collect();
-    }
-    if let Some(times) = child(node, "Times") {
-        entry.times = parse_times(times)?;
-    }
     let mut field_names = std::collections::BTreeSet::new();
-    for string_node in children(node, "String") {
-        let field = parse_field(string_node, stream)?;
-        if !field_names.insert(field.key.clone()) {
-            return Err(KdbxError::malformed("duplicate KeePass entry String field"));
-        }
-        match field.key.as_str() {
-            "Password" => entry.password = field.value.clone(),
-            "Title" | "UserName" | "URL" | "Notes" => {
-                if let Ok(value) = field.value.reveal_text() {
-                    let value = value.as_str().to_owned();
-                    match field.key.as_str() {
-                        "Title" => entry.title = value,
-                        "UserName" => entry.username = value,
-                        "URL" => entry.url = value,
-                        "Notes" => entry.notes = value,
-                        _ => unreachable!("matched standard text projection"),
+    let mut seen = std::collections::BTreeSet::new();
+    // KDBX 4 inner protected streams are consumed in strict document order, so
+    // String, Binary, and History children must be visited in exact XML order.
+    for child_node in &node.children {
+        match child_node.name.as_str() {
+            "String" => {
+                let field = parse_field(child_node, stream)?;
+                if !field_names.insert(field.key.clone()) {
+                    return Err(KdbxError::malformed("duplicate KeePass entry String field"));
+                }
+                match field.key.as_str() {
+                    "Password" => entry.password = field.value.clone(),
+                    "Title" | "UserName" | "URL" | "Notes" => {
+                        if let Ok(value) = field.value.reveal_text() {
+                            let value = value.as_str().to_owned();
+                            match field.key.as_str() {
+                                "Title" => entry.title = value,
+                                "UserName" => entry.username = value,
+                                "URL" => entry.url = value,
+                                "Notes" => entry.notes = value,
+                                _ => unreachable!("matched standard text projection"),
+                            }
+                        }
                     }
+                    _ => {}
+                }
+                entry.set_field(field);
+            }
+            "Binary" => {
+                let name = required_text(child_node, "Key")?;
+                let value = child(child_node, "Value")
+                    .ok_or_else(|| KdbxError::malformed("Binary is missing Value"))?;
+                let reference = if let Some(reference) = value.attrs.get("Ref") {
+                    let id = reference
+                        .parse::<u32>()
+                        .map_err(|_| KdbxError::malformed("invalid Binary Ref"))?;
+                    if legacy_binary_references {
+                        *legacy_references.get(&id).ok_or_else(|| {
+                            KdbxError::malformed("attachment references a missing legacy binary")
+                        })?
+                    } else {
+                        id as usize
+                    }
+                } else {
+                    let data = decode_xml_binary(value, stream, limits)?;
+                    add_binary(pool, data, xml_bool(value, "Protected")?, limits)?
+                };
+                entry.attachments.push(Attachment { name, reference });
+            }
+            other => {
+                if !seen.insert(other) {
+                    continue;
+                }
+                let value = child_node.text.as_str();
+                match other {
+                    "UUID" => entry.id = KdbxUuid::from_base64(value)?,
+                    "OverrideURL" => entry.override_url = value.into(),
+                    "IconID" => {
+                        entry.icon_id = value
+                            .parse()
+                            .map_err(|_| KdbxError::malformed("invalid entry IconID"))?;
+                    }
+                    "CustomIconUUID" => entry.custom_icon_id = KdbxUuid::from_base64(value)?,
+                    "ForegroundColor" => entry.foreground_color = KdbxColor::parse(value)?,
+                    "BackgroundColor" => entry.background_color = KdbxColor::parse(value)?,
+                    "QualityCheck" => entry.quality_check = Some(value == "True"),
+                    "PreviousParentGroup" => {
+                        entry.previous_parent_group_id = KdbxUuid::from_base64(value)?;
+                    }
+                    "CustomData" => entry.custom_data = parse_custom_data(child_node, false)?,
+                    "Tags" => {
+                        entry.tags = value
+                            .split(';')
+                            .filter(|tag| !tag.is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                    }
+                    "Times" => entry.times = parse_times(child_node)?,
+                    "AutoType" => {
+                        let associations = children(child_node, "Association")
+                            .map(|association| AutoTypeAssociation {
+                                window: text(association, "Window").unwrap_or_default().into(),
+                                keystrokes: text(association, "KeystrokeSequence")
+                                    .or_else(|| text(association, "Keystrokes"))
+                                    .unwrap_or_default()
+                                    .into(),
+                            })
+                            .collect();
+                        let obfuscated = if let Some(value) = text(child_node, "Obfuscated") {
+                            Some(value == "True" || value == "true" || value == "1")
+                        } else {
+                            text(child_node, "DataTransferObfuscation").map(|value| value != "0")
+                        };
+                        entry.auto_type = AutoType {
+                            enabled: text(child_node, "Enabled").map(|v| v == "True"),
+                            obfuscated,
+                            default_sequence: text(child_node, "DefaultSequence")
+                                .unwrap_or_default()
+                                .into(),
+                            associations,
+                        };
+                    }
+                    "History" => {
+                        for snapshot in children(child_node, "Entry") {
+                            entry.history.push(parse_entry(
+                                snapshot,
+                                stream,
+                                pool,
+                                legacy_references,
+                                legacy_binary_references,
+                                limits,
+                            )?);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
-        }
-        entry.set_field(field);
-    }
-    for binary_node in children(node, "Binary") {
-        let name = required_text(binary_node, "Key")?;
-        let value = child(binary_node, "Value")
-            .ok_or_else(|| KdbxError::malformed("Binary is missing Value"))?;
-        let reference = if let Some(reference) = value.attrs.get("Ref") {
-            let id = reference
-                .parse::<u32>()
-                .map_err(|_| KdbxError::malformed("invalid Binary Ref"))?;
-            if legacy_binary_references {
-                *legacy_references.get(&id).ok_or_else(|| {
-                    KdbxError::malformed("attachment references a missing legacy binary")
-                })?
-            } else {
-                id as usize
-            }
-        } else {
-            let data = decode_xml_binary(value, stream, limits)?;
-            add_binary(pool, data, xml_bool(value, "Protected")?, limits)?
-        };
-        entry.attachments.push(Attachment { name, reference });
-    }
-    if let Some(auto) = child(node, "AutoType") {
-        let associations = children(auto, "Association")
-            .map(|association| AutoTypeAssociation {
-                window: text(association, "Window").unwrap_or_default().into(),
-                keystrokes: text(association, "KeystrokeSequence")
-                    .or_else(|| text(association, "Keystrokes"))
-                    .unwrap_or_default()
-                    .into(),
-            })
-            .collect();
-        let obfuscated = if let Some(value) = text(auto, "Obfuscated") {
-            Some(value == "True" || value == "true" || value == "1")
-        } else {
-            text(auto, "DataTransferObfuscation").map(|value| value != "0")
-        };
-        entry.auto_type = AutoType {
-            enabled: text(auto, "Enabled").map(|v| v == "True"),
-            obfuscated,
-            default_sequence: text(auto, "DefaultSequence").unwrap_or_default().into(),
-            associations,
-        };
-    }
-    if let Some(history) = child(node, "History") {
-        for snapshot in children(history, "Entry") {
-            entry.history.push(parse_entry(
-                snapshot,
-                stream,
-                pool,
-                legacy_references,
-                legacy_binary_references,
-                limits,
-            )?);
         }
     }
     Ok(entry)
@@ -1152,7 +1139,7 @@ pub(crate) fn write_inner_header(
     stream_id: u32,
     stream_key: &[u8],
     binaries: &[(Vec<u8>, bool)],
-    stream: &mut InnerCipher,
+    _stream: &mut InnerCipher,
 ) -> Vec<u8> {
     let mut output = Vec::new();
     write_field(&mut output, 1, &stream_id.to_le_bytes());
@@ -1161,9 +1148,6 @@ pub(crate) fn write_inner_header(
         let mut value = Vec::with_capacity(data.len() + 1);
         value.push(u8::from(*protected));
         value.extend_from_slice(data);
-        if *protected {
-            stream.transform(&mut value[1..]);
-        }
         write_field(&mut output, 3, &value);
     }
     write_field(&mut output, 0, &[]);

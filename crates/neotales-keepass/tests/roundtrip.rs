@@ -738,3 +738,47 @@ fn round_trips_protected_values_across_mixed_entry_and_group_layouts() {
         assert_eq!(field.as_str(), expected, "{path} custom field");
     }
 }
+
+#[test]
+fn kdbx4_load_preserves_write_options_and_recommended_uses_argon2id_gzip() {
+    let recommended = KdbxWriteOptions::recommended();
+    assert_eq!(recommended.kdf, KdbxKdf::Argon2id);
+    assert_eq!(recommended.compression, KdbxCompression::GZip);
+    assert_ne!(KdbxWriteOptions::default().kdf, KdbxKdf::Argon2id);
+
+    let mut database = KeePassDatabase::default();
+    let mut entry = Entry::new("preserved");
+    entry.password = ProtectedValue::from_text("secret-value");
+    database.root.add_entry(entry);
+
+    let options = KdbxWriteOptions {
+        cipher: KdbxOuterCipher::ChaCha20,
+        compression: KdbxCompression::GZip,
+        kdf: KdbxKdf::Argon2id,
+        argon2_memory_kib: 128,
+        argon2_time: 3,
+        argon2_lanes: 2,
+        ..KdbxWriteOptions::default()
+    };
+    let mut bytes = Vec::new();
+    KdbxFile::save(
+        &database,
+        &mut bytes,
+        &mut KdbxCredentials::password("pw").unwrap(),
+        options,
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+
+    let loaded =
+        KdbxFile::load_password(bytes.as_slice(), "pw", &KdbxReadLimits::default()).unwrap();
+    let preserved = loaded
+        .write_options
+        .expect("KDBX 4 load must capture write_options");
+    assert_eq!(preserved.cipher, KdbxOuterCipher::ChaCha20);
+    assert_eq!(preserved.compression, KdbxCompression::GZip);
+    assert_eq!(preserved.kdf, KdbxKdf::Argon2id);
+    assert_eq!(preserved.argon2_memory_kib, 128);
+    assert_eq!(preserved.argon2_time, 3);
+    assert_eq!(preserved.argon2_lanes, 2);
+}

@@ -23,6 +23,8 @@ pub enum OtpAlgorithm {
 /// Number of digits in an OTP code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OtpDigits {
+    /// Five characters (Steam Guard).
+    Five,
     /// Six digits.
     Six,
     /// Eight digits.
@@ -32,10 +34,21 @@ pub enum OtpDigits {
 impl OtpDigits {
     fn count(self) -> u32 {
         match self {
+            Self::Five => 5,
             Self::Six => 6,
             Self::Eight => 8,
         }
     }
+}
+
+/// OTP code formatting encoder.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OtpEncoder {
+    /// Standard numeric digits (RFC 4226 / RFC 6238).
+    #[default]
+    Standard,
+    /// Steam Guard 5-character alphanumeric alphabet.
+    Steam,
 }
 
 /// Zeroizing OTP secret bytes.
@@ -54,11 +67,11 @@ impl OtpDigits {
 pub struct OtpSecret(Vec<u8>);
 
 impl OtpSecret {
-    /// Decodes strict, unpadded Base32.
+    /// Decodes Base32, allowing standard trailing `=` padding and ASCII whitespace.
     ///
     /// # Errors
     ///
-    /// Returns malformed-input for invalid characters, padding, or non-zero
+    /// Returns malformed-input for invalid characters, invalid padding, or non-zero
     /// trailing bits.
     pub fn from_base32(value: &str) -> Result<Self, KdbxError> {
         Ok(Self(decode_base32(value)?))
@@ -179,6 +192,18 @@ impl Totp {
             parameters.digits,
         )
     }
+    /// Generates a Steam Guard 5-character TOTP code for a Unix timestamp.
+    #[must_use]
+    pub fn generate_steam(secret: &[u8], timestamp: u64) -> String {
+        let counter = timestamp / 30;
+        generate_with_encoder(
+            secret,
+            counter,
+            OtpAlgorithm::Sha1,
+            OtpDigits::Five,
+            OtpEncoder::Steam,
+        )
+    }
     /// Verifies a code in past/future windows.
     #[must_use]
     pub fn verify(
@@ -207,22 +232,44 @@ impl Totp {
 }
 
 fn generate(secret: &[u8], counter: u64, algorithm: OtpAlgorithm, digits: OtpDigits) -> String {
+    generate_with_encoder(secret, counter, algorithm, digits, OtpEncoder::Standard)
+}
+
+fn generate_with_encoder(
+    secret: &[u8],
+    counter: u64,
+    algorithm: OtpAlgorithm,
+    digits: OtpDigits,
+    encoder: OtpEncoder,
+) -> String {
+    const STEAM_ALPHABET: &[u8; 26] = b"23456789BCDFGHJKMNPQRTVWXY";
     let message = counter.to_be_bytes();
     let digest = match algorithm {
-        OtpAlgorithm::Sha1 => hmac_sha1(&secret, &message),
-        OtpAlgorithm::Sha256 => hmac_sha256(&secret, &message),
-        OtpAlgorithm::Sha512 => hmac_sha512(&secret, &message),
+        OtpAlgorithm::Sha1 => hmac_sha1(secret, &message),
+        OtpAlgorithm::Sha256 => hmac_sha256(secret, &message),
+        OtpAlgorithm::Sha512 => hmac_sha512(secret, &message),
     };
     let offset = usize::from(digest[digest.len() - 1] & 0x0f);
     let value = (u32::from(digest[offset]) & 0x7f) << 24
         | u32::from(digest[offset + 1]) << 16
         | u32::from(digest[offset + 2]) << 8
         | u32::from(digest[offset + 3]);
-    format!(
-        "{:0width$}",
-        value % 10_u32.pow(digits.count()),
-        width = digits.count() as usize
-    )
+    match encoder {
+        OtpEncoder::Standard => format!(
+            "{:0width$}",
+            value % 10_u32.pow(digits.count()),
+            width = digits.count() as usize
+        ),
+        OtpEncoder::Steam => {
+            let mut code = String::with_capacity(5);
+            let mut remaining = value;
+            for _ in 0..5 {
+                code.push(STEAM_ALPHABET[(remaining % 26) as usize] as char);
+                remaining /= 26;
+            }
+            code
+        }
+    }
 }
 fn hmac_sha1(secret: &[u8], message: &[u8]) -> Vec<u8> {
     let mut mac = hmac::Hmac::<Sha1>::new_from_slice(secret).expect("HMAC accepts a 32-byte key");
@@ -247,17 +294,30 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             .fold(0, |diff, (a, b)| diff | (a ^ b))
             == 0
 }
-fn decode_base32(value: &str) -> Result<Vec<u8>, KdbxError> {
-    if value.is_empty()
-        || value.contains('=')
-            && value.trim_end_matches('=').len() != value.len() - value.trim_end_matches('=').len()
-    {
+fn normalize_base32(value: &str) -> Result<Zeroizing<String>, KdbxError> {
+    let mut cleaned = Zeroizing::new(String::with_capacity(value.len()));
+    for byte in value.bytes() {
+        if !byte.is_ascii_whitespace() {
+            cleaned.push(byte as char);
+        }
+    }
+    let trimmed = cleaned.trim_end_matches('=');
+    let pad = cleaned.len() - trimmed.len();
+    if trimmed.is_empty() || trimmed.contains('=') {
         return Err(KdbxError::malformed("invalid OTP Base32"));
     }
+    if pad > 0 && ((trimmed.len() + pad) % 8 != 0 || !matches!(pad, 1 | 3 | 4 | 6)) {
+        return Err(KdbxError::malformed("invalid OTP Base32"));
+    }
+    Ok(Zeroizing::new(trimmed.to_owned()))
+}
+
+fn decode_base32(value: &str) -> Result<Vec<u8>, KdbxError> {
+    let trimmed = normalize_base32(value)?;
     let mut output = Vec::new();
     let mut buffer = 0u32;
     let mut bits = 0u8;
-    for character in value.bytes() {
+    for character in trimmed.bytes() {
         let digit = match character {
             b'A'..=b'Z' => character - b'A',
             b'a'..=b'z' => character - b'a',
@@ -280,6 +340,48 @@ fn decode_base32(value: &str) -> Result<Vec<u8>, KdbxError> {
     Ok(output)
 }
 
+/// Structured parameters for building an [`OtpUri`].
+///
+/// [`fmt::Debug`] is hand-written and redacts `secret`.
+#[derive(Clone)]
+pub struct OtpUriParams<'a> {
+    /// URI algorithm family (`Totp` or `Hotp`).
+    pub kind: OtpKind,
+    /// Account label.
+    pub account: &'a str,
+    /// Optional issuer label.
+    pub issuer: Option<&'a str>,
+    /// Base32-encoded shared secret.
+    pub secret: &'a str,
+    /// HMAC algorithm.
+    pub algorithm: OtpAlgorithm,
+    /// Code width.
+    pub digits: OtpDigits,
+    /// HOTP counter (required for `Hotp`).
+    pub counter: Option<u64>,
+    /// TOTP period in seconds (defaults to 30 for `Totp` when `None`).
+    pub period: Option<u64>,
+    /// Output encoder (`Standard` or `Steam`).
+    pub encoder: OtpEncoder,
+}
+
+impl fmt::Debug for OtpUriParams<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OtpUriParams")
+            .field("kind", &self.kind)
+            .field("account", &self.account)
+            .field("issuer", &self.issuer)
+            .field("secret", &"<redacted>")
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("counter", &self.counter)
+            .field("period", &self.period)
+            .field("encoder", &self.encoder)
+            .finish()
+    }
+}
+
 /// A parsed `otpauth://` URI.
 ///
 /// The encoded secret is zeroized when this value is dropped and is redacted
@@ -293,12 +395,16 @@ pub struct OtpUri {
     pub account: String,
     /// Optional issuer.
     pub issuer: Option<String>,
+    /// Optional icon image URL/URI.
+    pub image: Option<String>,
     /// Strict, unpadded Base32 secret. This owned buffer is zeroized on drop.
     pub secret: String,
     /// HMAC algorithm.
     pub algorithm: OtpAlgorithm,
     /// Code width.
     pub digits: OtpDigits,
+    /// Code formatting encoder.
+    pub encoder: OtpEncoder,
     /// HOTP counter.
     pub counter: Option<u64>,
     /// TOTP period.
@@ -336,13 +442,23 @@ impl OtpUri {
                 return Err(KdbxError::malformed("duplicate OTP URI parameter"));
             }
         }
-        let secret = Zeroizing::new(
+        let raw_secret = Zeroizing::new(
             values
                 .remove("secret")
                 .ok_or_else(|| KdbxError::malformed("OTP URI secret is required"))?,
         );
-        OtpSecret::from_base32(secret.as_str())?;
+        OtpSecret::from_base32(raw_secret.as_str())?;
+        let secret = normalize_base32(raw_secret.as_str())?;
         let issuer = values.remove("issuer");
+        let image = values.remove("image");
+        let encoder = match values.remove("encoder").as_deref() {
+            None | Some("default") | Some("standard") => OtpEncoder::Standard,
+            Some("steam") => OtpEncoder::Steam,
+            Some(_) => return Err(KdbxError::malformed("unsupported OTP encoder")),
+        };
+        if encoder == OtpEncoder::Steam && kind != OtpKind::Totp {
+            return Err(KdbxError::malformed("Steam encoder requires TOTP"));
+        }
         let counter = values
             .remove("counter")
             .map(|value| {
@@ -351,7 +467,7 @@ impl OtpUri {
                     .map_err(|_| KdbxError::malformed("invalid OTP counter"))
             })
             .transpose()?;
-        let period = values
+        let parsed_period = values
             .remove("period")
             .map(|value| {
                 value
@@ -365,17 +481,25 @@ impl OtpUri {
             Some("SHA512") => OtpAlgorithm::Sha512,
             Some(_) => return Err(KdbxError::malformed("unsupported OTP algorithm")),
         };
-        let digits = match values.remove("digits").as_deref() {
-            None | Some("6") => OtpDigits::Six,
-            Some("8") => OtpDigits::Eight,
-            Some(_) => return Err(KdbxError::malformed("unsupported OTP digits")),
+        let digits = match (encoder, values.remove("digits").as_deref()) {
+            (OtpEncoder::Steam, None | Some("5")) => OtpDigits::Five,
+            (OtpEncoder::Standard, None | Some("6")) => OtpDigits::Six,
+            (OtpEncoder::Standard, Some("8")) => OtpDigits::Eight,
+            _ => return Err(KdbxError::malformed("unsupported OTP digits")),
         };
         if kind == OtpKind::Hotp && counter.is_none() {
             return Err(KdbxError::malformed("HOTP URI counter is required"));
         }
-        if kind == OtpKind::Totp && period.is_none_or(|value| value == 0) {
-            return Err(KdbxError::malformed("TOTP URI period must be positive"));
-        }
+        let period = match kind {
+            OtpKind::Totp => {
+                let effective = parsed_period.unwrap_or(30);
+                if effective == 0 {
+                    return Err(KdbxError::malformed("TOTP URI period must be positive"));
+                }
+                Some(effective)
+            }
+            OtpKind::Hotp => parsed_period,
+        };
         if !values.is_empty() {
             return Err(KdbxError::malformed("unknown OTP URI parameter"));
         }
@@ -386,12 +510,133 @@ impl OtpUri {
                 .map(|(_, account)| account.to_owned())
                 .unwrap_or_default(),
             issuer,
+            image,
             secret: secret.as_str().to_owned(),
             algorithm,
             digits,
+            encoder,
             counter,
             period,
         })
+    }
+
+    /// Builds and validates an [`OtpUri`] from structured parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed-input if the secret, label, or OTP parameter combination
+    /// is invalid.
+    pub fn from_params(params: OtpUriParams<'_>) -> Result<Self, KdbxError> {
+        fn valid_label_part(value: &str) -> bool {
+            !value
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '?' | '&' | '#'))
+        }
+        if !valid_label_part(params.account) || params.account.contains('/') {
+            return Err(KdbxError::malformed("invalid OTP URI account label"));
+        }
+        if let Some(issuer) = params.issuer {
+            if !valid_label_part(issuer) {
+                return Err(KdbxError::malformed("invalid OTP URI issuer"));
+            }
+        }
+        OtpSecret::from_base32(params.secret)?;
+        let secret = normalize_base32(params.secret)?;
+        match params.kind {
+            OtpKind::Hotp => {
+                if params.encoder == OtpEncoder::Steam {
+                    return Err(KdbxError::malformed("Steam encoder requires TOTP"));
+                }
+                if params.counter.is_none() {
+                    return Err(KdbxError::malformed("HOTP URI counter is required"));
+                }
+                if params.digits == OtpDigits::Five {
+                    return Err(KdbxError::malformed("unsupported OTP digits"));
+                }
+                Ok(Self {
+                    kind: OtpKind::Hotp,
+                    account: params.account.to_owned(),
+                    issuer: params.issuer.map(str::to_owned),
+                    image: None,
+                    secret: secret.as_str().to_owned(),
+                    algorithm: params.algorithm,
+                    digits: params.digits,
+                    encoder: OtpEncoder::Standard,
+                    counter: params.counter,
+                    period: None,
+                })
+            }
+            OtpKind::Totp => {
+                let period = params.period.unwrap_or(30);
+                if period == 0 {
+                    return Err(KdbxError::malformed("TOTP URI period must be positive"));
+                }
+                let digits = match params.encoder {
+                    OtpEncoder::Steam => {
+                        if params.digits != OtpDigits::Five {
+                            return Err(KdbxError::malformed("unsupported OTP digits"));
+                        }
+                        OtpDigits::Five
+                    }
+                    OtpEncoder::Standard => {
+                        if params.digits == OtpDigits::Five {
+                            return Err(KdbxError::malformed("unsupported OTP digits"));
+                        }
+                        params.digits
+                    }
+                };
+                Ok(Self {
+                    kind: OtpKind::Totp,
+                    account: params.account.to_owned(),
+                    issuer: params.issuer.map(str::to_owned),
+                    image: None,
+                    secret: secret.as_str().to_owned(),
+                    algorithm: params.algorithm,
+                    digits,
+                    encoder: params.encoder,
+                    counter: None,
+                    period: Some(period),
+                })
+            }
+        }
+    }
+
+    /// Formats a validated `otpauth://` URI string inside a [`Zeroizing`] buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::from_params`].
+    pub fn format_uri(params: OtpUriParams<'_>) -> Result<Zeroizing<String>, KdbxError> {
+        let uri = Self::from_params(params)?;
+        Ok(Zeroizing::new(uri.to_string()))
+    }
+
+    /// Generates an OTP code for this URI (`timestamp` is used for TOTP; HOTP uses `self.counter`).
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed-input when the Base32 secret is invalid or HOTP lacks a counter.
+    pub fn generate_code(&self, timestamp: u64) -> Result<Zeroizing<String>, KdbxError> {
+        let secret = OtpSecret::from_base32(&self.secret)?;
+        let counter = match self.kind {
+            OtpKind::Totp => {
+                let period = self.period.unwrap_or(30);
+                if period == 0 {
+                    return Err(KdbxError::malformed("TOTP URI period must be positive"));
+                }
+                timestamp / period
+            }
+            OtpKind::Hotp => self
+                .counter
+                .ok_or_else(|| KdbxError::malformed("HOTP URI counter is required"))?,
+        };
+        Ok(Zeroizing::new(generate_with_encoder(
+            secret.expose(),
+            counter,
+            self.algorithm,
+            self.digits,
+            self.encoder,
+        )))
     }
 }
 
@@ -430,6 +675,76 @@ impl KeePassXcOtp {
         let value = field.value.reveal_text()?;
         OtpUri::parse(value.as_str())
     }
+    /// Reads an entry's OTP configuration, supporting both protected and unprotected
+    /// `"otp"` fields as well as KeePass 2.x `TimeOtp-*` fallback fields when `"otp"` is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when neither `"otp"` nor `TimeOtp-Secret-Base32` is present,
+    /// or when the OTP parameters are malformed.
+    pub fn read_entry_fallback(entry: &Entry) -> Result<OtpUri, KdbxError> {
+        if let Some(field) = entry.field("otp") {
+            let value = field.value.reveal_text()?;
+            return OtpUri::parse(value.as_str());
+        }
+        let secret_field = entry.field("TimeOtp-Secret-Base32").ok_or_else(|| {
+            KdbxError::new(
+                KdbxFailureKind::InvalidArgument,
+                "KeePassXC OTP field is absent",
+            )
+        })?;
+        let raw_secret = secret_field.value.reveal_text()?;
+        OtpSecret::from_base32(raw_secret.as_str())?;
+        let secret = normalize_base32(raw_secret.as_str())?;
+
+        let algorithm = if let Some(alg_field) = entry.field("TimeOtp-Algorithm") {
+            let alg_text = alg_field.value.reveal_text()?;
+            match alg_text.as_str().trim().to_ascii_uppercase().as_str() {
+                "HMAC-SHA-1" | "SHA1" | "SHA-1" => OtpAlgorithm::Sha1,
+                "HMAC-SHA-256" | "SHA256" | "SHA-256" => OtpAlgorithm::Sha256,
+                "HMAC-SHA-512" | "SHA512" | "SHA-512" => OtpAlgorithm::Sha512,
+                _ => return Err(KdbxError::malformed("unsupported OTP algorithm")),
+            }
+        } else {
+            OtpAlgorithm::Sha1
+        };
+        let digits = if let Some(len_field) = entry.field("TimeOtp-Length") {
+            let len_text = len_field.value.reveal_text()?;
+            match len_text.as_str().trim() {
+                "6" => OtpDigits::Six,
+                "8" => OtpDigits::Eight,
+                _ => return Err(KdbxError::malformed("unsupported OTP digits")),
+            }
+        } else {
+            OtpDigits::Six
+        };
+        let period = if let Some(period_field) = entry.field("TimeOtp-Period") {
+            let period_text = period_field.value.reveal_text()?;
+            let parsed: u64 = period_text
+                .as_str()
+                .trim()
+                .parse()
+                .map_err(|_| KdbxError::malformed("invalid OTP period"))?;
+            if parsed == 0 {
+                return Err(KdbxError::malformed("TOTP URI period must be positive"));
+            }
+            parsed
+        } else {
+            30
+        };
+        Ok(OtpUri {
+            kind: OtpKind::Totp,
+            account: entry.title.clone(),
+            issuer: None,
+            image: None,
+            secret: secret.as_str().to_owned(),
+            algorithm,
+            digits,
+            encoder: OtpEncoder::Standard,
+            counter: None,
+            period: Some(period),
+        })
+    }
     /// Writes a protected modern `otp` field.
     pub fn write(entry: &mut Entry, uri: &OtpUri) {
         entry.set_field(crate::model::Field {
@@ -453,9 +768,11 @@ impl fmt::Debug for OtpUri {
             .field("kind", &self.kind)
             .field("account", &self.account)
             .field("issuer", &self.issuer)
+            .field("image", &self.image)
             .field("secret", &"<redacted>")
             .field("algorithm", &self.algorithm)
             .field("digits", &self.digits)
+            .field("encoder", &self.encoder)
             .field("counter", &self.counter)
             .field("period", &self.period)
             .finish()
@@ -490,6 +807,12 @@ impl fmt::Display for OtpUri {
         )?;
         if let Some(issuer) = &self.issuer {
             write!(formatter, "&issuer={issuer}")?;
+        }
+        if let Some(image) = &self.image {
+            write!(formatter, "&image={image}")?;
+        }
+        if self.encoder == OtpEncoder::Steam {
+            write!(formatter, "&encoder=steam")?;
         }
         if let Some(counter) = self.counter {
             write!(formatter, "&counter={counter}")?;

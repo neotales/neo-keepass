@@ -1810,10 +1810,7 @@ fn every_truncation_of_an_otp_uri_is_a_typed_error() {
     assert_eq!(uri.issuer.as_deref(), Some("Example"));
     assert_eq!(uri.secret, OTP_BASE32);
     assert_eq!(uri.period, Some(30));
-    // The shortest accepted prefix: one byte short of the whole URI, because the
-    // period's last digit is not load-bearing. This is the same shape as the PEM
-    // minimum in the crypto area's sweep, which is one byte short because the
-    // trailing newline is optional.
+    // One byte short of the whole URI parses with `period = Some(3)`.
     let shorter = OtpUri::parse(&OTP_URI[..102]).expect("one byte short is still a TOTP URI");
     assert_eq!(shorter.period, Some(3));
     assert_eq!(shorter.secret, OTP_BASE32);
@@ -1821,10 +1818,18 @@ fn every_truncation_of_an_otp_uri_is_a_typed_error() {
     let outcomes = sweep(bytes, |prefix| {
         OtpUri::parse(std::str::from_utf8(prefix).expect("the fixture is ASCII"))
     });
+    // TOTP defaults `period = 30` when omitted, so prefixes with a complete
+    // valid Base32 secret and no incomplete `algorithm=` / `digits=` / `period=`
+    // parameter parse cleanly.
+    let mut expected_accepted = vec![41, 44];
+    expected_accepted.extend(52..78);
+    expected_accepted.extend(84..92);
+    expected_accepted.extend(93..101);
+    expected_accepted.extend([102, 103]);
     assert_eq!(
         accepted(&outcomes),
-        vec![102, 103],
-        "only a whole or a one-byte-short period parses"
+        expected_accepted,
+        "valid TOTP prefixes with defaulted or present period parse"
     );
     // The region table. Each row is a range of cut points and the check that
     // fires there; the ranges are the fixture's own parameter boundaries, which
@@ -1836,15 +1841,10 @@ fn every_truncation_of_an_otp_uri_is_a_typed_error() {
         (14..36, "OTP URI secret is required"),
         (36..37, "invalid OTP Base32"),
         (37..41, "OTP Base32 has non-zero trailing bits"),
-        (41..42, "TOTP URI period must be positive"),
         (42..44, "OTP Base32 has non-zero trailing bits"),
-        (44..45, "TOTP URI period must be positive"),
         (45..52, "OTP Base32 has non-zero trailing bits"),
-        (52..78, "TOTP URI period must be positive"),
         (78..84, "unsupported OTP algorithm"),
-        (84..92, "TOTP URI period must be positive"),
         (92..93, "unsupported OTP digits"),
-        (93..101, "TOTP URI period must be positive"),
         (101..102, "invalid OTP period"),
     ];
     let mut expected = vec![None; bytes.len() + 1];
@@ -1856,11 +1856,8 @@ fn every_truncation_of_an_otp_uri_is_a_typed_error() {
     assert_eq!(messages(&outcomes), expected, "the otpauth URI");
     assert_all_malformed(&outcomes, "otpauth URI");
 
-    // The two secret cuts that land on a whole number of Base32 characters,
-    // named rather than left inside a range, because they are the only two
-    // offsets in this sweep where the reported failure is *not* about the bytes
-    // that were cut: the secret is complete and valid, and the URI is still
-    // missing its period.
+    // The two secret cuts that land on a whole number of Base32 characters:
+    // the secret is complete and valid, and `period` defaults to 30.
     for length in [41, 44] {
         let taken = length - 36;
         assert_eq!(
@@ -1872,15 +1869,12 @@ fn every_truncation_of_an_otp_uri_is_a_typed_error() {
         );
         assert_eq!(
             outcomes[length],
-            Outcome::of(
-                KdbxFailureKind::Malformed,
-                "TOTP URI period must be positive"
-            ),
-            "a valid secret and no period, at length {length}"
+            Outcome::Accepted,
+            "a valid secret with defaulted period, at length {length}"
         );
     }
     // The controls, which no cut produces: a duplicate parameter, an unknown
-    // one, and a HOTP URI with no counter.
+    // one, a zero TOTP period, and a HOTP URI with no counter.
     for (uri, message) in [
         (
             "otpauth://totp/a?secret=JBSWY3DPEHPK3PXP&period=30&period=60",
@@ -1889,6 +1883,10 @@ fn every_truncation_of_an_otp_uri_is_a_typed_error() {
         (
             "otpauth://totp/a?secret=JBSWY3DPEHPK3PXP&period=30&extra=1",
             "unknown OTP URI parameter",
+        ),
+        (
+            "otpauth://totp/a?secret=JBSWY3DPEHPK3PXP&period=0",
+            "TOTP URI period must be positive",
         ),
         (
             "otpauth://hotp/a?secret=JBSWY3DPEHPK3PXP",
@@ -2015,14 +2013,26 @@ fn every_truncation_of_a_protected_value_encoding_is_a_typed_error() {
             &format!("Base32 length {length}"),
         );
     }
-    // The decoder's own two checks, named, because no cut produces either: a
-    // padded secret is refused rather than trimmed, and a character outside the
-    // alphabet is refused rather than skipped.
+    // The decoder's own checks, named, because no cut produces either: invalid
+    // padding is refused, non-zero trailing bits under valid padding are refused,
+    // and a character outside the alphabet is refused rather than skipped.
+    assert_failure(
+        OtpSecret::from_base32("JBSW=3DPEHPK3PXP"),
+        KdbxFailureKind::Malformed,
+        "invalid OTP Base32",
+        "an interior-padded secret",
+    );
+    assert_failure(
+        OtpSecret::from_base32("JBSWY3DPEHPK3P=="),
+        KdbxFailureKind::Malformed,
+        "invalid OTP Base32",
+        "an invalidly padded secret",
+    );
     assert_failure(
         OtpSecret::from_base32("JBSWY3DPEHPK3PX="),
         KdbxFailureKind::Malformed,
-        "invalid OTP Base32",
-        "a padded secret",
+        "OTP Base32 has non-zero trailing bits",
+        "a padded secret with non-zero trailing bits",
     );
     assert_failure(
         OtpSecret::from_base32("JBSWY3DPEHPK3PX1"),

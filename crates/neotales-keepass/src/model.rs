@@ -3,6 +3,7 @@ use std::fmt;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::file::KdbxWriteOptions;
 use crate::primitives::{KdbxColor, KdbxTimestamp, KdbxUuid};
 
 /// Errors returned by an in-memory protection provider.
@@ -1194,6 +1195,8 @@ pub struct KeePassDatabase {
     pub typed_public_custom_data: VariantDictionary,
     /// Whether the loaded document can be saved without silent data loss.
     pub can_save_losslessly: bool,
+    /// Writer options captured when loading a KDBX 4 container, if any.
+    pub write_options: Option<KdbxWriteOptions>,
 }
 
 impl Default for KeePassDatabase {
@@ -1206,6 +1209,7 @@ impl Default for KeePassDatabase {
             public_custom_data: CustomData::default(),
             typed_public_custom_data: VariantDictionary::default(),
             can_save_losslessly: true,
+            write_options: None,
         }
     }
 }

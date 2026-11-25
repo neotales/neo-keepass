@@ -987,6 +987,7 @@ fn database_from_wire(
         public_custom_data: custom_data_from_wire(wire.public_custom_data)?,
         typed_public_custom_data: dictionary_from_wire(wire.typed_public_custom_data, budget)?,
         can_save_losslessly: true,
+        write_options: None,
     };
     for binary in wire.binary_pool {
         budget.binary(binary.data.decoded_len_hint()?, VAULT_LIMITS)?;
