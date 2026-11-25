@@ -2153,7 +2153,7 @@ impl VaultService {
         path: &str,
     ) -> Result<ResolvedEntry, ServiceError> {
         if path.is_empty()
-            || path.chars().any(char::is_control)
+            || !crate::template::is_safe_display_text(path)
             || path.starts_with('/')
             || path
                 .split('/')
@@ -2238,7 +2238,7 @@ impl VaultService {
         path: &str,
     ) -> Result<ResolvedEntry, SelectorError> {
         if path.is_empty()
-            || path.chars().any(char::is_control)
+            || !crate::template::is_safe_display_text(path)
             || path.starts_with('/')
             || path
                 .split('/')
@@ -3507,7 +3507,7 @@ fn split_entry_path(path: &str) -> Result<(Vec<&str>, &str), ServiceError> {
     if path.is_empty()
         || path.len() > MAX_HIT_BYTES
         || path.starts_with('/')
-        || path.chars().any(char::is_control)
+        || !crate::template::is_safe_display_text(path)
         || path
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
@@ -5181,10 +5181,7 @@ fn contains_lowercase(candidate: &str, needle: &[char], failure: &[usize]) -> bo
 }
 
 fn safe_metadata(value: &str) -> bool {
-    !value.chars().any(|character| {
-        let code = character as u32;
-        code <= 0x1f || (0x7f..=0x9f).contains(&code)
-    })
+    crate::template::is_safe_display_text(value)
 }
 
 #[cfg(all(test, unix))]
@@ -6762,6 +6759,16 @@ mod tests {
             assert!(
                 !safe_metadata(&format!("group{control}name")),
                 "U+{code:04X} must make group metadata unsafe",
+            );
+        }
+        for bidi in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}', '\u{202A}', '\u{202E}',
+            '\u{2066}', '\u{2069}',
+        ] {
+            assert!(
+                !safe_metadata(&format!("group{bidi}name")),
+                "U+{:04X} must make group metadata unsafe",
+                bidi as u32
             );
         }
         assert!(safe_metadata("ordinary group name"));

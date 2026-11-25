@@ -1802,14 +1802,11 @@ fn human_format_works_across_all_six_metadata_routes_without_leaking_secrets() {
 #[test]
 fn human_format_sanitizes_bidi_and_truncates_wide_unicode_metadata() {
     let mut database = KeePassDatabase::default();
-    let long_title = format!(
-        "prefix\u{202E}SPOOF\u{2066}{}",
-        "日本語の長いタイトル".repeat(12)
-    );
+    let long_title = format!("prefix_WIDE_{}", "日本語の長いタイトル".repeat(12));
     let mut entry = Entry::new(&long_title);
     entry.password = ProtectedValue::from_text("secret-value-never-shown");
-    entry.tags = vec!["tag-\u{202E}bidi".to_owned(), "second".to_owned()];
-    let long_field = format!("Custom\u{202E}Field_{}", "幅広文字".repeat(25));
+    entry.tags = vec!["tag-wide".to_owned(), "second".to_owned()];
+    let long_field = format!("CustomField_{}", "幅広文字".repeat(25));
     entry.set_field(Field {
         key: long_field.clone(),
         value: ProtectedValue::from_text("custom-secret-never-shown"),
@@ -1817,12 +1814,17 @@ fn human_format_sanitizes_bidi_and_truncates_wide_unicode_metadata() {
         protect_in_memory: true,
     });
     let reference = database.binary_pool.add(b"attachment-bytes".to_vec(), true);
-    let long_attachment = format!("attach\u{202E}_{}.bin", "あいうえお".repeat(20));
+    let long_attachment = format!("attach_{}.bin", "あいうえお".repeat(20));
     entry.attachments.push(Attachment {
         name: long_attachment,
         reference,
     });
     database.add_entry(entry);
+
+    let mut bidi_entry = Entry::new("Bidi\u{202E}Entry\u{2066}");
+    bidi_entry.password = ProtectedValue::from_text("bidi-secret-never-shown");
+    bidi_entry.tags = vec!["tag-\u{202E}bidi".to_owned()];
+    database.add_entry(bidi_entry);
 
     let dir = tempfile::tempdir().unwrap();
     let vault = dir.path().join("unicode-human.kdbx");
@@ -1853,8 +1855,6 @@ fn human_format_sanitizes_bidi_and_truncates_wide_unicode_metadata() {
     };
 
     for args in [
-        vec!["ls", "--format", "human"],
-        vec!["search", "SPOOF", "--format", "human"],
         vec!["show", &long_title, "--format", "human"],
         vec!["files", "ls", &long_title, "--format", "human"],
         vec!["field", "ls", &long_title, "--format", "human"],
@@ -1863,22 +1863,24 @@ fn human_format_sanitizes_bidi_and_truncates_wide_unicode_metadata() {
         let text = String::from_utf8(success(&output).to_vec()).unwrap();
         assert!(!text.contains("secret-value-never-shown"), "{args:?}");
         assert!(!text.contains("custom-secret-never-shown"), "{args:?}");
-        for forbidden in ['\u{202E}', '\u{2066}', '\u{200E}', '\u{001B}', '\u{009B}'] {
-            assert!(
-                !text.contains(forbidden),
-                "raw unsafe char U+{:04X} reached stdout in {args:?}: {text:?}",
-                u32::from(forbidden)
-            );
-        }
         assert!(
             text.contains('…'),
             "expected truncation marker in {args:?}: {text}"
         );
-        assert!(
-            text.contains("\\u{202e}"),
-            "expected escaped BiDi marker in {args:?}: {text}"
-        );
     }
+
+    // `ls --format human` truncates wide Unicode and withholds the BiDi entry at the service boundary.
+    let ls_human = run_vault(&["ls", "--format", "human"]);
+    assert!(ls_human.status.success());
+    let ls_text = String::from_utf8(ls_human.stdout).unwrap();
+    assert!(ls_text.contains('…'));
+    assert!(!ls_text.contains('\u{202E}'));
+    assert!(!ls_text.contains('\u{2066}'));
+    assert!(String::from_utf8_lossy(&ls_human.stderr).contains("withheld"));
+
+    let search_human = run_vault(&["search", "prefix_WIDE_", "--format", "human"]);
+    let search_text = String::from_utf8(success(&search_human).to_vec()).unwrap();
+    assert!(search_text.contains('…'));
 }
 
 #[test]
@@ -2172,6 +2174,20 @@ fn bidi_and_line_separators_are_withheld_from_ls_and_group_ls_metadata() {
     database.root.groups.push(good_group);
     database.root.groups.push(bad_group);
 
+    let mut bidi_children = Entry::new("BidiChildren");
+    bidi_children.set_field(Field {
+        key: "Custom\u{202e}Field".to_owned(),
+        value: ProtectedValue::from_text("secret"),
+        protected: true,
+        protect_in_memory: true,
+    });
+    let att_ref = database.binary_pool.add(b"bytes".to_vec(), true);
+    bidi_children.attachments.push(Attachment {
+        name: "attach\u{2028}.bin".to_owned(),
+        reference: att_ref,
+    });
+    database.add_entry(bidi_children);
+
     let dir = tempfile::tempdir().unwrap();
     let vault = dir.path().join("bidi.kdbx");
     KdbxFile::save(
@@ -2231,4 +2247,32 @@ fn bidi_and_line_separators_are_withheld_from_ls_and_group_ls_metadata() {
     let group_stdout = String::from_utf8_lossy(&group_out.stdout);
     assert!(group_stdout.contains("SafeGroup"));
     assert!(!group_stdout.contains('\u{2066}'));
+
+    // Piped JSON on `show`, `field ls`, and `files ls` / `attachment ls` rejects BiDi / line-separator metadata at the service boundary.
+    for args in [
+        vec!["show", "Hostile\u{202e}Entry", "--format", "json"],
+        vec!["show", "BidiChildren", "--format", "json"],
+        vec!["field", "ls", "BidiChildren", "--format", "json"],
+        vec!["files", "ls", "BidiChildren", "--format", "json"],
+        vec!["attachment", "ls", "BidiChildren", "--format", "json"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .args(["--vault", vault.to_str().unwrap()])
+            .args(&args)
+            .args(["--password-env", "NKEEPASS_TEST_PASSWORD"])
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?} should fail closed");
+        assert!(out.stdout.is_empty(), "{args:?} emitted stdout");
+        let combined = [out.stdout, out.stderr].concat();
+        let combined_str = String::from_utf8_lossy(&combined);
+        assert!(!combined_str.contains('\u{202e}'));
+        assert!(!combined_str.contains('\u{2028}'));
+        assert!(!combined_str.contains('\u{2066}'));
+    }
 }

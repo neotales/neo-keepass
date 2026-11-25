@@ -1986,7 +1986,7 @@ fn init_target_path(target: &str) -> Result<PathBuf> {
 
 fn entry_path(target: &str) -> Result<()> {
     if target.is_empty()
-        || target.chars().any(char::is_control)
+        || !nkeepass::template::is_safe_display_text(target)
         || target
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
@@ -5486,7 +5486,10 @@ fn validate_regular_options(action: &str, opts: &Options<'_>) -> Result<()> {
                 .field
                 .or(opts.name)
                 .ok_or_else(|| err("attachment name required"))?;
-            if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) {
+            if name.is_empty()
+                || name.contains('/')
+                || !nkeepass::template::is_safe_display_text(name)
+            {
                 return Err(err("invalid attachment name"));
             }
         }
@@ -6283,7 +6286,7 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             let (key, value) = specification
                 .split_once('=')
                 .ok_or_else(|| err("--field requires NAME=VALUE"))?;
-            if key.is_empty() || key.chars().any(char::is_control) {
+            if key.is_empty() || !nkeepass::template::is_safe_display_text(key) {
                 return Err(err("invalid field name"));
             }
             updates.push(FieldUpdate {
@@ -6344,7 +6347,7 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             if binary_name.is_empty()
                 || file_path.is_empty()
                 || binary_name.contains('/')
-                || binary_name.chars().any(char::is_control)
+                || !nkeepass::template::is_safe_display_text(binary_name)
             {
                 return Err(err("invalid --bin NAME=FILE_PATH"));
             }
@@ -6578,7 +6581,9 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
             .or(opts.name)
             .ok_or_else(|| err("attachment name required"))?;
         if action == "attachment-add"
-            && (name.is_empty() || name.contains('/') || name.chars().any(char::is_control))
+            && (name.is_empty()
+                || name.contains('/')
+                || !nkeepass::template::is_safe_display_text(name))
         {
             return Err(err("invalid attachment name"));
         }
@@ -10710,10 +10715,9 @@ fn run(args: &[String], program: &str) -> Result<()> {
                     }
                     Kind::Entry => {
                         entry_path(target)?;
-                        if field
-                            .as_ref()
-                            .is_some_and(|f| f.is_empty() || f.chars().any(char::is_control))
-                        {
+                        if field.as_ref().is_some_and(|f| {
+                            f.is_empty() || !nkeepass::template::is_safe_display_text(f)
+                        }) {
                             return Err(err("invalid field name"));
                         }
                     }
@@ -13895,6 +13899,10 @@ mod tests {
             assert!(validate_tty_raw_bytes(sample.as_bytes()).is_err());
             assert!(validate_formatted_controls(&sample).is_err());
             assert_eq!(sanitize_terminal_text(&sample), "text\u{fffd}more");
+            assert_eq!(
+                sanitize_human_text(&sample),
+                format!("text{}more", bidi.escape_default())
+            );
         }
         assert!(safe_metadata("ordinary group name"));
     }
