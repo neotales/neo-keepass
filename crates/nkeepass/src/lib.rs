@@ -6,6 +6,7 @@ pub mod env_file;
 pub mod fs_safe;
 pub mod glob;
 pub mod hook;
+pub mod icons;
 #[allow(dead_code, reason = "shared interchange model boundary")]
 pub(crate) mod interchange;
 pub mod manifest;

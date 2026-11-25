@@ -1,0 +1,494 @@
+//! Integration coverage for the `KeePass` 2.x standard icon catalog, default
+//! entry/group icons, and `VaultService` icon read/write/custom-icon APIs.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration test fixture setup and assertions"
+)]
+
+use std::collections::HashSet;
+
+use neotales_keepass::{
+    CustomIcon, Entry, Group, KdbxCredentials, KdbxFile, KdbxKdf, KdbxReadLimits, KdbxUuid,
+    KdbxWriteOptions, KeePassDatabase,
+};
+use nkeepass::icons::{
+    DEFAULT_ENTRY_ICON_ID, DEFAULT_GROUP_ICON_ID, MAX_CUSTOM_ICON_BYTES, MAX_STANDARD_ICON_ID,
+    STANDARD_ICON_COUNT, is_valid_standard_icon_id, lookup_standard_icon, standard_icon,
+    standard_icons,
+};
+use nkeepass::{ServiceError, SessionId, VaultService};
+use tempfile::TempDir;
+use unicode_width::UnicodeWidthStr;
+
+fn fast_write_options() -> KdbxWriteOptions {
+    KdbxWriteOptions {
+        kdf: KdbxKdf::Argon2id,
+        argon2_memory_kib: 1024,
+        argon2_time: 1,
+        argon2_lanes: 1,
+        ..KdbxWriteOptions::default()
+    }
+}
+
+fn credentials() -> KdbxCredentials {
+    KdbxCredentials::password("icons-test-master-password").unwrap()
+}
+
+fn create_and_open_vault() -> (TempDir, std::path::PathBuf, VaultService, SessionId) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vault.kdbx");
+    let mut service = VaultService::default();
+    service
+        .create(&path, &mut credentials(), fast_write_options(), None)
+        .unwrap();
+    let session = service
+        .open(&path, &mut credentials(), &KdbxReadLimits::default())
+        .unwrap();
+    (dir, path, service, session)
+}
+
+fn reopen_vault(path: &std::path::Path) -> (VaultService, SessionId) {
+    let mut service = VaultService::default();
+    let session = service
+        .open(path, &mut credentials(), &KdbxReadLimits::default())
+        .unwrap();
+    (service, session)
+}
+
+fn is_forbidden_bidi_or_format(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x061C
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2066..=0x2069
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+    )
+}
+
+fn is_emoji_presentation_bmp(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x231A..=0x231B
+            | 0x23E9..=0x23EC
+            | 0x23F0
+            | 0x23F3
+            | 0x25FD..=0x25FE
+            | 0x2614..=0x2615
+            | 0x2648..=0x2653
+            | 0x267F
+            | 0x2693
+            | 0x26A1
+            | 0x26AA..=0x26AB
+            | 0x26BD..=0x26BE
+            | 0x26C4..=0x26C5
+            | 0x26CE
+            | 0x26D4
+            | 0x26EA
+            | 0x26F2..=0x26F3
+            | 0x26F5
+            | 0x26FA
+            | 0x26FD
+            | 0x2705
+            | 0x270A..=0x270B
+            | 0x2728
+            | 0x274C
+            | 0x274E
+            | 0x2753..=0x2755
+            | 0x2757
+            | 0x2795..=0x2797
+            | 0x27B0
+            | 0x27BF
+            | 0x2B1B..=0x2B1C
+            | 0x2B50
+            | 0x2B55
+    )
+}
+
+#[test]
+fn standard_icon_catalog_is_complete_and_tui_safe() {
+    let icons = standard_icons();
+    assert_eq!(icons.len(), STANDARD_ICON_COUNT);
+    assert_eq!(STANDARD_ICON_COUNT, 69);
+    assert_eq!(MAX_STANDARD_ICON_ID, 68);
+    assert_eq!(DEFAULT_ENTRY_ICON_ID, 0);
+    assert_eq!(DEFAULT_GROUP_ICON_ID, 48);
+
+    let mut seen_names = HashSet::new();
+    for (index, icon) in icons.iter().enumerate() {
+        let expected_id = u32::try_from(index).unwrap();
+        assert_eq!(icon.id, expected_id);
+        assert!(!icon.name.is_empty(), "icon {expected_id} has empty name");
+        assert!(
+            seen_names.insert(icon.name),
+            "duplicate icon name: {}",
+            icon.name
+        );
+
+        let glyph_chars: Vec<char> = icon.glyph.chars().collect();
+        assert_eq!(
+            glyph_chars.len(),
+            1,
+            "icon {} ({}) glyph must be 1 char",
+            icon.id,
+            icon.name
+        );
+        let ch = glyph_chars[0];
+        assert!(
+            (ch as u32) <= 0xFFFF,
+            "icon {} ({}) glyph must be BMP",
+            icon.id,
+            icon.name
+        );
+        assert!(
+            !ch.is_control(),
+            "icon {} ({}) glyph must not be control",
+            icon.id,
+            icon.name
+        );
+        assert!(
+            !is_forbidden_bidi_or_format(ch),
+            "icon {} ({}) glyph must not be BiDi/format/variation selector",
+            icon.id,
+            icon.name
+        );
+        assert!(
+            !is_emoji_presentation_bmp(ch),
+            "icon {} ({}) glyph must not use Emoji_Presentation",
+            icon.id,
+            icon.name
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(icon.glyph),
+            1,
+            "icon {} ({}) glyph {:?} must have display width 1",
+            icon.id,
+            icon.name,
+            icon.glyph
+        );
+
+        let ascii_chars: Vec<char> = icon.ascii.chars().collect();
+        assert_eq!(
+            ascii_chars.len(),
+            1,
+            "icon {} ({}) ascii must be 1 char",
+            icon.id,
+            icon.name
+        );
+        assert!(
+            ascii_chars[0].is_ascii_graphic(),
+            "icon {} ({}) ascii {:?} must be printable ASCII",
+            icon.id,
+            icon.name,
+            icon.ascii
+        );
+
+        assert_eq!(lookup_standard_icon(expected_id), Some(icon));
+        assert_eq!(standard_icon(expected_id), icon);
+        assert!(is_valid_standard_icon_id(expected_id));
+    }
+
+    assert_eq!(lookup_standard_icon(0).unwrap().name, "Key");
+    assert_eq!(lookup_standard_icon(48).unwrap().name, "Folder");
+    assert_eq!(lookup_standard_icon(68).unwrap().name, "BlackBerry");
+    assert_eq!(lookup_standard_icon(69), None);
+    assert_eq!(lookup_standard_icon(999), None);
+    assert!(!is_valid_standard_icon_id(69));
+    assert!(!is_valid_standard_icon_id(u32::MAX));
+
+    assert_eq!(standard_icon(999), &icons[0]);
+    assert_eq!(standard_icon(u32::MAX).id, 0);
+}
+
+#[test]
+fn model_entry_and_group_default_icons() {
+    let entry = Entry::new("example");
+    assert_eq!(entry.icon_id, DEFAULT_ENTRY_ICON_ID);
+    assert_eq!(entry.icon_id, 0);
+
+    let group = Group::new("folder");
+    assert_eq!(group.icon_id, DEFAULT_GROUP_ICON_ID);
+    assert_eq!(group.icon_id, 48);
+}
+
+#[test]
+fn projections_and_set_icon_apis_work_and_persist() {
+    let (_dir, path, mut service, session) = create_and_open_vault();
+
+    let (root_id, root_custom) = service.root_icon().unwrap();
+    assert_eq!(root_id, DEFAULT_GROUP_ICON_ID);
+    assert_eq!(root_custom, None);
+
+    let root = service.root_group(session).unwrap();
+    service.add_group(&root, "Work").unwrap();
+    let root = service.root_group(session).unwrap();
+    let entry_ref = service.create_entry_in_group(&root, "Mail").unwrap();
+
+    // Check default icon_id on newly created entry via SelectedEntry, tree_page, and search_page.
+    let selected = service.selected_entry(&entry_ref).unwrap();
+    assert_eq!(selected.icon_id(), DEFAULT_ENTRY_ICON_ID);
+    assert_eq!(selected.custom_icon_id(), None);
+
+    let root = service.root_group(session).unwrap();
+    let tree = service.tree_page(&root, None).unwrap();
+    assert_eq!(tree.groups.len(), 1);
+    assert_eq!(tree.groups[0].icon_id(), DEFAULT_GROUP_ICON_ID);
+    assert_eq!(tree.groups[0].custom_icon_id(), None);
+    assert_eq!(tree.entries.len(), 1);
+    assert_eq!(tree.entries[0].icon_id(), DEFAULT_ENTRY_ICON_ID);
+    assert_eq!(tree.entries[0].custom_icon_id(), None);
+
+    let search = service.search_page(session, "Mail", None).unwrap();
+    assert_eq!(search.hits.len(), 1);
+    assert_eq!(search.hits[0].icon_id(), DEFAULT_ENTRY_ICON_ID);
+    assert_eq!(search.hits[0].custom_icon_id(), None);
+
+    // Invalid icon IDs fail with InvalidInput without mutating or invalidating handles.
+    assert_eq!(
+        service.set_entry_icon(&entry_ref, 69),
+        Err(ServiceError::InvalidInput)
+    );
+    assert_eq!(
+        service.set_entry_icon(&entry_ref, u32::MAX),
+        Err(ServiceError::InvalidInput)
+    );
+    let group_ref = tree.groups[0].reference();
+    assert_eq!(
+        service.set_group_icon(&group_ref, 69),
+        Err(ServiceError::InvalidInput)
+    );
+    assert_eq!(
+        service.set_group_icon(&group_ref, u32::MAX),
+        Err(ServiceError::InvalidInput)
+    );
+
+    // Valid icon IDs succeed and invalidate prior handles.
+    for valid_id in [0, 19, 48, 68] {
+        let current_entry = service.resolve_entry(session, "Mail").unwrap().reference();
+        service.set_entry_icon(&current_entry, valid_id).unwrap();
+        assert_eq!(
+            service.set_entry_icon(&current_entry, valid_id),
+            Err(ServiceError::Stale)
+        );
+        let refreshed_entry = service.resolve_entry(session, "Mail").unwrap().reference();
+        let selected = service.selected_entry(&refreshed_entry).unwrap();
+        assert_eq!(selected.icon_id(), valid_id);
+        assert_eq!(selected.custom_icon_id(), None);
+    }
+
+    // Set entry to 19 (Email) and group to 4 (Marked Directory).
+    let current_entry = service.resolve_entry(session, "Mail").unwrap().reference();
+    service.set_entry_icon(&current_entry, 19).unwrap();
+
+    let root = service.root_group(session).unwrap();
+    let tree = service.tree_page(&root, None).unwrap();
+    let work_ref = tree.groups[0].reference();
+    service.set_group_icon(&work_ref, 4).unwrap();
+    assert_eq!(
+        service.set_group_icon(&work_ref, 4),
+        Err(ServiceError::Stale)
+    );
+
+    service.save(&path, &mut credentials()).unwrap();
+
+    let (mut reopened, reopened_session) = reopen_vault(&path);
+    let reopened_entry = reopened
+        .resolve_entry(reopened_session, "Mail")
+        .unwrap()
+        .reference();
+    let reopened_selected = reopened.selected_entry(&reopened_entry).unwrap();
+    assert_eq!(reopened_selected.icon_id(), 19);
+    assert_eq!(reopened_selected.custom_icon_id(), None);
+
+    let reopened_root = reopened.root_group(reopened_session).unwrap();
+    let reopened_tree = reopened.tree_page(&reopened_root, None).unwrap();
+    assert_eq!(reopened_tree.groups[0].icon_id(), 4);
+    assert_eq!(reopened_tree.groups[0].custom_icon_id(), None);
+    assert_eq!(reopened_tree.entries[0].icon_id(), 19);
+    assert_eq!(reopened_tree.entries[0].custom_icon_id(), None);
+
+    let reopened_search = reopened
+        .search_page(reopened_session, "Mail", None)
+        .unwrap();
+    assert_eq!(reopened_search.hits[0].icon_id(), 19);
+    assert_eq!(reopened_search.hits[0].custom_icon_id(), None);
+
+    // Locked service rejects icon reads/writes.
+    reopened.lock(reopened_session).unwrap();
+    assert_eq!(reopened.root_icon(), Err(ServiceError::Locked));
+    assert_eq!(
+        reopened.custom_icon_bytes(KdbxUuid::from_bytes([0x11; 16])),
+        Err(ServiceError::Locked)
+    );
+    assert_eq!(
+        reopened.set_entry_icon(&reopened_entry, 0),
+        Err(ServiceError::Locked)
+    );
+    assert_eq!(
+        reopened.set_group_icon(&reopened_tree.groups[0].reference(), 48),
+        Err(ServiceError::Locked)
+    );
+}
+
+struct CustomIconFixture {
+    dir: TempDir,
+    path: std::path::PathBuf,
+    small_id: KdbxUuid,
+    exact_limit_id: KdbxUuid,
+    oversized_id: KdbxUuid,
+    empty_id: KdbxUuid,
+    group_custom_id: KdbxUuid,
+    root_custom_id: KdbxUuid,
+    png_bytes: Vec<u8>,
+    exact_bytes: Vec<u8>,
+}
+
+fn build_custom_icon_fixture() -> CustomIconFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("custom_icons.kdbx");
+
+    let small_id = KdbxUuid::from_bytes([0x11; 16]);
+    let exact_limit_id = KdbxUuid::from_bytes([0x22; 16]);
+    let oversized_id = KdbxUuid::from_bytes([0x33; 16]);
+    let empty_id = KdbxUuid::from_bytes([0x44; 16]);
+    let group_custom_id = KdbxUuid::from_bytes([0x55; 16]);
+    let root_custom_id = KdbxUuid::from_bytes([0x66; 16]);
+
+    let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    let exact_bytes = vec![0xAB; MAX_CUSTOM_ICON_BYTES];
+    let oversized_bytes = vec![0xCD; MAX_CUSTOM_ICON_BYTES + 1];
+
+    let mut db = KeePassDatabase::default();
+    db.root.icon_id = 49;
+    db.root.custom_icon_id = root_custom_id;
+    for (uuid, name, data) in [
+        (small_id, Some("small".to_owned()), png_bytes.clone()),
+        (exact_limit_id, None, exact_bytes.clone()),
+        (oversized_id, None, oversized_bytes),
+        (empty_id, None, Vec::new()),
+        (group_custom_id, None, png_bytes.clone()),
+        (root_custom_id, None, png_bytes.clone()),
+    ] {
+        db.meta.custom_icons.push(CustomIcon {
+            uuid,
+            name,
+            last_modification: None,
+            data,
+        });
+    }
+
+    let mut group = Group::new("CustomGroup");
+    group.icon_id = 4;
+    group.custom_icon_id = group_custom_id;
+    let mut entry = Entry::new("CustomEntry");
+    entry.icon_id = 19;
+    entry.custom_icon_id = small_id;
+    group.add_entry(entry);
+    db.root.add_group(group);
+
+    let mut creds = credentials();
+    let mut file = Vec::new();
+    KdbxFile::save(
+        &db,
+        &mut file,
+        &mut creds,
+        fast_write_options(),
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+    std::fs::write(&path, file).unwrap();
+
+    CustomIconFixture {
+        dir,
+        path,
+        small_id,
+        exact_limit_id,
+        oversized_id,
+        empty_id,
+        group_custom_id,
+        root_custom_id,
+        png_bytes,
+        exact_bytes,
+    }
+}
+
+#[test]
+fn custom_icon_lookup_is_bounded_and_cleared_by_set_icon() {
+    let fixture = build_custom_icon_fixture();
+    let _dir = &fixture.dir;
+    let (mut service, session) = reopen_vault(&fixture.path);
+
+    // Root icon exposes custom UUID.
+    assert_eq!(
+        service.root_icon().unwrap(),
+        (49, Some(fixture.root_custom_id))
+    );
+
+    // Bounded custom icon lookup checks.
+    assert_eq!(service.custom_icon_bytes(KdbxUuid::ZERO).unwrap(), None);
+    assert_eq!(
+        service
+            .custom_icon_bytes(KdbxUuid::from_bytes([0x99; 16]))
+            .unwrap(),
+        None
+    );
+    assert_eq!(service.custom_icon_bytes(fixture.empty_id).unwrap(), None);
+    assert_eq!(
+        service.custom_icon_bytes(fixture.oversized_id).unwrap(),
+        None
+    );
+    assert_eq!(
+        service.custom_icon_bytes(fixture.small_id).unwrap(),
+        Some(fixture.png_bytes)
+    );
+    assert_eq!(
+        service.custom_icon_bytes(fixture.exact_limit_id).unwrap(),
+        Some(fixture.exact_bytes)
+    );
+
+    // Projections expose custom_icon_id.
+    let root = service.root_group(session).unwrap();
+    let tree = service.tree_page(&root, None).unwrap();
+    assert_eq!(tree.groups[0].icon_id(), 4);
+    assert_eq!(
+        tree.groups[0].custom_icon_id(),
+        Some(fixture.group_custom_id)
+    );
+    let group_ref = tree.groups[0].reference();
+
+    let entry_ref = service
+        .resolve_entry(session, "CustomGroup/CustomEntry")
+        .unwrap()
+        .reference();
+    let selected = service.selected_entry(&entry_ref).unwrap();
+    assert_eq!(selected.icon_id(), 19);
+    assert_eq!(selected.custom_icon_id(), Some(fixture.small_id));
+
+    let search = service.search_page(session, "CustomEntry", None).unwrap();
+    assert_eq!(search.hits[0].icon_id(), 19);
+    assert_eq!(search.hits[0].custom_icon_id(), Some(fixture.small_id));
+
+    // Setting a standard icon clears custom_icon_id on both entry and group.
+    service.set_entry_icon(&entry_ref, 0).unwrap();
+    let refreshed_entry = service
+        .resolve_entry(session, "CustomGroup/CustomEntry")
+        .unwrap()
+        .reference();
+    let refreshed_selected = service.selected_entry(&refreshed_entry).unwrap();
+    assert_eq!(refreshed_selected.icon_id(), 0);
+    assert_eq!(refreshed_selected.custom_icon_id(), None);
+
+    let root = service.root_group(session).unwrap();
+    let tree = service.tree_page(&root, None).unwrap();
+    let refreshed_group_ref = tree.groups[0].reference();
+    assert!(refreshed_group_ref != group_ref);
+    service.set_group_icon(&refreshed_group_ref, 48).unwrap();
+
+    let root = service.root_group(session).unwrap();
+    let tree = service.tree_page(&root, None).unwrap();
+    assert_eq!(tree.groups[0].icon_id(), 48);
+    assert_eq!(tree.groups[0].custom_icon_id(), None);
+}

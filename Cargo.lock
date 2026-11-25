@@ -1473,6 +1473,7 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "terminal-password",
+ "unicode-width",
  "windows-clipboard",
  "windows-private-file",
  "zeroize",

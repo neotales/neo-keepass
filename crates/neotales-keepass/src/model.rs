@@ -1018,7 +1018,7 @@ impl Entry {
             url: String::new(),
             override_url: String::new(),
             notes: String::new(),
-            icon_id: 48,
+            icon_id: 0,
             custom_icon_id: KdbxUuid::ZERO,
             foreground_color: KdbxColor::empty(),
             background_color: KdbxColor::empty(),

@@ -387,6 +387,8 @@ pub struct TreeCursor {
 pub struct TreeGroup {
     label: String,
     reference: GroupRef,
+    icon_id: u32,
+    custom_icon_id: Option<KdbxUuid>,
 }
 
 impl TreeGroup {
@@ -399,6 +401,16 @@ impl TreeGroup {
     #[must_use]
     pub fn reference(&self) -> GroupRef {
         self.reference.clone()
+    }
+    /// Standard `KeePass` 2.x icon identifier.
+    #[must_use]
+    pub const fn icon_id(&self) -> u32 {
+        self.icon_id
+    }
+    /// Custom icon UUID when assigned (non-zero).
+    #[must_use]
+    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+        self.custom_icon_id
     }
 }
 
@@ -606,6 +618,8 @@ pub struct SelectedEntry {
     has_otp: bool,
     auto_type_enabled: bool,
     auto_type_associations: usize,
+    icon_id: u32,
+    custom_icon_id: Option<KdbxUuid>,
 }
 
 /// Allowlisted attachment name and byte length (never attachment data).
@@ -655,6 +669,16 @@ impl SelectedEntry {
     pub const fn auto_type_associations(&self) -> usize {
         self.auto_type_associations
     }
+    /// Standard `KeePass` 2.x icon identifier.
+    #[must_use]
+    pub const fn icon_id(&self) -> u32 {
+        self.icon_id
+    }
+    /// Custom icon UUID when assigned (non-zero).
+    #[must_use]
+    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+        self.custom_icon_id
+    }
 }
 
 impl AttachmentMetadata {
@@ -677,6 +701,8 @@ pub struct SearchHit {
     title: String,
     tags: Vec<String>,
     field_names: Vec<String>,
+    icon_id: u32,
+    custom_icon_id: Option<KdbxUuid>,
 }
 
 impl SearchHit {
@@ -708,6 +734,18 @@ impl SearchHit {
     #[must_use]
     pub fn field_names(&self) -> &[String] {
         &self.field_names
+    }
+
+    /// Standard `KeePass` 2.x icon identifier.
+    #[must_use]
+    pub const fn icon_id(&self) -> u32 {
+        self.icon_id
+    }
+
+    /// Custom icon UUID when assigned (non-zero).
+    #[must_use]
+    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+        self.custom_icon_id
     }
 }
 
@@ -1239,6 +1277,71 @@ impl VaultService {
         validate_unique_field_names(&live.database)?;
         let entry = resolve_locator_mut(&mut live.database, &reference.locator, reference.id)?;
         entry.tags = normalized;
+        self.invalidate_references();
+        Ok(())
+    }
+
+    /// Sets an entry's standard `KeePass` 2.x icon identifier and clears any custom icon assignment.
+    ///
+    /// All session entry handles and cursors are invalidated after mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidInput`] when `icon_id` is outside `0..=68`,
+    /// [`ServiceError::Locked`] without an open vault,
+    /// [`ServiceError::Stale`] for an expired handle, or
+    /// [`ServiceError::DuplicateIds`] or [`ServiceError::DuplicateFields`] when
+    /// the vault model is malformed.
+    pub fn set_entry_icon(
+        &mut self,
+        reference: &EntryRef,
+        icon_id: u32,
+    ) -> Result<(), ServiceError> {
+        if !crate::icons::is_valid_standard_icon_id(icon_id) {
+            return Err(ServiceError::InvalidInput);
+        }
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let entry = resolve_locator_mut(&mut live.database, &reference.locator, reference.id)?;
+        entry.icon_id = icon_id;
+        entry.custom_icon_id = KdbxUuid::ZERO;
+        self.invalidate_references();
+        Ok(())
+    }
+
+    /// Sets a group's standard `KeePass` 2.x icon identifier and clears any custom icon assignment.
+    ///
+    /// All session entry handles and cursors are invalidated after mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidInput`] when `icon_id` is outside `0..=68`,
+    /// [`ServiceError::Locked`] without an open vault,
+    /// [`ServiceError::Stale`] for an expired handle, or
+    /// [`ServiceError::DuplicateIds`] or [`ServiceError::DuplicateFields`] when
+    /// the vault model is malformed.
+    pub fn set_group_icon(
+        &mut self,
+        reference: &GroupRef,
+        icon_id: u32,
+    ) -> Result<(), ServiceError> {
+        if !crate::icons::is_valid_standard_icon_id(icon_id) {
+            return Err(ServiceError::InvalidInput);
+        }
+        let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
+        if live.id != reference.session || live.generation != reference.generation {
+            return Err(ServiceError::Stale);
+        }
+        validate_unique_object_ids(&live.database)?;
+        validate_unique_field_names(&live.database)?;
+        let group =
+            resolve_group_locator_mut(&mut live.database, &reference.locator, reference.id)?;
+        group.icon_id = icon_id;
+        group.custom_icon_id = KdbxUuid::ZERO;
         self.invalidate_references();
         Ok(())
     }
@@ -2528,6 +2631,44 @@ impl VaultService {
         })
     }
 
+    /// Returns the root group's standard icon ID and optional non-zero custom icon UUID.
+    ///
+    /// # Errors
+    /// Returns [`ServiceError::Locked`] without an open vault.
+    pub fn root_icon(&self) -> Result<(u32, Option<KdbxUuid>), ServiceError> {
+        let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        Ok((
+            live.database.root.icon_id,
+            nonzero_custom_icon(live.database.root.custom_icon_id),
+        ))
+    }
+
+    /// Returns bounded custom icon bytes for `id` when present, non-empty, and
+    /// within [`crate::icons::MAX_CUSTOM_ICON_BYTES`].
+    ///
+    /// Returns `Ok(None)` for the zero UUID, unknown IDs, empty payloads, or
+    /// oversized custom icons (fail-safe withholding).
+    ///
+    /// # Errors
+    /// Returns [`ServiceError::Locked`] without an open vault.
+    pub fn custom_icon_bytes(&self, id: KdbxUuid) -> Result<Option<Vec<u8>>, ServiceError> {
+        let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
+        if id.is_zero() {
+            return Ok(None);
+        }
+        let found = live
+            .database
+            .meta
+            .custom_icons
+            .iter()
+            .find(|icon| icon.uuid == id)
+            .filter(|icon| {
+                !icon.data.is_empty() && icon.data.len() <= crate::icons::MAX_CUSTOM_ICON_BYTES
+            })
+            .map(|icon| icon.data.clone());
+        Ok(found)
+    }
+
     /// Lists one bounded page of a group's direct child groups and entries.
     /// Display paths are projections only; handles carry verified locators and UUIDs.
     ///
@@ -2627,6 +2768,8 @@ impl VaultService {
                         id: child.id,
                         locator,
                     },
+                    icon_id: child.icon_id,
+                    custom_icon_id: nonzero_custom_icon(child.custom_icon_id),
                 });
             } else {
                 let entry_index = index - group.groups.len();
@@ -2734,6 +2877,8 @@ impl VaultService {
                     title: entry.title.clone(),
                     tags: visible_tags.into_iter().cloned().collect(),
                     field_names,
+                    icon_id: entry.icon_id,
+                    custom_icon_id: nonzero_custom_icon(entry.custom_icon_id),
                 });
             }
         }
@@ -3184,6 +3329,8 @@ impl VaultService {
             has_otp: KeePassXcOtp::read(entry).is_ok(),
             auto_type_enabled: entry.auto_type.enabled == Some(true),
             auto_type_associations: entry.auto_type.associations.len(),
+            icon_id: entry.icon_id,
+            custom_icon_id: nonzero_custom_icon(entry.custom_icon_id),
         })
     }
 
@@ -5141,9 +5288,15 @@ fn project_hit(
                 owned.extend(entry.fields.iter().map(|field| field.key.clone()));
                 owned
             },
+            icon_id: entry.icon_id,
+            custom_icon_id: nonzero_custom_icon(entry.custom_icon_id),
         },
         hit_bytes,
     ))
+}
+
+fn nonzero_custom_icon(id: KdbxUuid) -> Option<KdbxUuid> {
+    (!id.is_zero()).then_some(id)
 }
 
 fn failure_table(needle: &[char]) -> Vec<usize> {

@@ -34,6 +34,7 @@ terminal-password = { path = "../terminal-password" }
 tempfile.workspace = true
 syn.workspace = true
 criterion.workspace = true
+unicode-width = "0.2.3"
 
 # Benchmark harness. `cargo bench` builds this with the pinned release profile
 # and writes criterion output to target/criterion.
