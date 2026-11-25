@@ -5,7 +5,7 @@
 //! reveal, attachment handling, `.env`/template injection, and dirty-vault
 //! focus/idle lock transitions cleanly separated from Rune view rendering.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -254,16 +254,37 @@ impl fmt::Debug for EntryEditorState {
     }
 }
 
+/// Explicit lock screen field attribution for status/error diagnostics.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LockErrorField {
+    /// No error or status active.
+    #[default]
+    None,
+    /// Informational status notice (not an error).
+    Info,
+    /// Error relates to the `.kdbx` vault path.
+    Vault,
+    /// Error relates to the master password or confirmation.
+    Master,
+    /// Error relates to the key file path or contents.
+    KeyFile,
+    /// Error relates to the combined credentials (password and optional key file).
+    Credentials,
+}
+
 /// Result returned by a background unlock or create worker task.
 pub struct UnlockOutcome {
     /// Opened service instance, active session, and owned credentials (or diagnostic message).
     pub result: Result<(VaultService, SessionId, KdbxCredentials), String>,
+    /// Explicit target field attribution when `result` is `Err`.
+    pub error_field: LockErrorField,
 }
 
 impl fmt::Debug for UnlockOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnlockOutcome")
             .field("ok", &self.result.is_ok())
+            .field("error_field", &self.error_field)
             .finish()
     }
 }
@@ -300,6 +321,10 @@ pub struct LockCleanup {
 }
 
 /// Pure application state and controller for `nkpui`.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent session dirty, saving, status error, and reveal flags"
+)]
 pub struct VaultController {
     /// Current lock phase.
     pub phase: VaultPhase,
@@ -311,6 +336,8 @@ pub struct VaultController {
     pub key_file_path: String,
     /// Non-secret status or error message for the lock screen.
     pub lock_status: Option<String>,
+    /// Explicit field attribution for `lock_status`.
+    pub lock_error_field: LockErrorField,
     /// Active workspace tab when unlocked.
     pub active_tab: WorkspaceTab,
     /// Whether the live vault has unsaved in-memory mutations.
@@ -335,6 +362,8 @@ pub struct VaultController {
     pub editor: Option<EntryEditorState>,
     /// Non-secret status message for browser operations.
     pub browser_status: Option<String>,
+    /// Whether `browser_status` represents an error (`true`) vs informational notice (`false`).
+    pub browser_status_is_error: bool,
     /// Current inject view mode (`Template` vs `EnvFile`).
     pub inject_mode: InjectMode,
     /// Raw template or `.env` source text.
@@ -391,6 +420,7 @@ impl Default for VaultController {
             vault_path: String::new(),
             key_file_path: String::new(),
             lock_status: None,
+            lock_error_field: LockErrorField::None,
             active_tab: WorkspaceTab::Browser,
             dirty: false,
             saving: false,
@@ -403,6 +433,7 @@ impl Default for VaultController {
             detail: None,
             editor: None,
             browser_status: None,
+            browser_status_is_error: false,
             inject_mode: InjectMode::Template,
             inject_input: String::from("export API_TOKEN=nkp://Example/API#Password\n"),
             inject_save_path: String::new(),
@@ -430,6 +461,131 @@ pub fn current_unix_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+#[cfg(unix)]
+const fn unix_o_nofollow() -> i32 {
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "s390x",
+            target_arch = "riscv64",
+            target_arch = "loongarch64",
+            target_arch = "sparc",
+            target_arch = "sparc64",
+            target_arch = "mips",
+            target_arch = "mips64"
+        )
+    ))]
+    {
+        0o400_000
+    }
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        )
+    ))]
+    {
+        0o100_000
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0100
+    }
+    #[cfg(not(any(
+        all(
+            target_os = "linux",
+            any(
+                target_arch = "x86_64",
+                target_arch = "x86",
+                target_arch = "s390x",
+                target_arch = "riscv64",
+                target_arch = "loongarch64",
+                target_arch = "sparc",
+                target_arch = "sparc64",
+                target_arch = "mips",
+                target_arch = "mips64",
+                target_arch = "aarch64",
+                target_arch = "arm",
+                target_arch = "powerpc",
+                target_arch = "powerpc64",
+                target_arch = "m68k"
+            )
+        ),
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        0
+    }
+}
+
+#[cfg(unix)]
+const fn unix_o_nonblock() -> i32 {
+    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips64")))]
+    {
+        0x0080
+    }
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "sparc", target_arch = "sparc64")
+    ))]
+    {
+        0x4000
+    }
+    #[cfg(all(
+        target_os = "linux",
+        not(any(
+            target_arch = "mips",
+            target_arch = "mips64",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
+    {
+        0o4_000
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0004
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        0
+    }
+}
+
 fn ensure_regular_file(path: &Path, label: &str) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|_| format!("cannot access {label}"))?;
     if !meta.is_file() {
@@ -441,37 +597,79 @@ fn ensure_regular_file(path: &Path, label: &str) -> Result<(), String> {
 fn build_credentials(
     password: &Zeroizing<String>,
     key_file_path: Option<&Path>,
-) -> Result<KdbxCredentials, String> {
+) -> Result<KdbxCredentials, (LockErrorField, String)> {
     let mut providers: Vec<Box<dyn CredentialProvider + Send>> = Vec::new();
     if let Some(key_path) = key_file_path {
-        ensure_regular_file(key_path, "key file")?;
+        ensure_regular_file(key_path, "key file").map_err(|msg| (LockErrorField::KeyFile, msg))?;
         let Ok(file) = File::open(key_path) else {
-            return Err(String::from("cannot open key file"));
+            return Err((
+                LockErrorField::KeyFile,
+                String::from("cannot open key file"),
+            ));
         };
         let Ok(key_file) = read_key_file(file) else {
-            return Err(String::from("invalid key file"));
+            return Err((LockErrorField::KeyFile, String::from("invalid key file")));
         };
         providers.push(Box::new(key_file));
     }
 
     let password_bytes = (!password.is_empty()).then(|| password.as_bytes());
-    KdbxCredentials::from_parts(password_bytes, providers)
-        .map_err(|_| String::from("enter a master password or select a key file"))
+    KdbxCredentials::from_parts(password_bytes, providers).map_err(|_| {
+        (
+            LockErrorField::Credentials,
+            String::from("enter a master password or select a key file"),
+        )
+    })
 }
 
-/// Reads a regular attachment source file bounded to [`MAX_ATTACHMENT_BYTES`] (`16 MiB`).
+/// Reads a regular attachment source file bounded to [`MAX_ATTACHMENT_BYTES`] (`16 MiB`),
+/// refusing symlinks, Windows reparse points, FIFOs, and special files.
 ///
 /// # Errors
 ///
-/// Returns a fixed diagnostic if the path cannot be opened, is not a regular
-/// file, or exceeds [`MAX_ATTACHMENT_BYTES`].
+/// Returns a fixed diagnostic if the path cannot be opened, is a symlink or
+/// non-regular file, or exceeds [`MAX_ATTACHMENT_BYTES`].
 pub fn read_attachment_file_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-    let file = File::open(path).map_err(|_| String::from("cannot open attachment file"))?;
+    let lmeta = std::fs::symlink_metadata(path)
+        .map_err(|_| String::from("cannot access attachment file"))?;
+    if lmeta.file_type().is_symlink() || !lmeta.file_type().is_file() {
+        return Err(String::from(
+            "attachment source must be a regular file (symlinks and special files are refused)",
+        ));
+    }
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(unix_o_nofollow() | unix_o_nonblock());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    let file = opts
+        .open(path)
+        .map_err(|_| String::from("cannot open attachment file"))?;
     let meta = file
         .metadata()
         .map_err(|_| String::from("cannot inspect attachment file"))?;
-    if !meta.is_file() {
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
         return Err(String::from("attachment source is not a regular file"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return Err(String::from(
+                "attachment source must be a regular file (reparse points are refused)",
+            ));
+        }
     }
     if meta.len() > MAX_ATTACHMENT_BYTES {
         return Err(String::from("attachment exceeds 16 MiB size limit"));
@@ -497,22 +695,38 @@ pub fn open_vault_blocking(
     key_file_path: Option<&Path>,
 ) -> UnlockOutcome {
     if let Err(err) = ensure_regular_file(vault_path, "vault file") {
-        return UnlockOutcome { result: Err(err) };
+        return UnlockOutcome {
+            result: Err(err),
+            error_field: LockErrorField::Vault,
+        };
     }
 
     let mut credentials = match build_credentials(password, key_file_path) {
         Ok(creds) => creds,
-        Err(err) => return UnlockOutcome { result: Err(err) },
+        Err((error_field, err)) => {
+            return UnlockOutcome {
+                result: Err(err),
+                error_field,
+            };
+        }
     };
 
     let mut service = VaultService::default();
     match service.open(vault_path, &mut credentials, &KDBX_LIMITS) {
         Ok(session) => UnlockOutcome {
             result: Ok((service, session, credentials)),
+            error_field: LockErrorField::None,
         },
-        Err(err) => UnlockOutcome {
-            result: Err(err.message().to_owned()),
-        },
+        Err(err) => {
+            let error_field = match err {
+                ServiceError::Io => LockErrorField::Vault,
+                _ => LockErrorField::Credentials,
+            };
+            UnlockOutcome {
+                result: Err(err.message().to_owned()),
+                error_field,
+            }
+        }
     }
 }
 
@@ -543,13 +757,19 @@ pub fn create_and_open_vault_with_options(
 ) -> UnlockOutcome {
     let mut create_creds = match build_credentials(password, key_file_path) {
         Ok(creds) => creds,
-        Err(err) => return UnlockOutcome { result: Err(err) },
+        Err((error_field, err)) => {
+            return UnlockOutcome {
+                result: Err(err),
+                error_field,
+            };
+        }
     };
 
     let service = VaultService::default();
     if let Err(err) = service.create(vault_path, &mut create_creds, write_options, None) {
         return UnlockOutcome {
             result: Err(err.message().to_owned()),
+            error_field: LockErrorField::Vault,
         };
     }
     drop(create_creds);
@@ -650,6 +870,30 @@ impl VaultController {
         self.breadcrumbs.last().map(|(_, group)| group)
     }
 
+    /// Sets an informational browser banner status.
+    pub fn set_browser_info(&mut self, msg: impl Into<String>) {
+        self.browser_status = Some(msg.into());
+        self.browser_status_is_error = false;
+    }
+
+    /// Sets an error browser banner status.
+    pub fn set_browser_error(&mut self, msg: impl Into<String>) {
+        self.browser_status = Some(msg.into());
+        self.browser_status_is_error = true;
+    }
+
+    /// Clears the browser banner status.
+    pub fn clear_browser_status(&mut self) {
+        self.browser_status = None;
+        self.browser_status_is_error = false;
+    }
+
+    /// Clears the lock screen status and field attribution.
+    pub fn clear_lock_status(&mut self) {
+        self.lock_status = None;
+        self.lock_error_field = LockErrorField::None;
+    }
+
     /// Validates unlock inputs and transitions to [`VaultPhase::Unlocking`].
     ///
     /// Returns the `(vault_path, key_file_path, request_generation)` tuple for a
@@ -661,6 +905,7 @@ impl VaultController {
         let trimmed_vault = self.vault_path.trim();
         if trimmed_vault.is_empty() {
             self.lock_status = Some(String::from("select a .kdbx vault path"));
+            self.lock_error_field = LockErrorField::Vault;
             return None;
         }
         let trimmed_key = self.key_file_path.trim();
@@ -668,10 +913,12 @@ impl VaultController {
             self.lock_status = Some(String::from(
                 "enter a master password or provide a key file",
             ));
+            self.lock_error_field = LockErrorField::Credentials;
             return None;
         }
         self.phase = VaultPhase::Unlocking;
         self.lock_status = Some(String::from("Unlocking vault…"));
+        self.lock_error_field = LockErrorField::Info;
         self.unlock_generation = self.unlock_generation.wrapping_add(1);
         let key_path = (!trimmed_key.is_empty()).then(|| PathBuf::from(trimmed_key));
         Some((
@@ -690,10 +937,12 @@ impl VaultController {
         let trimmed_vault = self.vault_path.trim();
         if trimmed_vault.is_empty() {
             self.lock_status = Some(String::from("enter a .kdbx path for the new vault"));
+            self.lock_error_field = LockErrorField::Vault;
             return None;
         }
         if !passwords_match {
             self.lock_status = Some(String::from("master passwords do not match"));
+            self.lock_error_field = LockErrorField::Master;
             return None;
         }
         let trimmed_key = self.key_file_path.trim();
@@ -701,10 +950,12 @@ impl VaultController {
             self.lock_status = Some(String::from(
                 "enter a master password or provide a key file",
             ));
+            self.lock_error_field = LockErrorField::Credentials;
             return None;
         }
         self.phase = VaultPhase::Unlocking;
         self.lock_status = Some(String::from("Creating vault…"));
+        self.lock_error_field = LockErrorField::Info;
         self.unlock_generation = self.unlock_generation.wrapping_add(1);
         let key_path = (!trimmed_key.is_empty()).then(|| PathBuf::from(trimmed_key));
         Some((
@@ -730,20 +981,21 @@ impl VaultController {
                 self.dirty = false;
                 self.saving = false;
                 self.pending_lock_decision = None;
-                self.lock_status = None;
-                self.browser_status = None;
+                self.clear_lock_status();
+                self.clear_browser_status();
                 self.editor = None;
                 self.active_tab = WorkspaceTab::Browser;
                 self.search_query.clear();
                 self.last_activity_secs = now_secs;
                 if let Err(err) = self.load_root_group() {
-                    self.browser_status = Some(err.message().to_owned());
+                    self.set_browser_error(err.message().to_owned());
                 }
                 self.refresh_inject_preview();
             }
             Err(message) => {
                 self.phase = VaultPhase::Locked;
                 self.lock_status = Some(message);
+                self.lock_error_field = outcome.error_field;
             }
         }
     }
@@ -778,7 +1030,7 @@ impl VaultController {
         self.detail = None;
         self.editor = None;
         self.search_query.clear();
-        self.browser_status = None;
+        self.clear_browser_status();
         self.rendered_output = None;
         self.inject_output_revealed = false;
         self.inject_status = None;
@@ -798,10 +1050,12 @@ impl VaultController {
                 LockTrigger::FocusLoss => {
                     cleanup.clear_clipboard = false;
                     self.lock_status = Some(String::from("Locked when window lost focus"));
+                    self.lock_error_field = LockErrorField::Info;
                 }
                 LockTrigger::IdleTimeout => {
                     cleanup.clear_clipboard = true;
                     self.lock_status = Some(String::from("Locked after inactivity timeout"));
+                    self.lock_error_field = LockErrorField::Info;
                 }
             }
         }
@@ -846,7 +1100,7 @@ impl VaultController {
             return;
         }
         self.pending_lock_decision = None;
-        self.browser_status = Some(String::from("Lock cancelled; unsaved changes kept"));
+        self.set_browser_info("Lock cancelled; unsaved changes kept");
     }
 
     /// Discards unsaved changes and locks the vault, dropping credentials.
@@ -882,7 +1136,7 @@ impl VaultController {
             if let Some(pending) = self.pending_lock_decision.as_mut() {
                 pending.error = Some(msg);
             } else {
-                self.browser_status = Some(msg);
+                self.set_browser_error(msg);
             }
             return None;
         }
@@ -891,7 +1145,7 @@ impl VaultController {
             if let Some(pending) = self.pending_lock_decision.as_mut() {
                 pending.error = Some(msg);
             } else {
-                self.browser_status = Some(msg);
+                self.set_browser_error(msg);
             }
             return None;
         };
@@ -912,7 +1166,7 @@ impl VaultController {
 
     /// Reinstalls the [`VaultService`] and [`KdbxCredentials`] returned by a
     /// background save worker, clearing `dirty` on success and completing any
-    /// pending `Save & Lock` decision.
+    /// pending `Save & Lock` or in-flight `FocusLoss`/`IdleTimeout` lock decision.
     pub fn finish_save(&mut self, outcome: SaveOutcome) -> LockCleanup {
         if outcome.generation != self.save_generation || self.phase != VaultPhase::Unlocked {
             // Vault was already locked/discarded while save ran; drop returned
@@ -929,11 +1183,17 @@ impl VaultController {
         match outcome.result {
             Ok(()) => {
                 self.dirty = false;
-                self.browser_status = Some(String::from("Vault saved"));
-                if let Some(pending) = self.pending_lock_decision.take()
-                    && pending.save_requested
-                {
-                    return self.lock_with_trigger(pending.trigger);
+                self.set_browser_info("Vault saved");
+                if let Some(pending) = self.pending_lock_decision.take() {
+                    if pending.save_requested
+                        || matches!(
+                            pending.trigger,
+                            LockTrigger::FocusLoss | LockTrigger::IdleTimeout
+                        )
+                    {
+                        return self.lock_with_trigger(pending.trigger);
+                    }
+                    self.pending_lock_decision = Some(pending);
                 }
             }
             Err(err_msg) => {
@@ -944,7 +1204,7 @@ impl VaultController {
                         "{msg}. Retry Save & Lock, Discard & Lock, or Cancel."
                     ));
                 } else {
-                    self.browser_status = Some(msg);
+                    self.set_browser_error(msg);
                 }
             }
         }
@@ -1009,7 +1269,7 @@ impl VaultController {
         self.editor = None;
         self.breadcrumbs.push((label, group_ref.clone()));
         if let Err(err) = self.load_group_contents(&group_ref, None) {
-            self.browser_status = Some(err.message().to_owned());
+            self.set_browser_error(err.message().to_owned());
         }
     }
 
@@ -1025,7 +1285,7 @@ impl VaultController {
         self.search_query.clear();
         self.editor = None;
         if let Err(err) = self.load_group_contents(&target, None) {
-            self.browser_status = Some(err.message().to_owned());
+            self.set_browser_error(err.message().to_owned());
         }
     }
 
@@ -1058,7 +1318,7 @@ impl VaultController {
         self.entries = entries;
         self.selected_index = None;
         self.detail = None;
-        self.browser_status = None;
+        self.clear_browser_status();
         if !self.entries.is_empty() {
             let target = select_idx
                 .filter(|idx| *idx < self.entries.len())
@@ -1182,7 +1442,7 @@ impl VaultController {
         {
             editor.entry_ref = new_detail.entry_ref.clone();
         }
-        self.browser_status = Some(format!("Created group \"{trimmed}\""));
+        self.set_browser_info(format!("Created group \"{trimmed}\""));
         Ok(())
     }
 
@@ -1210,7 +1470,7 @@ impl VaultController {
         if let Err(err) = self.reload_after_mutation(None, None, None, current_unix_seconds()) {
             return Err(err.message().to_owned());
         }
-        self.browser_status = Some(String::from("Group deleted (unsaved)"));
+        self.set_browser_info("Group deleted (unsaved)");
         Ok(())
     }
 
@@ -1241,10 +1501,10 @@ impl VaultController {
         if trimmed.is_empty() {
             if let Some((_, group_ref)) = self.breadcrumbs.last().cloned() {
                 if let Err(err) = self.load_group_contents(&group_ref, None) {
-                    self.browser_status = Some(err.message().to_owned());
+                    self.set_browser_error(err.message().to_owned());
                 }
             } else if let Err(err) = self.load_root_group() {
-                self.browser_status = Some(err.message().to_owned());
+                self.set_browser_error(err.message().to_owned());
             }
             return;
         }
@@ -1257,13 +1517,13 @@ impl VaultController {
                 self.entries = page.hits;
                 self.selected_index = None;
                 self.detail = None;
-                self.browser_status = None;
+                self.clear_browser_status();
                 if !self.entries.is_empty() {
                     self.select_entry(0, unix_now);
                 }
             }
             Err(err) => {
-                self.browser_status = Some(err.message().to_owned());
+                self.set_browser_error(err.message().to_owned());
             }
         }
     }
@@ -1282,14 +1542,14 @@ impl VaultController {
         let metadata = match self.service.selected_entry(&entry_ref) {
             Ok(selected) => selected,
             Err(err) => {
-                self.browser_status = Some(err.message().to_owned());
+                self.set_browser_error(err.message().to_owned());
                 return;
             }
         };
         let attachments = match self.service.attachment_metadata(&entry_ref) {
             Ok(list) => list,
             Err(err) => {
-                self.browser_status = Some(err.message().to_owned());
+                self.set_browser_error(err.message().to_owned());
                 Vec::new()
             }
         };
@@ -1343,7 +1603,7 @@ impl VaultController {
             revealed_custom_fields: BTreeMap::new(),
             totp,
         });
-        self.browser_status = None;
+        self.clear_browser_status();
     }
 
     /// Creates a new entry in the current group via [`VaultService::create_entry_in_group`],
@@ -1394,7 +1654,7 @@ impl VaultController {
         self.reload_after_mutation(Some(&entry_ref), None, None, unix_now)
             .map_err(|err| err.message().to_owned())?;
         self.begin_edit_selected_entry()?;
-        self.browser_status = Some(format!("Created entry \"{chosen_title}\""));
+        self.set_browser_info(format!("Created entry \"{chosen_title}\""));
         Ok(entry_ref)
     }
 
@@ -1423,7 +1683,7 @@ impl VaultController {
         self.selected_index = None;
         self.reload_after_mutation(None, None, None, unix_now)
             .map_err(|err| err.message().to_owned())?;
-        self.browser_status = Some(String::from("Entry deleted (unsaved)"));
+        self.set_browser_info("Entry deleted (unsaved)");
         Ok(())
     }
 
@@ -1458,7 +1718,7 @@ impl VaultController {
                     .map_err(|_| String::from("password is not valid UTF-8"))?
                     .to_owned(),
             ),
-            Err(_) => Zeroizing::new(String::new()),
+            Err(err) => return Err(err.message().to_owned()),
         };
 
         let username_protected = detail.protected_standard_fields.contains_key("UserName");
@@ -1530,14 +1790,14 @@ impl VaultController {
             custom_fields,
             removed_custom_fields: Vec::new(),
         });
-        self.browser_status = None;
+        self.clear_browser_status();
         Ok(())
     }
 
     /// Cancels Entry Editor mode and zeroizes all editor secret buffers.
     pub fn cancel_entry_editor(&mut self) {
         self.editor = None;
-        self.browser_status = Some(String::from("Entry edits cancelled"));
+        self.set_browser_info("Entry edits cancelled");
     }
 
     /// Generates a new 20-character password into the active Entry Editor using
@@ -1723,7 +1983,8 @@ impl VaultController {
 
     /// Applies the active Entry Editor draft to the live [`VaultService`] via
     /// `set_title`, `set_tags`, `remove_custom_field`, and `set_fields_creating_custom`,
-    /// marks `dirty = true` if any change occurred, and reloads the entry detail.
+    /// pre-validates all draft changes before the first mutation, tracks any
+    /// partial mutations on `dirty` and `draft`, and reloads the entry detail.
     ///
     /// # Errors
     ///
@@ -1732,22 +1993,91 @@ impl VaultController {
         if self.saving {
             return Err(String::from("save in progress"));
         }
-        let draft = self
+        let mut draft = self
             .editor
             .take()
             .ok_or_else(|| String::from("entry editor is not active"))?;
 
-        let result = self.apply_entry_editor_inner(&draft, unix_now);
-        if result.is_err() {
-            // Keep draft open on validation failure so user edits are not lost.
-            let refreshed = self
-                .fresh_entry_ref_mut(&draft.path, self.selected_index)
-                .unwrap_or_else(|_| draft.entry_ref.clone());
-            let mut restored = draft;
-            restored.entry_ref = refreshed;
-            self.editor = Some(restored);
+        let result = self.apply_entry_editor_inner(&mut draft, unix_now);
+        if let Err(err) = result {
+            if let Ok(()) = self.reload_after_mutation(
+                Some(&draft.entry_ref),
+                Some(&draft.path),
+                self.selected_index,
+                unix_now,
+            ) && let Some(detail) = &self.detail
+            {
+                draft.entry_ref = detail.entry_ref.clone();
+                draft.path.clone_from(&detail.path);
+            }
+            self.set_browser_error(err.clone());
+            self.editor = Some(draft);
+            return Err(err);
         }
-        result
+        Ok(())
+    }
+
+    fn validate_title_text(title: &str) -> Result<(), String> {
+        if title.is_empty()
+            || title.len() > 4096
+            || title.contains('/')
+            || title.chars().any(|ch| {
+                ch.is_control() || matches!(ch, '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+            })
+        {
+            return Err(String::from("invalid entry title"));
+        }
+        Ok(())
+    }
+
+    fn validate_editor_draft(
+        &self,
+        draft: &EntryEditorState,
+        updates: &[FieldUpdate],
+    ) -> Result<(), String> {
+        if self.session.is_none() {
+            return Err(String::from("vault is locked"));
+        }
+        if draft.title != draft.original_title {
+            Self::validate_title_text(&draft.title)?;
+        }
+        if draft.tags != draft.original_tags {
+            if draft.tags.len() > 256 {
+                return Err(String::from("at most 256 tags are allowed per entry"));
+            }
+            for tag in &draft.tags {
+                let trimmed = tag.trim();
+                if trimmed.is_empty()
+                    || trimmed.len() > 256
+                    || trimmed.chars().any(is_disallowed_tag_char)
+                {
+                    return Err(String::from(
+                        "tags must be 1..=256 bytes without control characters or ';' / ','",
+                    ));
+                }
+            }
+        }
+        for name in &draft.removed_custom_fields {
+            if name.is_empty()
+                || matches!(
+                    name.as_str(),
+                    "Title" | "UserName" | "Password" | "URL" | "Notes"
+                )
+            {
+                return Err(String::from("invalid custom field removal"));
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for update in updates {
+            if update.key.is_empty()
+                || update.key.chars().any(char::is_control)
+                || update.key == "Title"
+                || !seen.insert(update.key.as_str())
+            {
+                return Err(String::from("invalid or duplicate field update"));
+            }
+        }
+        Ok(())
     }
 
     fn collect_editor_field_updates(draft: &EntryEditorState) -> Vec<FieldUpdate> {
@@ -1804,11 +2134,29 @@ impl VaultController {
         updates
     }
 
+    fn sync_draft_fields_after_commit(draft: &mut EntryEditorState) {
+        draft.original_username = draft.username.clone();
+        draft.original_username_protected = draft.username_protected;
+        draft.original_password = draft.password.clone();
+        draft.original_url = draft.url.clone();
+        draft.original_url_protected = draft.url_protected;
+        draft.original_notes = draft.notes.clone();
+        draft.original_notes_protected = draft.notes_protected;
+        for field in &mut draft.custom_fields {
+            field.is_new = false;
+            field.original_value = field.value.clone();
+            field.original_protected = field.protected;
+        }
+    }
+
     fn apply_entry_editor_inner(
         &mut self,
-        draft: &EntryEditorState,
+        draft: &mut EntryEditorState,
         unix_now: u64,
     ) -> Result<(), String> {
+        let updates = Self::collect_editor_field_updates(draft);
+        self.validate_editor_draft(draft, &updates)?;
+
         let mut entry_ref = draft.entry_ref.clone();
         let mut current_path = draft.path.clone();
         let group_idx = self.selected_index;
@@ -1819,13 +2167,17 @@ impl VaultController {
                 .set_title(&entry_ref, &draft.title)
                 .map_err(|err| err.message().to_owned())?;
             mutated = true;
+            self.dirty = true;
+            draft.original_title.clone_from(&draft.title);
             current_path = match current_path.rsplit_once('/') {
                 Some((parent, _)) => format!("{parent}/{}", draft.title),
                 None => draft.title.clone(),
             };
+            draft.path.clone_from(&current_path);
             entry_ref = self
                 .fresh_entry_ref_mut(&current_path, group_idx)
                 .map_err(|err| err.message().to_owned())?;
+            draft.entry_ref = entry_ref.clone();
         }
 
         if draft.tags != draft.original_tags {
@@ -1833,41 +2185,46 @@ impl VaultController {
                 .set_tags(&entry_ref, draft.tags.clone())
                 .map_err(|err| err.message().to_owned())?;
             mutated = true;
+            self.dirty = true;
+            draft.original_tags = draft.tags.clone();
             entry_ref = self
                 .fresh_entry_ref_mut(&current_path, group_idx)
                 .map_err(|err| err.message().to_owned())?;
+            draft.entry_ref = entry_ref.clone();
         }
 
-        for removed_name in &draft.removed_custom_fields {
+        while let Some(removed_name) = draft.removed_custom_fields.first().cloned() {
             self.service
-                .remove_custom_field(&entry_ref, removed_name)
+                .remove_custom_field(&entry_ref, &removed_name)
                 .map_err(|err| err.message().to_owned())?;
             mutated = true;
+            self.dirty = true;
+            draft.removed_custom_fields.remove(0);
             entry_ref = self
                 .fresh_entry_ref_mut(&current_path, group_idx)
                 .map_err(|err| err.message().to_owned())?;
+            draft.entry_ref = entry_ref.clone();
         }
 
-        let updates = Self::collect_editor_field_updates(draft);
         if !updates.is_empty() {
             self.service
                 .set_fields_creating_custom(&entry_ref, updates)
                 .map_err(|err| err.message().to_owned())?;
             mutated = true;
+            self.dirty = true;
+            Self::sync_draft_fields_after_commit(draft);
             entry_ref = self
                 .fresh_entry_ref_mut(&current_path, group_idx)
                 .map_err(|err| err.message().to_owned())?;
+            draft.entry_ref = entry_ref.clone();
         }
 
-        if mutated {
-            self.dirty = true;
-        }
         self.reload_after_mutation(Some(&entry_ref), Some(&current_path), group_idx, unix_now)
             .map_err(|err| err.message().to_owned())?;
-        self.browser_status = Some(if mutated {
-            String::from("Entry updated (unsaved)")
+        self.set_browser_info(if mutated {
+            "Entry updated (unsaved)"
         } else {
-            String::from("No changes to apply")
+            "No changes to apply"
         });
         Ok(())
     }
@@ -1909,7 +2266,7 @@ impl VaultController {
             .map_err(|err| err.message().to_owned())?;
         self.dirty = true;
         self.refresh_preserving_editor(&entry_path)?;
-        self.browser_status = Some(format!("Attached \"{resolved_name}\" (unsaved)"));
+        self.set_browser_info(format!("Attached \"{resolved_name}\" (unsaved)"));
         Ok(())
     }
 
@@ -1942,7 +2299,7 @@ impl VaultController {
             .reveal_attachment(&descriptor.reference())
             .map_err(|err| err.message().to_owned())?;
         write_private_noclobber(target_path, secret_bytes.as_slice()).map_err(str::to_owned)?;
-        self.browser_status = Some(format!(
+        self.set_browser_info(format!(
             "Saved attachment \"{name}\" privately (no-clobber)"
         ));
         Ok(())
@@ -1969,7 +2326,7 @@ impl VaultController {
             .map_err(|err| err.message().to_owned())?;
         self.dirty = true;
         self.refresh_preserving_editor(&entry_path)?;
-        self.browser_status = Some(format!(
+        self.set_browser_info(format!(
             "Removed attachment \"{attachment_name}\" (unsaved)"
         ));
         Ok(())
@@ -2017,7 +2374,7 @@ impl VaultController {
         }
         match Self::compute_totp(&self.service, &detail.entry_ref, unix_now) {
             Ok(totp) => detail.totp = Some(totp),
-            Err(err) => self.browser_status = Some(err.message().to_owned()),
+            Err(err) => self.set_browser_error(err.message().to_owned()),
         }
     }
 
@@ -2039,11 +2396,11 @@ impl VaultController {
                     detail.revealed_password = Some(Zeroizing::new(text.to_owned()));
                 }
                 Err(_) => {
-                    self.browser_status = Some(String::from("password is not valid UTF-8"));
+                    self.set_browser_error("password is not valid UTF-8");
                 }
             },
             Err(err) => {
-                self.browser_status = Some(err.message().to_owned());
+                self.set_browser_error(err.message().to_owned());
             }
         }
     }
@@ -2093,11 +2450,11 @@ impl VaultController {
                         .insert(field_name, Zeroizing::new(text.to_owned()));
                 }
                 Err(_) => {
-                    self.browser_status = Some(String::from("field is not valid UTF-8"));
+                    self.set_browser_error("field is not valid UTF-8");
                 }
             },
             Err(err) => {
-                self.browser_status = Some(err.message().to_owned());
+                self.set_browser_error(err.message().to_owned());
             }
         }
     }
@@ -2154,11 +2511,11 @@ impl VaultController {
                         .insert(custom_index, Zeroizing::new(text.to_owned()));
                 }
                 Err(_) => {
-                    self.browser_status = Some(String::from("custom field is not valid UTF-8"));
+                    self.set_browser_error("custom field is not valid UTF-8");
                 }
             },
             Err(err) => {
-                self.browser_status = Some(err.message().to_owned());
+                self.set_browser_error(err.message().to_owned());
             }
         }
     }
@@ -2495,7 +2852,7 @@ mod tests {
             .as_ref()
             .ok_or_else(|| String::from("protected note detail missing"))?;
         assert!(note_detail.protected_standard_fields.contains_key("Notes"));
-        assert!(note_detail.notes.is_empty());
+        assert_eq!(note_detail.notes, "");
         ctrl.toggle_reveal_standard_field("Notes");
         let note_detail = ctrl
             .detail
@@ -2591,7 +2948,7 @@ mod tests {
         ctrl.set_inject_mode(InjectMode::EnvFile);
         ctrl.set_inject_input(String::from("BAD=nkp://invalid/../path\n"));
         assert!(ctrl.inject_preview_error.is_some());
-        assert!(ctrl.extracted_refs.is_empty());
+        assert_eq!(ctrl.extracted_refs.len(), 0);
         Ok(())
     }
 
@@ -2970,6 +3327,105 @@ mod tests {
             ctrl.detail.as_ref().map(|d| d.username.as_str()),
             Some("searched-user")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn editor_prevalidation_partial_mutation_and_focus_during_save() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let (vault_path, master) = build_fixture_vault(dir.path())?;
+
+        let mut ctrl = VaultController::new();
+        ctrl.vault_path = vault_path.to_string_lossy().into_owned();
+        let (path, key_path, gen_id) = ctrl
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        let outcome = open_vault_blocking(&path, &master, key_path.as_deref());
+        ctrl.finish_unlock(gen_id, outcome, 10.0);
+
+        ctrl.open_child_group(0);
+        ctrl.begin_edit_selected_entry()?;
+        // Pre-validation must reject an invalid title BEFORE mutating username or setting dirty.
+        if let Some(editor) = ctrl.editor.as_mut() {
+            editor.title = String::from("Invalid/Title");
+            editor.username = Zeroizing::new(String::from("should-not-commit"));
+        }
+        assert!(ctrl.apply_entry_editor(1_700_000_000).is_err());
+        assert!(!ctrl.dirty);
+        assert!(ctrl.browser_status_is_error);
+        assert_eq!(
+            ctrl.detail.as_ref().map(|d| d.username.as_str()),
+            Some("deploy-bot")
+        );
+
+        // Simulate partial commit: valid title change succeeds, then an unexpected
+        // removal of a non-existent custom field fails; dirty and draft/detail must stay synced.
+        if let Some(editor) = ctrl.editor.as_mut() {
+            editor.title = String::from("ProdAPI Renamed");
+            editor.username = Zeroizing::new(String::from("new-bot"));
+            editor
+                .removed_custom_fields
+                .push(String::from("NonExistentField"));
+        }
+        assert!(ctrl.apply_entry_editor(1_700_000_000).is_err());
+        assert!(ctrl.dirty);
+        assert_eq!(
+            ctrl.detail.as_ref().map(|d| d.metadata.title()),
+            Some("ProdAPI Renamed")
+        );
+        // Fixing the bad removal and retrying must succeed without stale EntryRef or NotFound!
+        if let Some(editor) = ctrl.editor.as_mut() {
+            editor.removed_custom_fields.clear();
+        }
+        ctrl.apply_entry_editor(1_700_000_000)?;
+        assert!(ctrl.editor.is_none());
+        assert_eq!(
+            ctrl.detail.as_ref().map(|d| d.username.as_str()),
+            Some("new-bot")
+        );
+
+        // Focus loss while a header Save is already in flight opens pending_lock_decision,
+        // and finish_save locks cleanly once the save finishes!
+        let (save_gen, save_path, service, creds) = ctrl
+            .begin_save(false)
+            .ok_or_else(|| String::from("begin_save failed"))?;
+        let focus_during_save = ctrl.on_window_focus(false);
+        assert!(!focus_during_save.locked_active_session);
+        assert_eq!(
+            ctrl.pending_lock_decision.as_ref().map(|d| d.trigger),
+            Some(LockTrigger::FocusLoss)
+        );
+        let save_outcome = save_vault_blocking(save_gen, &save_path, service, creds);
+        let finish_cleanup = ctrl.finish_save(save_outcome);
+        assert!(finish_cleanup.locked_active_session);
+        assert!(!finish_cleanup.clear_clipboard);
+        assert_eq!(ctrl.phase, VaultPhase::Locked);
+        assert!(!ctrl.has_credentials());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_attachment_is_refused() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let (vault_path, master) = build_fixture_vault(dir.path())?;
+        let target = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&target, b"secret").map_err(|err| err.to_string())?;
+        std::os::unix::fs::symlink(&target, &link).map_err(|err| err.to_string())?;
+
+        let mut ctrl = VaultController::new();
+        ctrl.vault_path = vault_path.to_string_lossy().into_owned();
+        let (path, key_path, gen_id) = ctrl
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        let outcome = open_vault_blocking(&path, &master, key_path.as_deref());
+        ctrl.finish_unlock(gen_id, outcome, 10.0);
+        ctrl.open_child_group(0);
+
+        let err = ctrl.attach_file(&link, None);
+        assert!(err.is_err());
+        assert!(!ctrl.dirty);
         Ok(())
     }
 }

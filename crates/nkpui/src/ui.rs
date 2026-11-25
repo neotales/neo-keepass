@@ -14,10 +14,10 @@ use rune_kit::{
 use zeroize::Zeroizing;
 
 use crate::controller::{
-    EditableCustomField, EntryDetailState, EntryEditorState, InjectMode, LockCleanup, LockMode,
-    LockTrigger, SaveOutcome, TotpDisplay, UnlockOutcome, VaultController, VaultPhase,
-    WorkspaceTab, create_and_open_vault_blocking, current_unix_seconds, format_byte_size,
-    open_vault_blocking, save_vault_blocking,
+    EditableCustomField, EntryDetailState, EntryEditorState, InjectMode, LockCleanup,
+    LockErrorField, LockMode, LockTrigger, SaveOutcome, TotpDisplay, UnlockOutcome,
+    VaultController, VaultPhase, WorkspaceTab, create_and_open_vault_blocking,
+    current_unix_seconds, format_byte_size, open_vault_blocking, save_vault_blocking,
 };
 
 const SECRET_CLIPBOARD_TTL: Duration = Duration::from_secs(30);
@@ -289,6 +289,7 @@ impl AppState {
     fn apply_lock_cleanup(&mut self, cleanup: LockCleanup, tx: &mut Tx) {
         if cleanup.locked_active_session {
             self.unlock_worker.cancel();
+            self.save_worker.cancel();
             self.wipe_transient_widgets();
             if cleanup.clear_clipboard {
                 if let Some(copy) = self.secret_copy.take() {
@@ -396,7 +397,7 @@ impl AppState {
     pub fn open_entry_editor(&mut self) {
         match self.controller.begin_edit_selected_entry() {
             Ok(()) => self.sync_editor_widgets_from_controller(),
-            Err(err) => self.controller.browser_status = Some(err),
+            Err(err) => self.controller.set_browser_error(err),
         }
     }
 
@@ -406,8 +407,11 @@ impl AppState {
             .controller
             .create_entry_in_current_group(None, current_unix_seconds())
         {
-            Ok(_) => self.sync_editor_widgets_from_controller(),
-            Err(err) => self.controller.browser_status = Some(err),
+            Ok(_) => {
+                self.search_edit.replace_text("");
+                self.sync_editor_widgets_from_controller();
+            }
+            Err(err) => self.controller.set_browser_error(err),
         }
     }
 
@@ -416,14 +420,14 @@ impl AppState {
         if !self.edit_new_tag.text.trim().is_empty() {
             let raw = self.edit_new_tag.text.clone();
             if let Err(err) = self.controller.add_editor_tags_from_input(&raw) {
-                self.controller.browser_status = Some(err);
+                self.controller.set_browser_error(err);
                 return;
             }
             self.edit_new_tag.replace_text("");
         }
         match self.controller.apply_entry_editor(current_unix_seconds()) {
             Ok(()) => self.wipe_editor_widgets(),
-            Err(err) => self.controller.browser_status = Some(err),
+            Err(err) => self.controller.set_browser_error(err),
         }
     }
 
@@ -442,7 +446,7 @@ impl AppState {
         self.secret_copy = Some(copy);
         let msg = format!("Copied {label} to secret clipboard (30s TTL)");
         match self.controller.active_tab {
-            WorkspaceTab::Browser => self.controller.browser_status = Some(msg),
+            WorkspaceTab::Browser => self.controller.set_browser_info(msg),
             WorkspaceTab::Inject => self.controller.inject_status = Some(msg),
         }
     }
@@ -493,8 +497,11 @@ impl AppState {
             changed = true;
         }
 
+        let had_pending = self.controller.pending_lock_decision.is_some();
         let idle_cleanup = self.controller.check_idle_timeout(secs);
-        if idle_cleanup.locked_active_session || self.controller.pending_lock_decision.is_some() {
+        if idle_cleanup.locked_active_session
+            || (!had_pending && self.controller.pending_lock_decision.is_some())
+        {
             self.apply_lock_cleanup(idle_cleanup, tx);
             changed = true;
         }
@@ -685,7 +692,13 @@ fn build_confirm_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
             s.note_activity(tx);
             s.pending_confirm = None;
             let res = match &action {
-                ConfirmDialog::DeleteGroup { .. } => s.controller.remove_current_group(),
+                ConfirmDialog::DeleteGroup { .. } => {
+                    let r = s.controller.remove_current_group();
+                    if r.is_ok() {
+                        s.wipe_editor_widgets();
+                    }
+                    r
+                }
                 ConfirmDialog::DeleteEntry { .. } => {
                     let r = s.controller.delete_selected_entry(current_unix_seconds());
                     if r.is_ok() {
@@ -696,7 +709,7 @@ fn build_confirm_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
                 ConfirmDialog::RemoveAttachment { name } => s.controller.remove_attachment(name),
             };
             if let Err(err) = res {
-                s.controller.browser_status = Some(err);
+                s.controller.set_browser_error(err);
             }
         })
         .build(k)
@@ -759,8 +772,18 @@ fn build_attach_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .px(16.0)
         .pb(16.0)
         .gap(10.0)
-        .child(labeled_field(k, "Source File Path (<= 16 MiB)", path_field))
-        .child(labeled_field(k, "Attachment Name (optional)", name_field));
+        .child(labeled_field(
+            k,
+            "attach-source-field",
+            "Source File Path (<= 16 MiB)",
+            path_field,
+        ))
+        .child(labeled_field(
+            k,
+            "attach-name-field",
+            "Attachment Name (optional)",
+            name_field,
+        ));
 
     if let Some(err) = &state.attach_dialog_error {
         content = content.child(error_status_text(k, "attach-dialog-error", err));
@@ -842,7 +865,8 @@ fn build_extract_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .gap(10.0)
         .child(labeled_field(
             k,
-            "Destination Path (0600, no-clobber)",
+            "extract-dest-field",
+            "Destination Path (owner-only, no-clobber)",
             dest_field,
         ));
 
@@ -1072,24 +1096,20 @@ fn header_bar(k: &Kit, state: &AppState) -> El {
 }
 
 fn lock_field_errors(
-    status: Option<&str>,
+    field: LockErrorField,
     unlocking: bool,
     has_key_file: bool,
 ) -> (bool, bool, bool) {
-    let Some(msg) = status else {
-        return (false, false, false);
-    };
-    if unlocking || msg.starts_with("Locked ") {
+    if unlocking {
         return (false, false, false);
     }
-    let vault_err = msg.contains("vault") || msg.contains(".kdbx");
-    let key_err = msg.contains("key file");
-    let master_err = msg.contains("master password") || (!vault_err && !key_err);
-    (
-        vault_err,
-        master_err,
-        key_err || (master_err && has_key_file),
-    )
+    match field {
+        LockErrorField::None | LockErrorField::Info => (false, false, false),
+        LockErrorField::Vault => (true, false, false),
+        LockErrorField::Master => (false, true, false),
+        LockErrorField::KeyFile => (false, false, true),
+        LockErrorField::Credentials => (false, true, has_key_file),
+    }
 }
 
 fn submit_lock_screen(state: &mut AppState) {
@@ -1111,7 +1131,7 @@ fn lock_mode_switcher(k: &Kit, is_create: bool, unlocking: bool) -> El {
         .disabled(unlocking)
         .on_press(|s: &mut AppState| {
             s.controller.lock_mode = LockMode::Open;
-            s.controller.lock_status = None;
+            s.controller.clear_lock_status();
             s.confirm_master_edit.replace_text("");
         })
         .build(k)
@@ -1127,7 +1147,7 @@ fn lock_mode_switcher(k: &Kit, is_create: bool, unlocking: bool) -> El {
         .disabled(unlocking)
         .on_press(|s: &mut AppState| {
             s.controller.lock_mode = LockMode::Create;
-            s.controller.lock_status = None;
+            s.controller.clear_lock_status();
         })
         .build(k)
         .key("lock-mode-create-btn");
@@ -1195,8 +1215,18 @@ fn lock_form_inputs(
     let mut fields = col()
         .w_full()
         .gap(12.0)
-        .child(labeled_field(k, "Vault (.kdbx)", vault_field))
-        .child(labeled_field(k, "Master Password", master_field));
+        .child(labeled_field(
+            k,
+            "lock-vault-field",
+            "Vault (.kdbx)",
+            vault_field,
+        ))
+        .child(labeled_field(
+            k,
+            "lock-master-field",
+            "Master Password",
+            master_field,
+        ));
 
     if is_create {
         let confirm_field = TextInput::new(&state.confirm_master_edit)
@@ -1210,19 +1240,28 @@ fn lock_form_inputs(
             .on_submit(|s: &mut AppState, _| s.start_create_vault())
             .build(k)
             .key("lock-confirm-master-input");
-        fields = fields.child(labeled_field(k, "Confirm Password", confirm_field));
+        fields = fields.child(labeled_field(
+            k,
+            "lock-confirm-field",
+            "Confirm Password",
+            confirm_field,
+        ));
     }
 
-    fields.child(labeled_field(k, "Key File (optional)", key_field))
+    fields.child(labeled_field(
+        k,
+        "lock-key-field",
+        "Key File (optional)",
+        key_field,
+    ))
 }
 
 fn lock_view(k: &Kit, state: &AppState) -> El {
     let unlocking = state.controller.phase == VaultPhase::Unlocking;
     let is_create = state.controller.lock_mode == LockMode::Create;
-    let status_ref = state.controller.lock_status.as_deref();
-    let is_info_notice = status_ref.is_some_and(|msg| msg.starts_with("Locked "));
+    let is_info_notice = state.controller.lock_error_field == LockErrorField::Info;
     let invalid = lock_field_errors(
-        status_ref,
+        state.controller.lock_error_field,
         unlocking,
         !state.key_file_edit.text.trim().is_empty(),
     );
@@ -1359,7 +1398,7 @@ fn submit_new_group(state: &mut AppState) {
             state.new_group_edit.replace_text("");
             state.show_new_group_form = false;
         }
-        Err(err) => state.controller.browser_status = Some(err),
+        Err(err) => state.controller.set_browser_error(err),
     }
 }
 
@@ -1418,6 +1457,7 @@ fn group_sidebar_list(k: &Kit, state: &AppState) -> El {
             move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
                 s.controller.navigate_breadcrumb(idx);
+                s.search_edit.replace_text("");
                 s.wipe_editor_widgets();
             },
         ));
@@ -1436,6 +1476,7 @@ fn group_sidebar_list(k: &Kit, state: &AppState) -> El {
             move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
                 s.controller.open_child_group(idx);
+                s.search_edit.replace_text("");
                 s.wipe_editor_widgets();
             },
         ));
@@ -1704,12 +1745,6 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
         .scroll(ScrollSpec::default());
 
     if let Some(status) = &state.controller.browser_status {
-        let is_error = status.contains("failed")
-            || status.contains("cannot")
-            || status.contains("invalid")
-            || status.contains("not ")
-            || status.contains("already")
-            || status.contains("exceeds");
         pane = pane.child(
             text(status.clone())
                 .key("browser-status")
@@ -1717,7 +1752,11 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
                 .w_full()
                 .wrap_anywhere()
                 .font(k.ty.text_small)
-                .color(if is_error { k.c.danger.fg } else { k.c.info.fg }),
+                .color(if state.controller.browser_status_is_error {
+                    k.c.danger.fg
+                } else {
+                    k.c.info.fg
+                }),
         );
     }
 
@@ -1749,12 +1788,12 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
 
     if !detail.metadata.tags().is_empty() {
         let mut tags_row = row().key("detail-tags-row").w_full().flex_wrap().gap(6.0);
-        for (idx, tag) in detail.metadata.tags().iter().enumerate() {
+        for tag in detail.metadata.tags() {
             tags_row = tags_row.child(
                 Badge::new(tag.clone())
                     .variant(BadgeVariant::Accent)
                     .build(k)
-                    .key(format!("detail-tag-{idx}")),
+                    .key(format!("detail-tag-{tag}")),
             );
         }
         pane = pane.child(tags_row);
@@ -1890,10 +1929,10 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
             match s.controller.generate_editor_password() {
                 Ok(generated) => {
                     s.edit_password.replace_text(generated.as_str());
-                    s.controller.browser_status =
-                        Some(String::from("Generated 20-character password"));
+                    s.controller
+                        .set_browser_info("Generated 20-character password");
                 }
-                Err(err) => s.controller.browser_status = Some(err),
+                Err(err) => s.controller.set_browser_error(err),
             }
         })
         .build(k)
@@ -1905,7 +1944,7 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
             s.note_activity(tx);
             match s.controller.editor_password_for_copy() {
                 Ok(secret) => s.copy_secret(&secret, "Password", tx),
-                Err(err) => s.controller.browser_status = Some(err),
+                Err(err) => s.controller.set_browser_error(err),
             }
         })
         .build(k)
@@ -1915,7 +1954,12 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
         .key("editor-password-block")
         .w_full()
         .gap(6.0)
-        .child(labeled_field(k, "Password", password_input))
+        .child(labeled_field(
+            k,
+            "editor-password-field",
+            "Password",
+            password_input,
+        ))
         .child(
             row()
                 .key("editor-password-actions")
@@ -2015,11 +2059,16 @@ fn editor_standard_fields(k: &Kit, state: &AppState, editor: &EntryEditorState) 
     col()
         .w_full()
         .gap(10.0)
-        .child(labeled_field(k, "Title", title_input))
-        .child(labeled_field(k, "UserName", username_input))
+        .child(labeled_field(k, "editor-title-field", "Title", title_input))
+        .child(labeled_field(
+            k,
+            "editor-username-field",
+            "UserName",
+            username_input,
+        ))
         .child(editor_password_block(k, state, editor))
-        .child(labeled_field(k, "URL", url_input))
-        .child(labeled_field(k, "Notes", notes_input))
+        .child(labeled_field(k, "editor-url-field", "URL", url_input))
+        .child(labeled_field(k, "editor-notes-field", "Notes", notes_input))
 }
 
 fn entry_editor_pane(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEditorState) -> El {
@@ -2051,7 +2100,7 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
         for (idx, tag) in editor.tags.iter().enumerate() {
             chips = chips.child(
                 row()
-                    .key(format!("editor-tag-chip-{idx}"))
+                    .key(format!("editor-tag-chip-{tag}"))
                     .gap(4.0)
                     .center_y()
                     .child(
@@ -2068,7 +2117,7 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
                                 s.controller.remove_editor_tag(idx);
                             })
                             .build(k)
-                            .key(format!("editor-tag-remove-{idx}")),
+                            .key(format!("editor-tag-remove-{tag}")),
                     ),
             );
         }
@@ -2085,7 +2134,7 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
             let raw = s.edit_new_tag.text.clone();
             match s.controller.add_editor_tags_from_input(&raw) {
                 Ok(()) => s.edit_new_tag.replace_text(""),
-                Err(err) => s.controller.browser_status = Some(err),
+                Err(err) => s.controller.set_browser_error(err),
             }
         })
         .build(k)
@@ -2098,7 +2147,7 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
             let raw = s.edit_new_tag.text.clone();
             match s.controller.add_editor_tags_from_input(&raw) {
                 Ok(()) => s.edit_new_tag.replace_text(""),
-                Err(err) => s.controller.browser_status = Some(err),
+                Err(err) => s.controller.set_browser_error(err),
             }
         })
         .build(k)
@@ -2131,8 +2180,9 @@ fn editor_custom_field_card(
     idx: usize,
     field: &EditableCustomField,
 ) -> El {
+    let field_key = &field.name;
     let mut header_row = row()
-        .key(format!("editor-cf-head-{idx}"))
+        .key(format!("editor-cf-head-{field_key}"))
         .w_full()
         .justify_between()
         .center_y()
@@ -2156,7 +2206,7 @@ fn editor_custom_field_card(
             Badge::new("Protected")
                 .variant(BadgeVariant::Accent)
                 .build(k)
-                .key(format!("editor-cf-prot-badge-{idx}")),
+                .key(format!("editor-cf-prot-badge-{field_key}")),
         );
     }
     header_row = header_row.child(
@@ -2172,7 +2222,7 @@ fn editor_custom_field_card(
                 }
             })
             .build(k)
-            .key(format!("editor-cf-remove-{idx}")),
+            .key(format!("editor-cf-remove-{field_key}")),
     );
 
     let value_edit = state
@@ -2207,18 +2257,23 @@ fn editor_custom_field_card(
     let actions = editor_custom_field_actions(k, idx, field);
 
     col()
-        .key(format!("editor-cf-card-{idx}"))
+        .key(format!("editor-cf-card-{field_key}"))
         .w_full()
         .padding(8.0)
         .gap(6.0)
         .radius(k.radius.md)
         .fill(k.c.layer_01)
         .child(header_row)
-        .child(value_input.build(k).key(format!("editor-cf-input-{idx}")))
+        .child(
+            value_input
+                .build(k)
+                .key(format!("editor-cf-input-{field_key}")),
+        )
         .child(actions)
 }
 
 fn editor_custom_field_actions(k: &Kit, idx: usize, field: &EditableCustomField) -> El {
+    let field_key = &field.name;
     let protected_cb = Checkbox::new(field.protected)
         .label("Protected")
         .on_toggle_tx(move |s: &mut AppState, tx: &mut Tx| {
@@ -2236,10 +2291,10 @@ fn editor_custom_field_actions(k: &Kit, idx: usize, field: &EditableCustomField)
             }
         })
         .build(k)
-        .key(format!("editor-cf-protected-{idx}"));
+        .key(format!("editor-cf-protected-{field_key}"));
 
     let mut actions = row()
-        .key(format!("editor-cf-actions-{idx}"))
+        .key(format!("editor-cf-actions-{field_key}"))
         .w_full()
         .flex_wrap()
         .center_y()
@@ -2264,7 +2319,7 @@ fn editor_custom_field_actions(k: &Kit, idx: usize, field: &EditableCustomField)
                     }
                 })
                 .build(k)
-                .key(format!("editor-cf-reveal-{idx}")),
+                .key(format!("editor-cf-reveal-{field_key}")),
         );
     }
 
@@ -2276,11 +2331,11 @@ fn editor_custom_field_actions(k: &Kit, idx: usize, field: &EditableCustomField)
                 s.note_activity(tx);
                 match s.controller.editor_custom_field_for_copy(idx) {
                     Ok(secret) => s.copy_secret(&secret, &cf_name, tx),
-                    Err(err) => s.controller.browser_status = Some(err),
+                    Err(err) => s.controller.set_browser_error(err),
                 }
             })
             .build(k)
-            .key(format!("editor-cf-copy-{idx}")),
+            .key(format!("editor-cf-copy-{field_key}")),
     )
 }
 
@@ -2363,9 +2418,9 @@ fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
                         }
                         s.edit_custom_values.push(edit);
                         s.add_custom_form.reset();
-                        s.controller.browser_status = None;
+                        s.controller.clear_browser_status();
                     }
-                    Err(err) => s.controller.browser_status = Some(err),
+                    Err(err) => s.controller.set_browser_error(err),
                 }
             })
             .build(k)
@@ -2421,7 +2476,7 @@ fn attachment_item_row(
     saving: bool,
 ) -> El {
     let mut info = row()
-        .key(format!("attachment-info-{idx}"))
+        .key(format!("attachment-info-{name}"))
         .grow(1.0)
         .min_w(0.0)
         .shrink()
@@ -2429,7 +2484,7 @@ fn attachment_item_row(
         .gap(6.0)
         .child(
             text(format!("{name} ({})", format_byte_size(size)))
-                .key(format!("attachment-name-{idx}"))
+                .key(format!("attachment-name-{name}"))
                 .truncate()
                 .font(k.ty.ui)
                 .color(k.c.text_base),
@@ -2439,7 +2494,7 @@ fn attachment_item_row(
             Badge::new("Protected")
                 .variant(BadgeVariant::Accent)
                 .build(k)
-                .key(format!("attachment-prot-{idx}")),
+                .key(format!("attachment-prot-{name}")),
         );
     }
 
@@ -2458,7 +2513,7 @@ fn attachment_item_row(
             });
         })
         .build(k)
-        .key(format!("attachment-extract-{idx}"));
+        .key(format!("attachment-extract-{name}"));
 
     let remove_name = name.to_owned();
     let remove_btn = Button::new("Remove")
@@ -2472,10 +2527,10 @@ fn attachment_item_row(
             });
         })
         .build(k)
-        .key(format!("attachment-remove-{idx}"));
+        .key(format!("attachment-remove-{name}"));
 
     row()
-        .key(format!("attachment-row-{idx}"))
+        .key(format!("attachment-row-{name}"))
         .w_full()
         .padding(8.0)
         .radius(k.radius.md)
@@ -2486,7 +2541,7 @@ fn attachment_item_row(
         .child(info)
         .child(
             row()
-                .key(format!("attachment-actions-{idx}"))
+                .key(format!("attachment-actions-{name}"))
                 .gap(6.0)
                 .child(extract_btn)
                 .child(remove_btn),
@@ -2631,6 +2686,7 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
                 .color(k.c.text_muted),
         );
     for (idx, field) in detail.metadata.custom_fields().iter().enumerate() {
+        let field_name = field.name().to_owned();
         let revealed = detail.revealed_custom_fields.get(&idx);
         let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
             .control_size(ControlSize::Small)
@@ -2639,28 +2695,28 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
                 s.controller.toggle_reveal_custom_field(idx);
             })
             .build(k)
-            .key(format!("custom-reveal-{idx}"));
+            .key(format!("custom-reveal-{field_name}"));
 
-        let field_name = field.name().to_owned();
+        let copy_label = field_name.clone();
         let copy_btn = Button::new("Copy (30s)")
             .control_size(ControlSize::Small)
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
                 match s.controller.custom_field_for_copy(idx) {
-                    Ok(secret) => s.copy_secret(&secret, &field_name, tx),
-                    Err(err) => s.controller.browser_status = Some(err),
+                    Ok(secret) => s.copy_secret(&secret, &copy_label, tx),
+                    Err(err) => s.controller.set_browser_error(err),
                 }
             })
             .build(k)
-            .key(format!("custom-copy-{idx}"));
+            .key(format!("custom-copy-{field_name}"));
 
         pane = pane.child(secret_field_row(
             k,
             SecretRowSpec {
-                row_key: format!("custom-field-{idx}"),
-                label: field.name().to_owned(),
+                row_key: format!("custom-field-{field_name}"),
+                label: field_name.clone(),
                 protected_badge: field.protected(),
-                value_key: format!("custom-value-{idx}"),
+                value_key: format!("custom-value-{field_name}"),
                 revealed,
                 reveal_btn,
                 copy_btn,
@@ -2697,7 +2753,7 @@ fn standard_field_row(
             s.note_activity(tx);
             match s.controller.standard_field_for_copy(field_key) {
                 Ok(secret) => s.copy_secret(&secret, label, tx),
-                Err(err) => s.controller.browser_status = Some(err),
+                Err(err) => s.controller.set_browser_error(err),
             }
         })
         .build(k)
@@ -2762,7 +2818,7 @@ fn password_row(k: &Kit, detail: &EntryDetailState) -> El {
             s.note_activity(tx);
             match s.controller.password_for_copy() {
                 Ok(secret) => s.copy_secret(&secret, "Password", tx),
-                Err(err) => s.controller.browser_status = Some(err),
+                Err(err) => s.controller.set_browser_error(err),
             }
         })
         .build(k)
@@ -3093,8 +3149,9 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
     )
 }
 
-fn labeled_field(k: &Kit, label: &str, field: El) -> El {
+fn labeled_field(k: &Kit, key: impl Into<String>, label: &str, field: El) -> El {
     col()
+        .key(key)
         .w_full()
         .gap(4.0)
         .child(
