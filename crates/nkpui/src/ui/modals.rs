@@ -619,6 +619,7 @@ fn custom_icon_picker_tile(
     state: &AppState,
     idx: usize,
     summary: &CustomIconSummary,
+    selected: bool,
     target: IconPickerTarget,
 ) -> El {
     let id = summary.id;
@@ -628,7 +629,7 @@ fn custom_icon_picker_tile(
         summary.name.clone()
     };
     let custom_img = state.custom_icon_for(Some(id));
-    col()
+    let mut tile = col()
         .key(format!("custom-icon-tile-{idx}"))
         .w(88.0)
         .h(58.0)
@@ -636,13 +637,25 @@ fn custom_icon_picker_tile(
         .gap(2.0)
         .center()
         .radius(k.radius.md)
-        .fill(k.c.layer_01)
-        .border(1.0, k.c.border_muted)
+        .fill(if selected { k.c.layer_03 } else { k.c.layer_01 })
+        .border(
+            1.0,
+            if selected {
+                k.c.border_focus
+            } else {
+                k.c.border_muted
+            },
+        )
         .focusable(true)
+        .checked(selected)
         .press_on_return()
         .hover(k.c.hover)
         .press(k.c.pressed)
-        .label(format!("Custom icon: {display_name}"))
+        .label(if selected {
+            format!("Custom icon: {display_name}, selected")
+        } else {
+            format!("Custom icon: {display_name}")
+        })
         .help(display_name.clone())
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
@@ -661,7 +674,11 @@ fn custom_icon_picker_tile(
                 .truncate()
                 .font(k.ty.text_xsmall)
                 .color(k.c.text_muted),
-        )
+        );
+    if selected {
+        tile = tile.focus_selected(true);
+    }
+    tile
 }
 
 fn icon_picker_scroll_body(
@@ -692,6 +709,7 @@ fn icon_picker_scroll_body(
             state,
             idx,
             summary,
+            picker.selected_custom_id == Some(summary.id),
             picker.target.clone(),
         ));
     }
@@ -716,7 +734,7 @@ fn icon_picker_scroll_body(
             k,
             meta.id,
             meta.name,
-            meta.id == picker.selected_id,
+            picker.selected_custom_id.is_none() && meta.id == picker.selected_id,
             picker.target.clone(),
         ));
     }
@@ -842,6 +860,8 @@ fn build_rename_group_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
                     Ok(()) => {
                         s.rename_group_modal = None;
                         s.rename_group_edit.replace_text("");
+                        s.wipe_editor_widgets();
+                        s.clear_transient_overlays();
                         s.sync_path_bar_from_controller();
                     }
                     Err(err) => {
@@ -875,6 +895,8 @@ fn build_rename_group_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
                 Ok(()) => {
                     s.rename_group_modal = None;
                     s.rename_group_edit.replace_text("");
+                    s.wipe_editor_widgets();
+                    s.clear_transient_overlays();
                     s.sync_path_bar_from_controller();
                 }
                 Err(err) => {
@@ -1108,53 +1130,54 @@ fn settings_kdf_params(k: &Kit, state: &AppState, kdf_choice: KdfChoice) -> El {
     if matches!(kdf_choice, KdfChoice::Argon2id | KdfChoice::Argon2d) {
         let mem_in = TextInput::new(&state.settings_kdf_memory_mib)
             .label("Memory (MiB)")
-            .width(Some(100.0))
+            .width(None)
             .on_edit(|s: &mut AppState| &mut s.settings_kdf_memory_mib)
             .on_change(|s: &mut AppState, tx| s.note_activity(tx))
             .build(k)
             .key("settings-kdf-memory-input");
         let iter_in = TextInput::new(&state.settings_kdf_iterations)
             .label("Iterations")
-            .width(Some(90.0))
+            .width(None)
             .on_edit(|s: &mut AppState| &mut s.settings_kdf_iterations)
             .on_change(|s: &mut AppState, tx| s.note_activity(tx))
             .build(k)
             .key("settings-kdf-iter-input");
         let lanes_in = TextInput::new(&state.settings_kdf_lanes)
             .label("Lanes")
-            .width(Some(80.0))
+            .width(None)
             .on_edit(|s: &mut AppState| &mut s.settings_kdf_lanes)
             .on_change(|s: &mut AppState, tx| s.note_activity(tx))
             .build(k)
             .key("settings-kdf-lanes-input");
         kdf_params = kdf_params
-            .child(labeled_field(
-                k,
-                "settings-kdf-mem-f",
-                "Memory (MiB)",
-                mem_in,
-            ))
-            .child(labeled_field(
-                k,
-                "settings-kdf-iter-f",
-                "Iterations",
-                iter_in,
-            ))
-            .child(labeled_field(k, "settings-kdf-lanes-f", "Lanes", lanes_in));
+            .child(
+                labeled_field(k, "settings-kdf-mem-f", "Memory (MiB)", mem_in)
+                    .grow(1.0)
+                    .min_w(0.0),
+            )
+            .child(
+                labeled_field(k, "settings-kdf-iter-f", "Iterations", iter_in)
+                    .grow(1.0)
+                    .min_w(0.0),
+            )
+            .child(
+                labeled_field(k, "settings-kdf-lanes-f", "Lanes", lanes_in)
+                    .grow(1.0)
+                    .min_w(0.0),
+            );
     } else {
         let rounds_in = TextInput::new(&state.settings_kdf_rounds)
             .label("AES-KDF Rounds")
-            .width(Some(160.0))
+            .width(None)
             .on_edit(|s: &mut AppState| &mut s.settings_kdf_rounds)
             .on_change(|s: &mut AppState, tx| s.note_activity(tx))
             .build(k)
             .key("settings-kdf-rounds-input");
-        kdf_params = kdf_params.child(labeled_field(
-            k,
-            "settings-kdf-rounds-f",
-            "AES-KDF Rounds",
-            rounds_in,
-        ));
+        kdf_params = kdf_params.child(
+            labeled_field(k, "settings-kdf-rounds-f", "AES-KDF Rounds", rounds_in)
+                .grow(1.0)
+                .min_w(0.0),
+        );
     }
     kdf_params
 }
@@ -1252,7 +1275,7 @@ fn settings_desktop_security_section(k: &Kit, modal: &SettingsModalState) -> El 
         let preset_val = *val;
         presets_row = presets_row.child(
             Button::new(*label)
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .variant(if active {
                     ButtonVariant::Contrast
                 } else {
@@ -1398,6 +1421,8 @@ fn apply_settings_modal(s: &mut AppState) {
             s.controller.auto_lock_secs = modal.auto_lock_secs;
             s.controller.lock_on_focus_loss = modal.lock_on_focus_loss;
             s.settings_modal = None;
+            s.wipe_editor_widgets();
+            s.clear_transient_overlays();
             s.sync_path_bar_from_controller();
         }
         Err(err) => {
@@ -1446,14 +1471,14 @@ fn settings_metadata_fields(k: &Kit, state: &AppState, modal: &SettingsModalStat
 
     let hist_items_in = TextInput::new(&state.settings_history_items)
         .label("History Max Items (-1 unlimited)")
-        .width(Some(120.0))
+        .width(None)
         .on_edit(|s: &mut AppState| &mut s.settings_history_items)
         .on_change(|s: &mut AppState, tx| s.note_activity(tx))
         .build(k)
         .key("settings-hist-items-input");
     let hist_size_in = TextInput::new(&state.settings_history_size)
         .label("History Max Size bytes (-1 unlimited)")
-        .width(Some(150.0))
+        .width(None)
         .on_edit(|s: &mut AppState| &mut s.settings_history_size)
         .on_change(|s: &mut AppState, tx| s.note_activity(tx))
         .build(k)
@@ -1480,18 +1505,26 @@ fn settings_metadata_fields(k: &Kit, state: &AppState, modal: &SettingsModalStat
             row()
                 .w_full()
                 .gap(8.0)
-                .child(labeled_field(
-                    k,
-                    "settings-hist-items-f",
-                    "History Max Items (-1 = unlimited)",
-                    hist_items_in,
-                ))
-                .child(labeled_field(
-                    k,
-                    "settings-hist-size-f",
-                    "History Max Size (bytes, -1 = unlimited)",
-                    hist_size_in,
-                )),
+                .child(
+                    labeled_field(
+                        k,
+                        "settings-hist-items-f",
+                        "History Max Items (-1 = unlimited)",
+                        hist_items_in,
+                    )
+                    .grow(1.0)
+                    .min_w(0.0),
+                )
+                .child(
+                    labeled_field(
+                        k,
+                        "settings-hist-size-f",
+                        "History Max Size (bytes, -1 = unlimited)",
+                        hist_size_in,
+                    )
+                    .grow(1.0)
+                    .min_w(0.0),
+                ),
         )
 }
 
@@ -1508,12 +1541,22 @@ fn build_settings_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
 
     let scroll = col()
         .w_full()
-        .h(380.0)
+        .h(320.0)
+        .shrink()
+        .min_h(0.0)
+        .max_h(340.0)
         .padding(6.0)
         .scroll(ScrollSpec::default())
         .child(scroll_body);
 
-    let mut content = col().w_full().px(16.0).pb(16.0).gap(10.0).child(scroll);
+    let mut content = col()
+        .w_full()
+        .shrink()
+        .min_h(0.0)
+        .px(16.0)
+        .pb(16.0)
+        .gap(10.0)
+        .child(scroll);
     if let Some(err) = &modal.error {
         content = content.child(error_status_text(k, "settings-modal-error", err));
     }
@@ -1524,6 +1567,7 @@ fn build_settings_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             apply_settings_modal(s);
+            s.schedule_wakeup(tx);
         })
         .build(k)
         .key("settings-save-btn");

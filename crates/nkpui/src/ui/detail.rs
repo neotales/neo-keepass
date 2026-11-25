@@ -97,31 +97,36 @@ fn secret_field_row(k: &Kit, spec: SecretRowSpec<'_>) -> El {
         );
     }
 
-    row()
+    col()
         .key(spec.row_key)
         .w_full()
         .padding(8.0)
         .radius(k.radius.md)
         .fill(k.c.layer_01)
-        .justify_between()
-        .center_y()
-        .gap(8.0)
-        .child(
-            col()
-                .key("value-col")
-                .grow(1.0)
-                .min_w(0.0)
-                .shrink()
-                .gap(2.0)
-                .child(label_row)
-                .child(secret_value_text(k, spec.value_key, spec.revealed)),
-        )
+        .gap(6.0)
+        .child(label_row)
         .child(
             row()
-                .key("actions")
-                .gap(6.0)
-                .child(spec.reveal_btn)
-                .child(spec.copy_btn),
+                .key("value-row")
+                .w_full()
+                .justify_between()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    col()
+                        .key("value-col")
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .shrink()
+                        .child(secret_value_text(k, spec.value_key, spec.revealed)),
+                )
+                .child(
+                    row()
+                        .key("actions")
+                        .gap(6.0)
+                        .child(spec.reveal_btn)
+                        .child(spec.copy_btn),
+                ),
         )
 }
 
@@ -142,7 +147,7 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
         let field_name = field.name().to_owned();
         let revealed = detail.revealed_custom_fields.get(&idx);
         let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
                 s.controller.toggle_reveal_custom_field(idx);
@@ -152,7 +157,7 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
 
         let copy_label = field_name.clone();
         let copy_btn = Button::new("Copy (30s)")
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
                 match s.controller.custom_field_for_copy(idx) {
@@ -187,7 +192,7 @@ fn metadata_row(k: &Kit, key_suffix: &str, label: &str, value: &str) -> El {
         let copy_label = label.to_owned();
         actions = actions.child(
             Button::new("Copy")
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
                     tx.copy(copy_val.clone());
@@ -195,8 +200,7 @@ fn metadata_row(k: &Kit, key_suffix: &str, label: &str, value: &str) -> El {
                         .set_browser_info(format!("Copied {copy_label} to clipboard"));
                 })
                 .build(k)
-                .key(format!("std-copy-{key_suffix}"))
-                .min_h(24.0),
+                .key(format!("std-copy-{key_suffix}")),
         );
     }
     if key_suffix == "URL"
@@ -205,7 +209,7 @@ fn metadata_row(k: &Kit, key_suffix: &str, label: &str, value: &str) -> El {
         let open_target = safe_url.to_owned();
         actions = actions.child(
             Button::new("Open URL")
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .variant(ButtonVariant::Contrast)
                 .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
@@ -215,8 +219,7 @@ fn metadata_row(k: &Kit, key_suffix: &str, label: &str, value: &str) -> El {
                     }
                 })
                 .build(k)
-                .key("std-open-url-btn")
-                .min_h(24.0),
+                .key("std-open-url-btn"),
         );
     }
 
@@ -272,7 +275,7 @@ fn standard_field_row(
 
     let revealed = detail.revealed_standard_fields.get(field_key);
     let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             s.controller.toggle_reveal_standard_field(field_key);
@@ -281,7 +284,7 @@ fn standard_field_row(
         .key(format!("std-reveal-{field_key}"));
 
     let copy_btn = Button::new("Copy (30s)")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             match s.controller.standard_field_for_copy(field_key) {
@@ -309,17 +312,16 @@ fn standard_field_row(
 fn password_row(k: &Kit, detail: &EntryDetailState) -> El {
     let revealed = detail.revealed_password.as_ref();
     let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             s.controller.toggle_reveal_password();
         })
         .build(k)
-        .key("password-reveal-btn")
-        .min_h(24.0);
+        .key("password-reveal-btn");
 
     let copy_btn = Button::new("Copy (30s)")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Contrast)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
@@ -329,8 +331,7 @@ fn password_row(k: &Kit, detail: &EntryDetailState) -> El {
             }
         })
         .build(k)
-        .key("password-copy-btn")
-        .min_h(24.0);
+        .key("password-copy-btn");
 
     secret_field_row(
         k,
@@ -352,7 +353,7 @@ fn password_row(k: &Kit, detail: &EntryDetailState) -> El {
 )]
 fn totp_row(k: &Kit, totp: &TotpDisplay) -> El {
     let copy_btn = Button::new("Copy (30s)")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             if let Some(code) = s
@@ -428,7 +429,7 @@ fn totp_row(k: &Kit, totp: &TotpDisplay) -> El {
 
 fn hotp_row(k: &Kit, counter: u64, hotp_code: Option<&Zeroizing<String>>, saving: bool) -> El {
     let next_btn = Button::new("Generate Next Code")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Contrast)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -440,11 +441,11 @@ fn hotp_row(k: &Kit, counter: u64, hotp_code: Option<&Zeroizing<String>>, saving
         .build(k)
         .key("hotp-next-btn");
 
-    let mut actions = row().gap(6.0).child(next_btn);
+    let mut actions = row().key("hotp-actions").w_full().gap(6.0).child(next_btn);
     if hotp_code.is_some() {
         actions = actions.child(
             Button::new("Copy (30s)")
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
                     if let Some(code) = s
@@ -479,24 +480,22 @@ fn hotp_row(k: &Kit, counter: u64, hotp_code: Option<&Zeroizing<String>>, saving
             .color(k.c.text_faint)
     };
 
-    row()
+    col()
         .key("hotp-row")
         .w_full()
         .padding(8.0)
         .radius(k.radius.md)
         .fill(k.c.layer_01)
-        .justify_between()
-        .center_y()
-        .gap(8.0)
+        .gap(6.0)
         .child(
             col()
-                .grow(1.0)
-                .min_w(0.0)
-                .shrink()
+                .key("hotp-header")
+                .w_full()
                 .gap(4.0)
                 .child(
                     text(format!("HOTP (Counter: {counter})"))
                         .key("hotp-label")
+                        .w_full()
                         .font(k.ty.small_medium)
                         .color(k.c.text_muted),
                 )
@@ -539,10 +538,11 @@ fn attachment_item_row(
     let prefill_name = sanitize_attachment_prefill(name);
     let extract_name = prefill_name.clone();
     let extract_btn = Button::new("Save As…")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .disabled(saving)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            s.clear_transient_overlays();
             s.extract_path_edit.replace_text(prefill_name.clone());
             s.extract_dialog = Some(ExtractDialogState {
                 index: idx,
@@ -556,11 +556,12 @@ fn attachment_item_row(
 
     let remove_name = name.to_owned();
     let remove_btn = Button::new("Remove")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Danger)
         .disabled(saving)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            s.clear_transient_overlays();
             s.pending_confirm = Some(ConfirmDialog::RemoveAttachment {
                 name: remove_name.clone(),
             });
@@ -594,10 +595,11 @@ pub(super) fn attachments_section(
     saving: bool,
 ) -> El {
     let attach_btn = Button::new("+ Attach File")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            s.clear_transient_overlays();
             s.attach_dialog_open = true;
             s.attach_dialog_error = None;
         })
@@ -654,7 +656,7 @@ fn entry_recycle_action_buttons(
     let entry_title = detail.metadata.title().to_owned();
     if detail.is_in_recycle_bin {
         let restore_btn = Button::new("Restore")
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .variant(ButtonVariant::Contrast)
             .disabled(saving)
             .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -662,17 +664,20 @@ fn entry_recycle_action_buttons(
                 if let Err(err) = s.controller.restore_selected_entry(current_unix_seconds()) {
                     s.controller.set_browser_error(err);
                 } else {
+                    s.wipe_editor_widgets();
+                    s.clear_transient_overlays();
                     s.sync_path_bar_from_controller();
                 }
             })
             .build(k)
             .key("entry-restore-btn");
         let perm_del_btn = Button::new("Delete Permanently")
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .variant(ButtonVariant::Danger)
             .disabled(saving)
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
+                s.clear_transient_overlays();
                 s.pending_confirm = Some(ConfirmDialog::DeleteEntryPermanent {
                     title: entry_title.clone(),
                 });
@@ -688,7 +693,7 @@ fn entry_recycle_action_buttons(
         "Delete"
     };
     let delete_btn = Button::new(label)
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Danger)
         .disabled(saving)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
@@ -698,9 +703,11 @@ fn entry_recycle_action_buttons(
                     s.controller.set_browser_error(err);
                 } else {
                     s.wipe_editor_widgets();
+                    s.clear_transient_overlays();
                     s.sync_path_bar_from_controller();
                 }
             } else {
+                s.clear_transient_overlays();
                 s.pending_confirm = Some(ConfirmDialog::DeleteEntryPermanent {
                     title: entry_title.clone(),
                 });
@@ -746,32 +753,34 @@ fn entry_detail_actions(k: &Kit, state: &AppState, detail: &EntryDetailState, sa
     let move_ref = detail.entry_ref.clone();
     let move_title = detail.metadata.title().to_owned();
     let move_btn = Button::new("Move…")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .disabled(saving)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             s.open_move_entry_modal(move_ref.clone(), move_title.clone());
         })
         .build(k)
-        .key("entry-move-btn")
-        .min_h(24.0);
+        .key("entry-move-btn");
 
     let clone_btn = Button::new("Clone")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             match s.controller.clone_selected_entry(current_unix_seconds()) {
-                Ok(_) => s.sync_path_bar_from_controller(),
+                Ok(_) => {
+                    s.wipe_editor_widgets();
+                    s.clear_transient_overlays();
+                    s.sync_path_bar_from_controller();
+                }
                 Err(err) => s.controller.set_browser_error(err),
             }
         })
         .build(k)
-        .key("entry-clone-btn")
-        .min_h(24.0);
+        .key("entry-clone-btn");
 
     let edit_btn = Button::new("Edit")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Contrast)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -779,8 +788,7 @@ fn entry_detail_actions(k: &Kit, state: &AppState, detail: &EntryDetailState, sa
             s.open_entry_editor();
         })
         .build(k)
-        .key("entry-edit-btn")
-        .min_h(24.0);
+        .key("entry-edit-btn");
 
     let actions = row()
         .key("detail-header-actions")
@@ -846,6 +854,7 @@ fn entry_detail_header(k: &Kit, state: &AppState, detail: &EntryDetailState, sav
 fn entry_detail_scroll_body(k: &Kit, detail: &EntryDetailState, saving: bool) -> El {
     let mut scroll_body = col()
         .key("entry-detail-scroll")
+        .instant_changes()
         .w_full()
         .grow(1.0)
         .min_h(0.0)

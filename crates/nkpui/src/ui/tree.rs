@@ -1,6 +1,6 @@
 //! Collapsible `TreeView` group sidebar, group context menus, and inline subgroup creation.
 
-use rune::{El, ScrollSpec, Tx, col, el, row, text};
+use rune::{El, Key, KeyEvent, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::{
     Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, MenuEntry, MenuItem, TextInput,
     context_menu,
@@ -29,6 +29,8 @@ fn submit_new_group(state: &mut AppState) {
             state.new_group_error = None;
             state.show_new_group_form = false;
             state.new_group_target = None;
+            state.clear_transient_overlays();
+            state.wipe_editor_widgets();
             state.sync_path_bar_from_controller();
         }
         Err(err) => {
@@ -56,7 +58,7 @@ fn new_group_form_el(k: &Kit, state: &AppState) -> El {
         .key("new-group-name-input");
 
     let create_btn = Button::new("Add")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Submit)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
@@ -76,20 +78,29 @@ fn new_group_form_el(k: &Kit, state: &AppState) -> El {
     form.child(row().w_full().justify_end().child(create_btn))
 }
 
+fn can_mutate_tree(s: &AppState) -> bool {
+    s.controller.is_unlocked() && !s.controller.saving && !s.has_open_modal()
+}
+
 fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<MenuEntry> {
     let saving = state.controller.saving;
     let group_ref = node.reference.clone();
     let group_path = node.path.clone();
     let group_label = node.label.clone();
     let icon_id = node.icon_id;
+    let custom_icon_id = node.custom_icon_id;
 
     let mut entries = Vec::new();
     let g_new_entry_path = group_path.clone();
     entries.push(MenuEntry::item(
         MenuItem::new("New Entry").disabled(saving).on_select_tx(
             move |s: &mut AppState, tx: &mut Tx| {
-                s.note_activity(tx);
                 s.context_menu = None;
+                if !can_mutate_tree(s) {
+                    return;
+                }
+                s.note_activity(tx);
+                s.clear_transient_overlays();
                 s.controller
                     .select_group_by_path(&g_new_entry_path, current_unix_seconds());
                 s.create_new_entry();
@@ -102,8 +113,12 @@ fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<
     entries.push(MenuEntry::item(
         MenuItem::new("New Subgroup").disabled(saving).on_select_tx(
             move |s: &mut AppState, tx: &mut Tx| {
-                s.note_activity(tx);
                 s.context_menu = None;
+                if !can_mutate_tree(s) {
+                    return;
+                }
+                s.note_activity(tx);
+                s.clear_transient_overlays();
                 s.new_group_target = Some((g_sub_ref.clone(), g_sub_path.clone()));
                 s.show_new_group_form = true;
                 s.new_group_error = None;
@@ -117,8 +132,11 @@ fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<
         MenuItem::new("Rename Group…")
             .disabled(saving)
             .on_select_tx(move |s: &mut AppState, tx: &mut Tx| {
-                s.note_activity(tx);
                 s.context_menu = None;
+                if !can_mutate_tree(s) {
+                    return;
+                }
+                s.note_activity(tx);
                 s.open_rename_group_modal(g_ren_ref.clone(), g_ren_label.clone(), tx);
             }),
     ));
@@ -127,16 +145,33 @@ fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<
     entries.push(MenuEntry::item(
         MenuItem::new("Change Icon…").disabled(saving).on_select_tx(
             move |s: &mut AppState, tx: &mut Tx| {
-                s.note_activity(tx);
                 s.context_menu = None;
+                if !can_mutate_tree(s) {
+                    return;
+                }
+                s.note_activity(tx);
+                s.clear_transient_overlays();
                 s.icon_search_edit.replace_text("");
                 s.icon_picker = Some(IconPickerState {
                     target: IconPickerTarget::Group(g_icon_ref.clone()),
                     selected_id: icon_id,
+                    selected_custom_id: custom_icon_id,
                 });
             },
         ),
     ));
+
+    append_group_danger_menu_entries(&mut entries, node, saving);
+    entries
+}
+
+fn append_group_danger_menu_entries(
+    entries: &mut Vec<MenuEntry>,
+    node: &VisibleTreeGroup,
+    saving: bool,
+) {
+    let group_ref = node.reference.clone();
+    let group_label = node.label.clone();
 
     if node.is_recycle_bin {
         entries.push(MenuEntry::Separator);
@@ -145,8 +180,12 @@ fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<
                 .danger(true)
                 .disabled(saving)
                 .on_select_tx(|s: &mut AppState, tx: &mut Tx| {
-                    s.note_activity(tx);
                     s.context_menu = None;
+                    if !can_mutate_tree(s) {
+                        return;
+                    }
+                    s.note_activity(tx);
+                    s.clear_transient_overlays();
                     s.pending_confirm = Some(ConfirmDialog::EmptyRecycleBin);
                 }),
         ));
@@ -159,8 +198,12 @@ fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<
                 .danger(true)
                 .disabled(saving)
                 .on_select_tx(move |s: &mut AppState, tx: &mut Tx| {
-                    s.note_activity(tx);
                     s.context_menu = None;
+                    if !can_mutate_tree(s) {
+                        return;
+                    }
+                    s.note_activity(tx);
+                    s.clear_transient_overlays();
                     s.pending_confirm = Some(ConfirmDialog::DeleteGroup {
                         group_ref: group_ref.clone(),
                         label: group_label.clone(),
@@ -168,8 +211,6 @@ fn group_context_menu_entries(state: &AppState, node: &VisibleTreeGroup) -> Vec<
                 }),
         ));
     }
-
-    entries
 }
 
 fn tree_chevron_el(k: &Kit, idx: usize, node: &VisibleTreeGroup) -> El {
@@ -195,6 +236,7 @@ fn tree_chevron_el(k: &Kit, idx: usize, node: &VisibleTreeGroup) -> El {
         .press_on_return()
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            s.clear_transient_overlays();
             s.controller.toggle_group_expanded(&path_for_toggle);
         })
         .child(text(glyph).font(k.ty.small_medium).color(k.c.text_muted))
@@ -320,6 +362,7 @@ fn tree_group_row(
         row_el = row_el
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
+                s.clear_transient_overlays();
                 s.controller
                     .select_group_by_path(&path_click, current_unix_seconds());
                 s.search_edit.replace_text("");
@@ -328,6 +371,7 @@ fn tree_group_row(
             })
             .on_secondary_press(move |s: &mut AppState, point, tx: &mut Tx| {
                 s.note_activity(tx);
+                s.drag_state = None;
                 s.context_menu = Some(ActiveContextMenu {
                     point,
                     target: ContextMenuTarget::Group {
@@ -338,13 +382,14 @@ fn tree_group_row(
                         is_root: ctx_root,
                         is_recycle_bin: ctx_bin,
                     },
+                    move_submenu_open: false,
                 });
             });
     }
 
     let menu_point = state.context_menu.as_ref().and_then(|menu| {
-        if let ContextMenuTarget::Group { path, .. } = &menu.target
-            && path == &node.path
+        if let ContextMenuTarget::Group { group_ref, .. } = &menu.target
+            && *group_ref == node.reference
         {
             Some(menu.point)
         } else {
@@ -369,16 +414,94 @@ fn tree_group_row(
     }
 }
 
+fn select_tree_row(s: &mut AppState, visible: &[VisibleTreeGroup], target_idx: usize, tx: &mut Tx) {
+    let Some(node) = visible.get(target_idx) else {
+        return;
+    };
+    s.clear_transient_overlays();
+    s.controller
+        .select_group_by_path(&node.path, current_unix_seconds());
+    s.search_edit.replace_text("");
+    s.wipe_editor_widgets();
+    s.sync_path_bar_from_controller();
+    tx.focus(format!("tree-group-row-{target_idx}"), true);
+}
+
+fn handle_tree_key(s: &mut AppState, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if !can_mutate_tree(s)
+        || s.context_menu.is_some()
+        || ev.mods.ctrl
+        || ev.mods.cmd
+        || ev.mods.alt
+        || ev.mods.shift
+    {
+        return false;
+    }
+    let visible = s.controller.visible_tree_groups();
+    if visible.is_empty() {
+        return false;
+    }
+    let cur_idx = visible
+        .iter()
+        .position(|g| g.path == s.controller.current_group_path)
+        .unwrap_or(0);
+    match ev.key {
+        Key::Down => {
+            if cur_idx + 1 < visible.len() {
+                s.note_activity(tx);
+                select_tree_row(s, &visible, cur_idx + 1, tx);
+            }
+            true
+        }
+        Key::Up => {
+            if cur_idx > 0 {
+                s.note_activity(tx);
+                select_tree_row(s, &visible, cur_idx - 1, tx);
+            }
+            true
+        }
+        Key::Right => {
+            let cur = &visible[cur_idx];
+            if cur.has_children && !cur.expanded {
+                s.note_activity(tx);
+                s.controller.toggle_group_expanded(&cur.path);
+            } else if cur.has_children && cur.expanded && cur_idx + 1 < visible.len() {
+                s.note_activity(tx);
+                select_tree_row(s, &visible, cur_idx + 1, tx);
+            }
+            true
+        }
+        Key::Left => {
+            let cur = &visible[cur_idx];
+            if cur.has_children && cur.expanded && !cur.is_root {
+                s.note_activity(tx);
+                s.controller.toggle_group_expanded(&cur.path);
+            } else if cur.depth > 0
+                && let Some(parent_idx) = visible[..cur_idx]
+                    .iter()
+                    .rposition(|g| g.depth + 1 == cur.depth)
+            {
+                s.note_activity(tx);
+                select_tree_row(s, &visible, parent_idx, tx);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 fn group_tree_list(k: &Kit, state: &AppState, overlays: &mut Vec<El>) -> El {
     let mut col_groups = col()
         .key("group-tree-scroll")
         .role("tree")
         .label("Vault groups")
+        .instant_changes()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
         .scroll(ScrollSpec::default())
-        .gap(2.0);
+        .gap(2.0)
+        .on_key(handle_tree_key);
 
     let visible = state.controller.visible_tree_groups();
     for (idx, node) in visible.iter().enumerate() {
@@ -410,10 +533,12 @@ fn sidebar_header_controls(k: &Kit, state: &AppState) -> El {
         .label_with(move |_font, _ink| row().gap(6.0).center_y().child(cur_group_icon_el))
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            s.clear_transient_overlays();
             s.icon_search_edit.replace_text("");
             s.icon_picker = Some(IconPickerState {
                 target: IconPickerTarget::CurrentGroup,
                 selected_id: cur_group_icon_id,
+                selected_custom_id: cur_group_custom_id,
             });
         })
         .build(k)
@@ -426,11 +551,12 @@ fn sidebar_header_controls(k: &Kit, state: &AppState) -> El {
     } else {
         "+ Group"
     })
-    .control_size(ControlSize::Small)
+    .control_size(ControlSize::Regular)
     .variant(ButtonVariant::Ghost)
     .disabled(state.controller.saving)
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
         s.note_activity(tx);
+        s.clear_transient_overlays();
         s.show_new_group_form = !s.show_new_group_form;
         s.new_group_target = None;
         if !s.show_new_group_form {
@@ -439,12 +565,11 @@ fn sidebar_header_controls(k: &Kit, state: &AppState) -> El {
         }
     })
     .build(k)
-    .key("sidebar-add-group-toggle")
-    .min_h(24.0);
+    .key("sidebar-add-group-toggle");
 
     let rename_label = cur_group_label.clone();
     let rename_btn = Button::new("Rename")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Ghost)
         .disabled(state.controller.saving)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
@@ -454,8 +579,7 @@ fn sidebar_header_controls(k: &Kit, state: &AppState) -> El {
             }
         })
         .build(k)
-        .key("rename-group-btn")
-        .min_h(24.0);
+        .key("rename-group-btn");
 
     col()
         .key("group-sidebar-header")
@@ -504,11 +628,12 @@ pub(super) fn group_sidebar(k: &Kit, state: &AppState, overlays: &mut Vec<El>) -
     if state.controller.is_current_group_recycle_bin() {
         sidebar = sidebar.child(
             Button::new("Empty Recycle Bin")
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .variant(ButtonVariant::Danger)
                 .disabled(state.controller.saving)
                 .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
+                    s.clear_transient_overlays();
                     s.pending_confirm = Some(ConfirmDialog::EmptyRecycleBin);
                 })
                 .build(k)
@@ -526,11 +651,12 @@ pub(super) fn group_sidebar(k: &Kit, state: &AppState, overlays: &mut Vec<El>) -
         if let Some(cur_ref) = state.controller.current_group_ref().cloned() {
             sidebar = sidebar.child(
                 Button::new("Delete Group")
-                    .control_size(ControlSize::Small)
+                    .control_size(ControlSize::Regular)
                     .variant(ButtonVariant::Danger)
                     .disabled(state.controller.saving)
                     .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                         s.note_activity(tx);
+                        s.clear_transient_overlays();
                         s.pending_confirm = Some(ConfirmDialog::DeleteGroup {
                             group_ref: cur_ref.clone(),
                             label: current_label.clone(),

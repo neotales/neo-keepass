@@ -306,7 +306,7 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
     } else {
         "Reveal Output"
     })
-    .control_size(ControlSize::Small)
+    .control_size(ControlSize::Regular)
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
         s.note_activity(tx);
         s.controller.inject_output_revealed = !s.controller.inject_output_revealed;
@@ -321,7 +321,7 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
     .key("inject-output-toggle");
 
     let copy_btn = Button::new("Copy Output (30s)")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Contrast)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);

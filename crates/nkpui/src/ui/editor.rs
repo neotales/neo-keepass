@@ -47,7 +47,8 @@ pub(super) fn editor_header_row(
     editor: &EntryEditorState,
     saving: bool,
 ) -> El {
-    let custom_img = state.custom_icon_for(editor.custom_icon_id);
+    let custom_icon_id = editor.custom_icon_id;
+    let custom_img = state.custom_icon_for(custom_icon_id);
     let icon_id = editor.icon_id;
     let preview_icon =
         render_keepass_icon(k, icon_id, custom_img, 20.0, "editor-header-preview-icon");
@@ -65,10 +66,12 @@ pub(super) fn editor_header_row(
         })
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            s.clear_transient_overlays();
             s.icon_search_edit.replace_text("");
             s.icon_picker = Some(IconPickerState {
                 target: IconPickerTarget::EntryEditor,
                 selected_id: icon_id,
+                selected_custom_id: custom_icon_id,
             });
         })
         .build(k)
@@ -234,7 +237,7 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
     } else {
         "Reveal"
     })
-    .control_size(ControlSize::Small)
+    .control_size(ControlSize::Regular)
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
         s.note_activity(tx);
         if let Some(ed) = s.controller.editor.as_mut() {
@@ -247,7 +250,7 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
 
     let gen_len = state.controller.gen_length;
     let pw_generate_btn = Button::new(format!("Generate ({gen_len})"))
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Contrast)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
@@ -265,7 +268,7 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
         .key("editor-password-generate-btn");
 
     let pw_copy_btn = Button::new("Copy (30s)")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             match s.controller.editor_password_for_copy() {
@@ -361,7 +364,7 @@ fn editor_otp_guided_params(k: &Kit, state: &AppState, editor: &EntryEditorState
     } else {
         "Reveal"
     })
-    .control_size(ControlSize::Small)
+    .control_size(ControlSize::Regular)
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
         s.note_activity(tx);
         if let Some(ed) = s.controller.editor.as_mut() {
@@ -461,7 +464,7 @@ fn editor_otp_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El 
         OtpEditorMode::Hotp => 2,
         OtpEditorMode::RawUri => 3,
     };
-    let mode_sel = SegmentedControl::new(&["None", "TOTP", "HOTP", "Raw URI"], Some(mode_idx))
+    let mode_sel = SegmentedControl::new(&["None", "TOTP", "HOTP", "URI"], Some(mode_idx))
         .label("OTP Mode")
         .fit()
         .on_pick(|s: &mut AppState, idx, tx| {
@@ -527,7 +530,7 @@ fn editor_otp_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El 
             } else {
                 "Reveal"
             })
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
                 if let Some(ed) = s.controller.editor.as_mut() {
@@ -551,6 +554,206 @@ fn editor_otp_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El 
     card
 }
 
+#[derive(Clone, Copy)]
+struct ProtectedFieldSpec {
+    field_key: &'static str,
+    label: &'static str,
+    protected: bool,
+    revealed: bool,
+    toggle_key: &'static str,
+}
+
+fn protected_standard_field(
+    k: &Kit,
+    spec: ProtectedFieldSpec,
+    on_toggle: impl Fn(&mut AppState) + Clone + 'static,
+    input_el: El,
+) -> El {
+    if !spec.protected {
+        return labeled_field(k, spec.field_key, spec.label, input_el);
+    }
+    let reveal_btn = Button::new(if spec.revealed { "Hide" } else { "Reveal" })
+        .control_size(ControlSize::Regular)
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            on_toggle(s);
+        })
+        .build(k)
+        .key(spec.toggle_key);
+    col()
+        .key(spec.field_key)
+        .w_full()
+        .gap(4.0)
+        .child(
+            row()
+                .w_full()
+                .justify_between()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    row()
+                        .center_y()
+                        .gap(6.0)
+                        .child(
+                            text(spec.label)
+                                .font(k.ty.small_medium)
+                                .color(k.c.text_muted),
+                        )
+                        .child(
+                            Badge::new("Protected")
+                                .variant(BadgeVariant::Accent)
+                                .build(k),
+                        ),
+                )
+                .child(reveal_btn),
+        )
+        .child(input_el)
+}
+
+fn editor_username_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El {
+    if let Some(preview) = &editor.username_non_utf8 {
+        return labeled_field(
+            k,
+            "editor-username-field",
+            "UserName",
+            read_only_non_utf8_box(k, "editor-username-non-utf8", preview),
+        );
+    }
+    let base = TextInput::new(&state.edit_username)
+        .label("UserName")
+        .placeholder("Username")
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.edit_username)
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
+            let val = Zeroizing::new(s.edit_username.text.clone());
+            if let Some(ed) = s.controller.editor.as_mut() {
+                ed.username = val;
+            }
+        });
+    let input_el = if editor.username_protected {
+        base.secure().revealed(editor.username_revealed)
+    } else {
+        base
+    }
+    .build(k)
+    .key("editor-username-input");
+    protected_standard_field(
+        k,
+        ProtectedFieldSpec {
+            field_key: "editor-username-field",
+            label: "UserName",
+            protected: editor.username_protected,
+            revealed: editor.username_revealed,
+            toggle_key: "editor-username-reveal-btn",
+        },
+        |s| {
+            if let Some(ed) = s.controller.editor.as_mut() {
+                ed.username_revealed = !ed.username_revealed;
+                s.edit_username.set_revealed(ed.username_revealed);
+            }
+        },
+        input_el,
+    )
+}
+
+fn editor_url_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El {
+    if let Some(preview) = &editor.url_non_utf8 {
+        return labeled_field(
+            k,
+            "editor-url-field",
+            "URL",
+            read_only_non_utf8_box(k, "editor-url-non-utf8", preview),
+        );
+    }
+    let base = TextInput::new(&state.edit_url)
+        .label("URL")
+        .placeholder("https://example.org")
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.edit_url)
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
+            let val = Zeroizing::new(s.edit_url.text.clone());
+            if let Some(ed) = s.controller.editor.as_mut() {
+                ed.url = val;
+            }
+        });
+    let input_el = if editor.url_protected {
+        base.secure().revealed(editor.url_revealed)
+    } else {
+        base
+    }
+    .build(k)
+    .key("editor-url-input");
+    protected_standard_field(
+        k,
+        ProtectedFieldSpec {
+            field_key: "editor-url-field",
+            label: "URL",
+            protected: editor.url_protected,
+            revealed: editor.url_revealed,
+            toggle_key: "editor-url-reveal-btn",
+        },
+        |s| {
+            if let Some(ed) = s.controller.editor.as_mut() {
+                ed.url_revealed = !ed.url_revealed;
+                s.edit_url.set_revealed(ed.url_revealed);
+            }
+        },
+        input_el,
+    )
+}
+
+fn editor_notes_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El {
+    if let Some(preview) = &editor.notes_non_utf8 {
+        return labeled_field(
+            k,
+            "editor-notes-field",
+            "Notes",
+            read_only_non_utf8_box(k, "editor-notes-non-utf8", preview),
+        );
+    }
+    let base = TextArea::new(&state.edit_notes)
+        .label("Notes")
+        .placeholder("Multiline notes…")
+        .rows(4)
+        .max_height(150.0)
+        .scroll_bar(true)
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.edit_notes)
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
+            let val = Zeroizing::new(s.edit_notes.text.clone());
+            if let Some(ed) = s.controller.editor.as_mut() {
+                ed.notes = val;
+            }
+        });
+    let input_el = if editor.notes_protected {
+        base.secure().revealed(editor.notes_revealed)
+    } else {
+        base
+    }
+    .build(k)
+    .key("editor-notes-input");
+    protected_standard_field(
+        k,
+        ProtectedFieldSpec {
+            field_key: "editor-notes-field",
+            label: "Notes",
+            protected: editor.notes_protected,
+            revealed: editor.notes_revealed,
+            toggle_key: "editor-notes-reveal-btn",
+        },
+        |s| {
+            if let Some(ed) = s.controller.editor.as_mut() {
+                ed.notes_revealed = !ed.notes_revealed;
+                s.edit_notes.set_revealed(ed.notes_revealed);
+            }
+        },
+        input_el,
+    )
+}
+
 fn editor_standard_fields(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El {
     let title_input = TextInput::new(&state.edit_title)
         .label("Title")
@@ -567,95 +770,15 @@ fn editor_standard_fields(k: &Kit, state: &AppState, editor: &EntryEditorState) 
         .build(k)
         .key("editor-title-input");
 
-    let username_el = if let Some(preview) = &editor.username_non_utf8 {
-        read_only_non_utf8_box(k, "editor-username-non-utf8", preview)
-    } else {
-        let base = TextInput::new(&state.edit_username)
-            .label("UserName")
-            .placeholder("Username")
-            .width(None)
-            .on_edit(|s: &mut AppState| &mut s.edit_username)
-            .on_change(|s: &mut AppState, tx| {
-                s.note_activity(tx);
-                let val = Zeroizing::new(s.edit_username.text.clone());
-                if let Some(ed) = s.controller.editor.as_mut() {
-                    ed.username = val;
-                }
-            });
-        if editor.username_protected {
-            base.secure().revealed(true)
-        } else {
-            base
-        }
-        .build(k)
-        .key("editor-username-input")
-    };
-
-    let url_el = if let Some(preview) = &editor.url_non_utf8 {
-        read_only_non_utf8_box(k, "editor-url-non-utf8", preview)
-    } else {
-        let base = TextInput::new(&state.edit_url)
-            .label("URL")
-            .placeholder("https://example.org")
-            .width(None)
-            .on_edit(|s: &mut AppState| &mut s.edit_url)
-            .on_change(|s: &mut AppState, tx| {
-                s.note_activity(tx);
-                let val = Zeroizing::new(s.edit_url.text.clone());
-                if let Some(ed) = s.controller.editor.as_mut() {
-                    ed.url = val;
-                }
-            });
-        if editor.url_protected {
-            base.secure().revealed(true)
-        } else {
-            base
-        }
-        .build(k)
-        .key("editor-url-input")
-    };
-
-    let notes_el = if let Some(preview) = &editor.notes_non_utf8 {
-        read_only_non_utf8_box(k, "editor-notes-non-utf8", preview)
-    } else {
-        let base = TextArea::new(&state.edit_notes)
-            .label("Notes")
-            .placeholder("Multiline notes…")
-            .rows(4)
-            .max_height(150.0)
-            .scroll_bar(true)
-            .width(None)
-            .on_edit(|s: &mut AppState| &mut s.edit_notes)
-            .on_change(|s: &mut AppState, tx| {
-                s.note_activity(tx);
-                let val = Zeroizing::new(s.edit_notes.text.clone());
-                if let Some(ed) = s.controller.editor.as_mut() {
-                    ed.notes = val;
-                }
-            });
-        if editor.notes_protected {
-            base.secure().revealed(true)
-        } else {
-            base
-        }
-        .build(k)
-        .key("editor-notes-input")
-    };
-
     col()
         .w_full()
         .gap(10.0)
         .child(labeled_field(k, "editor-title-field", "Title", title_input))
-        .child(labeled_field(
-            k,
-            "editor-username-field",
-            "UserName",
-            username_el,
-        ))
+        .child(editor_username_block(k, state, editor))
         .child(editor_password_block(k, state, editor))
-        .child(labeled_field(k, "editor-url-field", "URL", url_el))
+        .child(editor_url_block(k, state, editor))
         .child(editor_otp_block(k, state, editor))
-        .child(labeled_field(k, "editor-notes-field", "Notes", notes_el))
+        .child(editor_notes_block(k, state, editor))
 }
 
 pub(super) fn entry_editor_body(
@@ -733,7 +856,7 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
         .key("editor-tag-input");
 
     let add_tag_btn = Button::new("+ Add Tag")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             let raw = s.edit_new_tag.text.clone();
@@ -798,7 +921,7 @@ fn editor_custom_field_header(k: &Kit, idx: usize, field: &EditableCustomField) 
     }
     header_row.child(
         Button::new("Remove")
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .variant(ButtonVariant::Danger)
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
@@ -917,7 +1040,7 @@ fn editor_custom_field_actions(k: &Kit, idx: usize, field: &EditableCustomField)
     if field.protected {
         actions = actions.child(
             Button::new(if field.revealed { "Hide" } else { "Reveal" })
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
                     s.controller.toggle_editor_custom_field_reveal(idx);
@@ -939,7 +1062,7 @@ fn editor_custom_field_actions(k: &Kit, idx: usize, field: &EditableCustomField)
     let cf_name = field.name.clone();
     actions.child(
         Button::new("Copy (30s)")
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
                 match s.controller.editor_custom_field_for_copy(idx) {
@@ -977,7 +1100,7 @@ fn editor_add_custom_actions(k: &Kit, form: &super::AddCustomFieldForm) -> El {
     if form.protected {
         actions = actions.child(
             Button::new(if form.revealed { "Hide" } else { "Reveal" })
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
                     s.add_custom_form.revealed = !s.add_custom_form.revealed;
@@ -992,7 +1115,7 @@ fn editor_add_custom_actions(k: &Kit, form: &super::AddCustomFieldForm) -> El {
 
     actions.child(
         Button::new("+ Add Custom String")
-            .control_size(ControlSize::Small)
+            .control_size(ControlSize::Regular)
             .variant(ButtonVariant::Contrast)
             .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);

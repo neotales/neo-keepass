@@ -217,7 +217,16 @@ impl RevealedSecret {
 pub fn format_non_utf8_preview(bytes: &[u8]) -> Zeroizing<String> {
     use std::fmt::Write as _;
     const MAX_PREVIEW_BYTES: usize = 24;
-    let mut out = Zeroizing::new(format!("[non-UTF-8 binary, {} bytes] ", bytes.len()));
+    let shown = bytes.len().min(MAX_PREVIEW_BYTES);
+    let cap = 36
+        + shown * 3
+        + if bytes.len() > MAX_PREVIEW_BYTES {
+            4
+        } else {
+            0
+        };
+    let mut out = Zeroizing::new(String::with_capacity(cap));
+    let _ = write!(out, "[non-UTF-8 binary, {} bytes] ", bytes.len());
     for (idx, byte) in bytes.iter().take(MAX_PREVIEW_BYTES).enumerate() {
         if idx > 0 {
             out.push(' ');
@@ -475,6 +484,8 @@ pub struct EntryEditorState {
     pub username_non_utf8: Option<Zeroizing<String>>,
     /// Whether `UserName` is protected.
     pub username_protected: bool,
+    /// Whether protected `UserName` is currently unmasked in the editor.
+    pub username_revealed: bool,
     /// Draft `Password` field.
     pub password: Zeroizing<String>,
     /// Safe read-only preview if `Password` contains non-UTF-8 bytes.
@@ -487,12 +498,16 @@ pub struct EntryEditorState {
     pub url_non_utf8: Option<Zeroizing<String>>,
     /// Whether `URL` is protected.
     pub url_protected: bool,
+    /// Whether protected `URL` is currently unmasked in the editor.
+    pub url_revealed: bool,
     /// Draft `Notes` field.
     pub notes: Zeroizing<String>,
     /// Safe read-only preview if `Notes` contains non-UTF-8 bytes.
     pub notes_non_utf8: Option<Zeroizing<String>>,
     /// Whether `Notes` is protected.
     pub notes_protected: bool,
+    /// Whether protected `Notes` is currently unmasked in the editor.
+    pub notes_revealed: bool,
     /// Draft `otpauth://` URI stored in the protected `"otp"` field.
     pub otp_uri: Zeroizing<String>,
     /// Safe read-only preview if `"otp"` contains non-UTF-8 bytes.
@@ -1711,7 +1726,10 @@ impl VaultController {
             detail.revealed_custom_fields.clear();
         }
         if let Some(editor) = self.editor.as_mut() {
+            editor.username_revealed = false;
             editor.password_revealed = false;
+            editor.url_revealed = false;
+            editor.notes_revealed = false;
             editor.otp_revealed = false;
             for field in &mut editor.custom_fields {
                 field.revealed = false;
@@ -2714,6 +2732,7 @@ impl VaultController {
             username_non_utf8,
             original_username_protected: username_protected,
             username_protected,
+            username_revealed: false,
             original_password: password.clone(),
             password,
             password_non_utf8,
@@ -2723,11 +2742,13 @@ impl VaultController {
             url_non_utf8,
             original_url_protected: url_protected,
             url_protected,
+            url_revealed: false,
             original_notes: notes.clone(),
             notes,
             notes_non_utf8,
             original_notes_protected: notes_protected,
             notes_protected,
+            notes_revealed: false,
             original_otp_uri: otp_uri.clone(),
             otp_uri,
             otp_non_utf8,
@@ -6319,5 +6340,17 @@ mod tests {
         assert_eq!(ctrl.entries.len(), 1);
         assert_eq!(ctrl.entries[0].title(), "BillingDB");
         Ok(())
+    }
+
+    #[test]
+    fn format_non_utf8_preview_formats_bounded_hex_without_reallocation() {
+        let short = format_non_utf8_preview(&[0xff, 0x0a, 0x7f]);
+        assert!(short.starts_with("[non-UTF-8 binary, 3 bytes] ff 0a 7f"));
+
+        let long_bytes = vec![0xab; 40];
+        let long = format_non_utf8_preview(&long_bytes);
+        assert!(long.starts_with("[non-UTF-8 binary, 40 bytes] "));
+        assert!(long.ends_with(" ..."));
+        assert!(long.capacity() >= long.len());
     }
 }

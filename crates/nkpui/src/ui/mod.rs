@@ -135,6 +135,8 @@ pub struct IconPickerState {
     pub target: IconPickerTarget,
     /// Currently highlighted standard icon ID (`0..=68`).
     pub selected_id: u32,
+    /// Currently active embedded custom icon UUID, if assigned.
+    pub selected_custom_id: Option<CustomIconId>,
 }
 
 /// Modal state for renaming any group from the sidebar or `TreeView` context menu.
@@ -221,16 +223,29 @@ pub enum DragDropTarget {
 }
 
 /// Active pointer drag state for moving or reordering an entry row.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ActiveDragState {
     /// Index of the entry row being dragged.
     pub entry_index: usize,
+    /// Session-scoped entry reference captured at drag start for safe commit verification.
+    pub entry_ref: EntryRef,
     /// Entry title shown in the drag pill.
     pub entry_title: String,
     /// Current pointer coordinates in window points.
     pub window_point: [f32; 2],
     /// Currently hovered drop target.
     pub target: Option<DragDropTarget>,
+}
+
+impl fmt::Debug for ActiveDragState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActiveDragState")
+            .field("entry_index", &self.entry_index)
+            .field("entry_title", &self.entry_title)
+            .field("window_point", &self.window_point)
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Target item for an active right-click context menu.
@@ -302,6 +317,8 @@ pub struct ActiveContextMenu {
     pub point: PointerPress,
     /// Target entry or group row.
     pub target: ContextMenuTarget,
+    /// Whether the entry context menu's `"Move"` submenu is expanded.
+    pub move_submenu_open: bool,
 }
 
 /// Form state for adding a new custom string field in the Entry Editor.
@@ -653,6 +670,7 @@ impl AppState {
 
     /// Initiates an off-thread `VaultService::save` via [`Latest`].
     pub fn start_save(&mut self, for_lock_decision: bool) {
+        self.clear_transient_overlays();
         let Some((generation, vault_path, service, credentials)) =
             self.controller.begin_save(for_lock_decision)
         else {
@@ -664,6 +682,26 @@ impl AppState {
                 save_vault_blocking(generation, &vault_path, service, credentials)
             },
         );
+    }
+
+    /// Returns whether any blocking modal dialog or context menu is currently open.
+    #[must_use]
+    pub fn has_open_modal(&self) -> bool {
+        self.settings_modal.is_some()
+            || self.move_entry_modal.is_some()
+            || self.rename_group_modal.is_some()
+            || self.icon_picker.is_some()
+            || self.attach_dialog_open
+            || self.extract_dialog.is_some()
+            || self.pending_confirm.is_some()
+            || self.controller.pending_lock_decision.is_some()
+            || self.context_menu.is_some()
+    }
+
+    /// Clears transient context menus and active drag state.
+    pub fn clear_transient_overlays(&mut self) {
+        self.context_menu = None;
+        self.drag_state = None;
     }
 
     fn apply_lock_cleanup(&mut self, cleanup: LockCleanup, tx: &mut Tx) {
@@ -683,12 +721,14 @@ impl AppState {
 
     /// Requests a lock with dirty-vault protection (`Manual`, `FocusLoss`, or `IdleTimeout`).
     pub fn request_lock_or_modal(&mut self, trigger: LockTrigger, tx: &mut Tx) {
+        self.clear_transient_overlays();
         let cleanup = self.controller.request_lock(trigger);
         self.apply_lock_cleanup(cleanup, tx);
     }
 
     /// Discards unsaved changes from the dirty-vault modal and locks immediately.
     pub fn discard_and_lock(&mut self, tx: &mut Tx) {
+        self.clear_transient_overlays();
         let cleanup = self.controller.discard_and_lock();
         self.apply_lock_cleanup(cleanup, tx);
     }
@@ -696,7 +736,31 @@ impl AppState {
     /// Masks all revealed secrets in controller state and UI text widgets.
     pub fn mask_all_reveals(&mut self) {
         self.controller.mask_all_reveals();
+        if self
+            .controller
+            .editor
+            .as_ref()
+            .is_some_and(|ed| ed.username_protected)
+        {
+            self.edit_username.set_revealed(false);
+        }
         self.edit_password.set_revealed(false);
+        if self
+            .controller
+            .editor
+            .as_ref()
+            .is_some_and(|ed| ed.url_protected)
+        {
+            self.edit_url.set_revealed(false);
+        }
+        if self
+            .controller
+            .editor
+            .as_ref()
+            .is_some_and(|ed| ed.notes_protected)
+        {
+            self.edit_notes.set_revealed(false);
+        }
         self.edit_otp_uri.set_revealed(false);
         self.edit_otp_secret.set_revealed(false);
         for edit in &mut self.edit_custom_values {
@@ -742,6 +806,7 @@ impl AppState {
 
     /// Opens the Rename Group modal for `group_ref`.
     pub fn open_rename_group_modal(&mut self, group_ref: GroupRef, label: String, tx: &mut Tx) {
+        self.clear_transient_overlays();
         self.rename_group_edit.replace_text(label);
         self.rename_group_modal = Some(RenameGroupModalState {
             group_ref,
@@ -752,6 +817,7 @@ impl AppState {
 
     /// Opens the Move Entry to Group modal for `entry_ref`.
     pub fn open_move_entry_modal(&mut self, entry_ref: EntryRef, entry_title: String) {
+        self.clear_transient_overlays();
         self.move_entry_modal = Some(MoveEntryModalState {
             entry_ref,
             entry_title,
@@ -764,6 +830,7 @@ impl AppState {
 
     /// Opens the Database & Desktop Security Settings modal populated from `VaultService`.
     pub fn open_settings_modal(&mut self) {
+        self.clear_transient_overlays();
         match self.controller.database_settings() {
             Ok(settings) => {
                 self.settings_name.replace_text(settings.name);
@@ -826,7 +893,8 @@ impl AppState {
         };
         self.edit_title.replace_text(editor.title.clone());
         self.edit_username.set_secure(editor.username_protected);
-        self.edit_username.set_revealed(!editor.username_protected);
+        self.edit_username
+            .set_revealed(!editor.username_protected || editor.username_revealed);
         self.edit_username
             .replace_text(editor.username.as_str().to_owned());
 
@@ -836,11 +904,13 @@ impl AppState {
             .replace_text(editor.password.as_str().to_owned());
 
         self.edit_url.set_secure(editor.url_protected);
-        self.edit_url.set_revealed(!editor.url_protected);
+        self.edit_url
+            .set_revealed(!editor.url_protected || editor.url_revealed);
         self.edit_url.replace_text(editor.url.as_str().to_owned());
 
         self.edit_notes.set_secure(editor.notes_protected);
-        self.edit_notes.set_revealed(!editor.notes_protected);
+        self.edit_notes
+            .set_revealed(!editor.notes_protected || editor.notes_revealed);
         self.edit_notes
             .replace_text(editor.notes.as_str().to_owned());
 
@@ -1061,6 +1131,12 @@ impl AppState {
                 ids.push(item.id);
             }
         }
+        let active_set: HashSet<CustomIconId> = ids.iter().copied().collect();
+        let all_cached_active = self.custom_icons.len() >= MAX_CUSTOM_ICON_CACHE_ENTRIES
+            && self.custom_icons.keys().all(|k| active_set.contains(k));
+        if all_cached_active {
+            return false;
+        }
         let mut changed = false;
         let mut lookups = 0usize;
         for id in ids {
@@ -1072,12 +1148,18 @@ impl AppState {
             }
             lookups += 1;
             changed |= self.cache_custom_icon(id);
+            if self.custom_icons.len() >= MAX_CUSTOM_ICON_CACHE_ENTRIES
+                && self.custom_icons.keys().all(|k| active_set.contains(k))
+            {
+                break;
+            }
         }
         changed
     }
 
     /// Opens Entry Editor mode for the currently selected entry and syncs widgets.
     pub fn open_entry_editor(&mut self) {
+        self.clear_transient_overlays();
         match self.controller.begin_edit_selected_entry() {
             Ok(()) => self.sync_editor_widgets_from_controller(),
             Err(err) => self.controller.set_browser_error(err),
@@ -1086,6 +1168,7 @@ impl AppState {
 
     /// Creates a new entry in the current group, auto-selects it, and opens Entry Editor mode.
     pub fn create_new_entry(&mut self) {
+        self.clear_transient_overlays();
         match self
             .controller
             .create_entry_in_current_group(None, current_unix_seconds())
@@ -1221,6 +1304,7 @@ impl AppState {
 
     /// Navigates straight to a [`PathCompletion`] and syncs widgets.
     pub fn navigate_to_completion(&mut self, item: &PathCompletion) {
+        self.clear_transient_overlays();
         match self
             .controller
             .navigate_to_completion(item, current_unix_seconds())
@@ -1431,50 +1515,76 @@ fn handle_browser_shortcuts(state: &mut AppState, ev: &KeyEvent, tx: &mut Tx) ->
     }
     if ev.is_command('k') || ev.is_command('g') {
         state.note_activity(tx);
+        state.path_edit.set_selection(0, state.path_edit.text.len());
         tx.focus("path-bar-input", true);
-        tx.select_all_text("path-bar-input/input");
+        tx.select_all_text("path-bar-input/value/input");
         return true;
     }
     if ev.is_command('n') && !state.controller.saving {
         state.note_activity(tx);
+        state.clear_transient_overlays();
         state.create_new_entry();
         return true;
     }
-    if ev.is_command('d') && !state.controller.saving && state.controller.detail.is_some() {
+    if ev.is_command('d')
+        && !state.controller.saving
+        && state.controller.editor.is_none()
+        && state.controller.detail.is_some()
+    {
         state.note_activity(tx);
+        state.clear_transient_overlays();
         match state
             .controller
             .clone_selected_entry(current_unix_seconds())
         {
-            Ok(_) => state.sync_path_bar_from_controller(),
+            Ok(_) => {
+                state.wipe_editor_widgets();
+                state.sync_path_bar_from_controller();
+            }
             Err(err) => state.controller.set_browser_error(err),
         }
         return true;
     }
-    if ev.mods.alt && !ev.mods.cmd && !ev.mods.ctrl && !state.controller.saving {
-        if matches!(ev.key, Key::Up) && state.controller.can_reorder_entries() {
+    handle_browser_entry_mutation_shortcuts(state, ev, tx)
+}
+
+fn handle_browser_entry_mutation_shortcuts(
+    state: &mut AppState,
+    ev: &KeyEvent,
+    tx: &mut Tx,
+) -> bool {
+    if state.controller.saving || state.controller.editor.is_some() {
+        return false;
+    }
+    if ev.mods.alt && !ev.mods.cmd && !ev.mods.ctrl && state.controller.can_reorder_entries() {
+        if matches!(ev.key, Key::Up) {
             state.note_activity(tx);
+            state.clear_transient_overlays();
             if let Err(err) = state
                 .controller
                 .move_selected_entry_up(current_unix_seconds())
             {
                 state.controller.set_browser_error(err);
+            } else {
+                state.wipe_editor_widgets();
             }
             return true;
         }
-        if matches!(ev.key, Key::Down) && state.controller.can_reorder_entries() {
+        if matches!(ev.key, Key::Down) {
             state.note_activity(tx);
+            state.clear_transient_overlays();
             if let Err(err) = state
                 .controller
                 .move_selected_entry_down(current_unix_seconds())
             {
                 state.controller.set_browser_error(err);
+            } else {
+                state.wipe_editor_widgets();
             }
             return true;
         }
     }
     if matches!(ev.key, Key::Delete)
-        && !state.controller.saving
         && !state.any_text_input_focused()
         && !tx
             .focused()
@@ -1486,6 +1596,7 @@ fn handle_browser_shortcuts(state: &mut AppState, ev: &KeyEvent, tx: &mut Tx) ->
             .map(|d| (d.is_in_recycle_bin, d.metadata.title().to_owned()))
     {
         state.note_activity(tx);
+        state.clear_transient_overlays();
         if in_bin || !state.controller.recycle_bin_enabled {
             state.pending_confirm = Some(ConfirmDialog::DeleteEntryPermanent { title });
         } else if let Err(err) = state
@@ -1507,16 +1618,7 @@ fn handle_root_key_preview(state: &mut AppState, ev: &KeyEvent, tx: &mut Tx) -> 
         return handle_escape_key(state, tx);
     }
 
-    let has_modal = state.settings_modal.is_some()
-        || state.move_entry_modal.is_some()
-        || state.rename_group_modal.is_some()
-        || state.icon_picker.is_some()
-        || state.attach_dialog_open
-        || state.extract_dialog.is_some()
-        || state.pending_confirm.is_some()
-        || state.controller.pending_lock_decision.is_some();
-
-    if has_modal || !state.controller.is_unlocked() {
+    if state.has_open_modal() || state.context_menu.is_some() || !state.controller.is_unlocked() {
         return false;
     }
     if ev.is_command('s') && state.controller.dirty && !state.controller.saving {
@@ -1688,7 +1790,7 @@ fn header_clipboard_status(
     ) {
         clip_row = clip_row.child(
             Button::new("Clear")
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
                     if s.controller.is_unlocked() {
                         s.note_activity(tx);
@@ -2267,6 +2369,169 @@ mod tests {
         state.cancel_path_dropdown();
         assert!(!state.path_dropdown_open);
         assert_eq!(state.path_edit.text, "/Work/Prod/ApiTwo");
+        Ok(())
+    }
+
+    #[test]
+    fn context_menu_blocks_modal_and_clear_overlays_drops_menu_and_drag() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
+        let path = dir.path().join("ctx-drag.kdbx");
+        let master = Zeroizing::new(String::from("ctx-drag-pass"));
+
+        let mut db = neotales_keepass::KeePassDatabase::default();
+        db.root.entries.push(neotales_keepass::Entry::new("Test"));
+        let mut creds = neotales_keepass::KdbxCredentials::password(master.as_bytes())
+            .map_err(|err| err.to_string())?;
+        let mut file = std::fs::File::create(&path).map_err(|err| err.to_string())?;
+        let opts = neotales_keepass::KdbxWriteOptions {
+            kdf: neotales_keepass::KdbxKdf::Argon2id,
+            argon2_memory_kib: 1024,
+            argon2_time: 1,
+            argon2_lanes: 1,
+            ..neotales_keepass::KdbxWriteOptions::default()
+        };
+        neotales_keepass::KdbxFile::save(&db, &mut file, &mut creds, opts, &nkeepass::KDBX_LIMITS)
+            .map_err(|err| err.to_string())?;
+
+        let mut state = AppState::default();
+        state.controller.vault_path = path.to_string_lossy().into_owned();
+        let (vpath, kpath, gen_id) = state
+            .controller
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        let outcome = open_vault_blocking(&vpath, &master, kpath.as_deref());
+        state.controller.finish_unlock(gen_id, outcome, 10.0);
+        assert!(!state.has_open_modal());
+
+        let entry_ref = state
+            .controller
+            .entries
+            .first()
+            .ok_or_else(|| String::from("entry missing"))?
+            .reference()
+            .clone();
+        state.context_menu = Some(ActiveContextMenu {
+            point: PointerPress { x: 10.0, y: 20.0 },
+            target: ContextMenuTarget::Entry {
+                index: 0,
+                entry_ref: entry_ref.clone(),
+                is_in_recycle_bin: false,
+                has_otp: false,
+            },
+            move_submenu_open: false,
+        });
+        state.drag_state = Some(ActiveDragState {
+            entry_index: 0,
+            entry_ref,
+            entry_title: String::from("Test"),
+            window_point: [12.0, 24.0],
+            target: None,
+        });
+
+        assert!(state.has_open_modal());
+        state.clear_transient_overlays();
+        assert!(!state.has_open_modal());
+        assert!(state.context_menu.is_none());
+        assert!(state.drag_state.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn custom_icon_cache_stays_stable_when_active_icons_exceed_256() -> Result<(), String> {
+        let mut state = AppState {
+            images: Some(ImageCache::new(Arc::new(|| {}))),
+            ..AppState::default()
+        };
+        let valid_png = png_header_bytes(32, 32);
+        let mut active_ids = Vec::new();
+        for idx in 0..MAX_CUSTOM_ICON_CACHE_ENTRIES {
+            let id = test_custom_icon_id(idx)?;
+            assert!(state.cache_custom_icon_bytes(id, valid_png.clone()));
+            active_ids.push(id);
+        }
+        let extra_id = test_custom_icon_id(MAX_CUSTOM_ICON_CACHE_ENTRIES + 5)?;
+        state.controller.breadcrumb_icons = active_ids
+            .iter()
+            .map(|id| (0, Some(*id)))
+            .chain(std::iter::once((0, Some(extra_id))))
+            .collect();
+
+        let changed = state.sync_custom_icons();
+        assert!(!changed);
+        assert_eq!(state.custom_icons.len(), MAX_CUSTOM_ICON_CACHE_ENTRIES);
+        assert!(!state.custom_icons.contains_key(&extra_id));
+        Ok(())
+    }
+
+    #[test]
+    fn protected_standard_editor_fields_start_masked_and_reset_on_mask_all() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
+        let path = dir.path().join("prot-std.kdbx");
+        let master = Zeroizing::new(String::from("prot-pass"));
+
+        let mut db = neotales_keepass::KeePassDatabase::default();
+        let mut entry = neotales_keepass::Entry::new("ProtectedEntry");
+        for (k, v) in [
+            ("UserName", "alice-secret"),
+            ("URL", "https://secret.example"),
+            ("Notes", "hidden note"),
+        ] {
+            entry.fields.push(neotales_keepass::Field {
+                key: String::from(k),
+                value: neotales_keepass::ProtectedValue::from_text(v),
+                protected: true,
+                protect_in_memory: true,
+            });
+        }
+        db.root.entries.push(entry);
+
+        let mut creds = neotales_keepass::KdbxCredentials::password(master.as_bytes())
+            .map_err(|err| err.to_string())?;
+        let mut file = std::fs::File::create(&path).map_err(|err| err.to_string())?;
+        let opts = neotales_keepass::KdbxWriteOptions {
+            kdf: neotales_keepass::KdbxKdf::Argon2id,
+            argon2_memory_kib: 1024,
+            argon2_time: 1,
+            argon2_lanes: 1,
+            ..neotales_keepass::KdbxWriteOptions::default()
+        };
+        neotales_keepass::KdbxFile::save(&db, &mut file, &mut creds, opts, &nkeepass::KDBX_LIMITS)
+            .map_err(|err| err.to_string())?;
+
+        let mut state = AppState::default();
+        state.controller.vault_path = path.to_string_lossy().into_owned();
+        let (vpath, kpath, gen_id) = state
+            .controller
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        let outcome = open_vault_blocking(&vpath, &master, kpath.as_deref());
+        state.controller.finish_unlock(gen_id, outcome, 10.0);
+        state.open_entry_editor();
+        let ed = state
+            .controller
+            .editor
+            .as_mut()
+            .ok_or_else(|| String::from("editor missing"))?;
+        assert!(ed.username_protected && !ed.username_revealed);
+        assert!(ed.url_protected && !ed.url_revealed);
+        assert!(ed.notes_protected && !ed.notes_revealed);
+
+        ed.username_revealed = true;
+        ed.url_revealed = true;
+        ed.notes_revealed = true;
+        state.edit_username.set_revealed(true);
+        state.edit_url.set_revealed(true);
+        state.edit_notes.set_revealed(true);
+
+        state.mask_all_reveals();
+        let ed_after = state
+            .controller
+            .editor
+            .as_ref()
+            .ok_or_else(|| String::from("editor missing"))?;
+        assert!(!ed_after.username_revealed);
+        assert!(!ed_after.url_revealed);
+        assert!(!ed_after.notes_revealed);
         Ok(())
     }
 }

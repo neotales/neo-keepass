@@ -266,7 +266,7 @@ fn lock_vault_chips(k: &Kit, state: &AppState, unlocking: bool) -> Option<El> {
         let path_val = item.path.clone();
         chips = chips.child(
             Button::new(item.label.clone())
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .variant(if selected {
                     ButtonVariant::Contrast
                 } else {
@@ -301,7 +301,7 @@ fn lock_vault_chips(k: &Kit, state: &AppState, unlocking: bool) -> Option<El> {
         let path_val = path.clone();
         chips = chips.child(
             Button::new(format!("Recent: {short}"))
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .variant(if selected {
                     ButtonVariant::Contrast
                 } else {
