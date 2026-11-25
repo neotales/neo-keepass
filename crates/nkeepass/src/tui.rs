@@ -366,13 +366,7 @@ fn handle_focus_lost(
 }
 
 fn bounded_read(path: &Path, limit: usize) -> io::Result<Zeroizing<Vec<u8>>> {
-    if !std::fs::symlink_metadata(path)?.file_type().is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "input is not a regular file",
-        ));
-    }
-    let mut file = File::open(path)?;
+    let (mut file, _) = nkeepass::fs_safe::open_regular_file_nofollow(path)?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(limit.saturating_add(1)));
     file.by_ref()
         .take(limit as u64 + 1)
@@ -795,7 +789,7 @@ fn create_group_or_entry(app: &mut App, action: Action, name: &str) {
     if name.is_empty()
         || name.contains('/')
         || matches!(name, "." | "..")
-        || name.chars().any(char::is_control)
+        || !nkeepass::template::is_safe_display_text(name)
     {
         app.status = "Name must be a non-empty path component".into();
         return;
@@ -1027,9 +1021,13 @@ fn snapshot_import(app: &mut App, path: &str) {
 }
 
 fn clean(input: &str) -> String {
-    let mut output = String::new();
+    let mut output = String::with_capacity(input.len());
     for c in input.chars() {
-        if c.is_control() || c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c) {
+        if c.is_control()
+            || c == '\u{7f}'
+            || ('\u{80}'..='\u{9f}').contains(&c)
+            || nkeepass::template::is_bidi_or_line_separator(c)
+        {
             output.extend(c.escape_default());
         } else {
             output.push(c);
@@ -1039,9 +1037,13 @@ fn clean(input: &str) -> String {
 }
 
 fn clean_secret(input: &str) -> Zeroizing<String> {
-    let mut output = Zeroizing::new(String::new());
+    let mut output = Zeroizing::new(String::with_capacity(input.len()));
     for c in input.chars() {
-        if c.is_control() || c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c) {
+        if c.is_control()
+            || c == '\u{7f}'
+            || ('\u{80}'..='\u{9f}').contains(&c)
+            || nkeepass::template::is_bidi_or_line_separator(c)
+        {
             output.extend(c.escape_default());
         } else {
             output.push(c);
@@ -3724,6 +3726,14 @@ mod tests {
     #[test]
     fn sanitizes_terminal_controls_without_dropping_following_text() {
         assert_eq!(clean("a\u{1b}[2Jb\u{85}c"), "a\\u{1b}[2Jb\\u{85}c");
+        assert_eq!(
+            clean("a\u{202e}b\u{2066}c\u{2028}d\u{2029}e\u{061c}f\u{200e}g"),
+            "a\\u{202e}b\\u{2066}c\\u{2028}d\\u{2029}e\\u{61c}f\\u{200e}g"
+        );
+        assert_eq!(
+            super::clean_secret("sec\u{202e}ret\u{2028}1").as_str(),
+            "sec\\u{202e}ret\\u{2028}1"
+        );
     }
 
     #[test]
@@ -3734,6 +3744,21 @@ mod tests {
         assert!(super::bounded_read(&file, 4).is_err());
         assert_eq!(super::bounded_read(&file, 5).unwrap().as_slice(), b"12345");
         assert!(super::bounded_read(directory.path(), 100).is_err());
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("bounded.link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(super::bounded_read(&link, 100).is_err());
+
+            let fifo = directory.path().join("bounded.fifo");
+            if std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                assert!(super::bounded_read(&fifo, 100).is_err());
+            }
+        }
     }
 
     #[test]

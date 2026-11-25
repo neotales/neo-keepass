@@ -848,7 +848,8 @@ impl VaultService {
         credentials: &mut KdbxCredentials,
         limits: &KdbxReadLimits,
     ) -> Result<SessionId, ServiceError> {
-        let file = File::open(path).map_err(|_| ServiceError::Io)?;
+        let file =
+            crate::fs_safe::open_regular_file_nonblocking(path).map_err(|_| ServiceError::Io)?;
         let database =
             KdbxFile::load(file, credentials, limits).map_err(|_| ServiceError::Unlock)?;
         self.generation = self.generation.wrapping_add(1).max(1);
@@ -893,7 +894,10 @@ impl VaultService {
             if depth > MAX_LOCATOR_DEPTH {
                 return Err(ServiceError::ResourceLimit);
             }
-            if group.name.is_empty() || group.name.contains('/') || !safe_metadata(&group.name) {
+            if group.name.is_empty()
+                || group.name.contains('/')
+                || !crate::template::is_safe_display_text(&group.name)
+            {
                 continue;
             }
             let path_bytes = parent
@@ -915,7 +919,7 @@ impl VaultService {
                 }
                 if entry.title.is_empty()
                     || entry.title.contains('/')
-                    || !safe_metadata(&entry.title)
+                    || !crate::template::is_safe_display_text(&entry.title)
                 {
                     continue;
                 }
@@ -939,7 +943,8 @@ impl VaultService {
                     if matches!(
                         field.key.as_str(),
                         "Title" | "UserName" | "Password" | "URL" | "Notes"
-                    ) {
+                    ) || !crate::template::is_safe_display_text(&field.key)
+                    {
                         continue;
                     }
                     key_items = key_items
@@ -957,7 +962,9 @@ impl VaultService {
                 if visited > MAX_COMPLETION_NODES {
                     return Err(ServiceError::ResourceLimit);
                 }
-                if child.name.is_empty() || child.name.contains('/') || !safe_metadata(&child.name)
+                if child.name.is_empty()
+                    || child.name.contains('/')
+                    || !crate::template::is_safe_display_text(&child.name)
                 {
                     continue;
                 }
@@ -1301,7 +1308,7 @@ impl VaultService {
         let mut names = BTreeSet::new();
         for update in &updates {
             if update.key.is_empty()
-                || update.key.chars().any(char::is_control)
+                || !crate::template::is_safe_display_text(&update.key)
                 || !names.insert(update.key.as_str())
             {
                 return Err(ServiceError::InvalidFieldName);
@@ -1704,7 +1711,7 @@ impl VaultService {
         name: &str,
         mut data: Zeroizing<Vec<u8>>,
     ) -> Result<(), ServiceError> {
-        if name.is_empty() || name.contains('/') || name.chars().any(char::is_control) {
+        if name.is_empty() || name.contains('/') || !crate::template::is_safe_display_text(name) {
             return Err(ServiceError::InvalidInput);
         }
         let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
@@ -2060,7 +2067,7 @@ impl VaultService {
         value: &str,
         custom_only: bool,
     ) -> Result<(), ServiceError> {
-        if name.is_empty() || name.chars().any(char::is_control) {
+        if name.is_empty() || !crate::template::is_safe_display_text(name) {
             return Err(ServiceError::InvalidFieldName);
         }
         let live = self.session.as_mut().ok_or(ServiceError::Locked)?;
@@ -2146,7 +2153,7 @@ impl VaultService {
         path: &str,
     ) -> Result<ResolvedEntry, ServiceError> {
         if path.is_empty()
-            || path.chars().any(char::is_control)
+            || !crate::template::is_safe_display_text(path)
             || path.starts_with('/')
             || path
                 .split('/')
@@ -2231,7 +2238,7 @@ impl VaultService {
         path: &str,
     ) -> Result<ResolvedEntry, SelectorError> {
         if path.is_empty()
-            || path.chars().any(char::is_control)
+            || !crate::template::is_safe_display_text(path)
             || path.starts_with('/')
             || path
                 .split('/')
@@ -3500,7 +3507,7 @@ fn split_entry_path(path: &str) -> Result<(Vec<&str>, &str), ServiceError> {
     if path.is_empty()
         || path.len() > MAX_HIT_BYTES
         || path.starts_with('/')
-        || path.chars().any(char::is_control)
+        || !crate::template::is_safe_display_text(path)
         || path
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
@@ -5174,10 +5181,7 @@ fn contains_lowercase(candidate: &str, needle: &[char], failure: &[usize]) -> bo
 }
 
 fn safe_metadata(value: &str) -> bool {
-    !value.chars().any(|character| {
-        let code = character as u32;
-        code <= 0x1f || (0x7f..=0x9f).contains(&code)
-    })
+    crate::template::is_safe_display_text(value)
 }
 
 #[cfg(all(test, unix))]
@@ -6757,7 +6761,109 @@ mod tests {
                 "U+{code:04X} must make group metadata unsafe",
             );
         }
+        for bidi in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}', '\u{202A}', '\u{202E}',
+            '\u{2066}', '\u{2069}',
+        ] {
+            assert!(
+                !safe_metadata(&format!("group{bidi}name")),
+                "U+{:04X} must make group metadata unsafe",
+                bidi as u32
+            );
+        }
         assert!(safe_metadata("ordinary group name"));
+    }
+
+    #[test]
+    fn service_mutations_reject_bidi_and_line_separators() {
+        let mut database = KeePassDatabase::default();
+        database.add_entry(Entry::new("Login"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bidi.kdbx");
+        let mut creds = KdbxCredentials::password("service-test-password").unwrap();
+        let mut service = VaultService::default();
+        service
+            .create(
+                &path,
+                &mut creds,
+                KdbxWriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..KdbxWriteOptions::default()
+                },
+                None,
+            )
+            .unwrap();
+        let session = service
+            .open(&path, &mut creds, &crate::KDBX_LIMITS)
+            .unwrap();
+        service.ensure_entry(session, "Login", None, false).unwrap();
+        let reference = service.resolve_entry(session, "Login").unwrap().reference();
+
+        for bad in [
+            "bad\u{202e}name",
+            "bad\u{2066}name",
+            "bad\u{2028}name",
+            "bad\u{2029}name",
+            "bad\u{061c}name",
+            "bad\u{200e}name",
+        ] {
+            assert_eq!(
+                service.set_custom_field(&reference, bad, "val"),
+                Err(ServiceError::InvalidFieldName)
+            );
+            assert_eq!(
+                service.set_fields_creating_custom(
+                    &reference,
+                    vec![FieldUpdate {
+                        key: bad.to_owned(),
+                        value: Zeroizing::new("val".to_owned()),
+                        protected: None,
+                        protect_in_memory: None,
+                    }]
+                ),
+                Err(ServiceError::InvalidFieldName)
+            );
+            assert_eq!(
+                service.add_attachment(&reference, bad, Zeroizing::new(b"data".to_vec())),
+                Err(ServiceError::InvalidInput)
+            );
+        }
+    }
+
+    #[test]
+    fn vault_service_open_allows_symlinked_vault_and_rejects_fifo_nonblocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.kdbx");
+        let link = dir.path().join("link.kdbx");
+        let mut creds = KdbxCredentials::password("service-test-password").unwrap();
+        let creator = VaultService::default();
+        creator
+            .create(
+                &real,
+                &mut creds,
+                KdbxWriteOptions {
+                    aes_kdf_rounds: 8,
+                    ..KdbxWriteOptions::default()
+                },
+                None,
+            )
+            .unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut service = VaultService::default();
+        assert!(service.open(&link, &mut creds, &crate::KDBX_LIMITS).is_ok());
+
+        let fifo = dir.path().join("vault.fifo");
+        if std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            let mut blocked_check = VaultService::default();
+            assert_eq!(
+                blocked_check.open(&fifo, &mut creds, &crate::KDBX_LIMITS),
+                Err(ServiceError::Io)
+            );
+        }
     }
 
     fn search_tree(group: &Group, query: &str) -> (usize, SearchPage) {

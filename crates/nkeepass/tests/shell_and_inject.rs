@@ -1061,3 +1061,106 @@ tick_prompt
         String::from_utf8_lossy(&bash_out.stderr),
     );
 }
+
+#[test]
+fn real_bash_shell_load_handles_root_options_with_cli_parity() {
+    let fx = TestFixture::new();
+    let proj = fx.dir.path().join("project");
+    let outside = fx.dir.path().join("outside");
+    fs::create_dir(&proj).unwrap();
+    fs::create_dir(&outside).unwrap();
+
+    write_private(
+        &proj.join(".nkp.toml"),
+        &format!(
+            "version = 1\nvault = \"{}\"\n\n[env]\nAPI_KEY = \"projects/myapp/stripe\"\n",
+            fx.vault.to_str().unwrap()
+        ),
+    );
+
+    let trust_out = fx
+        .cmd()
+        .current_dir(&proj)
+        .args(["trust"])
+        .output()
+        .unwrap();
+    assert!(
+        trust_out.status.success(),
+        "trust failed: {}",
+        String::from_utf8_lossy(&trust_out.stderr)
+    );
+
+    let bash_bin = if Path::new("/usr/bin/bash").exists() {
+        "/usr/bin/bash"
+    } else {
+        "bash"
+    };
+
+    let script = format!(
+        r#"
+set -euo pipefail
+eval "$("$NKP_BIN" shell init bash)"
+cd "$PROJ_DIR"
+
+# Root --color / --no-color + --password-env work across shell load
+nkp --color always --password-env CUSTOM_PW shell load
+[ "$API_KEY" = "{STRIPE_SECRET}" ]
+nkp shell unload
+[ "${{API_KEY:-__UNSET__}}" = "__UNSET__" ]
+
+nkp --color=never --password-env CUSTOM_PW shell load
+[ "$API_KEY" = "{STRIPE_SECRET}" ]
+nkp shell unload
+
+nkp --no-color --password-env CUSTOM_PW shell load
+[ "$API_KEY" = "{STRIPE_SECRET}" ]
+nkp shell unload
+
+# Root --password-stdin works through shell load (here-string avoids subshell pipeline)
+nkp --password-stdin shell load <<< "$CUSTOM_PW"
+[ "$API_KEY" = "{STRIPE_SECRET}" ]
+nkp shell unload
+
+# Root -V / --vault are rejected cleanly with the standard vault diagnostic
+set +e
+err_short="$(nkp -V "$VAULT_PATH" shell load 2>&1)"
+rc_short=$?
+err_long="$(nkp --vault "$VAULT_PATH" shell load 2>&1)"
+rc_long=$?
+err_hook="$(command "$NKP_BIN" __hook bash --prompt -V "$VAULT_PATH" 2>&1)"
+rc_hook=$?
+set -e
+
+[ "$rc_short" -ne 0 ]
+[ "$rc_long" -ne 0 ]
+[ "$rc_hook" -ne 0 ]
+printf '%s\n' "$err_short" | grep -q 'this command does not accept --vault'
+printf '%s\n' "$err_long" | grep -q 'this command does not accept --vault'
+printf '%s\n' "$err_hook" | grep -q 'this command does not accept --vault'
+"#,
+    );
+
+    let bash_out = Command::new(bash_bin)
+        .isolate_application_environment()
+        .args(["--norc", "--noprofile", "-c", &script])
+        .env("HOME", fx.dir.path())
+        .env("XDG_CONFIG_HOME", &fx.config_dir)
+        .env("XDG_DATA_HOME", &fx.data_dir)
+        .env_remove("NKP_PASSWORD")
+        .env("CUSTOM_PW", MASTER_PASSWORD)
+        .env("VAULT_PATH", &fx.vault)
+        .env("NKP_BIN", env!("CARGO_BIN_EXE_nkp"))
+        .env("PROJ_DIR", &proj)
+        .current_dir(&outside)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(
+        bash_out.status.success(),
+        "real bash shell load root-option parity failed (code {:?}):\nstdout:\n{}\nstderr:\n{}",
+        bash_out.status.code(),
+        String::from_utf8_lossy(&bash_out.stdout),
+        String::from_utf8_lossy(&bash_out.stderr),
+    );
+}
