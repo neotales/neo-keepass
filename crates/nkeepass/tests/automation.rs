@@ -1103,7 +1103,7 @@ fn failed_set_batches_never_persist_staged_mutations() {
     let expected_errors = [
         "title cannot be changed through set",
         "duplicate attachment name",
-        "cannot read input file",
+        "cannot open input file",
         "field specified more than once",
         "input exceeds size limit",
         "too many attachment inputs",
