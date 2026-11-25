@@ -1408,3 +1408,66 @@ fn env_and_exec_consume_option_values_uniformly_and_sanitize_diagnostics() {
         );
     }
 }
+
+#[test]
+fn symlink_and_fifo_rejected_on_key_file_password_file_and_inject_inputs() {
+    let fixture = Fixture::new(&database_with_entries([Entry::new("Demo")]), PASSWORD);
+    let dir = fixture.directory.path();
+    let real_file = dir.join("real.txt");
+    fs::write(&real_file, format!("{PASSWORD}\n")).unwrap();
+
+    let symlink_path = dir.join("input.link");
+    std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
+
+    let fifo_path = dir.join("input.fifo");
+    let has_fifo = Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .is_ok_and(|status| status.success());
+
+    let mut bad_paths = vec![symlink_path];
+    if has_fifo {
+        bad_paths.push(fifo_path);
+    }
+
+    for bad in &bad_paths {
+        let bad_str = bad.to_str().unwrap();
+
+        let key_out = run(
+            &fixture,
+            &[
+                "ls",
+                "--key-file",
+                bad_str,
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+        );
+        assert_static_failure(&key_out, "cannot open key file");
+
+        let pw_out = run(&fixture, &["ls", "--password-file", bad_str]);
+        assert_static_failure(&pw_out, "cannot open input file");
+
+        let inject_out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .args(["inject", "-f", bad_str])
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("XDG_DATA_HOME", dir.join("data"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!inject_out.status.success());
+        assert!(inject_out.stdout.is_empty());
+
+        let env_out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .args(["x", "--env-file", bad_str, "--", "/bin/true"])
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("XDG_DATA_HOME", dir.join("data"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!env_out.status.success());
+        assert!(env_out.stdout.is_empty());
+    }
+}

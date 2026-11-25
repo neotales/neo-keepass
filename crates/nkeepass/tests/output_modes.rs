@@ -2157,3 +2157,78 @@ fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
         assert_eq!(output.stderr, b"nkp: cannot write output\n");
     }
 }
+
+#[test]
+fn bidi_and_line_separators_are_withheld_from_ls_and_group_ls_metadata() {
+    let mut database = KeePassDatabase::default();
+    database.add_entry(Entry::new("SafeEntry"));
+    database.add_entry(Entry::new("Hostile\u{202e}Entry"));
+    database.add_entry(Entry::new("Separator\u{2028}Entry"));
+
+    let mut good_group = Group::new("SafeGroup");
+    good_group.add_entry(Entry::new("NestedSafe"));
+    let mut bad_group = Group::new("Hostile\u{2066}Group");
+    bad_group.add_entry(Entry::new("InsideBadGroup"));
+    database.root.groups.push(good_group);
+    database.root.groups.push(bad_group);
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("bidi.kdbx");
+    KdbxFile::save(
+        &database,
+        std::fs::File::create(&vault).unwrap(),
+        &mut KdbxCredentials::password(PASSWORD).unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+
+    let ls_out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "ls",
+            "--format",
+            "json",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ])
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(ls_out.status.success());
+    let ls_stdout = String::from_utf8_lossy(&ls_out.stdout);
+    assert!(ls_stdout.contains("SafeEntry"));
+    assert!(!ls_stdout.contains('\u{202e}'));
+    assert!(!ls_stdout.contains('\u{2028}'));
+    assert!(!ls_stdout.contains('\u{2066}'));
+    assert!(String::from_utf8_lossy(&ls_out.stderr).contains("withheld"));
+
+    let group_out = Command::new(env!("CARGO_BIN_EXE_nkp"))
+        .isolate_application_environment()
+        .args([
+            "--vault",
+            vault.to_str().unwrap(),
+            "group",
+            "ls",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ])
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(group_out.status.success());
+    let group_stdout = String::from_utf8_lossy(&group_out.stdout);
+    assert!(group_stdout.contains("SafeGroup"));
+    assert!(!group_stdout.contains('\u{2066}'));
+}

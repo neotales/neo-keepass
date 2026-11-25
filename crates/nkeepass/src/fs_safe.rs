@@ -375,16 +375,23 @@ pub(crate) fn open_lock_file_safe(path: &Path) -> Result<File, SafeFsError> {
     Ok(file)
 }
 
-/// Opens an existing regular file safely without following symlinks/reparse points
-/// or blocking on FIFOs/devices.
-///
-/// When `require_owner_only` is `true`, verifies `mode & 0o077 == 0` on Unix and
-/// `windows_private_file::verify` on Windows. Otherwise verifies `!world_writable`
-/// (`mode & 0o002 == 0`) on Unix.
-pub(crate) fn safe_open_regular_file(
-    path: &Path,
-    require_owner_only: bool,
-) -> Result<(File, Metadata), SafeFsError> {
+fn safe_fs_error_to_io(err: SafeFsError) -> io::Error {
+    match err {
+        SafeFsError::NotFound => io::Error::new(io::ErrorKind::NotFound, "file not found"),
+        SafeFsError::UnsafeFile | SafeFsError::UnsafePath => {
+            io::Error::new(io::ErrorKind::InvalidInput, "path must be a regular file")
+        }
+        SafeFsError::UnsafePermissions => {
+            io::Error::new(io::ErrorKind::PermissionDenied, "unsafe file permissions")
+        }
+        SafeFsError::TooLarge => {
+            io::Error::new(io::ErrorKind::InvalidData, "file exceeds size limit")
+        }
+        SafeFsError::Io => io::Error::other("filesystem I/O error"),
+    }
+}
+
+fn open_regular_file_nofollow_raw(path: &Path) -> Result<(File, Metadata), SafeFsError> {
     let lmeta = fs::symlink_metadata(path).map_err(|err| {
         if err.kind() == io::ErrorKind::NotFound {
             SafeFsError::NotFound
@@ -409,12 +416,10 @@ pub(crate) fn safe_open_regular_file(
         opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
 
-    let file = opts.open(path).map_err(|err| {
-        if err.kind() == io::ErrorKind::NotFound {
-            SafeFsError::NotFound
-        } else {
-            SafeFsError::UnsafeFile
-        }
+    let file = opts.open(path).map_err(|err| match err.kind() {
+        io::ErrorKind::NotFound => SafeFsError::NotFound,
+        io::ErrorKind::PermissionDenied => SafeFsError::Io,
+        _ => SafeFsError::UnsafeFile,
     })?;
 
     let fmeta = file.metadata().map_err(|_| SafeFsError::Io)?;
@@ -424,10 +429,84 @@ pub(crate) fn safe_open_regular_file(
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::MetadataExt;
         if fmeta.dev() != lmeta.dev() || fmeta.ino() != lmeta.ino() {
             return Err(SafeFsError::UnsafeFile);
         }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let attrs = fmeta.file_attributes();
+        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+            return Err(SafeFsError::UnsafeFile);
+        }
+    }
+
+    Ok((file, fmeta))
+}
+
+/// Opens an existing regular file without following symlinks or Windows reparse
+/// points and without blocking on FIFOs or device nodes, verifying post-open
+/// descriptor identity (`dev`/`ino` on Unix, no reparse point on Windows) and
+/// regular-file type.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] when `path` does not exist,
+/// [`io::ErrorKind::InvalidInput`] when `path` is a symlink, reparse point,
+/// directory, FIFO, or device, or another [`io::Error`] if opening or stating
+/// fails.
+pub fn open_regular_file_nofollow(path: &Path) -> io::Result<(File, Metadata)> {
+    open_regular_file_nofollow_raw(path).map_err(safe_fs_error_to_io)
+}
+
+/// Opens an existing regular file without blocking on FIFOs or device nodes,
+/// verifying post-open descriptor metadata confirms a regular file.
+///
+/// Unlike [`open_regular_file_nofollow`], symlinks resolving to a regular file
+/// are permitted (for example, symlink-managed vault files), while symlinks to
+/// FIFOs, devices, or directories are rejected before reading.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] when the opened descriptor is not a
+/// regular file, or the underlying [`io::Error`] when opening or stating fails.
+pub fn open_regular_file_nonblocking(path: &Path) -> io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(unix_o_nonblock());
+    }
+    let file = opts.open(path)?;
+    let fmeta = file.metadata()?;
+    if !fmeta.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path must be a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+/// Opens an existing regular file safely without following symlinks/reparse points
+/// or blocking on FIFOs/devices.
+///
+/// When `require_owner_only` is `true`, verifies `mode & 0o077 == 0` on Unix and
+/// `windows_private_file::verify` on Windows. Otherwise verifies `!world_writable`
+/// (`mode & 0o002 == 0`) on Unix.
+pub(crate) fn safe_open_regular_file(
+    path: &Path,
+    require_owner_only: bool,
+) -> Result<(File, Metadata), SafeFsError> {
+    let (file, fmeta) = open_regular_file_nofollow_raw(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = fmeta.permissions().mode();
         if require_owner_only {
             if mode & 0o077 != 0 {
@@ -444,11 +523,6 @@ pub(crate) fn safe_open_regular_file(
 
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let attrs = fmeta.file_attributes();
-        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 {
-            return Err(SafeFsError::UnsafeFile);
-        }
         if require_owner_only && windows_private_file::verify(&file).is_err() {
             return Err(SafeFsError::UnsafePermissions);
         }

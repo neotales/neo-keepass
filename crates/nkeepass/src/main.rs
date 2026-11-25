@@ -2114,7 +2114,9 @@ impl serde_json::ser::Formatter for TtyJsonFormatter {
     ) -> io::Result<()> {
         let mut start = 0;
         for (idx, ch) in fragment.char_indices() {
-            if matches!(ch, '\u{007f}' | '\u{0080}'..='\u{009f}') {
+            if matches!(ch, '\u{007f}' | '\u{0080}'..='\u{009f}')
+                || nkeepass::template::is_bidi_or_line_separator(ch)
+            {
                 if start < idx {
                     writer.write_all(&fragment.as_bytes()[start..idx])?;
                 }
@@ -2135,10 +2137,10 @@ fn validate_tty_raw_bytes(bytes: &[u8]) -> Result<()> {
             "raw output contains non-UTF-8 or terminal-control bytes; redirect stdout to a file or pipe",
         ));
     };
-    if text
-        .chars()
-        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
-    {
+    if text.chars().any(|character| {
+        (character.is_control() && !matches!(character, '\n' | '\t'))
+            || nkeepass::template::is_bidi_or_line_separator(character)
+    }) {
         return Err(err(
             "raw output contains terminal-control bytes; redirect stdout to a file or pipe",
         ));
@@ -2463,7 +2465,14 @@ const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 // dropped and the run continues. The diagnostic is deliberately silent about
 // which entry it was: naming the record would put the payload back on stderr.
 fn safe_metadata(value: &str) -> bool {
-    !value.chars().any(char::is_control)
+    nkeepass::template::is_safe_display_text(value)
+}
+
+fn safe_search_hit(hit: &nkeepass::SearchHit) -> bool {
+    safe_metadata(hit.path())
+        && safe_metadata(hit.title())
+        && hit.tags().iter().all(|tag| safe_metadata(tag))
+        && hit.field_names().iter().all(|field| safe_metadata(field))
 }
 
 /// Walks the tree, emitting one record per matching entry and counting the ones
@@ -3519,9 +3528,9 @@ fn credentials_with_password_and_keyfile(
 ) -> Result<KdbxCredentials> {
     let key_file = key_file_path
         .map(|path| {
-            File::open(path)
+            nkeepass::fs_safe::open_regular_file_nofollow(Path::new(path))
                 .map_err(|_| err("cannot open key file"))
-                .and_then(|file| read_key_file(file).map_err(|_| err("invalid key file")))
+                .and_then(|(file, _)| read_key_file(file).map_err(|_| err("invalid key file")))
         })
         .transpose()?;
     let providers = key_file
@@ -3869,7 +3878,8 @@ fn backup_directory_sync_policy() -> &'static str {
 }
 
 fn bounded_file(path: &str, max: u64) -> Result<Zeroizing<Vec<u8>>> {
-    let file = File::open(path).map_err(|_| err("cannot open input file"))?;
+    let (file, _) = nkeepass::fs_safe::open_regular_file_nofollow(Path::new(path))
+        .map_err(|_| err("cannot open input file"))?;
     let bytes = read_bounded(file, max, "cannot read input file")?;
     if bytes.len() as u64 > max {
         return Err(err("input exceeds size limit"));
@@ -4554,10 +4564,10 @@ fn write_stdout(bytes: &[u8], error: &'static str) -> Result<()> {
 // treats them as escaped/quoted data, but reject every other Unicode control
 // character (including ESC, BEL, DEL, and C1 controls) before writing bytes.
 fn validate_formatted_controls(value: &str) -> Result<()> {
-    if value
-        .chars()
-        .any(|character| character.is_control() && character != '\n')
-    {
+    if value.chars().any(|character| {
+        (character.is_control() && character != '\n')
+            || nkeepass::template::is_bidi_or_line_separator(character)
+    }) {
         return Err(err(
             "formatted output cannot contain terminal-control bytes",
         ));
@@ -5842,7 +5852,14 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                 withheld = withheld.saturating_add(page.withheld);
                 for hit in page.hits {
                     match format {
-                        MetadataFormat::Json => write_search_hit(&hit)?,
+                        MetadataFormat::Json => {
+                            if safe_search_hit(&hit) {
+                                write_search_hit(&hit)?;
+                            } else {
+                                withheld = withheld.saturating_add(1);
+                                continue;
+                            }
+                        }
                         MetadataFormat::Human => human_hits.push(hit),
                     }
                     emitted += 1;
@@ -5906,7 +5923,11 @@ fn operation(action: &str, args: &[String], vault: Option<&str>, config: &Config
                 match format {
                     MetadataFormat::Json => {
                         for hit in &page.hits {
-                            write_search_hit(hit)?;
+                            if safe_search_hit(hit) {
+                                write_search_hit(hit)?;
+                            } else {
+                                withheld = withheld.saturating_add(1);
+                            }
                         }
                     }
                     MetadataFormat::Human => {
@@ -6692,9 +6713,15 @@ fn group_operation(
                 let metadata = service
                     .completion_metadata()
                     .map_err(|error| err(error.message()))?;
+                let mut withheld = 0usize;
                 for group in metadata.groups {
-                    print_line(&group)?;
+                    if safe_metadata(&group) {
+                        print_line(&group)?;
+                    } else {
+                        withheld += 1;
+                    }
                 }
+                report_withheld(withheld);
                 false
             }
             "group-add" => {
@@ -8174,75 +8201,17 @@ fn exec_command(args: &[String], vault: Option<&str>, config: &Config) -> Result
     }
 }
 
-#[cfg(unix)]
-const fn cli_unix_o_nonblock() -> i32 {
-    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips64")))]
-    {
-        0x0080
-    }
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "sparc", target_arch = "sparc64")
-    ))]
-    {
-        0x4000
-    }
-    #[cfg(all(
-        target_os = "linux",
-        not(any(
-            target_arch = "mips",
-            target_arch = "mips64",
-            target_arch = "sparc",
-            target_arch = "sparc64"
-        ))
-    ))]
-    {
-        0o4_000
-    }
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    ))]
-    {
-        0x0004
-    }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    )))]
-    {
-        0
-    }
-}
-
-/// Reads an existing regular file up to `max` bytes without blocking on FIFOs or
-/// devices.
+/// Reads an existing regular file up to `max` bytes without following symlinks
+/// or reparse points and without blocking on FIFOs or devices.
 fn bounded_regular_file(path: &str, max: usize) -> Result<Zeroizing<Vec<u8>>> {
-    let meta = fs::metadata(path).map_err(|_| err("cannot open input file"))?;
-    if !meta.file_type().is_file() {
-        return Err(err("input path must be a regular file"));
-    }
-    let mut opts = fs::OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(cli_unix_o_nonblock());
-    }
-    let file = opts.open(path).map_err(|_| err("cannot open input file"))?;
-    let fmeta = file.metadata().map_err(|_| err("cannot open input file"))?;
-    if !fmeta.file_type().is_file() {
-        return Err(err("input path must be a regular file"));
-    }
+    let (file, _) =
+        nkeepass::fs_safe::open_regular_file_nofollow(Path::new(path)).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidInput {
+                err("input path must be a regular file")
+            } else {
+                err("cannot open input file")
+            }
+        })?;
     let max_u64 = u64::try_from(max).map_err(|_| err("input exceeds size limit"))?;
     let bytes = read_bounded(file, max_u64, "cannot read input file")?;
     if bytes.len() > max {
@@ -8552,11 +8521,21 @@ fn inject_command(args: &[String], vault: Option<&str>, config: &Config) -> Resu
                 nkeepass::env_file::resolve_env_file(&lines, &mut NoopLookup)
                     .map_err(template_cli_error)?
             };
-            let mut out = Zeroizing::new(String::new());
+            let mut quoted_entries = Vec::with_capacity(resolved.len());
+            let mut total_len = 0usize;
             for (name, val) in resolved {
                 let quoted = Zeroizing::new(
                     serde_json::to_string(val.as_str()).map_err(|_| err("cannot encode output"))?,
                 );
+                total_len = total_len
+                    .saturating_add(name.len())
+                    .saturating_add(1)
+                    .saturating_add(quoted.len())
+                    .saturating_add(1);
+                quoted_entries.push((name, quoted));
+            }
+            let mut out = Zeroizing::new(String::with_capacity(total_len));
+            for (name, quoted) in quoted_entries {
                 out.push_str(&name);
                 out.push('=');
                 out.push_str(&quoted);
@@ -9121,6 +9100,12 @@ fn hook_command(args: &[String], config: &Config) -> Result<()> {
                 key_file = Some(take_arg(args, i)?);
             }
             "--password-stdin" if !password_stdin => password_stdin = true,
+            "-V" | "--vault" => {
+                return Err(err("this command does not accept --vault"));
+            }
+            arg if arg.starts_with("-V=") || arg.starts_with("--vault=") => {
+                return Err(err("this command does not accept --vault"));
+            }
             _ => return Err(err("invalid hook option")),
         }
         i += 1;
@@ -10374,7 +10359,7 @@ fn sanitize_terminal_text(value: &str) -> String {
     value
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() || nkeepass::template::is_bidi_or_line_separator(character) {
                 '\u{fffd}'
             } else {
                 character
@@ -13678,6 +13663,26 @@ mod tests {
         // Force a partial plaintext read before the error; `read_bounded` owns
         // the Zeroizing buffer throughout, including this early return.
         assert!(read_bounded(FailsAfterSecret(false), 32, "read failed").is_err());
+
+        #[cfg(unix)]
+        {
+            let target = dir.path().join("target.bin");
+            fs::write(&target, b"ok").unwrap();
+            let link = dir.path().join("target.link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(bounded_file(link.to_str().unwrap(), 32).is_err());
+            assert!(bounded_regular_file(link.to_str().unwrap(), 32).is_err());
+
+            let fifo = dir.path().join("target.fifo");
+            if std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                assert!(bounded_file(fifo.to_str().unwrap(), 32).is_err());
+                assert!(bounded_regular_file(fifo.to_str().unwrap(), 32).is_err());
+            }
+        }
     }
 
     /// The three places the key set is written down must agree.
@@ -13876,6 +13881,20 @@ mod tests {
                 !safe_metadata(&format!("group{control}name")),
                 "U+{code:04X} must make CLI metadata unsafe",
             );
+        }
+        for bidi in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}', '\u{202A}', '\u{202E}',
+            '\u{2066}', '\u{2069}',
+        ] {
+            assert!(
+                !safe_metadata(&format!("group{bidi}name")),
+                "U+{:04X} must make CLI metadata unsafe",
+                bidi as u32
+            );
+            let sample = format!("text{bidi}more");
+            assert!(validate_tty_raw_bytes(sample.as_bytes()).is_err());
+            assert!(validate_formatted_controls(&sample).is_err());
+            assert_eq!(sanitize_terminal_text(&sample), "text\u{fffd}more");
         }
         assert!(safe_metadata("ordinary group name"));
     }

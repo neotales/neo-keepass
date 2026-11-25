@@ -869,6 +869,9 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     let fish_init = emit_shell_init(HookShell::Fish, None, true).unwrap();
     assert!(fish_init.contains("begin\n    set -lx __NKP_ENV_STATE \"$_nkp_env_state\""));
     assert!(fish_init.contains("set _nkp_lines (command nkp __hook fish"));
+    assert!(fish_init.contains(
+        "set _nkp_lines (command nkp $_nkp_root_opts __hook fish --prompt $_nkp_passthru)"
+    ));
     assert!(fish_init.contains("set _nkp_rc $status"));
     assert!(fish_init.contains("printf '%s\\n' $_nkp_lines | source"));
     assert!(!fish_init.contains("env __NKP_ENV_STATE="));
@@ -893,6 +896,8 @@ fn shell_emitters_enforce_quoting_json_safety_and_unexported_state() {
     assert!(pwsh_init.contains("SetEnvironmentVariable"));
     assert!(pwsh_init.contains("$script:_NkpHookInstalled"));
     assert!(pwsh_init.contains("[switch]$Explicit"));
+    assert!(pwsh_init.contains("[string[]]$RootArgs = @()"));
+    assert!(pwsh_init.contains("-RootArgs $rootOpts.ToArray()"));
     assert!(pwsh_init.contains("[System.Environment]::Version.Major -lt 9"));
     assert!(!pwsh_init.contains("--password-fd"));
     assert!(!pwsh_init.contains("Invoke-Expression"));

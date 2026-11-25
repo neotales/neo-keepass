@@ -3,7 +3,7 @@
 #[allow(dead_code, reason = "shared with the CLI's mutation and save paths")]
 pub(crate) mod automation;
 pub mod env_file;
-pub(crate) mod fs_safe;
+pub mod fs_safe;
 pub mod glob;
 pub mod hook;
 #[allow(dead_code, reason = "shared interchange model boundary")]
