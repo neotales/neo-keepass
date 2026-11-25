@@ -19,7 +19,11 @@ Isolated nested Cargo workspace for the `neo-keepass` desktop UI built on
 - `neo-keepass` pins `channel = "1.98.1"` in the root `rust-toolchain.toml`.
 - **Verified empirically:** `rustc 1.98.1 (48a229cea 2026-09-01)` compiles `nkpui`, `rune`, `rune-kit`, `nkeepass`, and `neotales-keepass` cleanly (`cargo check --all-targets`, `cargo clippy --all-targets --no-deps -- -D warnings`, and `cargo check --release` all pass with zero warnings in `nkpui`). No root toolchain bump was required.
 
-## `vendor/*` License Check
+## Licensing & Third-Party Dependencies
+
+`nkpui` itself is licensed under `MIT` (`crates/nkpui/Cargo.toml`) and enforces `unsafe_code = "forbid"`.
+
+### `vendor/*` License Check
 
 Inspected every `vendor/*/Cargo.toml` at pinned Rune rev `761fd132a286b9e87756d8a0889c8957b93c86be`:
 
@@ -36,7 +40,11 @@ Inspected every `vendor/*/Cargo.toml` at pinned Rune rev `761fd132a286b9e87756d8
 | `vendor/winit` | `Apache-2.0` |
 | `vendor/tiny-skia-path` (`rune-tiny-skia-path`) | `BSD-3-Clause` |
 
-All crates use permissive MIT/Apache-2.0/BSD-3-Clause licenses compatible with `neo-keepass` (`MIT`). `crates/nkpui/Cargo.toml` enforces `unsafe_code = "forbid"`.
+### Third-Party Transitive Dependency Notice (`spellbook v0.4.2`, `MPL-2.0`)
+
+- **Dependency chain:** `rune v0.0.1` unconditionally depends on `rune-spell v0.0.1`, which on Linux and Wasm targets pulls `spellbook v0.4.2` (`MPL-2.0`) as an unmodified upstream crates.io dependency (`crates/nkpui/Cargo.lock`).
+- **Scope & runtime posture:** `MPL-2.0` is a file-level weak copyleft license applying only to `spellbook`'s own unmodified source files. `nkpui` keeps runtime spellchecking disabled on `.secure()` fields and text inputs (`TextEdit`).
+- **Distribution notice:** For the `0.0.0-alpha.0` release and any binary distribution that links `spellbook v0.4.2` (such as Linux builds), source availability and `MPL-2.0` notice obligations apply to the unmodified `spellbook v0.4.2` crate alongside the permissive `MIT` / `Apache-2.0` / `BSD-3-Clause` crates listed above.
 
 ## Build Prerequisites
 

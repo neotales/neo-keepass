@@ -8,8 +8,8 @@ use rune::{
     Cx, El, Latest, ScrollSpec, SecretCopy, SecretState, TextEdit, Tx, col, oklch, row, text,
 };
 use rune_kit::{
-    Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Dialog, Divider, Kit,
-    TextArea, TextInput, root as kit_root,
+    Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Dialog, Divider, IconButton,
+    IconButtonVariant, Kit, TextArea, TextInput, root as kit_root,
 };
 use zeroize::Zeroizing;
 
@@ -17,7 +17,8 @@ use crate::controller::{
     EditableCustomField, EntryDetailState, EntryEditorState, InjectMode, LockCleanup,
     LockErrorField, LockMode, LockTrigger, SaveOutcome, TotpDisplay, UnlockOutcome,
     VaultController, VaultPhase, WorkspaceTab, create_and_open_vault_blocking,
-    current_unix_seconds, format_byte_size, open_vault_blocking, save_vault_blocking,
+    current_unix_seconds, format_byte_size, open_vault_blocking, sanitize_attachment_prefill,
+    save_vault_blocking,
 };
 
 const SECRET_CLIPBOARD_TTL: Duration = Duration::from_secs(30);
@@ -128,6 +129,8 @@ pub struct AppState {
     pub edit_notes: TextEdit,
     /// Entry editor tag input (supports comma-separated or single tag add).
     pub edit_new_tag: TextEdit,
+    /// Inline non-secret error message shown inside the sidebar new-group form.
+    pub new_group_error: Option<String>,
     /// Entry editor custom string value inputs matching `editor.custom_fields`.
     pub edit_custom_values: Vec<TextEdit>,
     /// Form state for staging a new custom string in the Entry Editor.
@@ -187,6 +190,7 @@ impl Default for AppState {
             search_edit: TextEdit::new(""),
             show_new_group_form: false,
             new_group_edit: TextEdit::new(""),
+            new_group_error: None,
             edit_title: TextEdit::new(""),
             edit_username: TextEdit::new(""),
             edit_password: TextEdit::new("").secure(),
@@ -248,15 +252,18 @@ impl AppState {
         let password_empty = password.is_empty();
         let passwords_match = password.as_str() == confirm.as_str();
         drop(confirm);
-        self.master_input.replace_text("");
-        self.confirm_master_edit.replace_text("");
 
         let Some((vault_path, key_file_path, generation)) = self
             .controller
             .begin_create(password_empty, passwords_match)
         else {
+            if !passwords_match {
+                self.confirm_master_edit.replace_text("");
+            }
             return;
         };
+        self.master_input.replace_text("");
+        self.confirm_master_edit.replace_text("");
 
         self.unlock_worker.request(
             (vault_path, key_file_path, password, generation),
@@ -382,6 +389,7 @@ impl AppState {
         self.confirm_master_edit.replace_text("");
         self.search_edit.replace_text("");
         self.new_group_edit.replace_text("");
+        self.new_group_error = None;
         self.show_new_group_form = false;
         self.pending_confirm = None;
         self.attach_dialog_open = false;
@@ -529,6 +537,7 @@ impl AppState {
 
 /// Builds the top-level Rune element tree for `nkpui`.
 pub fn view(state: &AppState, cx: &mut Cx<AppState>) -> El {
+    cx.web_focus();
     let dark = cx.system_dark();
     let mut k = Kit::neutral(dark);
     if !dark {
@@ -1130,9 +1139,12 @@ fn lock_mode_switcher(k: &Kit, is_create: bool, unlocking: bool) -> El {
         })
         .disabled(unlocking)
         .on_press(|s: &mut AppState| {
-            s.controller.lock_mode = LockMode::Open;
-            s.controller.clear_lock_status();
-            s.confirm_master_edit.replace_text("");
+            if s.controller.lock_mode != LockMode::Open {
+                s.controller.lock_mode = LockMode::Open;
+                s.controller.clear_lock_status();
+                s.master_input.replace_text("");
+                s.confirm_master_edit.replace_text("");
+            }
         })
         .build(k)
         .key("lock-mode-open-btn");
@@ -1146,8 +1158,12 @@ fn lock_mode_switcher(k: &Kit, is_create: bool, unlocking: bool) -> El {
         })
         .disabled(unlocking)
         .on_press(|s: &mut AppState| {
-            s.controller.lock_mode = LockMode::Create;
-            s.controller.clear_lock_status();
+            if s.controller.lock_mode != LockMode::Create {
+                s.controller.lock_mode = LockMode::Create;
+                s.controller.clear_lock_status();
+                s.master_input.replace_text("");
+                s.confirm_master_edit.replace_text("");
+            }
         })
         .build(k)
         .key("lock-mode-create-btn");
@@ -1396,9 +1412,13 @@ fn submit_new_group(state: &mut AppState) {
     match state.controller.create_subgroup(&name) {
         Ok(()) => {
             state.new_group_edit.replace_text("");
+            state.new_group_error = None;
             state.show_new_group_form = false;
         }
-        Err(err) => state.controller.set_browser_error(err),
+        Err(err) => {
+            state.new_group_error = Some(err.clone());
+            state.controller.set_browser_error(err);
+        }
     }
 }
 
@@ -1408,7 +1428,10 @@ fn new_group_form_el(k: &Kit, state: &AppState) -> El {
         .placeholder("Subgroup name")
         .width(None)
         .on_edit(|s: &mut AppState| &mut s.new_group_edit)
-        .on_change(|s: &mut AppState, tx| s.note_activity(tx))
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
+            s.new_group_error = None;
+        })
         .on_submit(|s: &mut AppState, tx| {
             s.note_activity(tx);
             submit_new_group(s);
@@ -1426,12 +1449,15 @@ fn new_group_form_el(k: &Kit, state: &AppState) -> El {
         .build(k)
         .key("new-group-submit-btn");
 
-    col()
+    let mut form = col()
         .key("new-group-form")
         .w_full()
         .gap(6.0)
-        .child(name_input)
-        .child(row().w_full().justify_end().child(create_btn))
+        .child(name_input);
+    if let Some(err) = &state.new_group_error {
+        form = form.child(error_status_text(k, "new-group-error", err));
+    }
+    form.child(row().w_full().justify_end().child(create_btn))
 }
 
 fn group_sidebar_list(k: &Kit, state: &AppState) -> El {
@@ -1499,6 +1525,7 @@ fn group_sidebar(k: &Kit, state: &AppState) -> El {
         s.show_new_group_form = !s.show_new_group_form;
         if !s.show_new_group_form {
             s.new_group_edit.replace_text("");
+            s.new_group_error = None;
         }
     })
     .build(k)
@@ -1583,39 +1610,46 @@ fn entry_list_items(k: &Kit, state: &AppState) -> El {
         );
     }
 
+    let saving = state.controller.is_saving();
     for (idx, hit) in state.controller.entries.iter().enumerate() {
         let selected = state.controller.selected_index == Some(idx);
-        list = list.child(
-            col()
-                .key(format!("entry-row-{idx}"))
-                .w_full()
-                .padding(8.0)
-                .gap(2.0)
-                .radius(k.radius.md)
-                .fill(if selected { k.c.layer_03 } else { k.c.layer_01 })
+        let mut row_el = col()
+            .key(format!("entry-row-{idx}"))
+            .w_full()
+            .padding(8.0)
+            .gap(2.0)
+            .radius(k.radius.md)
+            .fill(if selected { k.c.layer_03 } else { k.c.layer_01 })
+            .child(
+                text(hit.title().to_owned())
+                    .w_full()
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_base)
+                    .truncate(),
+            )
+            .child(
+                text(hit.path().to_owned())
+                    .w_full()
+                    .font(k.ty.text_xsmall)
+                    .color(k.c.text_muted)
+                    .truncate(),
+            );
+        if !saving {
+            row_el = row_el
                 .focusable(true)
+                .press_on_return()
                 .hover(k.c.hover)
                 .press(k.c.pressed)
                 .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                     s.note_activity(tx);
+                    if s.controller.is_saving() {
+                        return;
+                    }
                     s.controller.select_entry(idx, current_unix_seconds());
                     s.wipe_editor_widgets();
-                })
-                .child(
-                    text(hit.title().to_owned())
-                        .w_full()
-                        .font(k.ty.ui_medium)
-                        .color(k.c.text_base)
-                        .truncate(),
-                )
-                .child(
-                    text(hit.path().to_owned())
-                        .w_full()
-                        .font(k.ty.text_xsmall)
-                        .color(k.c.text_muted)
-                        .truncate(),
-                ),
-        );
+                });
+        }
+        list = list.child(row_el);
     }
     list
 }
@@ -1741,8 +1775,7 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
         .w_full()
         .h_full()
         .padding(16.0)
-        .gap(10.0)
-        .scroll(ScrollSpec::default());
+        .gap(10.0);
 
     if let Some(status) = &state.controller.browser_status {
         pane = pane.child(
@@ -1761,7 +1794,18 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
     }
 
     if let Some(editor) = &state.controller.editor {
-        return entry_editor_pane(k, state, pane, editor);
+        let mut scroll_body = col()
+            .key("entry-editor-scroll")
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .scroll(ScrollSpec::default())
+            .gap(10.0);
+        scroll_body = entry_editor_body(k, state, scroll_body, editor);
+        return pane
+            .child(editor_header_row(k, editor, state.controller.saving))
+            .child(Divider::horizontal().build(k).key("editor-divider"))
+            .child(scroll_body);
     }
 
     let Some(detail) = &state.controller.detail else {
@@ -1786,6 +1830,14 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
         .child(entry_detail_header(k, detail, state.controller.saving))
         .child(Divider::horizontal().build(k).key("detail-divider"));
 
+    let mut scroll_body = col()
+        .key("entry-detail-scroll")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .scroll(ScrollSpec::default())
+        .gap(10.0);
+
     if !detail.metadata.tags().is_empty() {
         let mut tags_row = row().key("detail-tags-row").w_full().flex_wrap().gap(6.0);
         for tag in detail.metadata.tags() {
@@ -1796,10 +1848,10 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
                     .key(format!("detail-tag-{tag}")),
             );
         }
-        pane = pane.child(tags_row);
+        scroll_body = scroll_body.child(tags_row);
     }
 
-    pane = pane
+    scroll_body = scroll_body
         .child(standard_field_row(
             k,
             detail,
@@ -1818,12 +1870,13 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
         ));
 
     if let Some(totp) = &detail.totp {
-        pane = pane.child(totp_row(k, totp));
+        scroll_body = scroll_body.child(totp_row(k, totp));
     }
     if !detail.metadata.custom_fields().is_empty() {
-        pane = custom_fields_section(k, pane, detail);
+        scroll_body = custom_fields_section(k, scroll_body, detail);
     }
-    attachments_section(k, pane, detail, state.controller.saving)
+    scroll_body = attachments_section(k, scroll_body, detail, state.controller.saving);
+    pane.child(scroll_body)
 }
 
 fn editor_header_row(k: &Kit, editor: &EntryEditorState, saving: bool) -> El {
@@ -2071,11 +2124,8 @@ fn editor_standard_fields(k: &Kit, state: &AppState, editor: &EntryEditorState) 
         .child(labeled_field(k, "editor-notes-field", "Notes", notes_input))
 }
 
-fn entry_editor_pane(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEditorState) -> El {
-    pane = pane
-        .child(editor_header_row(k, editor, state.controller.saving))
-        .child(Divider::horizontal().build(k).key("editor-divider"))
-        .child(editor_standard_fields(k, state, editor));
+fn entry_editor_body(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEditorState) -> El {
+    pane = pane.child(editor_standard_fields(k, state, editor));
 
     pane = editor_tags_section(k, state, pane, editor);
     pane = editor_custom_fields_section(k, state, pane, editor);
@@ -2109,9 +2159,10 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
                             .build(k),
                     )
                     .child(
-                        Button::new("×")
-                            .control_size(ControlSize::Mini)
-                            .variant(ButtonVariant::Ghost)
+                        IconButton::new(k.glyph.close)
+                            .control_size(ControlSize::Regular)
+                            .variant(IconButtonVariant::Ghost)
+                            .label(format!("Remove tag {tag}"))
                             .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
                                 s.note_activity(tx);
                                 s.controller.remove_editor_tag(idx);
@@ -2339,27 +2390,7 @@ fn editor_custom_field_actions(k: &Kit, idx: usize, field: &EditableCustomField)
     )
 }
 
-fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
-    let form = &state.add_custom_form;
-    let new_name_input = TextInput::new(&form.name_edit)
-        .label("New custom string name")
-        .placeholder("Field name (e.g. ApiKey)")
-        .width(None)
-        .on_edit(|s: &mut AppState| &mut s.add_custom_form.name_edit)
-        .on_change(|s: &mut AppState, tx| s.note_activity(tx))
-        .build(k)
-        .key("add-custom-name-input");
-
-    let mut new_value_input = TextInput::new(&form.value_edit)
-        .label("New custom string value")
-        .placeholder("Field value")
-        .width(None)
-        .on_edit(|s: &mut AppState| &mut s.add_custom_form.value_edit)
-        .on_change(|s: &mut AppState, tx| s.note_activity(tx));
-    if form.protected {
-        new_value_input = new_value_input.secure().revealed(form.revealed);
-    }
-
+fn editor_add_custom_actions(k: &Kit, form: &AddCustomFieldForm) -> El {
     let add_protected_cb = Checkbox::new(form.protected)
         .label("Protected")
         .on_toggle_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -2373,7 +2404,7 @@ fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
         .build(k)
         .key("add-custom-protected-cb");
 
-    let mut add_form_actions = row()
+    let mut actions = row()
         .key("add-custom-actions")
         .w_full()
         .flex_wrap()
@@ -2382,7 +2413,7 @@ fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
         .child(add_protected_cb);
 
     if form.protected {
-        add_form_actions = add_form_actions.child(
+        actions = actions.child(
             Button::new(if form.revealed { "Hide" } else { "Reveal" })
                 .control_size(ControlSize::Small)
                 .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -2397,7 +2428,7 @@ fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
         );
     }
 
-    add_form_actions = add_form_actions.child(
+    actions.child(
         Button::new("+ Add Custom String")
             .control_size(ControlSize::Small)
             .variant(ButtonVariant::Contrast)
@@ -2425,7 +2456,31 @@ fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
             })
             .build(k)
             .key("add-custom-submit-btn"),
-    );
+    )
+}
+
+fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
+    let form = &state.add_custom_form;
+    let new_name_input = TextInput::new(&form.name_edit)
+        .label("New custom string name")
+        .placeholder("Field name (e.g. ApiKey)")
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.add_custom_form.name_edit)
+        .on_change(|s: &mut AppState, tx| s.note_activity(tx))
+        .build(k)
+        .key("add-custom-name-input");
+
+    let mut new_value_input = TextInput::new(&form.value_edit)
+        .label("New custom string value")
+        .placeholder("Field value")
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.add_custom_form.value_edit)
+        .on_change(|s: &mut AppState, tx| s.note_activity(tx));
+    if form.protected {
+        new_value_input = new_value_input.secure().revealed(form.revealed);
+    }
+
+    let add_form_actions = editor_add_custom_actions(k, form);
 
     col()
         .key("add-custom-card")
@@ -2440,8 +2495,18 @@ fn editor_add_custom_form(k: &Kit, state: &AppState) -> El {
                 .font(k.ty.small_medium)
                 .color(k.c.text_muted),
         )
-        .child(new_name_input)
-        .child(new_value_input.build(k).key("add-custom-value-input"))
+        .child(labeled_field(
+            k,
+            "add-custom-name-field",
+            "Field Name",
+            new_name_input,
+        ))
+        .child(labeled_field(
+            k,
+            "add-custom-value-field",
+            "Field Value",
+            new_value_input.build(k).key("add-custom-value-input"),
+        ))
         .child(add_form_actions)
 }
 
@@ -2498,13 +2563,14 @@ fn attachment_item_row(
         );
     }
 
-    let extract_name = name.to_owned();
+    let prefill_name = sanitize_attachment_prefill(name);
+    let extract_name = prefill_name.clone();
     let extract_btn = Button::new("Save As…")
         .control_size(ControlSize::Small)
         .disabled(saving)
         .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
-            s.extract_path_edit.replace_text(extract_name.clone());
+            s.extract_path_edit.replace_text(prefill_name.clone());
             s.extract_dialog = Some(ExtractDialogState {
                 index: idx,
                 name: extract_name.clone(),

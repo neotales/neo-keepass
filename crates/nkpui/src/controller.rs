@@ -586,10 +586,82 @@ const fn unix_o_nonblock() -> i32 {
     }
 }
 
-fn ensure_regular_file(path: &Path, label: &str) -> Result<(), String> {
-    let meta = std::fs::metadata(path).map_err(|_| format!("cannot access {label}"))?;
-    if !meta.is_file() {
+fn open_regular_file_nofollow(
+    path: &Path,
+    label: &str,
+) -> Result<(File, std::fs::Metadata), String> {
+    let lmeta = std::fs::symlink_metadata(path).map_err(|_| format!("cannot access {label}"))?;
+    if lmeta.file_type().is_symlink() || !lmeta.file_type().is_file() {
+        return Err(format!(
+            "{label} must be a regular file (symlinks and special files are refused)"
+        ));
+    }
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(unix_o_nofollow() | unix_o_nonblock());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    let file = opts
+        .open(path)
+        .map_err(|_| format!("cannot open {label}"))?;
+    let meta = file
+        .metadata()
+        .map_err(|_| format!("cannot inspect {label}"))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
         return Err(format!("{label} is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.dev() != lmeta.dev() || meta.ino() != lmeta.ino() {
+            return Err(format!("{label} changed while opening"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return Err(format!(
+                "{label} must be a regular file (reparse points are refused)"
+            ));
+        }
+    }
+    Ok((file, meta))
+}
+
+fn ensure_vault_regular_file(path: &Path) -> Result<(), String> {
+    // Allow valid symlinked vaults (e.g. dotfiles managers), while rejecting
+    // FIFOs, directories, and device nodes without blocking on open().
+    let meta = std::fs::metadata(path).map_err(|_| String::from("cannot access vault file"))?;
+    if !meta.is_file() {
+        return Err(String::from("vault file is not a regular file"));
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(unix_o_nonblock());
+    }
+    let file = opts
+        .open(path)
+        .map_err(|_| String::from("cannot open vault file"))?;
+    let fmeta = file
+        .metadata()
+        .map_err(|_| String::from("cannot inspect vault file"))?;
+    if !fmeta.file_type().is_file() {
+        return Err(String::from("vault file is not a regular file"));
     }
     Ok(())
 }
@@ -600,13 +672,8 @@ fn build_credentials(
 ) -> Result<KdbxCredentials, (LockErrorField, String)> {
     let mut providers: Vec<Box<dyn CredentialProvider + Send>> = Vec::new();
     if let Some(key_path) = key_file_path {
-        ensure_regular_file(key_path, "key file").map_err(|msg| (LockErrorField::KeyFile, msg))?;
-        let Ok(file) = File::open(key_path) else {
-            return Err((
-                LockErrorField::KeyFile,
-                String::from("cannot open key file"),
-            ));
-        };
+        let (file, _meta) = open_regular_file_nofollow(key_path, "key file")
+            .map_err(|msg| (LockErrorField::KeyFile, msg))?;
         let Ok(key_file) = read_key_file(file) else {
             return Err((LockErrorField::KeyFile, String::from("invalid key file")));
         };
@@ -630,51 +697,16 @@ fn build_credentials(
 /// Returns a fixed diagnostic if the path cannot be opened, is a symlink or
 /// non-regular file, or exceeds [`MAX_ATTACHMENT_BYTES`].
 pub fn read_attachment_file_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-    let lmeta = std::fs::symlink_metadata(path)
-        .map_err(|_| String::from("cannot access attachment file"))?;
-    if lmeta.file_type().is_symlink() || !lmeta.file_type().is_file() {
-        return Err(String::from(
-            "attachment source must be a regular file (symlinks and special files are refused)",
-        ));
-    }
-
-    let mut opts = std::fs::OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(unix_o_nofollow() | unix_o_nonblock());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-
-    let file = opts
-        .open(path)
-        .map_err(|_| String::from("cannot open attachment file"))?;
-    let meta = file
-        .metadata()
-        .map_err(|_| String::from("cannot inspect attachment file"))?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        return Err(String::from("attachment source is not a regular file"));
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-            return Err(String::from(
-                "attachment source must be a regular file (reparse points are refused)",
-            ));
-        }
-    }
+    let (file, meta) = open_regular_file_nofollow(path, "attachment source")?;
     if meta.len() > MAX_ATTACHMENT_BYTES {
         return Err(String::from("attachment exceeds 16 MiB size limit"));
     }
-    let mut bytes = Zeroizing::new(Vec::new());
+    let max_bytes = usize::try_from(MAX_ATTACHMENT_BYTES).unwrap_or(usize::MAX);
+    let capacity = usize::try_from(meta.len())
+        .unwrap_or(0)
+        .min(max_bytes)
+        .saturating_add(1);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
     file.take(MAX_ATTACHMENT_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| String::from("cannot read attachment file"))?;
@@ -694,7 +726,7 @@ pub fn open_vault_blocking(
     password: &Zeroizing<String>,
     key_file_path: Option<&Path>,
 ) -> UnlockOutcome {
-    if let Err(err) = ensure_regular_file(vault_path, "vault file") {
+    if let Err(err) = ensure_vault_regular_file(vault_path) {
         return UnlockOutcome {
             result: Err(err),
             error_field: LockErrorField::Vault,
@@ -1006,6 +1038,12 @@ impl VaultController {
         matches!(self.phase, VaultPhase::Unlocked) && self.session.is_some()
     }
 
+    /// Returns whether a background vault save operation is currently in flight.
+    #[must_use]
+    pub const fn is_saving(&self) -> bool {
+        self.saving
+    }
+
     /// Immediately locks the vault, drops [`KdbxCredentials`], clears all revealed
     /// secrets, editor drafts, and rendered outputs, and invalidates in-flight workers.
     pub fn lock(&mut self) -> LockCleanup {
@@ -1041,6 +1079,7 @@ impl VaultController {
     }
 
     fn lock_with_trigger(&mut self, trigger: LockTrigger) -> LockCleanup {
+        let was_unlocking = self.phase == VaultPhase::Unlocking;
         let mut cleanup = self.lock();
         if cleanup.locked_active_session {
             match trigger {
@@ -1049,7 +1088,12 @@ impl VaultController {
                 }
                 LockTrigger::FocusLoss => {
                     cleanup.clear_clipboard = false;
-                    self.lock_status = Some(String::from("Locked when window lost focus"));
+                    let msg = if was_unlocking {
+                        "Unlock cancelled when window lost focus"
+                    } else {
+                        "Locked when window lost focus"
+                    };
+                    self.lock_status = Some(String::from(msg));
                     self.lock_error_field = LockErrorField::Info;
                 }
                 LockTrigger::IdleTimeout => {
@@ -1070,8 +1114,10 @@ impl VaultController {
     /// unsaved edits or dropping credentials.
     pub fn request_lock(&mut self, trigger: LockTrigger) -> LockCleanup {
         if self.phase != VaultPhase::Unlocked {
-            if trigger == LockTrigger::Manual {
-                return self.lock();
+            if trigger == LockTrigger::Manual
+                || (self.phase == VaultPhase::Unlocking && trigger == LockTrigger::FocusLoss)
+            {
+                return self.lock_with_trigger(trigger);
             }
             return LockCleanup {
                 locked_active_session: false,
@@ -2626,7 +2672,12 @@ impl VaultController {
             InjectMode::EnvFile => {
                 let parsed = parse_env_file(&self.inject_input)?;
                 let resolved = resolve_env_file(&parsed, &mut lookup)?;
-                let mut rendered = Zeroizing::new(String::new());
+                let capacity = resolved.iter().fold(0_usize, |acc, (name, value)| {
+                    acc.saturating_add(name.len())
+                        .saturating_add(dotenv_double_quoted_len(value))
+                        .saturating_add(2)
+                });
+                let mut rendered = Zeroizing::new(String::with_capacity(capacity));
                 for (name, value) in resolved {
                     rendered.push_str(&name);
                     rendered.push('=');
@@ -2685,6 +2736,54 @@ pub fn format_byte_size(bytes: usize) -> String {
     }
 }
 
+fn is_bidi_or_line_separator(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Sanitizes an untrusted attachment filename before prefilling a save dialog.
+///
+/// Extracts the final component across `/` and `\` separators, strips control,
+/// NUL, separator, and Unicode BiDi/line-separator characters, and falls back
+/// to `"attachment.bin"` if the resulting name is empty, `"."`, or `".."`.
+#[must_use]
+pub fn sanitize_attachment_prefill(raw_name: &str) -> String {
+    let base = raw_name.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .filter(|&ch| {
+            !ch.is_control()
+                && !is_bidi_or_line_separator(ch)
+                && ch != '/'
+                && ch != '\\'
+                && ch != '\0'
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if matches!(trimmed, "" | "." | "..") {
+        String::from("attachment.bin")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn dotenv_double_quoted_len(value: &str) -> usize {
+    let mut len = 2_usize;
+    for ch in value.chars() {
+        len = len.saturating_add(match ch {
+            '\\' | '"' | '\n' | '\r' => 2,
+            other => other.len_utf8(),
+        });
+    }
+    len
+}
+
 fn push_dotenv_double_quoted(out: &mut Zeroizing<String>, value: &str) {
     out.push('"');
     for ch in value.chars() {
@@ -2692,6 +2791,7 @@ fn push_dotenv_double_quoted(out: &mut Zeroizing<String>, value: &str) {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             other => out.push(other),
         }
     }
@@ -3427,5 +3527,116 @@ mod tests {
         assert!(err.is_err());
         assert!(!ctrl.dirty);
         Ok(())
+    }
+
+    #[test]
+    fn focus_loss_during_unlocking_cancels_and_rejects_late_outcome() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let (vault_path, master) = build_fixture_vault(dir.path())?;
+
+        let mut ctrl = VaultController::new();
+        ctrl.vault_path = vault_path.to_string_lossy().into_owned();
+        let (path, key_path, gen_id) = ctrl
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        assert_eq!(ctrl.phase, VaultPhase::Unlocking);
+
+        // Background KDF completes into an Ok(UnlockOutcome) before UI polls it.
+        let outcome = open_vault_blocking(&path, &master, key_path.as_deref());
+        assert!(outcome.result.is_ok());
+
+        // Window loses focus while still Unlocking: cancel unlock and bump generation.
+        let cleanup = ctrl.on_window_focus(false);
+        assert!(cleanup.locked_active_session);
+        assert!(!cleanup.clear_clipboard);
+        assert_eq!(ctrl.phase, VaultPhase::Locked);
+        assert_eq!(
+            ctrl.lock_status.as_deref(),
+            Some("Unlock cancelled when window lost focus")
+        );
+        assert_eq!(ctrl.lock_error_field, LockErrorField::Info);
+        assert_ne!(ctrl.unlock_generation, gen_id);
+
+        // Late UnlockOutcome arriving after FocusLoss must be rejected and dropped/wiped.
+        ctrl.finish_unlock(gen_id, outcome, 20.0);
+        assert_eq!(ctrl.phase, VaultPhase::Locked);
+        assert!(!ctrl.is_unlocked());
+        assert!(!ctrl.has_session());
+        assert!(!ctrl.has_credentials());
+        assert_eq!(
+            ctrl.lock_status.as_deref(),
+            Some("Unlock cancelled when window lost focus")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_key_file_is_refused_while_symlink_vault_is_allowed() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let real_vault = dir.path().join("real.kdbx");
+        let link_vault = dir.path().join("link.kdbx");
+        let real_key = dir.path().join("real.key");
+        let link_key = dir.path().join("link.key");
+        std::fs::write(
+            &real_key,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .map_err(|err| err.to_string())?;
+        std::os::unix::fs::symlink(&real_key, &link_key).map_err(|err| err.to_string())?;
+
+        let empty_pw = Zeroizing::new(String::new());
+        let create_outcome = create_and_open_vault_with_options(
+            &real_vault,
+            &empty_pw,
+            Some(&real_key),
+            fast_write_options(),
+        );
+        assert!(create_outcome.result.is_ok());
+        drop(create_outcome);
+
+        // Symlinked key file must be refused.
+        let refused = open_vault_blocking(&real_vault, &empty_pw, Some(&link_key));
+        assert_eq!(refused.error_field, LockErrorField::KeyFile);
+        assert!(matches!(
+            refused.result,
+            Err(ref msg) if msg.contains("symlinks") || msg.contains("regular file")
+        ));
+
+        // Symlinked .kdbx vault with a regular key file must be allowed.
+        std::os::unix::fs::symlink(&real_vault, &link_vault).map_err(|err| err.to_string())?;
+        let allowed = open_vault_blocking(&link_vault, &empty_pw, Some(&real_key));
+        assert!(allowed.result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn dotenv_escapes_carriage_return_and_preallocates_exact_capacity() {
+        let mut out = Zeroizing::new(String::new());
+        push_dotenv_double_quoted(&mut out, "line1\r\n\"\\end");
+        assert_eq!(out.as_str(), "\"line1\\r\\n\\\"\\\\end\"");
+
+        let exact = dotenv_double_quoted_len("line1\r\n\"\\end");
+        assert_eq!(exact, out.len());
+    }
+
+    #[test]
+    fn sanitize_attachment_prefill_strips_traversal_controls_and_bidi() {
+        assert_eq!(sanitize_attachment_prefill("../../etc/passwd"), "passwd");
+        assert_eq!(
+            sanitize_attachment_prefill("C:\\Users\\alice\\payload.exe"),
+            "payload.exe"
+        );
+        assert_eq!(sanitize_attachment_prefill("\u{202E}gpj.exe"), "gpj.exe");
+        assert_eq!(
+            sanitize_attachment_prefill("report\r\n\0.pdf"),
+            "report.pdf"
+        );
+        assert_eq!(sanitize_attachment_prefill(".."), "attachment.bin");
+        assert_eq!(sanitize_attachment_prefill("."), "attachment.bin");
+        assert_eq!(sanitize_attachment_prefill("dir/"), "attachment.bin");
+        assert_eq!(sanitize_attachment_prefill(""), "attachment.bin");
+        assert_eq!(sanitize_attachment_prefill("\u{200F}"), "attachment.bin");
+        assert_eq!(sanitize_attachment_prefill("my..file.txt"), "my..file.txt");
     }
 }
