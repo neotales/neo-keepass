@@ -18,7 +18,7 @@ use nkeepass::icons::{
     STANDARD_ICON_COUNT, is_valid_standard_icon_id, lookup_standard_icon, standard_icon,
     standard_icons,
 };
-use nkeepass::{ServiceError, SessionId, VaultService};
+use nkeepass::{CustomIconId, ServiceError, SessionId, VaultService};
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
@@ -331,9 +331,10 @@ fn set_icon_apis_persist_and_enforce_session_and_lock_contracts() {
     service.save(&path, &mut credentials()).unwrap();
 
     let (mut reopened, reopened_session) = reopen_vault(&path);
+    let sample_icon_id = CustomIconId::from_bytes([0x11; 16]).unwrap();
     assert_eq!(reopened.root_icon(session), Err(ServiceError::Stale));
     assert_eq!(
-        reopened.custom_icon_bytes(session, KdbxUuid::from_bytes([0x11; 16])),
+        reopened.custom_icon_bytes(session, sample_icon_id),
         Err(ServiceError::Stale)
     );
 
@@ -367,7 +368,7 @@ fn set_icon_apis_persist_and_enforce_session_and_lock_contracts() {
         Err(ServiceError::Locked)
     );
     assert_eq!(
-        reopened.custom_icon_bytes(reopened_session, KdbxUuid::from_bytes([0x11; 16])),
+        reopened.custom_icon_bytes(reopened_session, sample_icon_id),
         Err(ServiceError::Locked)
     );
     assert_eq!(
@@ -383,13 +384,13 @@ fn set_icon_apis_persist_and_enforce_session_and_lock_contracts() {
 struct CustomIconFixture {
     dir: TempDir,
     path: std::path::PathBuf,
-    small_id: KdbxUuid,
-    exact_limit_id: KdbxUuid,
-    oversized_id: KdbxUuid,
-    empty_id: KdbxUuid,
-    group_custom_id: KdbxUuid,
-    root_custom_id: KdbxUuid,
-    duplicate_custom_id: KdbxUuid,
+    small_id: CustomIconId,
+    exact_limit_id: CustomIconId,
+    oversized_id: CustomIconId,
+    empty_id: CustomIconId,
+    group_custom_id: CustomIconId,
+    root_custom_id: CustomIconId,
+    duplicate_custom_id: CustomIconId,
     png_bytes: Vec<u8>,
     exact_bytes: Vec<u8>,
 }
@@ -398,13 +399,13 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("custom_icons.kdbx");
 
-    let small_id = KdbxUuid::from_bytes([0x11; 16]);
-    let exact_limit_id = KdbxUuid::from_bytes([0x22; 16]);
-    let oversized_id = KdbxUuid::from_bytes([0x33; 16]);
-    let empty_id = KdbxUuid::from_bytes([0x44; 16]);
-    let group_custom_id = KdbxUuid::from_bytes([0x55; 16]);
-    let root_custom_id = KdbxUuid::from_bytes([0x66; 16]);
-    let duplicate_custom_id = KdbxUuid::from_bytes([0x77; 16]);
+    let small_uuid = KdbxUuid::from_bytes([0x11; 16]);
+    let exact_limit_uuid = KdbxUuid::from_bytes([0x22; 16]);
+    let oversized_uuid = KdbxUuid::from_bytes([0x33; 16]);
+    let empty_uuid = KdbxUuid::from_bytes([0x44; 16]);
+    let group_custom_uuid = KdbxUuid::from_bytes([0x55; 16]);
+    let root_custom_uuid = KdbxUuid::from_bytes([0x66; 16]);
+    let duplicate_custom_uuid = KdbxUuid::from_bytes([0x77; 16]);
 
     let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
     let exact_bytes = vec![0xAB; MAX_CUSTOM_ICON_BYTES];
@@ -412,16 +413,16 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
 
     let mut db = KeePassDatabase::default();
     db.root.icon_id = 49;
-    db.root.custom_icon_id = root_custom_id;
+    db.root.custom_icon_id = root_custom_uuid;
     for (uuid, name, data) in [
-        (small_id, Some("small".to_owned()), png_bytes.clone()),
-        (exact_limit_id, None, exact_bytes.clone()),
-        (oversized_id, None, oversized_bytes),
-        (empty_id, None, Vec::new()),
-        (group_custom_id, None, png_bytes.clone()),
-        (root_custom_id, None, png_bytes.clone()),
-        (duplicate_custom_id, None, png_bytes.clone()),
-        (duplicate_custom_id, None, vec![1, 2, 3]),
+        (small_uuid, Some("small".to_owned()), png_bytes.clone()),
+        (exact_limit_uuid, None, exact_bytes.clone()),
+        (oversized_uuid, None, oversized_bytes),
+        (empty_uuid, None, Vec::new()),
+        (group_custom_uuid, None, png_bytes.clone()),
+        (root_custom_uuid, None, png_bytes.clone()),
+        (duplicate_custom_uuid, None, png_bytes.clone()),
+        (duplicate_custom_uuid, None, vec![1, 2, 3]),
     ] {
         db.meta.custom_icons.push(CustomIcon {
             uuid,
@@ -433,10 +434,10 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
 
     let mut group = Group::new("CustomGroup");
     group.icon_id = 4;
-    group.custom_icon_id = group_custom_id;
+    group.custom_icon_id = group_custom_uuid;
     let mut entry = Entry::new("CustomEntry");
     entry.icon_id = 19;
-    entry.custom_icon_id = small_id;
+    entry.custom_icon_id = small_uuid;
     group.add_entry(entry);
     db.root.add_group(group);
 
@@ -445,13 +446,13 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
     CustomIconFixture {
         dir,
         path,
-        small_id,
-        exact_limit_id,
-        oversized_id,
-        empty_id,
-        group_custom_id,
-        root_custom_id,
-        duplicate_custom_id,
+        small_id: CustomIconId::from_bytes(*small_uuid.as_bytes()).unwrap(),
+        exact_limit_id: CustomIconId::from_bytes(*exact_limit_uuid.as_bytes()).unwrap(),
+        oversized_id: CustomIconId::from_bytes(*oversized_uuid.as_bytes()).unwrap(),
+        empty_id: CustomIconId::from_bytes(*empty_uuid.as_bytes()).unwrap(),
+        group_custom_id: CustomIconId::from_bytes(*group_custom_uuid.as_bytes()).unwrap(),
+        root_custom_id: CustomIconId::from_bytes(*root_custom_uuid.as_bytes()).unwrap(),
+        duplicate_custom_id: CustomIconId::from_bytes(*duplicate_custom_uuid.as_bytes()).unwrap(),
         png_bytes,
         exact_bytes,
     }
@@ -459,6 +460,8 @@ fn build_custom_icon_fixture() -> CustomIconFixture {
 
 #[test]
 fn custom_icon_lookup_is_bounded_and_cleared_by_set_icon() {
+    assert_eq!(CustomIconId::from_bytes([0; 16]), None);
+
     let fixture = build_custom_icon_fixture();
     let _dir = &fixture.dir;
     let (mut service, session) = reopen_vault(&fixture.path);
@@ -467,16 +470,12 @@ fn custom_icon_lookup_is_bounded_and_cleared_by_set_icon() {
     let root_info = service.root_icon(session).unwrap();
     assert_eq!(root_info.icon_id(), 49);
     assert_eq!(root_info.custom_icon_id(), Some(fixture.root_custom_id));
+    assert_eq!(root_info.custom_icon_id().unwrap().as_bytes(), &[0x66; 16]);
 
     // Bounded custom icon lookup checks + duplicate UUID fail-closed rejection.
+    let unknown_id = CustomIconId::from_bytes([0x99; 16]).unwrap();
     assert_eq!(
-        service.custom_icon_bytes(session, KdbxUuid::ZERO).unwrap(),
-        None
-    );
-    assert_eq!(
-        service
-            .custom_icon_bytes(session, KdbxUuid::from_bytes([0x99; 16]))
-            .unwrap(),
+        service.custom_icon_bytes(session, unknown_id).unwrap(),
         None
     );
     assert_eq!(

@@ -383,11 +383,43 @@ pub struct TreeCursor {
     token: u64,
 }
 
+/// Opaque identifier for a vault custom icon.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CustomIconId(KdbxUuid);
+
+impl CustomIconId {
+    /// Creates an opaque custom-icon identifier from 16 UUID bytes, returning
+    /// `None` when all bytes are zero.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Option<Self> {
+        let mut all_zero = true;
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != 0 {
+                all_zero = false;
+                break;
+            }
+            index += 1;
+        }
+        if all_zero {
+            None
+        } else {
+            Some(Self(KdbxUuid::from_bytes(bytes)))
+        }
+    }
+
+    /// Returns the raw 16-byte UUID bytes for keying or caching.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+}
+
 /// Standard and optional custom icon metadata for a vault object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IconInfo {
     icon_id: u32,
-    custom_icon_id: Option<KdbxUuid>,
+    custom_icon_id: Option<CustomIconId>,
 }
 
 impl IconInfo {
@@ -397,9 +429,9 @@ impl IconInfo {
         self.icon_id
     }
 
-    /// Custom icon UUID when assigned (non-zero).
+    /// Opaque custom icon identifier when assigned.
     #[must_use]
-    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+    pub const fn custom_icon_id(&self) -> Option<CustomIconId> {
         self.custom_icon_id
     }
 }
@@ -409,7 +441,7 @@ pub struct TreeGroup {
     label: String,
     reference: GroupRef,
     icon_id: u32,
-    custom_icon_id: Option<KdbxUuid>,
+    custom_icon_id: Option<CustomIconId>,
 }
 
 impl TreeGroup {
@@ -428,9 +460,9 @@ impl TreeGroup {
     pub const fn icon_id(&self) -> u32 {
         self.icon_id
     }
-    /// Custom icon UUID when assigned (non-zero).
+    /// Opaque custom icon identifier when assigned.
     #[must_use]
-    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+    pub const fn custom_icon_id(&self) -> Option<CustomIconId> {
         self.custom_icon_id
     }
 }
@@ -640,7 +672,7 @@ pub struct SelectedEntry {
     auto_type_enabled: bool,
     auto_type_associations: usize,
     icon_id: u32,
-    custom_icon_id: Option<KdbxUuid>,
+    custom_icon_id: Option<CustomIconId>,
 }
 
 /// Allowlisted attachment name and byte length (never attachment data).
@@ -695,9 +727,9 @@ impl SelectedEntry {
     pub const fn icon_id(&self) -> u32 {
         self.icon_id
     }
-    /// Custom icon UUID when assigned (non-zero).
+    /// Opaque custom icon identifier when assigned.
     #[must_use]
-    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+    pub const fn custom_icon_id(&self) -> Option<CustomIconId> {
         self.custom_icon_id
     }
 }
@@ -723,7 +755,7 @@ pub struct SearchHit {
     tags: Vec<String>,
     field_names: Vec<String>,
     icon_id: u32,
-    custom_icon_id: Option<KdbxUuid>,
+    custom_icon_id: Option<CustomIconId>,
 }
 
 impl SearchHit {
@@ -763,9 +795,9 @@ impl SearchHit {
         self.icon_id
     }
 
-    /// Custom icon UUID when assigned (non-zero).
+    /// Opaque custom icon identifier when assigned.
     #[must_use]
-    pub const fn custom_icon_id(&self) -> Option<KdbxUuid> {
+    pub const fn custom_icon_id(&self) -> Option<CustomIconId> {
         self.custom_icon_id
     }
 }
@@ -2685,18 +2717,18 @@ impl VaultService {
     pub fn custom_icon_bytes(
         &self,
         session: SessionId,
-        id: KdbxUuid,
+        id: CustomIconId,
     ) -> Result<Option<Vec<u8>>, ServiceError> {
         let live = self.session.as_ref().ok_or(ServiceError::Locked)?;
         if live.id != session {
             return Err(ServiceError::Stale);
         }
-        if id.is_zero() {
+        if id.0.is_zero() {
             return Ok(None);
         }
         let mut matched = None;
         for icon in &live.database.meta.custom_icons {
-            if icon.uuid == id {
+            if icon.uuid == id.0 {
                 if matched.is_some() {
                     return Err(ServiceError::DuplicateIds);
                 }
@@ -5338,8 +5370,8 @@ fn project_hit(
     ))
 }
 
-fn nonzero_custom_icon(id: KdbxUuid) -> Option<KdbxUuid> {
-    (!id.is_zero()).then_some(id)
+fn nonzero_custom_icon(id: KdbxUuid) -> Option<CustomIconId> {
+    (!id.is_zero()).then_some(CustomIconId(id))
 }
 
 fn failure_table(needle: &[char]) -> Vec<usize> {
