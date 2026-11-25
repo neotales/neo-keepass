@@ -9,8 +9,9 @@ Isolated nested Cargo workspace for the `neo-keepass` desktop UI built on
 - **Repository:** `https://github.com/anomalyco/rune.git` (`dev` branch)
 - **Pinned `rev`:** `761fd132a286b9e87756d8a0889c8957b93c86be`
 - **Features:**
-  - `rune`: `default-features = false`, `features = ["accessibility", "embedded-fonts", "metal-backend", "svg"]` (`dbus`, `ogg-audio`, `avif`, and `tooling` are omitted; `tooling` is **never** enabled in release builds).
+  - `rune`: `default-features = false`, `features = ["accessibility", "embedded-fonts", "metal-backend", "native-file-dialog", "svg"]` (`ogg-audio`, `avif`, and `tooling` are omitted; `tooling` is **never** enabled in release builds).
   - `rune-kit`: `default-features = false`.
+  - `serde_json`: read-only parsing of non-secret vault aliases from `nkp`'s `config.json`.
 - **Workspace isolation:** `crates/nkpui/Cargo.toml` declares `[workspace]` and owns `crates/nkpui/Cargo.lock`, mirroring all 8 `[patch.crates-io]` overrides from Rune's root `Cargo.toml` (`wgpu-hal`, `naga`, `winit`, `sctk-adwaita`, `parley_engine`, `accesskit_windows`, `accesskit_atspi_common`, `accesskit_macos`) without altering the root `neo-keepass` workspace.
 
 ## Rust `1.98.1` vs `1.99.1` Finding
@@ -39,6 +40,9 @@ Inspected every `vendor/*/Cargo.toml` at pinned Rune rev `761fd132a286b9e87756d8
 | `vendor/accesskit_macos` | `MIT OR Apache-2.0` |
 | `vendor/winit` | `Apache-2.0` |
 | `vendor/tiny-skia-path` (`rune-tiny-skia-path`) | `BSD-3-Clause` |
+| `rfd` (via `rune/native-file-dialog` on macOS/Windows) | `MIT` |
+| `zbus` + async-io stack (via `rune/native-file-dialog` -> `dbus` on Linux XDG FileChooser) | `MIT` |
+| `serde_json` | `MIT OR Apache-2.0` |
 
 ### Third-Party Transitive Dependency Notice (`spellbook v0.4.2`, `MPL-2.0`)
 

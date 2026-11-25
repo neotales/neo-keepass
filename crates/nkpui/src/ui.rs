@@ -1,11 +1,15 @@
 //! Rune view layer and UI state adapter for `nkpui`.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nkeepass::CustomIconId;
+use nkeepass::icons::{MAX_CUSTOM_ICON_BYTES, standard_icons};
 use rune::{
-    Cx, El, Latest, ScrollSpec, SecretCopy, SecretState, TextEdit, Tx, col, oklch, row, text,
+    Cx, El, FileDialogOptions, Image, ImageCache, Key, KeyEvent, Latest, ScrollSpec, SecretCopy,
+    SecretState, TextEdit, Tx, col, oklch, row, text,
 };
 use rune_kit::{
     Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Dialog, Divider, IconButton,
@@ -17,11 +21,17 @@ use crate::controller::{
     EditableCustomField, EntryDetailState, EntryEditorState, InjectMode, LockCleanup,
     LockErrorField, LockMode, LockTrigger, SaveOutcome, TotpDisplay, UnlockOutcome,
     VaultController, VaultPhase, WorkspaceTab, create_and_open_vault_blocking,
-    current_unix_seconds, format_byte_size, open_vault_blocking, sanitize_attachment_prefill,
-    save_vault_blocking,
+    current_unix_seconds, ensure_kdbx_extension, format_byte_size, open_vault_blocking,
+    read_inject_file_bounded, sanitize_attachment_prefill, save_vault_blocking,
+};
+use crate::icons::{
+    MAX_CUSTOM_ICON_DIMENSION, SEARCH_ICON, STAR_FILLED_ICON, STAR_ICON,
+    raster_dimensions_within_limit, render_keepass_icon,
 };
 
 const SECRET_CLIPBOARD_TTL: Duration = Duration::from_secs(30);
+const MAX_CUSTOM_ICON_CACHE_ENTRIES: usize = 256;
+const MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME: usize = 32;
 
 /// Explicit confirmation dialog kind for destructive browser actions.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +64,24 @@ pub struct ExtractDialogState {
     pub size: usize,
     /// Non-secret error message if extraction failed.
     pub error: Option<String>,
+}
+
+/// Target object mutated when picking an icon from the Icon Picker modal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IconPickerTarget {
+    /// Updates the draft icon in the active Entry Editor (persisted on Apply).
+    EntryEditor,
+    /// Updates the currently viewed group's icon via `VaultService::set_group_icon`.
+    CurrentGroup,
+}
+
+/// Modal state for the interactive `KeePass` standard icon picker (`0..=68`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IconPickerState {
+    /// Whether picking an entry icon or the current group's icon.
+    pub target: IconPickerTarget,
+    /// Currently highlighted standard icon ID (`0..=68`).
+    pub selected_id: u32,
 }
 
 /// Form state for adding a new custom string field in the Entry Editor.
@@ -127,6 +155,8 @@ pub struct AppState {
     pub edit_url: TextEdit,
     /// Entry editor multiline notes input.
     pub edit_notes: TextEdit,
+    /// Entry editor `otpauth://` URI input (`.secure()`).
+    pub edit_otp_uri: TextEdit,
     /// Entry editor tag input (supports comma-separated or single tag add).
     pub edit_new_tag: TextEdit,
     /// Inline non-secret error message shown inside the sidebar new-group form.
@@ -139,6 +169,17 @@ pub struct AppState {
     fallback_edit: TextEdit,
     /// Active confirmation dialog for destructive actions.
     pub pending_confirm: Option<ConfirmDialog>,
+    /// Active interactive `KeePass` icon picker modal state.
+    pub icon_picker: Option<IconPickerState>,
+    /// Filter query inside the interactive `KeePass` icon picker modal.
+    pub icon_search_edit: TextEdit,
+    /// Shared Rune image decoder cache initialized in `AppSpec::setup`.
+    pub images: Option<ImageCache>,
+    /// Session-scoped decoded custom KDBX icon images, cleared on `lock()`.
+    pub custom_icons: HashMap<CustomIconId, Image>,
+    failed_custom_icons: HashSet<CustomIconId>,
+    /// True while a native/scripted OS file picker is open so focus loss does not lock the vault.
+    pub file_dialog_active: bool,
     /// Whether the Attach Binary File dialog is open.
     pub attach_dialog_open: bool,
     /// Source file path input in the Attach Binary File dialog.
@@ -196,11 +237,18 @@ impl Default for AppState {
             edit_password: TextEdit::new("").secure(),
             edit_url: TextEdit::new(""),
             edit_notes: TextEdit::new(""),
+            edit_otp_uri: TextEdit::new("").secure(),
             edit_new_tag: TextEdit::new(""),
             edit_custom_values: Vec::new(),
             add_custom_form: AddCustomFieldForm::default(),
             fallback_edit: TextEdit::new("").secure(),
             pending_confirm: None,
+            icon_picker: None,
+            icon_search_edit: TextEdit::new(""),
+            images: None,
+            custom_icons: HashMap::new(),
+            failed_custom_icons: HashSet::new(),
+            file_dialog_active: false,
             attach_dialog_open: false,
             attach_path_edit: TextEdit::new(""),
             attach_name_edit: TextEdit::new(""),
@@ -319,13 +367,40 @@ impl AppState {
         self.apply_lock_cleanup(cleanup, tx);
     }
 
-    /// Handles window deactivation by requesting a focus-loss lock while preserving
-    /// any active 30s timed `SecretCopy` lease for Alt+Tab paste.
-    pub fn handle_focus_lost(&mut self, tx: &mut Tx) {
+    /// Masks all revealed secrets in controller state and UI text widgets.
+    pub fn mask_all_reveals(&mut self) {
+        self.controller.mask_all_reveals();
+        self.edit_password.set_revealed(false);
+        self.edit_otp_uri.set_revealed(false);
+        for edit in &mut self.edit_custom_values {
+            edit.set_revealed(false);
+        }
+        self.add_custom_form.revealed = false;
+        if self.add_custom_form.protected {
+            self.add_custom_form.value_edit.set_revealed(false);
+        }
+    }
+
+    /// Handles window deactivation by masking all revealed secrets and requesting a
+    /// Masks all revealed secrets immediately and returns lock cleanup unless
+    /// a native OS file dialog is currently open.
+    #[must_use]
+    pub fn focus_lost_lock_cleanup(&mut self) -> Option<LockCleanup> {
+        self.mask_all_reveals();
         self.master_input.replace_text("");
         self.confirm_master_edit.replace_text("");
-        let cleanup = self.controller.on_window_focus(false);
-        self.apply_lock_cleanup(cleanup, tx);
+        if self.file_dialog_active {
+            return None;
+        }
+        Some(self.controller.on_window_focus(false))
+    }
+
+    /// Handles OS window focus loss: always masks revealed secrets and runs
+    /// focus-loss lock (skipped only while a native file dialog is active).
+    pub fn handle_focus_lost(&mut self, tx: &mut Tx) {
+        if let Some(cleanup) = self.focus_lost_lock_cleanup() {
+            self.apply_lock_cleanup(cleanup, tx);
+        }
     }
 
     /// Populates all Entry Editor [`TextEdit`] widgets from `controller.editor`.
@@ -354,6 +429,11 @@ impl AppState {
         self.edit_notes
             .replace_text(editor.notes.as_str().to_owned());
 
+        self.edit_otp_uri.set_secure(true);
+        self.edit_otp_uri.set_revealed(editor.otp_revealed);
+        self.edit_otp_uri
+            .replace_text(editor.otp_uri.as_str().to_owned());
+
         self.edit_new_tag.replace_text("");
         self.edit_custom_values.clear();
         for field in &editor.custom_fields {
@@ -375,6 +455,8 @@ impl AppState {
         self.edit_password.set_revealed(false);
         self.edit_url.replace_text("");
         self.edit_notes.replace_text("");
+        self.edit_otp_uri.replace_text("");
+        self.edit_otp_uri.set_revealed(false);
         self.edit_new_tag.replace_text("");
         for edit in &mut self.edit_custom_values {
             edit.replace_text("");
@@ -392,6 +474,11 @@ impl AppState {
         self.new_group_error = None;
         self.show_new_group_form = false;
         self.pending_confirm = None;
+        self.icon_picker = None;
+        self.icon_search_edit.replace_text("");
+        self.custom_icons.clear();
+        self.failed_custom_icons.clear();
+        self.file_dialog_active = false;
         self.attach_dialog_open = false;
         self.attach_path_edit.replace_text("");
         self.attach_name_edit.replace_text("");
@@ -399,6 +486,107 @@ impl AppState {
         self.extract_dialog = None;
         self.extract_path_edit.replace_text("");
         self.wipe_editor_widgets();
+    }
+
+    /// Returns a cached decoded custom KDBX icon image if available.
+    #[must_use]
+    pub fn custom_icon_for(&self, id: Option<CustomIconId>) -> Option<&Image> {
+        id.and_then(|icon_id| self.custom_icons.get(&icon_id))
+    }
+
+    fn record_failed_custom_icon(&mut self, id: CustomIconId) {
+        if self.failed_custom_icons.len() >= MAX_CUSTOM_ICON_CACHE_ENTRIES
+            && let Some(&evict) = self.failed_custom_icons.iter().next()
+        {
+            self.failed_custom_icons.remove(&evict);
+        }
+        self.failed_custom_icons.insert(id);
+    }
+
+    fn cache_custom_icon_bytes(&mut self, id: CustomIconId, bytes: Vec<u8>) -> bool {
+        if self.custom_icons.contains_key(&id) || self.failed_custom_icons.contains(&id) {
+            return false;
+        }
+        let Some(cache) = &self.images else {
+            return false;
+        };
+        if bytes.len() <= MAX_CUSTOM_ICON_BYTES
+            && raster_dimensions_within_limit(&bytes, MAX_CUSTOM_ICON_DIMENSION)
+        {
+            if self.custom_icons.len() >= MAX_CUSTOM_ICON_CACHE_ENTRIES
+                && let Some(&evict) = self.custom_icons.keys().next()
+            {
+                self.custom_icons.remove(&evict);
+            }
+            let image = cache.load_scaled(bytes, 64.0, 1.0);
+            self.custom_icons.insert(id, image);
+            true
+        } else {
+            self.record_failed_custom_icon(id);
+            false
+        }
+    }
+
+    fn cache_custom_icon(&mut self, id: CustomIconId) -> bool {
+        if self.custom_icons.contains_key(&id)
+            || self.failed_custom_icons.contains(&id)
+            || self.images.is_none()
+        {
+            return false;
+        }
+        if let Ok(Some(bytes)) = self.controller.custom_icon_bytes(id) {
+            self.cache_custom_icon_bytes(id, bytes)
+        } else {
+            self.record_failed_custom_icon(id);
+            false
+        }
+    }
+
+    /// Ensures up to [`MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME`] uncached visible custom
+    /// KDBX icon UUIDs are validated and queued for decoding in `images`.
+    pub fn sync_custom_icons(&mut self) -> bool {
+        if !self.controller.is_unlocked() || self.controller.saving || self.images.is_none() {
+            return false;
+        }
+        let mut ids: Vec<CustomIconId> = Vec::new();
+        for (_, custom_id) in &self.controller.breadcrumb_icons {
+            if let Some(id) = custom_id {
+                ids.push(*id);
+            }
+        }
+        for group in &self.controller.child_groups {
+            if let Some(id) = group.custom_icon_id() {
+                ids.push(id);
+            }
+        }
+        for hit in &self.controller.entries {
+            if let Some(id) = hit.custom_icon_id() {
+                ids.push(id);
+            }
+        }
+        if let Some(detail) = &self.controller.detail
+            && let Some(id) = detail.metadata.custom_icon_id()
+        {
+            ids.push(id);
+        }
+        if let Some(editor) = &self.controller.editor
+            && let Some(id) = editor.custom_icon_id
+        {
+            ids.push(id);
+        }
+        let mut changed = false;
+        let mut lookups = 0usize;
+        for id in ids {
+            if self.custom_icons.contains_key(&id) || self.failed_custom_icons.contains(&id) {
+                continue;
+            }
+            if lookups >= MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME {
+                break;
+            }
+            lookups += 1;
+            changed |= self.cache_custom_icon(id);
+        }
+        changed
     }
 
     /// Opens Entry Editor mode for the currently selected entry and syncs widgets.
@@ -455,7 +643,7 @@ impl AppState {
         let msg = format!("Copied {label} to secret clipboard (30s TTL)");
         match self.controller.active_tab {
             WorkspaceTab::Browser => self.controller.set_browser_info(msg),
-            WorkspaceTab::Inject => self.controller.inject_status = Some(msg),
+            WorkspaceTab::Inject => self.controller.set_inject_info(msg),
         }
     }
 
@@ -494,6 +682,7 @@ impl AppState {
         if let Some((generation, outcome)) = self.unlock_worker.take() {
             self.controller.finish_unlock(generation, outcome, secs);
             self.wipe_transient_widgets();
+            self.sync_custom_icons();
             tx.instant();
             changed = true;
         }
@@ -515,6 +704,9 @@ impl AppState {
         }
 
         if self.controller.is_unlocked() && !self.controller.saving {
+            if self.sync_custom_icons() {
+                changed = true;
+            }
             let now = current_unix_seconds();
             if now != self.last_totp_refresh {
                 self.last_totp_refresh = now;
@@ -535,6 +727,81 @@ impl AppState {
     }
 }
 
+fn starting_directory_from_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parent = Path::new(trimmed).parent()?;
+    (!parent.as_os_str().is_empty()).then(|| parent.to_path_buf())
+}
+
+fn handle_root_key_preview(state: &mut AppState, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let has_modal = state.icon_picker.is_some()
+        || state.attach_dialog_open
+        || state.extract_dialog.is_some()
+        || state.pending_confirm.is_some()
+        || state.controller.pending_lock_decision.is_some();
+
+    if matches!(ev.key, Key::Escape) {
+        if state.icon_picker.is_some() {
+            state.icon_picker = None;
+            state.icon_search_edit.replace_text("");
+            return true;
+        }
+        if state.attach_dialog_open {
+            state.attach_dialog_open = false;
+            state.attach_dialog_error = None;
+            return true;
+        }
+        if state.extract_dialog.is_some() {
+            state.extract_dialog = None;
+            return true;
+        }
+        if state.pending_confirm.is_some() {
+            state.pending_confirm = None;
+            return true;
+        }
+        if state.controller.pending_lock_decision.is_some() && !state.controller.saving {
+            state.controller.cancel_pending_lock();
+            return true;
+        }
+        if state.controller.editor.is_some() && !state.controller.saving {
+            state.note_activity(tx);
+            state.cancel_entry_editor();
+            return true;
+        }
+        return false;
+    }
+
+    if has_modal || !state.controller.is_unlocked() {
+        return false;
+    }
+    if ev.is_command('s') && state.controller.dirty && !state.controller.saving {
+        state.note_activity(tx);
+        state.start_save(false);
+        return true;
+    }
+    if ev.is_command('l') && !state.controller.saving {
+        state.request_lock_or_modal(LockTrigger::Manual, tx);
+        return true;
+    }
+    if ev.is_command('f') && state.controller.active_tab == WorkspaceTab::Browser {
+        state.note_activity(tx);
+        tx.focus("entry-search-input", true);
+        return true;
+    }
+    if ev.is_command('n')
+        && state.controller.active_tab == WorkspaceTab::Browser
+        && !state.controller.saving
+    {
+        state.note_activity(tx);
+        state.create_new_entry();
+        return true;
+    }
+    false
+}
+
 /// Builds the top-level Rune element tree for `nkpui`.
 pub fn view(state: &AppState, cx: &mut Cx<AppState>) -> El {
     cx.web_focus();
@@ -545,6 +812,12 @@ pub fn view(state: &AppState, cx: &mut Cx<AppState>) -> El {
         k.c.text_faint = oklch(0.41, 0.01, 265.0);
         k.c.bg_accent = oklch(0.44, 0.17, 256.0);
         k.c.text_accent = oklch(0.42, 0.17, 256.0);
+        k.c.icon_muted = k.c.text_muted;
+        k.c.icon_accent = k.c.text_accent;
+        k.c.warning.icon = oklch(0.45, 0.15, 80.0);
+        k.c.success.icon = oklch(0.43, 0.15, 150.0);
+        k.c.danger.icon = oklch(0.45, 0.16, 25.0);
+        k.c.info.icon = oklch(0.42, 0.17, 256.0);
     }
 
     let header = header_bar(&k, state);
@@ -569,11 +842,13 @@ pub fn view(state: &AppState, cx: &mut Cx<AppState>) -> El {
     let mut overlays = Vec::new();
     build_modals(&k, state, &mut overlays);
 
-    kit_root(base, overlays).on_window_focus(|s: &mut AppState, focused: bool, tx: &mut Tx| {
-        if !focused {
-            s.handle_focus_lost(tx);
-        }
-    })
+    kit_root(base, overlays)
+        .on_key_preview(handle_root_key_preview)
+        .on_window_focus(|s: &mut AppState, focused: bool, tx: &mut Tx| {
+            if !focused {
+                s.handle_focus_lost(tx);
+            }
+        })
 }
 
 fn build_modals(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
@@ -581,6 +856,7 @@ fn build_modals(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
     build_confirm_modal(k, state, overlays);
     build_attach_modal(k, state, overlays);
     build_extract_modal(k, state, overlays);
+    build_icon_picker_modal(k, state, overlays);
 }
 
 fn build_unsaved_lock_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
@@ -753,11 +1029,7 @@ fn build_confirm_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .build(k, overlays);
 }
 
-fn build_attach_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
-    if !state.attach_dialog_open {
-        return;
-    }
-
+fn attach_source_row(k: &Kit, state: &AppState) -> El {
     let path_field = TextInput::new(&state.attach_path_edit)
         .label("Source file path (<= 16 MiB)")
         .placeholder("/path/to/file.pem")
@@ -766,6 +1038,59 @@ fn build_attach_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .on_change(|s: &mut AppState, tx| s.note_activity(tx))
         .build(k)
         .key("attach-source-path-input");
+
+    let browse_btn = Button::new("Browse…")
+        .control_size(ControlSize::Regular)
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
+            let opts = FileDialogOptions {
+                title: String::from("Attach File"),
+                directory: starting_directory_from_path(&s.attach_path_edit.text),
+                ..FileDialogOptions::default()
+            };
+            s.file_dialog_active = true;
+            tx.open_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || !s.attach_dialog_open {
+                    return;
+                }
+                match res {
+                    Ok(Some(path)) => {
+                        let path_text = path.to_string_lossy().into_owned();
+                        s.attach_path_edit.replace_text(path_text);
+                        if s.attach_name_edit.text.trim().is_empty()
+                            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                        {
+                            s.attach_name_edit
+                                .replace_text(sanitize_attachment_prefill(name));
+                        }
+                        s.attach_dialog_error = None;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        s.attach_dialog_error = Some(format!("File dialog unavailable: {err}"));
+                    }
+                }
+            });
+        })
+        .build(k)
+        .key("attach-browse-btn");
+
+    row()
+        .w_full()
+        .gap(6.0)
+        .center_y()
+        .child(path_field.grow(1.0).min_w(0.0))
+        .child(browse_btn)
+}
+
+fn build_attach_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
+    if !state.attach_dialog_open {
+        return;
+    }
 
     let name_field = TextInput::new(&state.attach_name_edit)
         .label("Attachment name (optional, defaults to filename)")
@@ -785,7 +1110,7 @@ fn build_attach_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
             k,
             "attach-source-field",
             "Source File Path (<= 16 MiB)",
-            path_field,
+            attach_source_row(k, state),
         ))
         .child(labeled_field(
             k,
@@ -841,7 +1166,7 @@ fn build_attach_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
     Dialog::new("attach-file", "Attach Binary File")
         .open(true)
         .fit()
-        .width(460.0)
+        .width(480.0)
         .description(
             "Reads a regular file bounded to 16 MiB into the vault's protected binary pool.",
         )
@@ -853,11 +1178,7 @@ fn build_attach_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .build(k, overlays);
 }
 
-fn build_extract_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
-    let Some(dialog) = &state.extract_dialog else {
-        return;
-    };
-
+fn extract_dest_row(k: &Kit, state: &AppState, default_name: String) -> El {
     let dest_field = TextInput::new(&state.extract_path_edit)
         .label("Destination file path (no-clobber)")
         .placeholder("/path/to/output.bin")
@@ -866,6 +1187,58 @@ fn build_extract_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
         .on_change(|s: &mut AppState, tx| s.note_activity(tx))
         .build(k)
         .key("extract-dest-path-input");
+
+    let save_as_btn = Button::new("Save As…")
+        .control_size(ControlSize::Regular)
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
+            let opts = FileDialogOptions {
+                title: String::from("Save Attachment"),
+                file_name: Some(default_name.clone()),
+                directory: starting_directory_from_path(&s.extract_path_edit.text),
+                ..FileDialogOptions::default()
+            };
+            s.file_dialog_active = true;
+            tx.save_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || s.extract_dialog.is_none() {
+                    return;
+                }
+                match res {
+                    Ok(Some(path)) => {
+                        s.extract_path_edit
+                            .replace_text(path.to_string_lossy().into_owned());
+                        if let Some(dlg) = s.extract_dialog.as_mut() {
+                            dlg.error = None;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        if let Some(dlg) = s.extract_dialog.as_mut() {
+                            dlg.error = Some(format!("File dialog unavailable: {err}"));
+                        }
+                    }
+                }
+            });
+        })
+        .build(k)
+        .key("extract-browse-btn");
+
+    row()
+        .w_full()
+        .gap(6.0)
+        .center_y()
+        .child(dest_field.grow(1.0).min_w(0.0))
+        .child(save_as_btn)
+}
+
+fn build_extract_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
+    let Some(dialog) = &state.extract_dialog else {
+        return;
+    };
 
     let mut content = col()
         .w_full()
@@ -876,7 +1249,7 @@ fn build_extract_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
             k,
             "extract-dest-field",
             "Destination Path (owner-only, no-clobber)",
-            dest_field,
+            extract_dest_row(k, state, dialog.name.clone()),
         ));
 
     if let Some(err) = &dialog.error {
@@ -927,13 +1300,182 @@ fn build_extract_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
     Dialog::new("extract-attachment", "Extract Attachment Privately")
         .open(true)
         .fit()
-        .width(460.0)
+        .width(480.0)
         .description(format!(
             "Write \"{}\" ({}) with owner-only permissions without overwriting existing files.",
             dialog.name,
             format_byte_size(dialog.size)
         ))
         .on_close(|s: &mut AppState| s.extract_dialog = None)
+        .child(content)
+        .build(k, overlays);
+}
+
+fn apply_picked_icon(state: &mut AppState, target: IconPickerTarget, icon_id: u32) {
+    match target {
+        IconPickerTarget::EntryEditor => {
+            state.controller.set_editor_icon(icon_id);
+        }
+        IconPickerTarget::CurrentGroup => {
+            if let Err(err) = state.controller.set_current_group_icon(icon_id) {
+                state.controller.set_browser_error(err);
+            }
+        }
+    }
+    state.icon_picker = None;
+    state.icon_search_edit.replace_text("");
+}
+
+fn icon_picker_tile(
+    k: &Kit,
+    icon_id: u32,
+    icon_name: &'static str,
+    selected: bool,
+    target: IconPickerTarget,
+) -> El {
+    let mut tile = col()
+        .key(format!("icon-tile-{icon_id}"))
+        .w(76.0)
+        .h(56.0)
+        .padding(4.0)
+        .gap(2.0)
+        .center()
+        .radius(k.radius.md)
+        .fill(if selected { k.c.layer_03 } else { k.c.layer_01 })
+        .border(
+            if selected { 1.5 } else { 1.0 },
+            if selected {
+                k.c.border_focus
+            } else {
+                k.c.border_muted
+            },
+        )
+        .focusable(true)
+        .checked(selected)
+        .press_on_return()
+        .hover(k.c.hover)
+        .press(k.c.pressed)
+        .label(if selected {
+            format!("Icon {icon_id}: {icon_name}, selected")
+        } else {
+            format!("Icon {icon_id}: {icon_name}")
+        })
+        .help(format!("{icon_id}: {icon_name}"))
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            apply_picked_icon(s, target, icon_id);
+        })
+        .child(render_keepass_icon(
+            k,
+            icon_id,
+            None,
+            20.0,
+            format!("icon-tile-svg-{icon_id}"),
+        ))
+        .child(
+            text(format!("{icon_id}"))
+                .font(k.ty.text_xsmall)
+                .color(k.c.text_muted),
+        );
+    if selected {
+        tile = tile.focus_selected(true);
+    }
+    tile
+}
+
+fn build_icon_picker_modal(k: &Kit, state: &AppState, overlays: &mut Vec<El>) {
+    let Some(picker) = state.icon_picker else {
+        return;
+    };
+    let search_input = TextInput::new(&state.icon_search_edit)
+        .label("Filter icons by name or number")
+        .placeholder("Filter (e.g. key, folder, 19)…")
+        .leading_icon(&SEARCH_ICON)
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.icon_search_edit)
+        .on_change(|s: &mut AppState, tx| s.note_activity(tx))
+        .build(k)
+        .key("icon-picker-search-input");
+
+    let needle = state.icon_search_edit.text.trim().to_ascii_lowercase();
+    let mut grid = row()
+        .key("icon-picker-grid")
+        .w_full()
+        .flex_wrap()
+        .gap(6.0)
+        .focus_group();
+    let mut matches = 0usize;
+    for meta in standard_icons() {
+        let id_str = meta.id.to_string();
+        if !needle.is_empty()
+            && !meta.name.to_ascii_lowercase().contains(&needle)
+            && !id_str.contains(&needle)
+        {
+            continue;
+        }
+        matches += 1;
+        grid = grid.child(icon_picker_tile(
+            k,
+            meta.id,
+            meta.name,
+            meta.id == picker.selected_id,
+            picker.target,
+        ));
+    }
+
+    let scroll_area = col()
+        .key("icon-picker-scroll")
+        .w_full()
+        .h(300.0)
+        .padding(4.0)
+        .radius(k.radius.md)
+        .fill(k.c.bg_base)
+        .border(1.0, k.c.border_muted)
+        .scroll(ScrollSpec::default())
+        .child(if matches == 0 {
+            text("No matching KeePass icons")
+                .key("icon-picker-empty")
+                .padding(12.0)
+                .font(k.ty.text_small)
+                .color(k.c.text_muted)
+        } else {
+            grid
+        });
+
+    let cancel_btn = Button::new("Cancel")
+        .control_size(ControlSize::Regular)
+        .variant(ButtonVariant::Neutral)
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            s.icon_picker = None;
+            s.icon_search_edit.replace_text("");
+        })
+        .build(k)
+        .key("icon-picker-cancel-btn");
+
+    let content = col()
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(10.0)
+        .child(search_input)
+        .child(scroll_area)
+        .child(row().w_full().justify_end().child(cancel_btn));
+
+    let title = match picker.target {
+        IconPickerTarget::EntryEditor => "Choose Entry Icon",
+        IconPickerTarget::CurrentGroup => "Choose Group Icon",
+    };
+
+    Dialog::new("icon-picker", title)
+        .open(true)
+        .fit()
+        .width(540.0)
+        .description("Select one of the 69 standard KeePass 2.x icons.")
+        .on_close(|s: &mut AppState| {
+            s.icon_picker = None;
+            s.icon_search_edit.replace_text("");
+        })
         .child(content)
         .build(k, overlays);
 }
@@ -1175,15 +1717,78 @@ fn lock_mode_switcher(k: &Kit, is_create: bool, unlocking: bool) -> El {
         .child(create_mode_btn)
 }
 
-fn lock_form_inputs(
+fn handle_lock_vault_dialog_result(
+    s: &mut AppState,
+    res: Result<Option<PathBuf>, impl fmt::Display>,
+    expected_mode: LockMode,
+    ensure_ext: bool,
+) {
+    s.file_dialog_active = false;
+    if s.controller.phase != VaultPhase::Locked || s.controller.lock_mode != expected_mode {
+        return;
+    }
+    match res {
+        Ok(Some(path)) => {
+            let resolved = if ensure_ext {
+                ensure_kdbx_extension(path)
+            } else {
+                path
+            };
+            let text = resolved.to_string_lossy().into_owned();
+            s.vault_path_edit.replace_text(text.clone());
+            s.controller.vault_path = text;
+            s.controller.clear_lock_status();
+        }
+        Ok(None) => {}
+        Err(err) => {
+            s.controller.lock_status = Some(format!("File dialog unavailable: {err}"));
+            s.controller.lock_error_field = LockErrorField::Info;
+        }
+    }
+}
+
+fn launch_lock_vault_file_dialog(s: &mut AppState, tx: &mut Tx, is_create: bool) {
+    if s.file_dialog_active {
+        return;
+    }
+    let directory = starting_directory_from_path(&s.vault_path_edit.text);
+    let expected_mode = if is_create {
+        LockMode::Create
+    } else {
+        LockMode::Open
+    };
+    s.file_dialog_active = true;
+    if is_create {
+        let opts = FileDialogOptions {
+            title: String::from("Create KeePass Database"),
+            directory,
+            file_name: Some(String::from("vault.kdbx")),
+            ..FileDialogOptions::default()
+        }
+        .filter("KeePass Database", &["kdbx"]);
+        tx.save_file(opts, move |s: &mut AppState, res, _| {
+            handle_lock_vault_dialog_result(s, res, expected_mode, true);
+        });
+    } else {
+        let opts = FileDialogOptions {
+            title: String::from("Open KeePass Database"),
+            directory,
+            ..FileDialogOptions::default()
+        }
+        .filter("KeePass Database", &["kdbx"]);
+        tx.open_file(opts, move |s: &mut AppState, res, _| {
+            handle_lock_vault_dialog_result(s, res, expected_mode, false);
+        });
+    }
+}
+
+fn lock_vault_path_row(
     k: &Kit,
     state: &AppState,
     is_create: bool,
     unlocking: bool,
-    invalid: (bool, bool, bool),
+    vault_invalid: bool,
 ) -> El {
-    let (vault_invalid, master_invalid, key_invalid) = invalid;
-
     let vault_field = TextInput::new(&state.vault_path_edit)
         .label("Vault (.kdbx)")
         .placeholder(if is_create {
@@ -1202,18 +1807,25 @@ fn lock_form_inputs(
         .build(k)
         .key("lock-vault-path-input");
 
-    let master_field = TextInput::new(&state.master_input)
-        .secure()
-        .label("Master Password")
-        .placeholder("Master password")
-        .width(None)
-        .invalid(master_invalid)
+    let browse_label = if is_create { "Save As…" } else { "Browse…" };
+    let browse_btn = Button::new(browse_label)
+        .control_size(ControlSize::Regular)
         .disabled(unlocking)
-        .on_edit(|s: &mut AppState| &mut s.master_input)
-        .on_submit(|s: &mut AppState, _| submit_lock_screen(s))
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            launch_lock_vault_file_dialog(s, tx, is_create);
+        })
         .build(k)
-        .key("lock-master-input");
+        .key("lock-vault-browse-btn");
 
+    row()
+        .w_full()
+        .gap(6.0)
+        .center_y()
+        .child(vault_field.grow(1.0).min_w(0.0))
+        .child(browse_btn)
+}
+
+fn lock_keyfile_path_row(k: &Kit, state: &AppState, unlocking: bool, key_invalid: bool) -> El {
     let key_field = TextInput::new(&state.key_file_edit)
         .label("Key File (optional)")
         .placeholder("Optional key file path")
@@ -1228,14 +1840,165 @@ fn lock_form_inputs(
         .build(k)
         .key("lock-key-file-input");
 
-    let mut fields = col()
+    let browse_btn = Button::new("Browse…")
+        .control_size(ControlSize::Regular)
+        .disabled(unlocking)
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            if s.file_dialog_active {
+                return;
+            }
+            let opts = FileDialogOptions {
+                title: String::from("Select Key File"),
+                directory: starting_directory_from_path(&s.key_file_edit.text),
+                ..FileDialogOptions::default()
+            }
+            .filter("Key Files", &["keyx", "key"]);
+            s.file_dialog_active = true;
+            tx.open_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if s.controller.phase != VaultPhase::Locked {
+                    return;
+                }
+                match res {
+                    Ok(Some(path)) => {
+                        let text = path.to_string_lossy().into_owned();
+                        s.key_file_edit.replace_text(text.clone());
+                        s.controller.key_file_path = text;
+                        if s.controller.lock_error_field == LockErrorField::KeyFile {
+                            s.controller.clear_lock_status();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        s.controller.lock_status = Some(format!("File dialog unavailable: {err}"));
+                        s.controller.lock_error_field = LockErrorField::Info;
+                    }
+                }
+            });
+        })
+        .build(k)
+        .key("lock-keyfile-browse-btn");
+
+    row()
         .w_full()
-        .gap(12.0)
+        .gap(6.0)
+        .center_y()
+        .child(key_field.grow(1.0).min_w(0.0))
+        .child(browse_btn)
+}
+
+fn lock_vault_chips(k: &Kit, state: &AppState, unlocking: bool) -> Option<El> {
+    if state.controller.configured_vaults.is_empty() && state.controller.recent_vaults.is_empty() {
+        return None;
+    }
+    let mut chips = row()
+        .key("lock-quick-vault-chips")
+        .w_full()
+        .flex_wrap()
+        .gap(6.0);
+    let current = state.vault_path_edit.text.trim();
+    for (idx, item) in state.controller.configured_vaults.iter().enumerate() {
+        let selected = current == item.path;
+        let path_val = item.path.clone();
+        chips = chips.child(
+            Button::new(item.label.clone())
+                .control_size(ControlSize::Small)
+                .variant(if selected {
+                    ButtonVariant::Contrast
+                } else {
+                    ButtonVariant::Neutral
+                })
+                .disabled(unlocking)
+                .on_press(move |s: &mut AppState| {
+                    s.vault_path_edit.replace_text(path_val.clone());
+                    s.controller.vault_path.clone_from(&path_val);
+                    s.controller.clear_lock_status();
+                })
+                .build(k)
+                .key(format!("lock-configured-vault-{idx}"))
+                .help(item.path.clone()),
+        );
+    }
+    for (idx, path) in state.controller.recent_vaults.iter().enumerate() {
+        if state
+            .controller
+            .configured_vaults
+            .iter()
+            .any(|cfg| &cfg.path == path)
+        {
+            continue;
+        }
+        let selected = current == path;
+        let short = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_owned();
+        let path_val = path.clone();
+        chips = chips.child(
+            Button::new(format!("Recent: {short}"))
+                .control_size(ControlSize::Small)
+                .variant(if selected {
+                    ButtonVariant::Contrast
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .disabled(unlocking)
+                .on_press(move |s: &mut AppState| {
+                    s.vault_path_edit.replace_text(path_val.clone());
+                    s.controller.vault_path.clone_from(&path_val);
+                    s.controller.clear_lock_status();
+                })
+                .build(k)
+                .key(format!("lock-recent-vault-{idx}"))
+                .help(path.clone()),
+        );
+    }
+    Some(
+        col()
+            .key("lock-quick-vaults")
+            .w_full()
+            .gap(4.0)
+            .child(
+                text("Quick Vaults")
+                    .font(k.ty.text_xsmall)
+                    .color(k.c.text_muted),
+            )
+            .child(chips),
+    )
+}
+
+fn lock_form_inputs(
+    k: &Kit,
+    state: &AppState,
+    is_create: bool,
+    unlocking: bool,
+    invalid: (bool, bool, bool),
+) -> El {
+    let (vault_invalid, master_invalid, key_invalid) = invalid;
+
+    let master_field = TextInput::new(&state.master_input)
+        .secure()
+        .label("Master Password")
+        .placeholder("Master password")
+        .width(None)
+        .invalid(master_invalid)
+        .disabled(unlocking)
+        .on_edit(|s: &mut AppState| &mut s.master_input)
+        .on_submit(|s: &mut AppState, _| submit_lock_screen(s))
+        .build(k)
+        .key("lock-master-input");
+
+    let mut fields = col().w_full().gap(12.0);
+    if !is_create && let Some(chips) = lock_vault_chips(k, state, unlocking) {
+        fields = fields.child(chips);
+    }
+    fields = fields
         .child(labeled_field(
             k,
             "lock-vault-field",
             "Vault (.kdbx)",
-            vault_field,
+            lock_vault_path_row(k, state, is_create, unlocking, vault_invalid),
         ))
         .child(labeled_field(
             k,
@@ -1268,7 +2031,7 @@ fn lock_form_inputs(
         k,
         "lock-key-field",
         "Key File (optional)",
-        key_field,
+        lock_keyfile_path_row(k, state, unlocking, key_invalid),
     ))
 }
 
@@ -1359,7 +2122,7 @@ fn lock_view(k: &Kit, state: &AppState) -> El {
         .key("lock-screen")
         .w_full()
         .h_full()
-        .center()
+        .items_center()
         .padding(16.0)
         .scroll(ScrollSpec::default())
         .child(card)
@@ -1385,24 +2148,30 @@ fn sidebar_button(
     k: &Kit,
     key: impl Into<String>,
     label: String,
+    icon_id: u32,
+    custom_icon: Option<&Image>,
     variant: ButtonVariant,
     on_press: impl Fn(&mut AppState, &mut Tx) + 'static,
 ) -> El {
+    let key_str = key.into();
     let display = label.clone();
+    let icon_el = render_keepass_icon(k, icon_id, custom_icon, 16.0, format!("{key_str}-icon"));
     Button::new(label)
         .control_size(ControlSize::Regular)
         .variant(variant)
         .label_with(move |font, ink| {
-            text(display)
-                .grow(1.0)
-                .min_w(0.0)
-                .truncate()
-                .font(font)
-                .color(ink)
+            row().w_full().gap(6.0).center_y().child(icon_el).child(
+                text(display)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .truncate()
+                    .font(font)
+                    .color(ink),
+            )
         })
         .on_press_tx(on_press)
         .build(k)
-        .key(key)
+        .key(key_str)
         .w_full()
         .justify_start()
 }
@@ -1471,10 +2240,19 @@ fn group_sidebar_list(k: &Kit, state: &AppState) -> El {
 
     for (idx, (label, _)) in state.controller.breadcrumbs.iter().enumerate() {
         let is_current = idx + 1 == state.controller.breadcrumbs.len();
+        let (icon_id, custom_id) = state
+            .controller
+            .breadcrumb_icons
+            .get(idx)
+            .copied()
+            .unwrap_or((nkeepass::icons::DEFAULT_GROUP_ICON_ID, None));
+        let custom_img = state.custom_icon_for(custom_id);
         col_groups = col_groups.child(sidebar_button(
             k,
             format!("breadcrumb-{idx}"),
             format!("↳ {label}"),
+            icon_id,
+            custom_img,
             if is_current {
                 ButtonVariant::Neutral
             } else {
@@ -1494,10 +2272,13 @@ fn group_sidebar_list(k: &Kit, state: &AppState) -> El {
     }
 
     for (idx, group) in state.controller.child_groups.iter().enumerate() {
+        let custom_img = state.custom_icon_for(group.custom_icon_id());
         col_groups = col_groups.child(sidebar_button(
             k,
             format!("child-group-{idx}"),
             group.label().to_owned(),
+            group.icon_id(),
+            custom_img,
             ButtonVariant::GhostMuted,
             move |s: &mut AppState, tx: &mut Tx| {
                 s.note_activity(tx);
@@ -1511,13 +2292,49 @@ fn group_sidebar_list(k: &Kit, state: &AppState) -> El {
     col_groups
 }
 
+fn group_icon_picker_button(k: &Kit, state: &AppState) -> (El, String) {
+    let (cur_group_icon_id, cur_group_custom_id) = state.controller.current_group_icon();
+    let cur_group_label = state
+        .controller
+        .breadcrumbs
+        .last()
+        .map_or("Root", |(label, _)| label.as_str())
+        .to_owned();
+    let cur_group_custom = state.custom_icon_for(cur_group_custom_id);
+    let cur_group_icon_el = render_keepass_icon(
+        k,
+        cur_group_icon_id,
+        cur_group_custom,
+        16.0,
+        "current-group-icon",
+    );
+    let btn = Button::new("Change group icon")
+        .control_size(ControlSize::Regular)
+        .variant(ButtonVariant::Ghost)
+        .disabled(state.controller.saving)
+        .label_with(move |_font, _ink| row().gap(6.0).center_y().child(cur_group_icon_el))
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            s.icon_search_edit.replace_text("");
+            s.icon_picker = Some(IconPickerState {
+                target: IconPickerTarget::CurrentGroup,
+                selected_id: cur_group_icon_id,
+            });
+        })
+        .build(k)
+        .key("group-icon-picker-btn")
+        .label("Change group icon")
+        .help("Change group icon");
+    (btn, cur_group_label)
+}
+
 fn group_sidebar(k: &Kit, state: &AppState) -> El {
     let add_group_toggle = Button::new(if state.show_new_group_form {
         "Close"
     } else {
         "+ Group"
     })
-    .control_size(ControlSize::Small)
+    .control_size(ControlSize::Regular)
     .variant(ButtonVariant::Ghost)
     .disabled(state.controller.saving)
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -1531,26 +2348,46 @@ fn group_sidebar(k: &Kit, state: &AppState) -> El {
     .build(k)
     .key("sidebar-add-group-toggle");
 
+    let (group_icon_btn, cur_group_label) = group_icon_picker_button(k, state);
+
     let mut sidebar = col()
         .key("group-sidebar")
-        .w(190.0)
+        .w(205.0)
         .h_full()
         .padding(10.0)
         .gap(8.0)
         .fill(k.c.layer_01)
         .child(
-            row()
+            col()
                 .key("group-sidebar-header")
                 .w_full()
-                .justify_between()
-                .center_y()
+                .gap(6.0)
                 .child(
-                    text("Groups")
-                        .key("group-sidebar-heading")
-                        .font(k.ty.small_medium)
-                        .color(k.c.text_muted),
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(6.0)
+                        .child(group_icon_btn)
+                        .child(
+                            text(cur_group_label)
+                                .key("group-sidebar-heading")
+                                .grow(1.0)
+                                .min_w(0.0)
+                                .truncate()
+                                .font(k.ty.small_medium)
+                                .color(k.c.text_base),
+                        ),
                 )
-                .child(add_group_toggle),
+                .child(
+                    row()
+                        .key("group-sidebar-actions")
+                        .w_full()
+                        .justify_between()
+                        .center_y()
+                        .gap(4.0)
+                        .child(text("Groups").font(k.ty.text_xsmall).color(k.c.text_muted))
+                        .child(add_group_toggle),
+                ),
         );
 
     if state.show_new_group_form {
@@ -1595,7 +2432,9 @@ fn entry_list_items(k: &Kit, state: &AppState) -> El {
         .gap(4.0);
 
     if state.controller.entries.is_empty() {
-        let empty_msg = if state.controller.search_query.trim().is_empty() {
+        let empty_msg = if state.controller.favorites_only {
+            "No favorite entries match"
+        } else if state.controller.search_query.trim().is_empty() {
             "No entries in this group"
         } else {
             "No matching entries"
@@ -1613,26 +2452,43 @@ fn entry_list_items(k: &Kit, state: &AppState) -> El {
     let saving = state.controller.is_saving();
     for (idx, hit) in state.controller.entries.iter().enumerate() {
         let selected = state.controller.selected_index == Some(idx);
-        let mut row_el = col()
+        let custom_img = state.custom_icon_for(hit.custom_icon_id());
+        let icon_el = render_keepass_icon(
+            k,
+            hit.icon_id(),
+            custom_img,
+            18.0,
+            format!("entry-row-icon-{idx}"),
+        );
+        let mut row_el = row()
             .key(format!("entry-row-{idx}"))
             .w_full()
             .padding(8.0)
-            .gap(2.0)
+            .gap(8.0)
+            .center_y()
             .radius(k.radius.md)
             .fill(if selected { k.c.layer_03 } else { k.c.layer_01 })
+            .child(icon_el)
             .child(
-                text(hit.title().to_owned())
-                    .w_full()
-                    .font(k.ty.ui_medium)
-                    .color(k.c.text_base)
-                    .truncate(),
-            )
-            .child(
-                text(hit.path().to_owned())
-                    .w_full()
-                    .font(k.ty.text_xsmall)
-                    .color(k.c.text_muted)
-                    .truncate(),
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .shrink()
+                    .gap(2.0)
+                    .child(
+                        text(hit.title().to_owned())
+                            .w_full()
+                            .font(k.ty.ui_medium)
+                            .color(k.c.text_base)
+                            .truncate(),
+                    )
+                    .child(
+                        text(hit.path().to_owned())
+                            .w_full()
+                            .font(k.ty.text_xsmall)
+                            .color(k.c.text_muted)
+                            .truncate(),
+                    ),
             );
         if !saving {
             row_el = row_el
@@ -1680,9 +2536,46 @@ fn entry_list_pane(k: &Kit, state: &AppState) -> El {
         .build(k)
         .key("entry-search-input");
 
+    let fav_active = state.controller.favorites_only;
+    let warn_icon_color = k.c.warning.icon;
+    let fav_btn = Button::new("Favorites")
+        .control_size(ControlSize::Small)
+        .variant(if fav_active {
+            ButtonVariant::Contrast
+        } else {
+            ButtonVariant::Ghost
+        })
+        .disabled(state.controller.saving)
+        .label_with(move |font, ink| {
+            row()
+                .gap(4.0)
+                .center_y()
+                .child(
+                    rune::icon(
+                        if fav_active {
+                            &STAR_FILLED_ICON
+                        } else {
+                            &STAR_ICON
+                        },
+                        13.0,
+                    )
+                    .color(if fav_active { ink } else { warn_icon_color }),
+                )
+                .child(text("Favorites").font(font).color(ink))
+        })
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            let next = !s.controller.favorites_only;
+            s.controller
+                .set_favorites_only(next, current_unix_seconds());
+            s.wipe_editor_widgets();
+        })
+        .build(k)
+        .key("entry-favorites-filter-btn");
+
     col()
         .key("entry-list-pane")
-        .w(215.0)
+        .w(230.0)
         .h_full()
         .padding(10.0)
         .gap(8.0)
@@ -1701,10 +2594,42 @@ fn entry_list_pane(k: &Kit, state: &AppState) -> El {
                 .child(new_entry_btn),
         )
         .child(search_box)
+        .child(row().w_full().child(fav_btn))
         .child(entry_list_items(k, state))
 }
 
-fn entry_detail_header(k: &Kit, detail: &EntryDetailState, saving: bool) -> El {
+fn entry_detail_actions(k: &Kit, state: &AppState, detail: &EntryDetailState, saving: bool) -> El {
+    let is_fav = state.controller.is_selected_favorite();
+    let fav_btn = IconButton::new(if is_fav {
+        &STAR_FILLED_ICON
+    } else {
+        &STAR_ICON
+    })
+    .control_size(ControlSize::Regular)
+    .variant(IconButtonVariant::Ghost)
+    .disabled(saving)
+    .label(if is_fav {
+        "Remove from favorites"
+    } else {
+        "Add to favorites"
+    })
+    .help(if is_fav {
+        "Remove favorite tag"
+    } else {
+        "Mark as favorite"
+    })
+    .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+        s.note_activity(tx);
+        if let Err(err) = s
+            .controller
+            .toggle_selected_favorite(current_unix_seconds())
+        {
+            s.controller.set_browser_error(err);
+        }
+    })
+    .build(k)
+    .key("entry-favorite-btn");
+
     let edit_btn = Button::new("Edit")
         .control_size(ControlSize::Small)
         .variant(ButtonVariant::Contrast)
@@ -1731,105 +2656,67 @@ fn entry_detail_header(k: &Kit, detail: &EntryDetailState, saving: bool) -> El {
         .key("entry-delete-btn");
 
     row()
+        .key("detail-header-actions")
+        .center_y()
+        .gap(6.0)
+        .child(fav_btn)
+        .child(edit_btn)
+        .child(delete_btn)
+}
+
+fn entry_detail_header(k: &Kit, state: &AppState, detail: &EntryDetailState, saving: bool) -> El {
+    let custom_img = state.custom_icon_for(detail.metadata.custom_icon_id());
+    let detail_icon = render_keepass_icon(
+        k,
+        detail.metadata.icon_id(),
+        custom_img,
+        24.0,
+        "detail-header-icon",
+    );
+
+    row()
         .key("detail-header-row")
         .w_full()
         .justify_between()
         .center_y()
         .gap(8.0)
         .child(
-            col()
-                .key("detail-title-col")
+            row()
                 .grow(1.0)
                 .min_w(0.0)
                 .shrink()
-                .gap(2.0)
+                .gap(10.0)
+                .center_y()
+                .child(detail_icon)
                 .child(
-                    text(detail.metadata.title().to_owned())
-                        .key("detail-title")
-                        .w_full()
-                        .wrap_anywhere()
-                        .font(k.ty.body_medium)
-                        .color(k.c.text_base),
-                )
-                .child(
-                    text(detail.path.clone())
-                        .key("detail-path")
-                        .w_full()
-                        .wrap_anywhere()
-                        .font(k.ty.text_xsmall)
-                        .color(k.c.text_muted),
+                    col()
+                        .key("detail-title-col")
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .shrink()
+                        .gap(2.0)
+                        .child(
+                            text(detail.metadata.title().to_owned())
+                                .key("detail-title")
+                                .w_full()
+                                .wrap_anywhere()
+                                .font(k.ty.body_medium)
+                                .color(k.c.text_base),
+                        )
+                        .child(
+                            text(detail.path.clone())
+                                .key("detail-path")
+                                .w_full()
+                                .wrap_anywhere()
+                                .font(k.ty.text_xsmall)
+                                .color(k.c.text_muted),
+                        ),
                 ),
         )
-        .child(
-            row()
-                .key("detail-header-actions")
-                .gap(6.0)
-                .child(edit_btn)
-                .child(delete_btn),
-        )
+        .child(entry_detail_actions(k, state, detail, saving))
 }
 
-fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
-    let mut pane = col()
-        .key("entry-detail-pane")
-        .w_full()
-        .h_full()
-        .padding(16.0)
-        .gap(10.0);
-
-    if let Some(status) = &state.controller.browser_status {
-        pane = pane.child(
-            text(status.clone())
-                .key("browser-status")
-                .role("status")
-                .w_full()
-                .wrap_anywhere()
-                .font(k.ty.text_small)
-                .color(if state.controller.browser_status_is_error {
-                    k.c.danger.fg
-                } else {
-                    k.c.info.fg
-                }),
-        );
-    }
-
-    if let Some(editor) = &state.controller.editor {
-        let mut scroll_body = col()
-            .key("entry-editor-scroll")
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .scroll(ScrollSpec::default())
-            .gap(10.0);
-        scroll_body = entry_editor_body(k, state, scroll_body, editor);
-        return pane
-            .child(editor_header_row(k, editor, state.controller.saving))
-            .child(Divider::horizontal().build(k).key("editor-divider"))
-            .child(scroll_body);
-    }
-
-    let Some(detail) = &state.controller.detail else {
-        let empty_msg = if !state.controller.search_query.trim().is_empty()
-            && state.controller.entries.is_empty()
-        {
-            "No matching entries"
-        } else {
-            "Select an entry to inspect or edit, or click + New Entry"
-        };
-        return pane.child(
-            text(empty_msg)
-                .key("detail-empty")
-                .w_full()
-                .wrap()
-                .font(k.ty.ui)
-                .color(k.c.text_muted),
-        );
-    };
-
-    pane = pane
-        .child(entry_detail_header(k, detail, state.controller.saving))
-        .child(Divider::horizontal().build(k).key("detail-divider"));
-
+fn entry_detail_scroll_body(k: &Kit, detail: &EntryDetailState, saving: bool) -> El {
     let mut scroll_body = col()
         .key("entry-detail-scroll")
         .w_full()
@@ -1872,16 +2759,115 @@ fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
     if let Some(totp) = &detail.totp {
         scroll_body = scroll_body.child(totp_row(k, totp));
     }
-    if !detail.metadata.custom_fields().is_empty() {
+    let has_visible_custom_fields = detail
+        .metadata
+        .custom_fields()
+        .iter()
+        .any(|field| !(detail.metadata.has_otp() && field.name() == "otp"));
+    if has_visible_custom_fields {
         scroll_body = custom_fields_section(k, scroll_body, detail);
     }
-    scroll_body = attachments_section(k, scroll_body, detail, state.controller.saving);
-    pane.child(scroll_body)
+    attachments_section(k, scroll_body, detail, saving)
 }
 
-fn editor_header_row(k: &Kit, editor: &EntryEditorState, saving: bool) -> El {
+fn entry_detail_pane(k: &Kit, state: &AppState) -> El {
+    let mut pane = col()
+        .key("entry-detail-pane")
+        .w_full()
+        .h_full()
+        .padding(16.0)
+        .gap(10.0);
+
+    if let Some(status) = &state.controller.browser_status {
+        pane = pane.child(
+            text(status.clone())
+                .key("browser-status")
+                .role("status")
+                .w_full()
+                .wrap_anywhere()
+                .font(k.ty.text_small)
+                .color(if state.controller.browser_status_is_error {
+                    k.c.danger.fg
+                } else {
+                    k.c.info.fg
+                }),
+        );
+    }
+
+    if let Some(editor) = &state.controller.editor {
+        let mut scroll_body = col()
+            .key("entry-editor-scroll")
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .scroll(ScrollSpec::default())
+            .gap(10.0);
+        scroll_body = entry_editor_body(k, state, scroll_body, editor);
+        return pane
+            .child(editor_header_row(k, state, editor, state.controller.saving))
+            .child(Divider::horizontal().build(k).key("editor-divider"))
+            .child(scroll_body);
+    }
+
+    let Some(detail) = &state.controller.detail else {
+        let empty_msg = if !state.controller.search_query.trim().is_empty()
+            && state.controller.entries.is_empty()
+        {
+            "No matching entries"
+        } else {
+            "Select an entry to inspect or edit, or click + New Entry"
+        };
+        return pane.child(
+            text(empty_msg)
+                .key("detail-empty")
+                .w_full()
+                .wrap()
+                .font(k.ty.ui)
+                .color(k.c.text_muted),
+        );
+    };
+
+    pane.child(entry_detail_header(
+        k,
+        state,
+        detail,
+        state.controller.saving,
+    ))
+    .child(Divider::horizontal().build(k).key("detail-divider"))
+    .child(entry_detail_scroll_body(k, detail, state.controller.saving))
+}
+
+fn editor_header_row(k: &Kit, state: &AppState, editor: &EntryEditorState, saving: bool) -> El {
+    let custom_img = state.custom_icon_for(editor.custom_icon_id);
+    let icon_id = editor.icon_id;
+    let preview_icon =
+        render_keepass_icon(k, icon_id, custom_img, 20.0, "editor-header-preview-icon");
+    let picker_icon = render_keepass_icon(k, icon_id, custom_img, 16.0, "editor-header-icon");
+    let icon_btn = Button::new("Change icon")
+        .control_size(ControlSize::Regular)
+        .variant(ButtonVariant::Neutral)
+        .disabled(saving)
+        .label_with(move |font, ink| {
+            row()
+                .gap(6.0)
+                .center_y()
+                .child(picker_icon)
+                .child(text("Change icon").font(font).color(ink))
+        })
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            s.icon_search_edit.replace_text("");
+            s.icon_picker = Some(IconPickerState {
+                target: IconPickerTarget::EntryEditor,
+                selected_id: icon_id,
+            });
+        })
+        .build(k)
+        .key("editor-icon-picker-btn")
+        .label("Change entry icon");
+
     let apply_btn = Button::new("Apply")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Submit)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -1892,7 +2878,7 @@ fn editor_header_row(k: &Kit, editor: &EntryEditorState, saving: bool) -> El {
         .key("editor-apply-btn");
 
     let cancel_btn = Button::new("Cancel")
-        .control_size(ControlSize::Small)
+        .control_size(ControlSize::Regular)
         .variant(ButtonVariant::Neutral)
         .disabled(saving)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
@@ -1902,42 +2888,110 @@ fn editor_header_row(k: &Kit, editor: &EntryEditorState, saving: bool) -> El {
         .build(k)
         .key("editor-cancel-btn");
 
-    row()
+    col()
         .key("editor-header-row")
         .w_full()
-        .justify_between()
-        .center_y()
         .gap(8.0)
         .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .shrink()
-                .gap(2.0)
+            row()
+                .key("editor-header-title-row")
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(preview_icon)
                 .child(
-                    text(format!("Editing: {}", editor.title))
-                        .key("editor-heading")
-                        .w_full()
-                        .truncate()
-                        .font(k.ty.body_medium)
-                        .color(k.c.text_base),
-                )
-                .child(
-                    text(editor.path.clone())
-                        .key("editor-path")
-                        .w_full()
-                        .truncate()
-                        .font(k.ty.text_xsmall)
-                        .color(k.c.text_muted),
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .shrink()
+                        .gap(2.0)
+                        .child(
+                            text(format!("Editing: {}", editor.title))
+                                .key("editor-heading")
+                                .w_full()
+                                .truncate()
+                                .font(k.ty.body_medium)
+                                .color(k.c.text_base),
+                        )
+                        .child(
+                            text(editor.path.clone())
+                                .key("editor-path")
+                                .w_full()
+                                .truncate()
+                                .font(k.ty.text_xsmall)
+                                .color(k.c.text_muted),
+                        ),
                 ),
         )
         .child(
             row()
                 .key("editor-header-actions")
+                .w_full()
+                .justify_between()
+                .center_y()
                 .gap(6.0)
-                .child(cancel_btn)
-                .child(apply_btn),
+                .child(icon_btn)
+                .child(row().gap(6.0).child(cancel_btn).child(apply_btn)),
         )
+}
+
+fn editor_generator_controls(k: &Kit, state: &AppState) -> El {
+    let cur_len = state.controller.gen_length;
+    let policy = state.controller.gen_policy;
+    let mut len_row = row()
+        .key("editor-gen-lengths")
+        .gap(4.0)
+        .center_y()
+        .child(text("Len:").font(k.ty.text_xsmall).color(k.c.text_muted));
+    for len in [16_usize, 20, 24, 32] {
+        len_row = len_row.child(
+            Button::new(format!("{len}"))
+                .control_size(ControlSize::Regular)
+                .variant(if cur_len == len {
+                    ButtonVariant::Contrast
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+                    s.note_activity(tx);
+                    s.controller.gen_length = len;
+                })
+                .build(k)
+                .key(format!("editor-gen-len-{len}")),
+        );
+    }
+
+    let toggle_class = |label: &'static str, checked: bool, kind: u8| {
+        Checkbox::new(checked)
+            .label(label)
+            .on_toggle_tx(move |s: &mut AppState, tx: &mut Tx| {
+                s.note_activity(tx);
+                let mut p = s.controller.gen_policy;
+                match kind {
+                    0 => p.upper = !p.upper,
+                    1 => p.lower = !p.lower,
+                    2 => p.digits = !p.digits,
+                    _ => p.symbols = !p.symbols,
+                }
+                if p.selected() {
+                    s.controller.gen_policy = p;
+                }
+            })
+            .build(k)
+            .key(format!("editor-gen-class-{kind}"))
+    };
+
+    row()
+        .key("editor-gen-options")
+        .w_full()
+        .flex_wrap()
+        .center_y()
+        .gap(8.0)
+        .child(len_row)
+        .child(toggle_class("Upper", policy.upper, 0))
+        .child(toggle_class("Lower", policy.lower, 1))
+        .child(toggle_class("Digits", policy.digits, 2))
+        .child(toggle_class("Symbols", policy.symbols, 3))
 }
 
 fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El {
@@ -1974,16 +3028,18 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
     .build(k)
     .key("editor-password-reveal-btn");
 
-    let pw_generate_btn = Button::new("Generate (20)")
+    let gen_len = state.controller.gen_length;
+    let pw_generate_btn = Button::new(format!("Generate ({gen_len})"))
         .control_size(ControlSize::Small)
         .variant(ButtonVariant::Contrast)
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
+            let len = s.controller.gen_length;
             match s.controller.generate_editor_password() {
                 Ok(generated) => {
                     s.edit_password.replace_text(generated.as_str());
                     s.controller
-                        .set_browser_info("Generated 20-character password");
+                        .set_browser_info(format!("Generated {len}-character password"));
                 }
                 Err(err) => s.controller.set_browser_error(err),
             }
@@ -2022,6 +3078,54 @@ fn editor_password_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -
                 .child(pw_generate_btn)
                 .child(pw_copy_btn),
         )
+        .child(editor_generator_controls(k, state))
+}
+
+fn editor_otp_block(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El {
+    let otp_input = TextInput::new(&state.edit_otp_uri)
+        .secure()
+        .revealed(editor.otp_revealed)
+        .label("OTP Auth URI (otpauth://...)")
+        .placeholder("otpauth://totp/Issuer:user?secret=BASE32&period=30")
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.edit_otp_uri)
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
+            let val = Zeroizing::new(s.edit_otp_uri.text.clone());
+            if let Some(ed) = s.controller.editor.as_mut() {
+                ed.otp_uri = val;
+            }
+        })
+        .build(k)
+        .key("editor-otp-input");
+
+    let reveal_btn = Button::new(if editor.otp_revealed {
+        "Hide"
+    } else {
+        "Reveal"
+    })
+    .control_size(ControlSize::Small)
+    .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+        s.note_activity(tx);
+        if let Some(ed) = s.controller.editor.as_mut() {
+            ed.otp_revealed = !ed.otp_revealed;
+            s.edit_otp_uri.set_revealed(ed.otp_revealed);
+        }
+    })
+    .build(k)
+    .key("editor-otp-reveal-btn");
+
+    labeled_field(
+        k,
+        "editor-otp-field",
+        "OTP Auth URI (otpauth://...)",
+        row()
+            .w_full()
+            .gap(6.0)
+            .center_y()
+            .child(otp_input.grow(1.0).min_w(0.0))
+            .child(reveal_btn),
+    )
 }
 
 fn editor_standard_fields(k: &Kit, state: &AppState, editor: &EntryEditorState) -> El {
@@ -2121,6 +3225,7 @@ fn editor_standard_fields(k: &Kit, state: &AppState, editor: &EntryEditorState) 
         ))
         .child(editor_password_block(k, state, editor))
         .child(labeled_field(k, "editor-url-field", "URL", url_input))
+        .child(editor_otp_block(k, state, editor))
         .child(labeled_field(k, "editor-notes-field", "Notes", notes_input))
 }
 
@@ -2138,7 +3243,7 @@ fn entry_editor_body(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEdit
 }
 
 fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEditorState) -> El {
-    let mut chips = row().key("editor-tag-chips").w_full().flex_wrap().gap(6.0);
+    let mut chips = row().key("editor-tag-chips").w_full().flex_wrap().gap(10.0);
     if editor.tags.is_empty() {
         chips = chips.child(
             text("No tags")
@@ -2151,7 +3256,10 @@ fn editor_tags_section(k: &Kit, state: &AppState, mut pane: El, editor: &EntryEd
             chips = chips.child(
                 row()
                     .key(format!("editor-tag-chip-{tag}"))
+                    .padding(2.0)
                     .gap(4.0)
+                    .radius(k.radius.sm)
+                    .fill(k.c.layer_01)
                     .center_y()
                     .child(
                         Badge::new(tag.clone())
@@ -2751,7 +3859,11 @@ fn custom_fields_section(k: &Kit, mut pane: El, detail: &EntryDetailState) -> El
                 .font(k.ty.small_medium)
                 .color(k.c.text_muted),
         );
+    let hide_otp = detail.metadata.has_otp();
     for (idx, field) in detail.metadata.custom_fields().iter().enumerate() {
+        if hide_otp && field.name() == "otp" {
+            continue;
+        }
         let field_name = field.name().to_owned();
         let revealed = detail.revealed_custom_fields.get(&idx);
         let reveal_btn = Button::new(if revealed.is_some() { "Hide" } else { "Reveal" })
@@ -2963,42 +4075,96 @@ fn totp_row(k: &Kit, totp: &TotpDisplay) -> El {
         .child(copy_btn)
 }
 
-fn inject_view(k: &Kit, state: &AppState) -> El {
-    let preview_has_error = state.controller.inject_preview_error.is_some();
-    let mode_row = row()
+fn inject_mode_bar(k: &Kit, state: &AppState) -> El {
+    let open_file_btn = Button::new("Open File…")
+        .control_size(ControlSize::Regular)
+        .variant(ButtonVariant::Neutral)
+        .disabled(state.controller.saving)
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
+            let opts = FileDialogOptions {
+                title: String::from("Open Template or .env File"),
+                ..FileDialogOptions::default()
+            }
+            .filter("Template / Env Files", &["env", "tmpl", "txt"]);
+            s.file_dialog_active = true;
+            tx.open_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || s.controller.active_tab != WorkspaceTab::Inject {
+                    return;
+                }
+                match res {
+                    Ok(Some(path)) => match read_inject_file_bounded(&path) {
+                        Ok(content) => {
+                            s.inject_edit.replace_text(content.clone());
+                            s.controller.set_inject_input(content);
+                            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                            s.controller.set_inject_info(format!("Loaded \"{name}\""));
+                        }
+                        Err(err) => {
+                            s.controller.set_inject_error(err);
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(err) => {
+                        s.controller
+                            .set_inject_error(format!("File dialog unavailable: {err}"));
+                    }
+                }
+            });
+        })
+        .build(k)
+        .key("inject-open-file-btn");
+
+    row()
         .key("inject-modes")
-        .gap(8.0)
+        .w_full()
+        .justify_between()
         .center_y()
         .child(
-            Button::new("Template")
-                .control_size(ControlSize::Regular)
-                .variant(if state.controller.inject_mode == InjectMode::Template {
-                    ButtonVariant::Contrast
-                } else {
-                    ButtonVariant::Neutral
-                })
-                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-                    s.note_activity(tx);
-                    s.controller.set_inject_mode(InjectMode::Template);
-                })
-                .build(k)
-                .key("inject-mode-template"),
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    Button::new("Template")
+                        .control_size(ControlSize::Regular)
+                        .variant(if state.controller.inject_mode == InjectMode::Template {
+                            ButtonVariant::Contrast
+                        } else {
+                            ButtonVariant::Neutral
+                        })
+                        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                            s.note_activity(tx);
+                            s.controller.set_inject_mode(InjectMode::Template);
+                        })
+                        .build(k)
+                        .key("inject-mode-template"),
+                )
+                .child(
+                    Button::new(".env File")
+                        .control_size(ControlSize::Regular)
+                        .variant(if state.controller.inject_mode == InjectMode::EnvFile {
+                            ButtonVariant::Contrast
+                        } else {
+                            ButtonVariant::Neutral
+                        })
+                        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+                            s.note_activity(tx);
+                            s.controller.set_inject_mode(InjectMode::EnvFile);
+                        })
+                        .build(k)
+                        .key("inject-mode-env"),
+                ),
         )
-        .child(
-            Button::new(".env File")
-                .control_size(ControlSize::Regular)
-                .variant(if state.controller.inject_mode == InjectMode::EnvFile {
-                    ButtonVariant::Contrast
-                } else {
-                    ButtonVariant::Neutral
-                })
-                .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-                    s.note_activity(tx);
-                    s.controller.set_inject_mode(InjectMode::EnvFile);
-                })
-                .build(k)
-                .key("inject-mode-env"),
-        );
+        .child(open_file_btn)
+}
+
+fn inject_view(k: &Kit, state: &AppState) -> El {
+    let preview_has_error = state.controller.inject_preview_error.is_some();
+    let mode_row = inject_mode_bar(k, state);
 
     let editor = TextArea::new(&state.inject_edit)
         .label("Template or .env input")
@@ -3024,7 +4190,7 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
         .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
             s.note_activity(tx);
             if let Err(err) = s.controller.render_inject(current_unix_seconds()) {
-                s.controller.inject_status = Some(err.to_string());
+                s.controller.set_inject_error(err.to_string());
             }
         })
         .build(k)
@@ -3055,6 +4221,11 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
     }
 
     if let Some(status) = &state.controller.inject_status {
+        let status_color = if state.controller.inject_status_is_error {
+            k.c.danger.fg
+        } else {
+            k.c.info.fg
+        };
         page = page.child(
             text(status.clone())
                 .key("inject-status")
@@ -3062,7 +4233,7 @@ fn inject_view(k: &Kit, state: &AppState) -> El {
                 .w_full()
                 .wrap_anywhere()
                 .font(k.ty.text_small)
-                .color(k.c.info.fg),
+                .color(status_color),
         );
     }
 
@@ -3119,6 +4290,78 @@ fn inject_refs_card(k: &Kit, state: &AppState) -> El {
     refs_box
 }
 
+fn inject_save_row(k: &Kit, state: &AppState) -> El {
+    let save_path_box = TextInput::new(&state.save_path_edit)
+        .label("Private output file path")
+        .placeholder("/path/to/rendered.env (no-clobber)")
+        .width(None)
+        .on_edit(|s: &mut AppState| &mut s.save_path_edit)
+        .on_change(|s: &mut AppState, tx| {
+            s.note_activity(tx);
+            s.controller.inject_save_path = s.save_path_edit.text.clone();
+        })
+        .build(k)
+        .key("inject-save-path-input");
+
+    let default_out_name = match state.controller.inject_mode {
+        InjectMode::EnvFile => ".env",
+        InjectMode::Template => "rendered.txt",
+    };
+    let save_as_btn = Button::new("Save As…")
+        .control_size(ControlSize::Regular)
+        .on_press_tx(move |s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            if s.file_dialog_active {
+                return;
+            }
+            let opts = FileDialogOptions {
+                title: String::from("Save Rendered Output"),
+                file_name: Some(String::from(default_out_name)),
+                directory: starting_directory_from_path(&s.save_path_edit.text),
+                ..FileDialogOptions::default()
+            };
+            s.file_dialog_active = true;
+            tx.save_file(opts, |s: &mut AppState, res, _| {
+                s.file_dialog_active = false;
+                if !s.controller.is_unlocked() || s.controller.active_tab != WorkspaceTab::Inject {
+                    return;
+                }
+                match res {
+                    Ok(Some(path)) => {
+                        let text = path.to_string_lossy().into_owned();
+                        s.save_path_edit.replace_text(text.clone());
+                        s.controller.inject_save_path = text;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        s.controller
+                            .set_inject_error(format!("File dialog unavailable: {err}"));
+                    }
+                }
+            });
+        })
+        .build(k)
+        .key("inject-save-browse-btn");
+
+    let save_btn = Button::new("Save Private File")
+        .control_size(ControlSize::Regular)
+        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
+            s.note_activity(tx);
+            let _ = s.controller.save_inject_output();
+        })
+        .build(k)
+        .key("inject-save-btn");
+
+    row()
+        .key("inject-save-row")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(save_path_box.grow(1.0).min_w(0.0))
+        .child(save_as_btn)
+        .child(save_btn)
+}
+
 fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing<String>) -> El {
     let revealed = state.controller.inject_output_revealed;
     let output_text = secret_value_text(k, "inject-output-value", revealed.then_some(output));
@@ -3132,11 +4375,12 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
     .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
         s.note_activity(tx);
         s.controller.inject_output_revealed = !s.controller.inject_output_revealed;
-        s.controller.inject_status = Some(if s.controller.inject_output_revealed {
+        let msg = if s.controller.inject_output_revealed {
             String::from("Rendered output revealed in memory")
         } else {
             String::from("Rendered securely in memory (masked)")
-        });
+        };
+        s.controller.set_inject_info(msg);
     })
     .build(k)
     .key("inject-output-toggle");
@@ -3152,27 +4396,6 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
         })
         .build(k)
         .key("inject-output-copy");
-
-    let save_path_box = TextInput::new(&state.save_path_edit)
-        .label("Private output file path")
-        .placeholder("/path/to/rendered.env (no-clobber)")
-        .width(None)
-        .on_edit(|s: &mut AppState| &mut s.save_path_edit)
-        .on_change(|s: &mut AppState, tx| {
-            s.note_activity(tx);
-            s.controller.inject_save_path = s.save_path_edit.text.clone();
-        })
-        .build(k)
-        .key("inject-save-path-input");
-
-    let save_btn = Button::new("Save Private File")
-        .control_size(ControlSize::Regular)
-        .on_press_tx(|s: &mut AppState, tx: &mut Tx| {
-            s.note_activity(tx);
-            let _ = s.controller.save_inject_output();
-        })
-        .build(k)
-        .key("inject-save-btn");
 
     page.child(
         col()
@@ -3204,15 +4427,7 @@ fn inject_output_section(k: &Kit, state: &AppState, page: El, output: &Zeroizing
             )
             .child(output_text),
     )
-    .child(
-        row()
-            .key("inject-save-row")
-            .w_full()
-            .gap(8.0)
-            .center_y()
-            .child(save_path_box.grow(1.0).min_w(0.0))
-            .child(save_btn),
-    )
+    .child(inject_save_row(k, state))
 }
 
 fn labeled_field(k: &Kit, key: impl Into<String>, label: &str, field: El) -> El {
@@ -3226,4 +4441,147 @@ fn labeled_field(k: &Kit, key: impl Into<String>, label: &str, field: El) -> El 
                 .color(k.c.text_muted),
         )
         .child(field)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use zeroize::Zeroizing;
+
+    fn test_custom_icon_id(index: usize) -> Result<CustomIconId, String> {
+        let mut bytes = [0_u8; 16];
+        let raw = u32::try_from(index + 1)
+            .map_err(|err| format!("index overflow: {err}"))?
+            .to_be_bytes();
+        bytes[..4].copy_from_slice(&raw);
+        CustomIconId::from_bytes(bytes).ok_or_else(|| String::from("zero custom icon id"))
+    }
+
+    fn png_header_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+        ];
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn focus_loss_with_active_file_dialog_masks_reveals_without_locking() -> Result<(), String> {
+        let temp_dir =
+            std::env::temp_dir().join(format!("nkpui-ui-focus-dialog-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).map_err(|err| format!("mkdir failed: {err}"))?;
+        let vault_path = temp_dir.join("focus.kdbx");
+        let master = Zeroizing::new(String::from("FocusDialog!Pass99"));
+
+        let mut state = AppState::default();
+        state.controller.lock_mode = LockMode::Create;
+        state.controller.vault_path = vault_path.to_string_lossy().into_owned();
+
+        let Some((path, key, gen_id)) = state.controller.begin_unlock(false) else {
+            return Err(String::from("begin_unlock failed"));
+        };
+        let outcome = create_and_open_vault_blocking(&path, &master, key.as_deref());
+        state.controller.finish_unlock(gen_id, outcome, 1.0);
+        assert!(state.controller.is_unlocked());
+
+        state
+            .controller
+            .create_entry_in_current_group(Some("Vault Entry"), 1_700_000_000)?;
+        state.sync_editor_widgets_from_controller();
+        state.edit_password.set_revealed(true);
+        state.edit_otp_uri.set_revealed(true);
+        if let Some(editor) = state.controller.editor.as_mut() {
+            editor.password_revealed = true;
+            editor.otp_revealed = true;
+        }
+        state.controller.toggle_reveal_password();
+        state.controller.inject_output_revealed = true;
+        state.file_dialog_active = true;
+
+        assert!(state.focus_lost_lock_cleanup().is_none());
+        assert!(state.controller.is_unlocked());
+        assert!(state.controller.pending_lock_decision.is_none());
+        assert!(!state.controller.inject_output_revealed);
+        assert!(
+            state
+                .controller
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.revealed_password.is_none())
+        );
+        assert!(
+            state
+                .controller
+                .editor
+                .as_ref()
+                .is_some_and(|editor| !editor.password_revealed && !editor.otp_revealed)
+        );
+
+        state.file_dialog_active = false;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn custom_icon_cache_caps_entries_and_per_frame_lookups() -> Result<(), String> {
+        let temp_dir =
+            std::env::temp_dir().join(format!("nkpui-ui-icon-caps-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).map_err(|err| format!("mkdir failed: {err}"))?;
+        let vault_path = temp_dir.join("icons.kdbx");
+        let master = Zeroizing::new(String::from("IconsCache!Pass99"));
+
+        let mut state = AppState {
+            images: Some(ImageCache::new(Arc::new(|| {}))),
+            ..AppState::default()
+        };
+        state.controller.lock_mode = LockMode::Create;
+        state.controller.vault_path = vault_path.to_string_lossy().into_owned();
+        let Some((path, key, gen_id)) = state.controller.begin_unlock(false) else {
+            return Err(String::from("begin_unlock failed"));
+        };
+        let outcome = create_and_open_vault_blocking(&path, &master, key.as_deref());
+        state.controller.finish_unlock(gen_id, outcome, 1.0);
+        assert!(state.controller.is_unlocked());
+
+        // Oversized raster header is rejected into failed_custom_icons without calling decode.
+        let bad_id = test_custom_icon_id(999)?;
+        let oversized = png_header_bytes(8192, 8192);
+        assert!(!state.cache_custom_icon_bytes(bad_id, oversized));
+        assert!(!state.custom_icons.contains_key(&bad_id));
+        assert!(state.failed_custom_icons.contains(&bad_id));
+        state.failed_custom_icons.clear();
+
+        // Both custom_icons and failed_custom_icons stay capped at MAX_CUSTOM_ICON_CACHE_ENTRIES.
+        let valid_png = png_header_bytes(32, 32);
+        for idx in 0..300 {
+            let id = test_custom_icon_id(idx)?;
+            assert!(state.cache_custom_icon_bytes(id, valid_png.clone()));
+            state.record_failed_custom_icon(id);
+        }
+        assert_eq!(state.custom_icons.len(), MAX_CUSTOM_ICON_CACHE_ENTRIES);
+        assert_eq!(
+            state.failed_custom_icons.len(),
+            MAX_CUSTOM_ICON_CACHE_ENTRIES
+        );
+
+        // sync_custom_icons processes at most MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME new lookups per frame.
+        state.custom_icons.clear();
+        state.failed_custom_icons.clear();
+        state.controller.breadcrumb_icons.clear();
+        for idx in 0..40 {
+            let id = test_custom_icon_id(idx)?;
+            state.controller.breadcrumb_icons.push((0, Some(id)));
+        }
+        let _ = state.sync_custom_icons();
+        assert_eq!(
+            state.failed_custom_icons.len(),
+            MAX_CUSTOM_ICON_LOOKUPS_PER_FRAME
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
 }

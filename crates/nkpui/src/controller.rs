@@ -12,18 +12,21 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use neotales_keepass::{CredentialProvider, KdbxCredentials, KdbxWriteOptions, read_key_file};
+use neotales_keepass::{
+    CredentialProvider, KdbxCredentials, KdbxWriteOptions, OtpKind, OtpUri, read_key_file,
+};
 use nkeepass::env_file::{EnvLine, EnvValueKind, parse_env_file, resolve_env_file};
+use nkeepass::icons::{DEFAULT_GROUP_ICON_ID, is_valid_standard_icon_id};
 use nkeepass::password_generator::Policy;
 use nkeepass::private_file::write_private_noclobber;
 use nkeepass::service::FieldUpdate;
 use nkeepass::template::{
     NkpUri, RenderOptions, ServiceSecretLookup, TemplateError, ValueEscape, extract_references,
-    render_text,
+    is_safe_display_text, render_text,
 };
 use nkeepass::{
-    AttachmentDescriptor, EntryRef, GroupRef, KDBX_LIMITS, SearchHit, SelectedEntry, ServiceError,
-    SessionId, TreeGroup, VaultService,
+    AttachmentDescriptor, CustomIconId, EntryRef, GroupRef, KDBX_LIMITS, SearchHit, SelectedEntry,
+    ServiceError, SessionId, TreeGroup, VaultService,
 };
 use zeroize::Zeroizing;
 
@@ -33,8 +36,28 @@ pub const IDLE_LOCK_SECS: f64 = 300.0;
 /// Maximum attachment file size accepted when attaching a binary (`16 MiB`).
 pub const MAX_ATTACHMENT_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Maximum template/env file size loaded into the Inject view (`1 MiB`).
+pub const MAX_INJECT_FILE_BYTES: u64 = 1024 * 1024;
+
 /// Default generated password length in characters.
 pub const GENERATED_PASSWORD_LEN: usize = 20;
+
+/// Standard `KeePass` tag marking a favorite entry.
+pub const FAVORITE_TAG: &str = "favorite";
+
+/// Maximum number of recent in-session vault paths shown on the lock screen.
+pub const MAX_RECENT_VAULTS: usize = 8;
+
+/// Maximum number of configured vault shortcuts loaded from `config.json`.
+pub const MAX_CONFIGURED_VAULTS: usize = 32;
+
+/// Maximum byte length of a configured vault display label.
+pub const MAX_CONFIGURED_LABEL_BYTES: usize = 64;
+
+/// Maximum byte length of a configured vault path.
+pub const MAX_CONFIGURED_PATH_BYTES: usize = 4096;
+
+const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 
 /// Current lock lifecycle phase of the application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +220,15 @@ impl fmt::Debug for EditableCustomField {
     }
 }
 
+/// Non-secret configured vault entry discovered from `nkp`'s `config.json`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfiguredVault {
+    /// Friendly alias or role label (e.g. `"work"`, `"Default"`).
+    pub label: String,
+    /// Configured filesystem path to the `.kdbx` vault.
+    pub path: String,
+}
+
 /// Editable draft state for the currently selected entry.
 #[allow(
     clippy::struct_excessive_bools,
@@ -207,6 +239,12 @@ pub struct EntryEditorState {
     pub entry_ref: EntryRef,
     /// Canonical entry path when editing began.
     pub path: String,
+    /// Draft standard `KeePass` 2.x icon ID (`0..=68`).
+    pub icon_id: u32,
+    /// Draft custom icon UUID when preserved from the vault.
+    pub custom_icon_id: Option<CustomIconId>,
+    /// Whether the user explicitly selected a new standard icon in the editor.
+    pub icon_changed: bool,
     /// Draft entry title.
     pub title: String,
     /// Draft `UserName` field.
@@ -225,12 +263,18 @@ pub struct EntryEditorState {
     pub notes: Zeroizing<String>,
     /// Whether `Notes` is protected.
     pub notes_protected: bool,
+    /// Draft `otpauth://` URI stored in the protected `"otp"` field.
+    pub otp_uri: Zeroizing<String>,
+    /// Whether `otp_uri` is currently unmasked in the editor.
+    pub otp_revealed: bool,
     /// Draft tag list.
     pub tags: Vec<String>,
     /// Draft custom string fields.
     pub custom_fields: Vec<EditableCustomField>,
     /// Existing custom field names staged for removal on Apply.
     pub removed_custom_fields: Vec<String>,
+    original_icon_id: u32,
+    original_custom_icon_id: Option<CustomIconId>,
     original_title: String,
     original_username: Zeroizing<String>,
     original_username_protected: bool,
@@ -239,6 +283,8 @@ pub struct EntryEditorState {
     original_url_protected: bool,
     original_notes: Zeroizing<String>,
     original_notes_protected: bool,
+    original_otp_uri: Zeroizing<String>,
+    had_otp_field: bool,
     original_tags: Vec<String>,
 }
 
@@ -246,8 +292,10 @@ impl fmt::Debug for EntryEditorState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EntryEditorState")
             .field("path", &self.path)
+            .field("icon_id", &self.icon_id)
             .field("title", &self.title)
             .field("password", &"[REDACTED]")
+            .field("has_otp_uri", &!self.otp_uri.is_empty())
             .field("custom_field_count", &self.custom_fields.len())
             .field("removed_custom_count", &self.removed_custom_fields.len())
             .finish_non_exhaustive()
@@ -350,6 +398,18 @@ pub struct VaultController {
     pub search_query: String,
     /// Breadcrumb stack of visited groups `(label, GroupRef)` starting from root.
     pub breadcrumbs: Vec<(String, GroupRef)>,
+    /// Standard and custom icon metadata matching each entry in `breadcrumbs`.
+    pub breadcrumb_icons: Vec<(u32, Option<CustomIconId>)>,
+    /// Whether the entry list is filtered to entries tagged `"favorite"`.
+    pub favorites_only: bool,
+    /// Non-secret vault aliases/paths read-only loaded from `nkp`'s `config.json`.
+    pub configured_vaults: Vec<ConfiguredVault>,
+    /// In-session recently unlocked or created `.kdbx` paths (MRU).
+    pub recent_vaults: Vec<String>,
+    /// Selected length for the Entry Editor password generator.
+    pub gen_length: usize,
+    /// Selected character classes for the Entry Editor password generator.
+    pub gen_policy: Policy,
     /// Direct child groups of the currently selected group (empty during search).
     pub child_groups: Vec<TreeGroup>,
     /// Visible entry hits for the current group or search query.
@@ -382,6 +442,8 @@ pub struct VaultController {
     pub inject_output_revealed: bool,
     /// Non-secret status message for the inject view.
     pub inject_status: Option<String>,
+    /// Whether `inject_status` represents an error (`true`) vs informational notice (`false`).
+    pub inject_status_is_error: bool,
     /// Last user interaction timestamp (monotonic seconds from runtime clock).
     pub last_activity_secs: f64,
     service: VaultService,
@@ -427,6 +489,17 @@ impl Default for VaultController {
             pending_lock_decision: None,
             search_query: String::new(),
             breadcrumbs: Vec::new(),
+            breadcrumb_icons: Vec::new(),
+            favorites_only: false,
+            configured_vaults: Vec::new(),
+            recent_vaults: Vec::new(),
+            gen_length: GENERATED_PASSWORD_LEN,
+            gen_policy: Policy {
+                upper: true,
+                lower: true,
+                digits: true,
+                symbols: true,
+            },
             child_groups: Vec::new(),
             entries: Vec::new(),
             selected_index: None,
@@ -443,6 +516,7 @@ impl Default for VaultController {
             rendered_output: None,
             inject_output_revealed: false,
             inject_status: None,
+            inject_status_is_error: false,
             last_activity_secs: 0.0,
             service: VaultService::default(),
             session: None,
@@ -716,6 +790,239 @@ pub fn read_attachment_file_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, S
     Ok(bytes)
 }
 
+/// Appends `.kdbx` when `path` has no file extension, preserving chosen extensions.
+#[must_use]
+pub fn ensure_kdbx_extension(path: PathBuf) -> PathBuf {
+    if path.as_os_str().is_empty() || path.extension().is_some() {
+        path
+    } else {
+        path.with_extension("kdbx")
+    }
+}
+
+/// Reads a UTF-8 template or `.env` source file bounded to [`MAX_INJECT_FILE_BYTES`] (`1 MiB`),
+/// refusing symlinks, Windows reparse points, FIFOs, and special files.
+///
+/// # Errors
+///
+/// Returns a fixed diagnostic if the file cannot be opened, exceeds `1 MiB`,
+/// or is not valid UTF-8.
+pub fn read_inject_file_bounded(path: &Path) -> Result<String, String> {
+    let (file, meta) = open_regular_file_nofollow(path, "template/env file")?;
+    if meta.len() > MAX_INJECT_FILE_BYTES {
+        return Err(String::from("template/env file exceeds 1 MiB size limit"));
+    }
+    let max_bytes = usize::try_from(MAX_INJECT_FILE_BYTES).unwrap_or(usize::MAX);
+    let capacity = usize::try_from(meta.len())
+        .unwrap_or(0)
+        .min(max_bytes)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_INJECT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| String::from("cannot read template/env file"))?;
+    if bytes.len() as u64 > MAX_INJECT_FILE_BYTES {
+        return Err(String::from("template/env file exceeds 1 MiB size limit"));
+    }
+    String::from_utf8(bytes).map_err(|_| String::from("template/env file must be valid UTF-8"))
+}
+
+fn validated_env_base_dir(raw: &std::ffi::OsStr) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if raw.as_bytes().contains(&0) {
+            return None;
+        }
+    }
+    let text = raw.to_str()?;
+    if text.contains('\0')
+        || text.starts_with(r"\\?\")
+        || text.starts_with(r"\\.\")
+        || text.starts_with("//?/")
+        || text.starts_with("//./")
+    {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn validated_env_var_dir(name: &str) -> Option<PathBuf> {
+    let raw = std::env::var_os(name)?;
+    validated_env_base_dir(&raw)
+}
+
+fn resolve_nkp_config_path() -> Option<PathBuf> {
+    if let Some(dir) = validated_env_var_dir("NKP_CONFIG_HOME") {
+        return Some(dir.join("config.json"));
+    }
+    if let Some(dir) = validated_env_var_dir("NEO_KEEPASS_CONFIG_DIR") {
+        return Some(dir.join("config.json"));
+    }
+    if let Some(dir) = validated_env_var_dir("XDG_CONFIG_DIR") {
+        return Some(dir.join("nkeepass").join("config.json"));
+    }
+    if let Some(dir) = validated_env_var_dir("XDG_CONFIG_HOME") {
+        return Some(dir.join("nkeepass").join("config.json"));
+    }
+    #[cfg(windows)]
+    if let Some(dir) = validated_env_var_dir("APPDATA") {
+        return Some(dir.join("nkeepass").join("config.json"));
+    }
+    let home = validated_env_var_dir("HOME")?;
+    Some(home.join(".config").join("nkeepass").join("config.json"))
+}
+
+fn config_parent_is_safe(config_path: &Path) -> bool {
+    let Some(parent) = config_path.parent() else {
+        return false;
+    };
+    let Ok(meta) = std::fs::symlink_metadata(parent) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (meta.mode() & 0o002) != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn config_file_permissions_safe(config_path: &Path, opened: &File) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(lmeta) = std::fs::symlink_metadata(config_path) else {
+            return false;
+        };
+        if (lmeta.mode() & 0o077) != 0 {
+            return false;
+        }
+        let Ok(fmeta) = opened.metadata() else {
+            return false;
+        };
+        if (fmeta.mode() & 0o077) != 0 {
+            return false;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (config_path, opened);
+    true
+}
+
+fn push_unique_configured_vault(out: &mut Vec<ConfiguredVault>, label: &str, path: &str) {
+    if out.len() >= MAX_CONFIGURED_VAULTS {
+        return;
+    }
+    let trimmed_label = label.trim();
+    let trimmed = path.trim();
+    if trimmed_label.is_empty()
+        || trimmed_label.len() > MAX_CONFIGURED_LABEL_BYTES
+        || trimmed.is_empty()
+        || trimmed.len() > MAX_CONFIGURED_PATH_BYTES
+        || !is_safe_display_text(trimmed_label)
+        || !is_safe_display_text(trimmed)
+        || out.iter().any(|existing| existing.path == trimmed)
+    {
+        return;
+    }
+    out.push(ConfiguredVault {
+        label: trimmed_label.to_owned(),
+        path: trimmed.to_owned(),
+    });
+}
+
+/// Reads non-secret vault paths and aliases from an explicit `config.json` path,
+/// returning an empty list if absent, unsafe, or malformed.
+#[must_use]
+pub fn load_configured_vaults_from_path(config_path: &Path) -> Vec<ConfiguredVault> {
+    if !config_parent_is_safe(config_path) {
+        return Vec::new();
+    }
+    let Ok((file, meta)) = open_regular_file_nofollow(config_path, "config.json") else {
+        return Vec::new();
+    };
+    if !config_file_permissions_safe(config_path, &file) || meta.len() > MAX_CONFIG_BYTES {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > MAX_CONFIG_BYTES
+    {
+        return Vec::new();
+    }
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    let Some(obj) = doc.as_object() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(aliases) = obj.get("aliases").and_then(serde_json::Value::as_object) {
+        for (name, entry) in aliases {
+            if out.len() >= MAX_CONFIGURED_VAULTS {
+                break;
+            }
+            let Some(entry_obj) = entry.as_object() else {
+                continue;
+            };
+            let is_vault = entry_obj
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|k| k == "vault");
+            let Some(target) = entry_obj.get("target").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if is_vault {
+                push_unique_configured_vault(&mut out, name, target);
+            }
+        }
+    }
+    if let Some(default_vault) = obj.get("default_vault").and_then(serde_json::Value::as_str) {
+        push_unique_configured_vault(&mut out, "Default", default_vault);
+    }
+    if let Some(current) = obj.get("current").and_then(serde_json::Value::as_str) {
+        let matches_alias = out.iter().any(|item| item.label == current);
+        if !matches_alias
+            && (current.contains('/')
+                || current.contains('\\')
+                || Path::new(current)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("kdbx")))
+        {
+            push_unique_configured_vault(&mut out, "Current", current);
+        }
+    }
+    out
+}
+
+/// Reads non-secret vault paths and aliases from `nkp`'s existing `config.json` if present.
+#[must_use]
+pub fn load_configured_vaults() -> Vec<ConfiguredVault> {
+    resolve_nkp_config_path().map_or_else(Vec::new, |path| load_configured_vaults_from_path(&path))
+}
+
 /// Executes blocking KDBX credential parsing + [`VaultService::open`] for a worker thread.
 ///
 /// The master password is taken in a [`Zeroizing`] buffer and cleared once moved
@@ -863,12 +1170,46 @@ fn validate_and_append_tags(existing: &mut Vec<String>, raw_tags: &str) -> Resul
 }
 
 impl VaultController {
-    /// Creates a controller pre-seeded with the initial `inject_input` preview parsed.
+    /// Creates a controller pre-seeded with the initial `inject_input` preview parsed
+    /// and read-only configured vaults loaded from `nkp`'s `config.json`.
     #[must_use]
     pub fn new() -> Self {
-        let mut controller = Self::default();
+        let mut controller = Self {
+            configured_vaults: load_configured_vaults(),
+            ..Self::default()
+        };
         controller.refresh_inject_preview();
         controller
+    }
+
+    /// Records a successfully unlocked/created vault path into the MRU `recent_vaults` list.
+    pub fn record_recent_vault(&mut self, path: &str) {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.recent_vaults.retain(|item| item != trimmed);
+        self.recent_vaults.insert(0, trimmed.to_owned());
+        self.recent_vaults.truncate(MAX_RECENT_VAULTS);
+    }
+
+    /// Fetches bounded (`<= 256 KiB`) custom KDBX icon bytes for `id` in the live session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when locked, stale, or the vault contains duplicate icon UUIDs.
+    pub fn custom_icon_bytes(&self, id: CustomIconId) -> Result<Option<Vec<u8>>, ServiceError> {
+        let session = self.session.ok_or(ServiceError::Locked)?;
+        self.service.custom_icon_bytes(session, id)
+    }
+
+    /// Returns `(icon_id, custom_icon_id)` for the currently open group.
+    #[must_use]
+    pub fn current_group_icon(&self) -> (u32, Option<CustomIconId>) {
+        self.breadcrumb_icons
+            .last()
+            .copied()
+            .unwrap_or((DEFAULT_GROUP_ICON_ID, None))
     }
 
     /// Records user interaction time so idle lock counts from the latest event.
@@ -1016,9 +1357,12 @@ impl VaultController {
                 self.clear_lock_status();
                 self.clear_browser_status();
                 self.editor = None;
+                self.favorites_only = false;
                 self.active_tab = WorkspaceTab::Browser;
                 self.search_query.clear();
                 self.last_activity_secs = now_secs;
+                let opened_path = self.vault_path.clone();
+                self.record_recent_vault(&opened_path);
                 if let Err(err) = self.load_root_group() {
                     self.set_browser_error(err.message().to_owned());
                 }
@@ -1062,6 +1406,8 @@ impl VaultController {
         self.saving = false;
         self.pending_lock_decision = None;
         self.breadcrumbs.clear();
+        self.breadcrumb_icons.clear();
+        self.favorites_only = false;
         self.child_groups.clear();
         self.entries.clear();
         self.selected_index = None;
@@ -1072,10 +1418,28 @@ impl VaultController {
         self.rendered_output = None;
         self.inject_output_revealed = false;
         self.inject_status = None;
+        self.inject_status_is_error = false;
         LockCleanup {
             locked_active_session: was_active,
             clear_clipboard: true,
         }
+    }
+
+    /// Masks all revealed secrets across entry detail, entry editor, and inject output.
+    pub fn mask_all_reveals(&mut self) {
+        if let Some(detail) = self.detail.as_mut() {
+            detail.revealed_password = None;
+            detail.revealed_standard_fields.clear();
+            detail.revealed_custom_fields.clear();
+        }
+        if let Some(editor) = self.editor.as_mut() {
+            editor.password_revealed = false;
+            editor.otp_revealed = false;
+            for field in &mut editor.custom_fields {
+                field.revealed = false;
+            }
+        }
+        self.inject_output_revealed = false;
     }
 
     fn lock_with_trigger(&mut self, trigger: LockTrigger) -> LockCleanup {
@@ -1296,8 +1660,12 @@ impl VaultController {
     pub fn load_root_group(&mut self) -> Result<(), ServiceError> {
         let session = self.session.ok_or(ServiceError::Locked)?;
         let root = self.service.root_group(session)?;
+        let root_icon = self.service.root_icon(session)?;
         self.breadcrumbs.clear();
         self.breadcrumbs.push((String::from("Root"), root.clone()));
+        self.breadcrumb_icons.clear();
+        self.breadcrumb_icons
+            .push((root_icon.icon_id(), root_icon.custom_icon_id()));
         self.load_group_contents(&root, None)
     }
 
@@ -1311,9 +1679,12 @@ impl VaultController {
         };
         let label = group.label().to_owned();
         let group_ref = group.reference();
+        let icon = (group.icon_id(), group.custom_icon_id());
         self.search_query.clear();
+        self.favorites_only = false;
         self.editor = None;
         self.breadcrumbs.push((label, group_ref.clone()));
+        self.breadcrumb_icons.push(icon);
         if let Err(err) = self.load_group_contents(&group_ref, None) {
             self.set_browser_error(err.message().to_owned());
         }
@@ -1328,7 +1699,9 @@ impl VaultController {
             return;
         };
         self.breadcrumbs.truncate(index + 1);
+        self.breadcrumb_icons.truncate(index + 1);
         self.search_query.clear();
+        self.favorites_only = false;
         self.editor = None;
         if let Err(err) = self.load_group_contents(&target, None) {
             self.set_browser_error(err.message().to_owned());
@@ -1383,18 +1756,82 @@ impl VaultController {
             .map(|(label, _)| label.clone())
             .collect();
         let root = self.service.root_group(session)?;
+        let root_icon = self.service.root_icon(session)?;
         let mut next_breadcrumbs = vec![(String::from("Root"), root.clone())];
+        let mut next_icons = vec![(root_icon.icon_id(), root_icon.custom_icon_id())];
         let mut current = root;
         for label in saved_labels {
             let (children, _) = Self::fetch_group_page_all(&mut self.service, &current)?;
             let Some(found) = children.into_iter().find(|child| child.label() == label) else {
                 break;
             };
+            let icon = (found.icon_id(), found.custom_icon_id());
             let next_ref = found.reference();
             next_breadcrumbs.push((label, next_ref.clone()));
+            next_icons.push(icon);
             current = next_ref;
         }
         self.breadcrumbs = next_breadcrumbs;
+        self.breadcrumb_icons = next_icons;
+        Ok(())
+    }
+
+    fn is_favorite_hit(hit: &SearchHit) -> bool {
+        hit.tags()
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case(FAVORITE_TAG))
+    }
+
+    fn search_entries_filtered(
+        &mut self,
+        session: SessionId,
+        query: &str,
+        only_favorites: bool,
+    ) -> Result<Vec<SearchHit>, ServiceError> {
+        let mut hits = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = self.service.search_page(session, query, cursor)?;
+            for hit in page.hits {
+                if !only_favorites || Self::is_favorite_hit(&hit) {
+                    hits.push(hit);
+                }
+            }
+            match page.next_cursor {
+                Some(next) if hits.len() < 1000 => cursor = Some(next),
+                Some(next) => {
+                    let _ = self.service.release_search_cursor(next);
+                    break;
+                }
+                None => break,
+            }
+        }
+        Ok(hits)
+    }
+
+    fn populate_visible_entries(&mut self) -> Result<(), ServiceError> {
+        let session = self.session.ok_or(ServiceError::Locked)?;
+        let trimmed = self.search_query.trim().to_owned();
+        if trimmed.is_empty() && !self.favorites_only {
+            let current_group = self
+                .breadcrumbs
+                .last()
+                .map(|(_, group)| group.clone())
+                .ok_or(ServiceError::Locked)?;
+            let (child_groups, entries) =
+                Self::fetch_group_page_all(&mut self.service, &current_group)?;
+            self.child_groups = child_groups;
+            self.entries = entries;
+        } else {
+            let query = if trimmed.is_empty() {
+                FAVORITE_TAG
+            } else {
+                trimmed.as_str()
+            };
+            let hits = self.search_entries_filtered(session, query, self.favorites_only)?;
+            self.child_groups.clear();
+            self.entries = hits;
+        }
         Ok(())
     }
 
@@ -1406,26 +1843,7 @@ impl VaultController {
         unix_now: u64,
     ) -> Result<(), ServiceError> {
         self.rebuild_breadcrumbs_after_mutation()?;
-        let session = self.session.ok_or(ServiceError::Locked)?;
-        let trimmed = self.search_query.trim().to_owned();
-        if trimmed.is_empty() {
-            let current_group = self
-                .breadcrumbs
-                .last()
-                .map(|(_, group)| group.clone())
-                .ok_or(ServiceError::Locked)?;
-            let (child_groups, entries) =
-                Self::fetch_group_page_all(&mut self.service, &current_group)?;
-            self.child_groups = child_groups;
-            self.entries = entries;
-        } else {
-            let page = self.service.search(session, &trimmed)?;
-            if let Some(cursor) = page.next_cursor {
-                let _ = self.service.release_search_cursor(cursor);
-            }
-            self.child_groups.clear();
-            self.entries = page.hits;
-        }
+        self.populate_visible_entries()?;
 
         self.selected_index = None;
         self.detail = None;
@@ -1509,6 +1927,7 @@ impl VaultController {
             && self.breadcrumbs.len() > 1
         {
             self.breadcrumbs.pop();
+            self.breadcrumb_icons.pop();
         }
         self.editor = None;
         self.detail = None;
@@ -1533,6 +1952,112 @@ impl VaultController {
         self.remove_group(&target)
     }
 
+    /// Sets the standard `KeePass` 2.x icon (`0..=68`) on the currently viewed group
+    /// via [`VaultService::set_group_icon`] and marks `dirty = true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-secret error message if locked, saving, or icon ID is invalid.
+    pub fn set_current_group_icon(&mut self, icon_id: u32) -> Result<(), String> {
+        if self.saving {
+            return Err(String::from("save in progress"));
+        }
+        if !is_valid_standard_icon_id(icon_id) {
+            return Err(String::from("invalid icon id"));
+        }
+        let target = self
+            .current_group_ref()
+            .cloned()
+            .ok_or_else(|| String::from("vault is locked"))?;
+        self.service
+            .set_group_icon(&target, icon_id)
+            .map_err(|err| err.message().to_owned())?;
+        self.dirty = true;
+        let current_path = self.detail.as_ref().map(|detail| detail.path.clone());
+        let current_idx = self.selected_index;
+        let fresh_editor_path = self.editor.as_ref().map(|ed| ed.path.clone());
+        self.reload_after_mutation(
+            None,
+            current_path.as_deref(),
+            current_idx,
+            current_unix_seconds(),
+        )
+        .map_err(|err| err.message().to_owned())?;
+        if let Some(editor) = self.editor.as_mut()
+            && let Some(new_detail) = &self.detail
+            && fresh_editor_path.as_deref() == Some(new_detail.path.as_str())
+        {
+            editor.entry_ref = new_detail.entry_ref.clone();
+        }
+        self.set_browser_info("Group icon updated (unsaved)");
+        Ok(())
+    }
+
+    /// Returns whether the currently selected entry has the `"favorite"` tag.
+    #[must_use]
+    pub fn is_selected_favorite(&self) -> bool {
+        self.detail.as_ref().is_some_and(|detail| {
+            detail
+                .metadata
+                .tags()
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case(FAVORITE_TAG))
+        })
+    }
+
+    /// Toggles the standard `"favorite"` tag on the currently selected entry via
+    /// [`VaultService::set_tags`] and marks `dirty = true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-secret error message if locked, saving, or no entry is selected.
+    pub fn toggle_selected_favorite(&mut self, unix_now: u64) -> Result<bool, String> {
+        if self.saving {
+            return Err(String::from("save in progress"));
+        }
+        let detail = self
+            .detail
+            .as_ref()
+            .ok_or_else(|| String::from("no entry selected"))?;
+        let entry_ref = detail.entry_ref.clone();
+        let entry_path = detail.path.clone();
+        let current_idx = self.selected_index;
+        let was_fav = self.is_selected_favorite();
+        let mut next_tags: Vec<String> = detail
+            .metadata
+            .tags()
+            .iter()
+            .filter(|tag| !tag.eq_ignore_ascii_case(FAVORITE_TAG))
+            .cloned()
+            .collect();
+        if !was_fav {
+            next_tags.push(String::from(FAVORITE_TAG));
+        }
+        self.service
+            .set_tags(&entry_ref, next_tags)
+            .map_err(|err| err.message().to_owned())?;
+        self.dirty = true;
+        self.reload_after_mutation(None, Some(&entry_path), current_idx, unix_now)
+            .map_err(|err| err.message().to_owned())?;
+        let now_fav = !was_fav;
+        self.set_browser_info(if now_fav {
+            "Added to favorites (unsaved)"
+        } else {
+            "Removed from favorites (unsaved)"
+        });
+        Ok(now_fav)
+    }
+
+    /// Toggles filtering the entry list to entries tagged `"favorite"`.
+    pub fn set_favorites_only(&mut self, enabled: bool, unix_now: u64) {
+        if self.saving {
+            return;
+        }
+        self.favorites_only = enabled;
+        let query = self.search_query.clone();
+        self.set_search_query(query, unix_now);
+    }
+
     /// Runs a search across the unlocked vault, or reloads the current group when empty.
     pub fn set_search_query(&mut self, query: String, unix_now: u64) {
         if self.saving {
@@ -1540,37 +2065,18 @@ impl VaultController {
         }
         self.search_query = query;
         self.editor = None;
-        let Some(session) = self.session else {
-            return;
-        };
-        let trimmed = self.search_query.trim().to_owned();
-        if trimmed.is_empty() {
-            if let Some((_, group_ref)) = self.breadcrumbs.last().cloned() {
-                if let Err(err) = self.load_group_contents(&group_ref, None) {
-                    self.set_browser_error(err.message().to_owned());
-                }
-            } else if let Err(err) = self.load_root_group() {
-                self.set_browser_error(err.message().to_owned());
-            }
+        if self.session.is_none() {
             return;
         }
-        match self.service.search(session, &trimmed) {
-            Ok(page) => {
-                if let Some(cursor) = page.next_cursor {
-                    let _ = self.service.release_search_cursor(cursor);
-                }
-                self.child_groups.clear();
-                self.entries = page.hits;
-                self.selected_index = None;
-                self.detail = None;
-                self.clear_browser_status();
-                if !self.entries.is_empty() {
-                    self.select_entry(0, unix_now);
-                }
-            }
-            Err(err) => {
-                self.set_browser_error(err.message().to_owned());
-            }
+        if let Err(err) = self.populate_visible_entries() {
+            self.set_browser_error(err.message().to_owned());
+            return;
+        }
+        self.selected_index = None;
+        self.detail = None;
+        self.clear_browser_status();
+        if !self.entries.is_empty() {
+            self.select_entry(0, unix_now);
         }
     }
 
@@ -1744,6 +2250,40 @@ impl VaultController {
         }
     }
 
+    fn read_editor_custom_fields(
+        service: &VaultService,
+        detail: &EntryDetailState,
+    ) -> Result<(Vec<EditableCustomField>, Zeroizing<String>, bool), String> {
+        let mut custom_fields = Vec::with_capacity(detail.metadata.custom_fields().len());
+        let mut otp_uri = Zeroizing::new(String::new());
+        let mut had_otp_field = false;
+        for descriptor in detail.metadata.custom_fields() {
+            let value = match service.reveal_custom_field(&descriptor.reference()) {
+                Ok(secret) => Zeroizing::new(
+                    std::str::from_utf8(secret.as_slice())
+                        .map_err(|_| String::from("custom field is not valid UTF-8"))?
+                        .to_owned(),
+                ),
+                Err(err) => return Err(err.message().to_owned()),
+            };
+            if descriptor.name() == "otp" {
+                otp_uri = value;
+                had_otp_field = true;
+                continue;
+            }
+            custom_fields.push(EditableCustomField {
+                name: descriptor.name().to_owned(),
+                original_value: value.clone(),
+                value,
+                protected: descriptor.protected(),
+                revealed: !descriptor.protected(),
+                is_new: false,
+                original_protected: descriptor.protected(),
+            });
+        }
+        Ok((custom_fields, otp_uri, had_otp_field))
+    }
+
     /// Opens Entry Editor mode for the currently selected entry.
     ///
     /// # Errors
@@ -1787,33 +2327,22 @@ impl VaultController {
             Zeroizing::new(detail.notes.clone())
         };
 
-        let mut custom_fields = Vec::with_capacity(detail.metadata.custom_fields().len());
-        for descriptor in detail.metadata.custom_fields() {
-            let value = match self.service.reveal_custom_field(&descriptor.reference()) {
-                Ok(secret) => Zeroizing::new(
-                    std::str::from_utf8(secret.as_slice())
-                        .map_err(|_| String::from("custom field is not valid UTF-8"))?
-                        .to_owned(),
-                ),
-                Err(err) => return Err(err.message().to_owned()),
-            };
-            custom_fields.push(EditableCustomField {
-                name: descriptor.name().to_owned(),
-                original_value: value.clone(),
-                value,
-                protected: descriptor.protected(),
-                revealed: !descriptor.protected(),
-                is_new: false,
-                original_protected: descriptor.protected(),
-            });
-        }
+        let (custom_fields, otp_uri, had_otp_field) =
+            Self::read_editor_custom_fields(&self.service, detail)?;
 
         let title = detail.metadata.title().to_owned();
         let tags = detail.metadata.tags().to_vec();
+        let icon_id = detail.metadata.icon_id();
+        let custom_icon_id = detail.metadata.custom_icon_id();
 
         self.editor = Some(EntryEditorState {
             entry_ref,
             path: detail.path.clone(),
+            original_icon_id: icon_id,
+            icon_id,
+            original_custom_icon_id: custom_icon_id,
+            custom_icon_id,
+            icon_changed: false,
             original_title: title.clone(),
             title,
             original_username: username.clone(),
@@ -1831,6 +2360,10 @@ impl VaultController {
             notes,
             original_notes_protected: notes_protected,
             notes_protected,
+            original_otp_uri: otp_uri.clone(),
+            otp_uri,
+            otp_revealed: false,
+            had_otp_field,
             original_tags: tags.clone(),
             tags,
             custom_fields,
@@ -1840,28 +2373,54 @@ impl VaultController {
         Ok(())
     }
 
+    /// Sets the draft standard `KeePass` icon ID (`0..=68`) in the active Entry Editor.
+    pub fn set_editor_icon(&mut self, icon_id: u32) {
+        if !is_valid_standard_icon_id(icon_id) {
+            return;
+        }
+        if let Some(editor) = self.editor.as_mut() {
+            editor.icon_id = icon_id;
+            editor.custom_icon_id = None;
+            editor.icon_changed = true;
+        }
+    }
+
     /// Cancels Entry Editor mode and zeroizes all editor secret buffers.
     pub fn cancel_entry_editor(&mut self) {
         self.editor = None;
         self.set_browser_info("Entry edits cancelled");
     }
 
-    /// Generates a new 20-character password into the active Entry Editor using
-    /// [`VaultService::generate_password_value`].
+    /// Generates a new password into the active Entry Editor using the configured
+    /// length and character-class policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed diagnostic if no editor is active, policy/size is invalid,
+    /// or OS randomness fails.
+    pub fn generate_editor_password_with(
+        &mut self,
+        len: usize,
+        policy: Policy,
+    ) -> Result<Zeroizing<String>, String> {
+        let editor = self
+            .editor
+            .as_mut()
+            .ok_or_else(|| String::from("entry editor is not active"))?;
+        let generated = VaultService::generate_password_value(len, policy)
+            .map_err(|err| err.message().to_owned())?;
+        editor.password.clone_from(&generated);
+        Ok(generated)
+    }
+
+    /// Generates a new password into the active Entry Editor using the current
+    /// controller generator settings (`gen_length`, `gen_policy`).
     ///
     /// # Errors
     ///
     /// Returns a fixed diagnostic if no editor is active or OS randomness fails.
     pub fn generate_editor_password(&mut self) -> Result<Zeroizing<String>, String> {
-        let editor = self
-            .editor
-            .as_mut()
-            .ok_or_else(|| String::from("entry editor is not active"))?;
-        let generated =
-            VaultService::generate_password_value(GENERATED_PASSWORD_LEN, Policy::default())
-                .map_err(|err| err.message().to_owned())?;
-        editor.password.clone_from(&generated);
-        Ok(generated)
+        self.generate_editor_password_with(self.gen_length, self.gen_policy)
     }
 
     /// Returns the active editor's password buffer for timed secret clipboard copy.
@@ -1922,6 +2481,11 @@ impl VaultController {
         if matches!(trimmed, "Title" | "UserName" | "Password" | "URL" | "Notes") {
             return Err(String::from(
                 "standard field names cannot be added as custom strings",
+            ));
+        }
+        if trimmed == "otp" {
+            return Err(String::from(
+                "use the OTP Auth URI field above to configure 'otp'",
             ));
         }
         if editor
@@ -2001,6 +2565,7 @@ impl VaultController {
     ) -> Result<EntryRef, ServiceError> {
         let session = self.session.ok_or(ServiceError::Locked)?;
         if self.search_query.trim().is_empty()
+            && !self.favorites_only
             && let Some(idx) = group_entry_index
         {
             let labels: Vec<String> = self
@@ -2087,6 +2652,20 @@ impl VaultController {
         if draft.title != draft.original_title {
             Self::validate_title_text(&draft.title)?;
         }
+        if draft.icon_changed && !is_valid_standard_icon_id(draft.icon_id) {
+            return Err(String::from("invalid icon id"));
+        }
+        let trimmed_otp = draft.otp_uri.trim();
+        if !trimmed_otp.is_empty() && draft.otp_uri != draft.original_otp_uri {
+            let parsed = OtpUri::parse(trimmed_otp).map_err(|_| {
+                String::from(
+                    "invalid OTP Auth URI (expected otpauth://totp/... with Base32 secret)",
+                )
+            })?;
+            if parsed.kind != OtpKind::Totp {
+                return Err(String::from("only otpauth://totp/... URIs are supported"));
+            }
+        }
         if draft.tags != draft.original_tags {
             if draft.tags.len() > 256 {
                 return Err(String::from("at most 256 tags are allowed per entry"));
@@ -2164,6 +2743,15 @@ impl VaultController {
                 protect_in_memory: Some(draft.notes_protected),
             });
         }
+        let trimmed_otp = draft.otp_uri.trim();
+        if !trimmed_otp.is_empty() && draft.otp_uri != draft.original_otp_uri {
+            updates.push(FieldUpdate {
+                key: String::from("otp"),
+                value: Zeroizing::new(trimmed_otp.to_owned()),
+                protected: Some(true),
+                protect_in_memory: Some(true),
+            });
+        }
         for field in &draft.custom_fields {
             if field.is_new
                 || field.value != field.original_value
@@ -2188,11 +2776,56 @@ impl VaultController {
         draft.original_url_protected = draft.url_protected;
         draft.original_notes = draft.notes.clone();
         draft.original_notes_protected = draft.notes_protected;
+        let trimmed_otp = draft.otp_uri.trim().to_owned();
+        if !trimmed_otp.is_empty() {
+            draft.had_otp_field = true;
+        }
+        draft.original_otp_uri = Zeroizing::new(trimmed_otp);
         for field in &mut draft.custom_fields {
             field.is_new = false;
             field.original_value = field.value.clone();
             field.original_protected = field.protected;
         }
+    }
+
+    fn apply_editor_icon_and_tags(
+        &mut self,
+        draft: &mut EntryEditorState,
+        entry_ref: &mut EntryRef,
+        current_path: &str,
+        group_idx: Option<usize>,
+    ) -> Result<bool, String> {
+        let mut mutated = false;
+        if draft.icon_changed
+            && (draft.icon_id != draft.original_icon_id
+                || draft.custom_icon_id != draft.original_custom_icon_id)
+        {
+            self.service
+                .set_entry_icon(entry_ref, draft.icon_id)
+                .map_err(|err| err.message().to_owned())?;
+            mutated = true;
+            self.dirty = true;
+            draft.original_icon_id = draft.icon_id;
+            draft.original_custom_icon_id = None;
+            draft.icon_changed = false;
+            *entry_ref = self
+                .fresh_entry_ref_mut(current_path, group_idx)
+                .map_err(|err| err.message().to_owned())?;
+            draft.entry_ref = entry_ref.clone();
+        }
+        if draft.tags != draft.original_tags {
+            self.service
+                .set_tags(entry_ref, draft.tags.clone())
+                .map_err(|err| err.message().to_owned())?;
+            mutated = true;
+            self.dirty = true;
+            draft.original_tags = draft.tags.clone();
+            *entry_ref = self
+                .fresh_entry_ref_mut(current_path, group_idx)
+                .map_err(|err| err.message().to_owned())?;
+            draft.entry_ref = entry_ref.clone();
+        }
+        Ok(mutated)
     }
 
     fn apply_entry_editor_inner(
@@ -2226,13 +2859,17 @@ impl VaultController {
             draft.entry_ref = entry_ref.clone();
         }
 
-        if draft.tags != draft.original_tags {
+        mutated |=
+            self.apply_editor_icon_and_tags(draft, &mut entry_ref, &current_path, group_idx)?;
+
+        if draft.otp_uri.trim().is_empty() && draft.had_otp_field {
             self.service
-                .set_tags(&entry_ref, draft.tags.clone())
+                .remove_custom_field(&entry_ref, "otp")
                 .map_err(|err| err.message().to_owned())?;
             mutated = true;
             self.dirty = true;
-            draft.original_tags = draft.tags.clone();
+            draft.had_otp_field = false;
+            draft.original_otp_uri = Zeroizing::new(String::new());
             entry_ref = self
                 .fresh_entry_ref_mut(&current_path, group_idx)
                 .map_err(|err| err.message().to_owned())?;
@@ -2596,12 +3233,25 @@ impl VaultController {
         Ok(Zeroizing::new(text.to_owned()))
     }
 
+    /// Sets an informational inject banner status.
+    pub fn set_inject_info(&mut self, msg: impl Into<String>) {
+        self.inject_status = Some(msg.into());
+        self.inject_status_is_error = false;
+    }
+
+    /// Sets an error inject banner status.
+    pub fn set_inject_error(&mut self, msg: impl Into<String>) {
+        self.inject_status = Some(msg.into());
+        self.inject_status_is_error = true;
+    }
+
     /// Updates `inject_input` and refreshes reference extraction without resolving secrets.
     pub fn set_inject_input(&mut self, input: String) {
         self.inject_input = input;
         self.rendered_output = None;
         self.inject_output_revealed = false;
         self.inject_status = None;
+        self.inject_status_is_error = false;
         self.refresh_inject_preview();
     }
 
@@ -2611,6 +3261,7 @@ impl VaultController {
         self.rendered_output = None;
         self.inject_output_revealed = false;
         self.inject_status = None;
+        self.inject_status_is_error = false;
         self.refresh_inject_preview();
     }
 
@@ -2689,7 +3340,7 @@ impl VaultController {
         };
         self.rendered_output = Some(output);
         self.inject_output_revealed = false;
-        self.inject_status = Some(String::from("Rendered securely in memory (masked)"));
+        self.set_inject_info("Rendered securely in memory (masked)");
         Ok(())
     }
 
@@ -2704,18 +3355,19 @@ impl VaultController {
         let target = self.inject_save_path.trim();
         if target.is_empty() {
             let msg = "enter a target path before saving";
-            self.inject_status = Some(msg.to_owned());
+            self.set_inject_error(msg);
             return Err(msg);
         }
         let Some(output) = &self.rendered_output else {
             let msg = "render the template before saving";
-            self.inject_status = Some(msg.to_owned());
+            self.set_inject_error(msg);
             return Err(msg);
         };
-        write_private_noclobber(Path::new(target), output.as_bytes()).inspect_err(|err| {
-            self.inject_status = Some((*err).to_owned());
-        })?;
-        self.inject_status = Some(String::from("Saved private output (no-clobber)"));
+        if let Err(err) = write_private_noclobber(Path::new(target), output.as_bytes()) {
+            self.set_inject_error(err);
+            return Err(err);
+        }
+        self.set_inject_info("Saved private output (no-clobber)");
         Ok(())
     }
 }
@@ -3638,5 +4290,250 @@ mod tests {
         assert_eq!(sanitize_attachment_prefill(""), "attachment.bin");
         assert_eq!(sanitize_attachment_prefill("\u{200F}"), "attachment.bin");
         assert_eq!(sanitize_attachment_prefill("my..file.txt"), "my..file.txt");
+    }
+
+    #[test]
+    fn kdbx_extension_and_inject_file_bounded_checks() -> Result<(), String> {
+        assert_eq!(
+            ensure_kdbx_extension(PathBuf::from("/tmp/myvault")),
+            PathBuf::from("/tmp/myvault.kdbx")
+        );
+        assert_eq!(
+            ensure_kdbx_extension(PathBuf::from("/tmp/already.kdbx")),
+            PathBuf::from("/tmp/already.kdbx")
+        );
+        assert_eq!(
+            ensure_kdbx_extension(PathBuf::from("/tmp/custom.ext")),
+            PathBuf::from("/tmp/custom.ext")
+        );
+        assert_eq!(ensure_kdbx_extension(PathBuf::new()), PathBuf::new());
+
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let env_path = dir.path().join("app.env");
+        std::fs::write(&env_path, "API_KEY=nkp://Infra/ProdAPI#Password\n")
+            .map_err(|err| err.to_string())?;
+        let loaded = read_inject_file_bounded(&env_path)?;
+        assert!(loaded.contains("nkp://Infra/ProdAPI#Password"));
+
+        let oversized = dir.path().join("huge.env");
+        let f = File::create(&oversized).map_err(|err| err.to_string())?;
+        f.set_len(MAX_INJECT_FILE_BYTES + 1)
+            .map_err(|err| err.to_string())?;
+        assert!(read_inject_file_bounded(&oversized).is_err());
+
+        let invalid_utf8 = dir.path().join("bad.env");
+        std::fs::write(&invalid_utf8, [0xFF_u8, 0xFE_u8]).map_err(|err| err.to_string())?;
+        assert!(read_inject_file_bounded(&invalid_utf8).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn configured_vaults_loads_aliases_and_ignores_malformed() -> Result<(), String> {
+        use std::ffi::OsStr;
+
+        assert!(validated_env_base_dir(OsStr::new("")).is_none());
+        assert!(validated_env_base_dir(OsStr::new("relative/dir")).is_none());
+        assert!(validated_env_base_dir(OsStr::new("/tmp/../etc")).is_none());
+        assert!(validated_env_base_dir(OsStr::new("/tmp/has\0nul")).is_none());
+        assert!(validated_env_base_dir(OsStr::new(r"\\?\C:\foo")).is_none());
+        assert!(validated_env_base_dir(OsStr::new(r"\\.\pipe\foo")).is_none());
+
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let missing = dir.path().join("does-not-exist.json");
+        assert_eq!(load_configured_vaults_from_path(&missing), Vec::new());
+
+        let malformed = dir.path().join("bad.json");
+        std::fs::write(&malformed, b"{not valid json").map_err(|err| err.to_string())?;
+        assert_eq!(load_configured_vaults_from_path(&malformed), Vec::new());
+
+        let cfg_dir = dir.path().join("safe-cfg");
+        std::fs::create_dir_all(&cfg_dir).map_err(|err| err.to_string())?;
+        let cfg = cfg_dir.join("config.json");
+        std::fs::write(
+            &cfg,
+            r#"{
+                "current": "work",
+                "default_vault": "/vaults/default.kdbx",
+                "aliases": {
+                    "work": { "kind": "vault", "target": "/vaults/work.kdbx" },
+                    "bidi": { "kind": "vault", "target": "/vaults/\u202Eevil.kdbx" },
+                    "api": { "kind": "entry", "target": "Infra/ProdAPI", "field": "Password" }
+                }
+            }"#,
+        )
+        .map_err(|err| err.to_string())?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cfg_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|err| err.to_string())?;
+            // Group/world-readable config.json must be rejected.
+            std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o644))
+                .map_err(|err| err.to_string())?;
+            assert_eq!(load_configured_vaults_from_path(&cfg), Vec::new());
+            // Owner-only config.json succeeds.
+            std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| err.to_string())?;
+        }
+
+        let vaults = load_configured_vaults_from_path(&cfg);
+        assert_eq!(
+            vaults,
+            vec![
+                ConfiguredVault {
+                    label: String::from("work"),
+                    path: String::from("/vaults/work.kdbx"),
+                },
+                ConfiguredVault {
+                    label: String::from("Default"),
+                    path: String::from("/vaults/default.kdbx"),
+                },
+            ]
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // World-writable parent directory must be rejected.
+            std::fs::set_permissions(&cfg_dir, std::fs::Permissions::from_mode(0o777))
+                .map_err(|err| err.to_string())?;
+            assert_eq!(load_configured_vaults_from_path(&cfg), Vec::new());
+
+            // Symlinked parent directory must be rejected.
+            let link_dir = dir.path().join("link-cfg");
+            std::os::unix::fs::symlink(&cfg_dir, &link_dir).map_err(|err| err.to_string())?;
+            assert_eq!(
+                load_configured_vaults_from_path(&link_dir.join("config.json")),
+                Vec::new()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mask_all_reveals_clears_dirty_session_reveals_on_focus_loss() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let (vault_path, master) = build_fixture_vault(dir.path())?;
+
+        let mut ctrl = VaultController::new();
+        ctrl.vault_path = vault_path.to_string_lossy().into_owned();
+        let (path, key_path, gen_id) = ctrl
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        let outcome = open_vault_blocking(&path, &master, key_path.as_deref());
+        ctrl.finish_unlock(gen_id, outcome, 10.0);
+        ctrl.open_child_group(0);
+
+        ctrl.toggle_reveal_password();
+        ctrl.toggle_reveal_custom_field(1);
+        ctrl.begin_edit_selected_entry()?;
+        if let Some(ed) = ctrl.editor.as_mut() {
+            ed.password_revealed = true;
+            ed.otp_revealed = true;
+            if let Some(cf) = ed.custom_fields.get_mut(0) {
+                cf.revealed = true;
+            }
+        }
+        ctrl.inject_output_revealed = true;
+        ctrl.dirty = true;
+
+        ctrl.mask_all_reveals();
+        let cleanup = ctrl.on_window_focus(false);
+        assert!(!cleanup.locked_active_session);
+        assert!(ctrl.pending_lock_decision.is_some());
+        let detail = ctrl.detail.as_ref().ok_or_else(|| String::from("detail"))?;
+        assert!(detail.revealed_password.is_none());
+        assert!(detail.revealed_custom_fields.is_empty());
+        let ed = ctrl.editor.as_ref().ok_or_else(|| String::from("editor"))?;
+        assert!(!ed.password_revealed);
+        assert!(!ed.otp_revealed);
+        assert!(ed.custom_fields.iter().all(|f| !f.revealed));
+        assert!(!ctrl.inject_output_revealed);
+        Ok(())
+    }
+
+    #[test]
+    fn icons_favorites_totp_editor_and_generator_policy() -> Result<(), String> {
+        let dir = tempdir().map_err(|err| err.to_string())?;
+        let (vault_path, master) = build_fixture_vault(dir.path())?;
+
+        let mut ctrl = VaultController::new();
+        ctrl.vault_path = vault_path.to_string_lossy().into_owned();
+        let (path, key_path, gen_id) = ctrl
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("begin_unlock failed"))?;
+        let outcome = open_vault_blocking(&path, &master, key_path.as_deref());
+        ctrl.finish_unlock(gen_id, outcome, 10.0);
+        assert_eq!(ctrl.recent_vaults, vec![ctrl.vault_path.clone()]);
+
+        // Change group icon and entry icon + favorite + TOTP URI + password generator policy.
+        ctrl.open_child_group(0);
+        ctrl.set_current_group_icon(3)?;
+        assert_eq!(ctrl.current_group_icon(), (3, None));
+
+        ctrl.select_entry(1, 1_700_000_000);
+        assert!(!ctrl.is_selected_favorite());
+        assert!(ctrl.toggle_selected_favorite(1_700_000_000)?);
+        assert!(ctrl.is_selected_favorite());
+
+        ctrl.set_favorites_only(true, 1_700_000_000);
+        assert_eq!(ctrl.entries.len(), 1);
+        assert_eq!(ctrl.entries[0].title(), "ProtectedNoteEntry");
+
+        ctrl.begin_edit_selected_entry()?;
+        ctrl.set_editor_icon(19);
+        if let Some(editor) = ctrl.editor.as_mut() {
+            editor.otp_uri = Zeroizing::new(String::from(
+                "otpauth://totp/Test:user?secret=JBSWY3DPEHPK3PXP&period=30",
+            ));
+        }
+        let digits_only = Policy {
+            upper: false,
+            lower: false,
+            digits: true,
+            symbols: false,
+        };
+        let pin = ctrl.generate_editor_password_with(16, digits_only)?;
+        assert_eq!(pin.len(), 16);
+        assert!(pin.chars().all(|ch| ch.is_ascii_digit()));
+        ctrl.apply_entry_editor(1_700_000_000)?;
+
+        let detail = ctrl
+            .detail
+            .as_ref()
+            .ok_or_else(|| String::from("detail missing after editor apply"))?;
+        assert_eq!(detail.metadata.icon_id(), 19);
+        assert!(detail.metadata.has_otp());
+        assert!(detail.totp.is_some());
+
+        // Clear OTP URI removes it cleanly.
+        ctrl.begin_edit_selected_entry()?;
+        if let Some(editor) = ctrl.editor.as_mut() {
+            editor.otp_uri = Zeroizing::new(String::new());
+        }
+        ctrl.apply_entry_editor(1_700_000_000)?;
+        let detail = ctrl
+            .detail
+            .as_ref()
+            .ok_or_else(|| String::from("detail missing after otp clear"))?;
+        assert!(!detail.metadata.has_otp());
+        assert!(detail.totp.is_none());
+
+        run_save_blocking(&mut ctrl, false)?;
+        let _ = ctrl.lock();
+
+        // Reopen and verify group icon 3, entry icon 19, and favorite tag persisted!
+        let (path2, key2, gen2) = ctrl
+            .begin_unlock(false)
+            .ok_or_else(|| String::from("reopen failed"))?;
+        let outcome2 = open_vault_blocking(&path2, &master, key2.as_deref());
+        ctrl.finish_unlock(gen2, outcome2, 20.0);
+        assert_eq!(ctrl.child_groups[0].icon_id(), 3);
+        ctrl.open_child_group(0);
+        ctrl.select_entry(1, 1_700_000_000);
+        assert_eq!(ctrl.detail.as_ref().map(|d| d.metadata.icon_id()), Some(19));
+        assert!(ctrl.is_selected_favorite());
+        Ok(())
     }
 }
