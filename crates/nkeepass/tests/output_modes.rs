@@ -1594,3 +1594,566 @@ fn powershell_output_neutralizes_unicode_curly_single_quotes() {
         "$env:CURLY = ('a' + [char]0x2018 + '; Invoke-Expression calc;' + [char]0x2019 + '' + [char]0x201A + '' + [char]0x201B + '''b')\n"
     );
 }
+
+fn strip_sgr_bytes(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index..].starts_with(b"\x1b[") {
+            index += 2;
+            while index < input.len() && input[index] != b'm' {
+                index += 1;
+            }
+            if index < input.len() {
+                index += 1;
+            }
+        } else {
+            output.push(input[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "covers all six human-format metadata routes together"
+)]
+fn human_format_works_across_all_six_metadata_routes_without_leaking_secrets() {
+    let fixture = Fixture::new();
+    let auth = ["--password-env", "NKEEPASS_TEST_PASSWORD"];
+    let run_colored = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+        if !args.iter().any(|arg| *arg == "alias") {
+            command.args(["--vault", fixture.vault.to_str().unwrap()]);
+        }
+        command
+            .args(args)
+            .env("XDG_CONFIG_HOME", fixture.directory.path().join("config"))
+            .env("XDG_DATA_HOME", fixture.directory.path().join("data"))
+            .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+            .env("TERM", "xterm")
+            .env_remove("NO_COLOR")
+            .env_remove("FORCE_COLOR")
+            .env_remove("COLORTERM")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    // Set up an alias so `alias ls` has data in both JSON and human modes.
+    let alias_set = run_colored(&["alias", "set", "mail", "LOGIN"]);
+    success(&alias_set);
+
+    let metadata_routes: Vec<Vec<&str>> = vec![
+        vec!["ls", auth[0], auth[1]],
+        vec!["secrets", "ls", auth[0], auth[1]],
+        vec!["search", "LOGIN", auth[0], auth[1]],
+        vec!["secrets", "search", "LOGIN", auth[0], auth[1]],
+        vec!["show", "LOGIN", auth[0], auth[1]],
+        vec!["secrets", "show", "LOGIN", auth[0], auth[1]],
+        vec!["files", "ls", "LOGIN", auth[0], auth[1]],
+        vec!["field", "ls", "LOGIN", auth[0], auth[1]],
+        vec!["alias", "ls"],
+    ];
+
+    for base_args in &metadata_routes {
+        // Default == explicit `--format json`, even under `--color=always`.
+        let default_out = run_colored(base_args);
+        let default_bytes = success(&default_out).to_vec();
+
+        let mut json_args = vec!["--color=always"];
+        json_args.extend(base_args.iter().copied());
+        json_args.extend(["--format", "json"]);
+        let json_out = run_colored(&json_args);
+        assert_eq!(
+            success(&json_out),
+            default_bytes.as_slice(),
+            "{base_args:?}"
+        );
+        assert!(!json_out.stdout.contains(&0x1b), "{base_args:?}");
+
+        // `--format human` with `--color=never` vs `--color=always`.
+        let mut human_plain_args = vec!["--color=never"];
+        human_plain_args.extend(base_args.iter().copied());
+        human_plain_args.extend(["--format", "human"]);
+        let human_plain = run_colored(&human_plain_args);
+        assert_markers_absent(&human_plain);
+        let plain_bytes = success(&human_plain).to_vec();
+        assert!(!plain_bytes.contains(&0x1b), "{base_args:?}");
+
+        let mut human_color_args = vec!["--color=always"];
+        human_color_args.extend(base_args.iter().copied());
+        human_color_args.extend(["--format", "human"]);
+        let human_color = run_colored(&human_color_args);
+        assert_markers_absent(&human_color);
+        let color_bytes = success(&human_color).to_vec();
+        assert!(
+            color_bytes.windows(2).any(|w| w == b"\x1b["),
+            "expected SGR styling for {base_args:?}"
+        );
+        assert_eq!(
+            strip_sgr_bytes(&color_bytes),
+            plain_bytes,
+            "color altered plain layout for {base_args:?}"
+        );
+    }
+
+    let ls_human =
+        String::from_utf8(run(&fixture, &["ls", "--format", "human", auth[0], auth[1]]).stdout)
+            .unwrap();
+    assert!(ls_human.contains("PATH") && ls_human.contains("LOGIN"));
+    assert!(ls_human.contains("[otp]"));
+
+    let search_human = String::from_utf8(
+        run(
+            &fixture,
+            &["search", "LOGIN", "--format", "human", auth[0], auth[1]],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert!(search_human.contains("PATH") && search_human.contains("LOGIN"));
+    assert!(search_human.contains("[otp]"));
+
+    let show_human = String::from_utf8(
+        run(
+            &fixture,
+            &["show", "LOGIN", "--format", "human", auth[0], auth[1]],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert!(show_human.contains("Entry: LOGIN"));
+    assert!(show_human.contains("OTP: [otp] configured"));
+    assert!(show_human.contains("[protected]"));
+    assert!(show_human.contains("report.bin"));
+
+    let files_human = String::from_utf8(
+        run(
+            &fixture,
+            &[
+                "files", "ls", "LOGIN", "--format", "human", auth[0], auth[1],
+            ],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert!(files_human.contains("NAME") && files_human.contains("report.bin"));
+    assert!(files_human.contains("[protected]"));
+
+    let field_human = String::from_utf8(
+        run(
+            &fixture,
+            &[
+                "field", "ls", "LOGIN", "--format", "human", auth[0], auth[1],
+            ],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert!(field_human.contains("NAME") && field_human.contains("Token"));
+    assert!(field_human.contains("[protected]"));
+    assert!(field_human.contains("[otp]"));
+
+    let alias_human =
+        String::from_utf8(run(&fixture, &["alias", "ls", "--format", "human"]).stdout).unwrap();
+    assert!(alias_human.contains("NAME") && alias_human.contains("mail"));
+    assert!(alias_human.contains("[entry]") && alias_human.contains("LOGIN"));
+
+    // Empty states for search, files ls, and a clean alias store.
+    let empty_search = String::from_utf8(
+        success(&run(
+            &fixture,
+            &[
+                "search",
+                "no-such-match-xyz",
+                "--format",
+                "human",
+                auth[0],
+                auth[1],
+            ],
+        ))
+        .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(empty_search, "(no matches)\n");
+
+    let empty_files = String::from_utf8(
+        success(&run(
+            &fixture,
+            &[
+                "files",
+                "ls",
+                HOSTILE_TITLE,
+                "--format",
+                "human",
+                auth[0],
+                auth[1],
+            ],
+        ))
+        .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(empty_files, "(no attachments)\n");
+}
+
+#[test]
+fn human_format_sanitizes_bidi_and_truncates_wide_unicode_metadata() {
+    let mut database = KeePassDatabase::default();
+    let long_title = format!(
+        "prefix\u{202E}SPOOF\u{2066}{}",
+        "日本語の長いタイトル".repeat(12)
+    );
+    let mut entry = Entry::new(&long_title);
+    entry.password = ProtectedValue::from_text("secret-value-never-shown");
+    entry.tags = vec!["tag-\u{202E}bidi".to_owned(), "second".to_owned()];
+    let long_field = format!("Custom\u{202E}Field_{}", "幅広文字".repeat(25));
+    entry.set_field(Field {
+        key: long_field.clone(),
+        value: ProtectedValue::from_text("custom-secret-never-shown"),
+        protected: true,
+        protect_in_memory: true,
+    });
+    let reference = database.binary_pool.add(b"attachment-bytes".to_vec(), true);
+    let long_attachment = format!("attach\u{202E}_{}.bin", "あいうえお".repeat(20));
+    entry.attachments.push(Attachment {
+        name: long_attachment,
+        reference,
+    });
+    database.add_entry(entry);
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("unicode-human.kdbx");
+    KdbxFile::save(
+        &database,
+        std::fs::File::create(&vault).unwrap(),
+        &mut KdbxCredentials::password(PASSWORD).unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+
+    let run_vault = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .args(["--color=never", "--vault", vault.to_str().unwrap()])
+            .args(args)
+            .args(["--password-env", "NKEEPASS_TEST_PASSWORD"])
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    for args in [
+        vec!["ls", "--format", "human"],
+        vec!["search", "SPOOF", "--format", "human"],
+        vec!["show", &long_title, "--format", "human"],
+        vec!["files", "ls", &long_title, "--format", "human"],
+        vec!["field", "ls", &long_title, "--format", "human"],
+    ] {
+        let output = run_vault(&args);
+        let text = String::from_utf8(success(&output).to_vec()).unwrap();
+        assert!(!text.contains("secret-value-never-shown"), "{args:?}");
+        assert!(!text.contains("custom-secret-never-shown"), "{args:?}");
+        for forbidden in ['\u{202E}', '\u{2066}', '\u{200E}', '\u{001B}', '\u{009B}'] {
+            assert!(
+                !text.contains(forbidden),
+                "raw unsafe char U+{:04X} reached stdout in {args:?}: {text:?}",
+                u32::from(forbidden)
+            );
+        }
+        assert!(
+            text.contains('…'),
+            "expected truncation marker in {args:?}: {text}"
+        );
+        assert!(
+            text.contains("\\u{202e}"),
+            "expected escaped BiDi marker in {args:?}: {text}"
+        );
+    }
+}
+
+#[test]
+fn human_format_is_rejected_on_secret_and_interchange_routes() {
+    let fixture = Fixture::new();
+    let template = fixture.directory.path().join("tmpl.txt");
+    std::fs::write(&template, "KEY={{nkp://LOGIN#Password}}\n").unwrap();
+    let export_dest = fixture.directory.path().join("export.json");
+    let import_src = fixture.directory.path().join("import.json");
+    std::fs::write(&import_src, "{}").unwrap();
+    let auth = ["--password-env", "NKEEPASS_TEST_PASSWORD"];
+
+    for args in [
+        vec!["get", "LOGIN", "--format", "human", auth[0], auth[1]],
+        vec![
+            "get", "many", "LOGIN", "--format", "human", auth[0], auth[1],
+        ],
+        vec!["otp", "LOGIN", "--format", "human", auth[0], auth[1]],
+        vec![
+            "field", "get", "LOGIN", "Token", "--format", "human", auth[0], auth[1],
+        ],
+        vec![
+            "env", "-k", "LOGIN", "-F", "Password", "-n", "PW", "--format", "human", auth[0],
+            auth[1],
+        ],
+        vec![
+            "secrets", "env", "-k", "LOGIN", "-F", "Password", "-n", "PW", "--format", "human",
+            auth[0], auth[1],
+        ],
+        vec![
+            "inject",
+            "-f",
+            template.to_str().unwrap(),
+            "--format",
+            "human",
+            auth[0],
+            auth[1],
+        ],
+        vec![
+            "export",
+            "-o",
+            export_dest.to_str().unwrap(),
+            "--format",
+            "human",
+            auth[0],
+            auth[1],
+        ],
+        vec![
+            "import",
+            "-f",
+            import_src.to_str().unwrap(),
+            "--format",
+            "human",
+            auth[0],
+            auth[1],
+        ],
+    ] {
+        let output = run(&fixture, &args);
+        assert!(
+            !output.status.success(),
+            "route unexpectedly accepted --format human: {args:?}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "rejected --format human wrote stdout: {args:?}"
+        );
+        assert_markers_absent(&output);
+    }
+    assert!(!export_dest.exists());
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "covers pre-closed stdout/stderr and mid-stream broken-pipe cases"
+)]
+fn broken_pipe_never_panics_on_help_version_completion_and_listings() {
+    use std::io::Read;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("pipe-test.kdbx");
+    let mut database = KeePassDatabase::default();
+    for index in 0..2_000 {
+        let mut entry = Entry::new(format!("entry-{index:04}"));
+        if index == 0 {
+            entry.password = ProtectedValue::from_text("short-pw");
+        }
+        database.root.add_entry(entry);
+    }
+    KdbxFile::save(
+        &database,
+        std::fs::File::create(&vault).unwrap(),
+        &mut KdbxCredentials::password(PASSWORD).unwrap(),
+        KdbxWriteOptions {
+            aes_kdf_rounds: 8,
+            ..KdbxWriteOptions::default()
+        },
+        &KdbxReadLimits::default(),
+    )
+    .unwrap();
+
+    let stdout_cases: &[(&[&str], bool, &[u8])] = &[
+        (&["--help"], false, b"nkp: cannot write output\n"),
+        (&["version"], false, b"nkp: cannot write output\n"),
+        (&["--version"], false, b"nkp: cannot write output\n"),
+        (
+            &["completion", "bash"],
+            false,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &["shell", "init", "bash"],
+            false,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &["shell", "completions", "bash"],
+            false,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &["ls", "--password-env", "NKEEPASS_TEST_PASSWORD"],
+            true,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &[
+                "ls",
+                "--format",
+                "human",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+            true,
+            b"nkp: cannot write output\n",
+        ),
+        (
+            &[
+                "get",
+                "entry-0000",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+            true,
+            b"nkp: cannot write value\n",
+        ),
+        (
+            &[
+                "get",
+                "entry-0000",
+                "--format",
+                "null",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+            true,
+            b"nkp: cannot write value\n",
+        ),
+        (
+            &[
+                "env",
+                "-k",
+                "entry-0000",
+                "-F",
+                "Password",
+                "-n",
+                "PW",
+                "--format",
+                "null",
+                "--password-env",
+                "NKEEPASS_TEST_PASSWORD",
+            ],
+            true,
+            b"nkp: cannot write value\n",
+        ),
+    ];
+
+    for (args, needs_vault, expected_stderr) in stdout_cases {
+        // Close read end deterministically BEFORE spawn() so there is no spawn-vs-drop race.
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nkp")).isolate_application_environment();
+        command
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env("NKEEPASS_TEST_PASSWORD", PASSWORD);
+        if *needs_vault {
+            command.args(["--vault", vault.to_str().unwrap()]);
+        }
+        command.args(*args);
+        let output = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr_text.contains("panicked at")
+                && !stderr_text.contains("Broken pipe")
+                && !stderr_text.contains("RUST_BACKTRACE"),
+            "broken pipe panicked for {args:?}: {stderr_text:?}"
+        );
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr_text:?}");
+        assert_eq!(
+            output.stderr.as_slice(),
+            *expected_stderr,
+            "{args:?}: {stderr_text:?}"
+        );
+    }
+
+    // Pre-closed stderr must never panic either (status != 101).
+    for (args, expected_code) in [
+        (&["trust", "--prune"][..], 0),
+        (&["untrust", "--all"][..], 0),
+        (&["unknown-command"][..], 2),
+    ] {
+        let (err_reader, err_writer) = std::io::pipe().unwrap();
+        drop(err_reader);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(err_writer))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_code), "{args:?}");
+    }
+
+    // Also close the pipe partway through a multi-line listing (>64 KiB pipe buffer).
+    for args in [
+        vec![
+            "--vault",
+            vault.to_str().unwrap(),
+            "ls",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+        vec![
+            "--vault",
+            vault.to_str().unwrap(),
+            "ls",
+            "--format",
+            "human",
+            "--password-env",
+            "NKEEPASS_TEST_PASSWORD",
+        ],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nkp"))
+            .isolate_application_environment()
+            .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env("NKEEPASS_TEST_PASSWORD", PASSWORD)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut prefix = [0_u8; 16];
+        stdout.read_exact(&mut prefix).unwrap();
+        drop(stdout);
+        let output = child.wait_with_output().unwrap();
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr_text.contains("panicked at"),
+            "{args:?}: {stderr_text:?}"
+        );
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr_text:?}");
+        assert_eq!(output.stderr, b"nkp: cannot write output\n");
+    }
+}

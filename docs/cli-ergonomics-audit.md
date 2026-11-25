@@ -516,7 +516,7 @@ listing, confirmation, output name, or clipboard sink.
 
 ### P2 — Human render and color contract (not a wire change)
 
-- [ ] Add opt-in human metadata output (`--format human` on listings/descriptors
+- [x] Add opt-in human metadata output (`--format human` on listings/descriptors
   where a user actually benefits). Keep current default raw/text/JSON/NDJSON
   schemas and status codes on **both** TTY and pipes; don't auto-reformat by
   detecting stdout. Can improve existing help, context and init human layout
@@ -527,7 +527,7 @@ listing, confirmation, output name, or clipboard sink.
   visible marker; handle Unicode column width and narrow terminals. Machine
   formats keep exact bytes: no headers, footers, styling, added newline, ANSI
   reset, or progress.
-- [ ] Implement CLI presentation `--color auto|never|always|basic|truecolor`
+- [x] Implement CLI presentation `--color auto|never|always|basic|truecolor`
   and `--no-color` alias `never` on actual presentation routes, once only.
   Explicit policy wins over env; absent CLI, nonempty `NO_COLOR` wins over
   `FORCE_COLOR`; empty `NO_COLOR` is absent. For human styling only,
@@ -551,7 +551,7 @@ listing, confirmation, output name, or clipboard sink.
   sanitization. No OSC, hyperlinks, cursor control, or secrets rendered by
   styling code. Evaluate stdout and stderr capabilities independently;
   keep machine-mode diagnostics plain. Publish exact precedence and examples.
-- [ ] Normalize output failure and status language. Never panic on broken
+- [x] Normalize output failure and status language. Never panic on broken
   pipe (including help/version/completion); return a consistent documented
   controlled disposition without confusing post-mutation failures with
   rollback. Document stable categories/statuses before introducing any

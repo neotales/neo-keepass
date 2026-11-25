@@ -26,15 +26,28 @@ requests truecolor. Invalid `FORCE_COLOR` values are ignored. Explicit
 `--color=always` can color human output redirected to a pager; `TERM=dumb` and
 unsupported Windows terminals remain plain.
 
-Color affects only human help and diagnostic labels. A color policy is accepted
+Color affects only human help, explicit `--format human` metadata output (on
+`ls`, `search`, `show`, `files ls`, `field ls`, and `alias ls`), and human
+diagnostic labels. A color policy is accepted
 but ignored by machine/raw routes to preserve their exact bytes: data output,
-JSON, null-delimited and shell formats, completion scripts, files, and
+default JSON/NDJSON listings and descriptors, null-delimited and shell formats,
+completion scripts, files, and
 child-process output are never styled, even when color is forced.
 Diagnostics for data routes (including `show`, `otp`, all interchange forms,
 and `secrets env/environment`) are also always plain. This is intentional:
 forcing presentation color never rejects an otherwise valid data command.
 Help remains human output even when requested for a data route; styling is
 inserted after wrapping, so disabling it leaves exactly the same layout.
+
+## Output failure and broken pipes
+
+Standard output write failures — including a closed/broken pipe when piping
+`--help`, `version`, `completion`, `shell init`, `shell completions`, listings,
+or value output to commands such as `head` — never panic. The CLI reports a
+controlled static error on stderr (such as `nkp: cannot write output`) and exits
+with status `2`. For mutating commands that emit a final stdout report (`init`,
+`import`, `sync`), a stdout write failure after saving does not roll back the
+already-saved vault or configuration.
 
 For `exec/x`, the first `--` **after the exec route** starts child argv; a
 preceding exec value option must be complete before it. A root `-V` / `--vault`

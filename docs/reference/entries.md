@@ -13,12 +13,14 @@ compatibility aliases.
 ### `files ls`
 
 ```text
-nkp files ls (ENTRY | --key ENTRY)
+nkp files ls (ENTRY | --key ENTRY) [--format json|human]
 ```
 
-Lists attachment names and sizes for the selected entry. `list` aliases `ls`.
-The entry selector may be positional or supplied with `-k` / `--key`; do not
-supply both.
+Lists attachment names, byte sizes, and protection flags for the selected entry
+as JSON Lines (`--format json`, the default) or bounded human-readable columns
+(`--format human`, marking attachments `[protected]` or `[plain]` and empty
+lists `(no attachments)`). `list` aliases `ls`. The entry selector may be
+positional or supplied with `-k` / `--key`; do not supply both.
 
 ### `files add`
 
@@ -98,13 +100,15 @@ The group name is `field`. `custom-field` is an alias.
 ### `field ls`
 
 ```text
-nkp field ls (ENTRY | --key ENTRY)
+nkp field ls (ENTRY | --key ENTRY) [--format json|human]
 ```
 
 Lists all fields present on one entry, including built-in fields such as
-`Title`, `UserName`, `Password`, `URL`, and `Notes`. `list` aliases `ls`. The
-entry selector may be positional or supplied with `-k` / `--key`; do not
-supply both.
+`Title`, `UserName`, `Password`, `URL`, and `Notes`, as JSON Lines (`--format
+json`, the default) or bounded human-readable columns (`--format human`,
+marking `[protected]`/`[plain]`, `[in-memory]`, `[otp]`, and `(no fields)`).
+`list` aliases `ls`. The entry selector may be positional or supplied with `-k` /
+`--key`; do not supply both.
 
 ### `field get`
 

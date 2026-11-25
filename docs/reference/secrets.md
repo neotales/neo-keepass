@@ -53,30 +53,38 @@ For example: `nkp field get 'Services/mail' Token`.
 ### `secrets ls`
 
 ```text
-nkp secrets ls [--] [GLOB]
+nkp secrets ls [--] [GLOB] [--format json|human]
 ```
 
-Prints redacted entry metadata as JSON Lines. `list` is an alias. `GLOB` is
-optional. Use `--` before a pattern that begins with a dash. The command does
-not reveal field values.
+Prints redacted entry metadata as JSON Lines (`--format json`, the default) or
+bounded aligned human columns (`--format human`). `list` is an alias. `GLOB` is
+optional. Use `--` before a pattern that begins with a dash. Human output
+sanitizes control and bidirectional characters, truncates wide cells with `…`,
+marks TOTP entries with `[otp]`, prints `(no entries)` when empty, and follows
+the `--color` policy. The command does not reveal field values.
 
 ### `secrets search`
 
 ```text
-nkp secrets search [--] QUERY
+nkp secrets search [--] QUERY [--format json|human]
 ```
 
-Searches bounded, allowlisted entry metadata. A leading-dash query can follow
-`--`. Unsafe labels or metadata that exceed projection limits may be withheld.
+Searches bounded, allowlisted entry metadata. `--format` defaults to `json`
+(JSON Lines); `--format human` renders bounded aligned columns (or
+`(no matches)` when empty) and follows the `--color` policy. A leading-dash
+query can follow `--`. Unsafe labels or metadata that exceed projection limits
+may be withheld.
 
 ### `secrets show`
 
 ```text
-nkp secrets show PATH
+nkp secrets show PATH [--format json|human]
 ```
 
-Prints redacted descriptors for one entry. `--key PATH` and `-k PATH` remain
-supported alternatives. It does not reveal field values.
+Prints redacted descriptors for one entry as JSON (`--format json`, the
+default) or a bounded human-readable descriptor card (`--format human`) with
+`[protected]`/`[plain]`, `[in-memory]`, and `[otp]` markers. `--key PATH` and
+`-k PATH` remain supported alternatives. It does not reveal field values.
 
 ### `secrets env`
 
