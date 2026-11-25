@@ -445,9 +445,9 @@ and `aarch64-unknown-linux-gnu` (cross-compiled; installs
 `gcc-aarch64-linux-gnu`, needed by `ring`'s build script via `rcgen` →
 `neotales-x509`; strips with `aarch64-linux-gnu-strip`). Produces, per target:
 
-- `nkeepass-<version>-<target>.tar.gz` / `.zip` (`packaging/scripts/archive.sh`) —
-  the archive basenames keep the historical `nkeepass` package identifier;
-  the executable inside is the real `nkp` binary name
+- `nkp-<version>-<target>.tar.gz` / `.zip` (`packaging/scripts/archive.sh`) —
+  CLI archive basenames and top-level directory `nkp-<version>-<target>/` use
+  the `nkp` executable name
 - `nkeepass-<version>-<deb-arch>.deb` (`packaging/deb/build.sh`, amd64/arm64) —
   deb `Package:` stays `nkeepass`; the executable installs to `/usr/bin/nkp`
 - validated by `packaging/validate.sh --binary <built>` before upload: every
@@ -523,7 +523,7 @@ Verification before anything is executed or uploaded:
    (`packaging/scripts/windows-verify-artifact.ps1`), in this order:
    - the zip manifest is parsed and WHITELISTED before anything is opened
      for extraction: exactly the four payloads under one named
-     `nkeepass-<version>-<triple>/` root, strict filename charset (no
+     `nkp-<version>-<triple>/` root, strict filename charset (no
      separators beyond the root, no `..` segments, no absolute paths), no
      duplicates, no directory entries, no symlink external attributes —
      an out-of-root canary entry is never read, let alone extracted
@@ -567,7 +567,7 @@ Verification before anything is executed or uploaded:
      filesystem), a name resolving to a reparse point (symlink/junction)
      is rejected even when its recorded hash is correct, every hash must
      match the actual file, and the canonical
-     `nkeepass-<version>-<triple>.zip` in the dist dir must BE the file
+     `nkp-<version>-<triple>.zip` in the dist dir must BE the file
      that was checked (same resolved path), so the published hash
      describes exactly the artifact that passed the checks (all
      regression-tested);
@@ -622,7 +622,7 @@ assert its numeric value, while only a native Windows runner can exercise
 the kernel API call.
 
 Produces the compatibility package artifact, `nkeepass-x86_64-pc-windows-msvc` (retention 14
-days): `nkeepass-<version>-x86_64-pc-windows-msvc.zip` (one named root:
+days): `nkp-<version>-x86_64-pc-windows-msvc.zip` (one named root:
 binary, README, LICENSE, WINDOWS-LIMITATIONS.txt), the raw `nkp.exe`,
 `WINDOWS-LIMITATIONS.txt`, and a sha256sum-compatible `SHA256SUMS`
 (`<hex>  <name>`, LF endings — `sha256sum -c` works on Linux/macOS).
@@ -663,7 +663,7 @@ scope caveats.
 Windows archives with its own `archive-windows.ps1`; this workflow uses
 `packaging/scripts/windows-package.ps1`. They are separate implementations
 and must not diverge in their user-visible contract: archive name
-`nkeepass-<version>-x86_64-pc-windows-msvc.zip` (the `archive.sh`
+`nkp-<version>-x86_64-pc-windows-msvc.zip` (the `archive.sh`
 convention), payload `nkp.exe` + `README.md` + `LICENSE.md` +
 `WINDOWS-LIMITATIONS.txt` under one named root, and a sha256sum-compatible
 `SHA256SUMS` (`<hex>  <name>`, LF, forward slashes). Change both together
@@ -697,12 +697,12 @@ in `crates/nkpui/` via `--locked --release` without the `tooling` feature):
 
 | Platform | Runner | Rust target | Archives produced |
 |---|---|---|---|
-| `linux-amd64` | `ubuntu-24.04` | `x86_64-unknown-linux-gnu` | `nkeepass-<ver>-x86_64-unknown-linux-gnu.{tar.gz,zip}`, `nkeepass-<ver>-amd64.deb`, `nkpui-<ver>-x86_64-unknown-linux-gnu.{tar.gz,zip}` |
-| `linux-arm64` | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` | `nkeepass-<ver>-aarch64-unknown-linux-gnu.{tar.gz,zip}`, `nkeepass-<ver>-arm64.deb`, `nkpui-<ver>-aarch64-unknown-linux-gnu.{tar.gz,zip}` |
-| `macos-arm64` | `macos-15` | `aarch64-apple-darwin` | `nkeepass-<ver>-aarch64-apple-darwin.{tar.gz,zip}`, `nkpui-<ver>-aarch64-apple-darwin.{tar.gz,zip}` |
-| `macos-amd64` | `macos-15` | `x86_64-apple-darwin` | `nkeepass-<ver>-x86_64-apple-darwin.{tar.gz,zip}`, `nkpui-<ver>-x86_64-apple-darwin.{tar.gz,zip}` |
-| `windows-amd64` | `windows-2025` | `x86_64-pc-windows-msvc` | `nkeepass-<ver>-x86_64-pc-windows-msvc.zip`, `nkpui-<ver>-x86_64-pc-windows-msvc.zip` |
-| `windows-arm64` | `windows-11-arm` | `aarch64-pc-windows-msvc` | `nkeepass-<ver>-aarch64-pc-windows-msvc.zip`, `nkpui-<ver>-aarch64-pc-windows-msvc.zip` |
+| `linux-amd64` | `ubuntu-24.04` | `x86_64-unknown-linux-gnu` | `nkp-<ver>-x86_64-unknown-linux-gnu.{tar.gz,zip}`, `nkeepass-<ver>-amd64.deb`, `nkpui-<ver>-x86_64-unknown-linux-gnu.{tar.gz,zip}` |
+| `linux-arm64` | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` | `nkp-<ver>-aarch64-unknown-linux-gnu.{tar.gz,zip}`, `nkeepass-<ver>-arm64.deb`, `nkpui-<ver>-aarch64-unknown-linux-gnu.{tar.gz,zip}` |
+| `macos-arm64` | `macos-15` | `aarch64-apple-darwin` | `nkp-<ver>-aarch64-apple-darwin.{tar.gz,zip}`, `nkpui-<ver>-aarch64-apple-darwin.{tar.gz,zip}` |
+| `macos-amd64` | `macos-15` | `x86_64-apple-darwin` | `nkp-<ver>-x86_64-apple-darwin.{tar.gz,zip}`, `nkpui-<ver>-x86_64-apple-darwin.{tar.gz,zip}` |
+| `windows-amd64` | `windows-2025` | `x86_64-pc-windows-msvc` | `nkp-<ver>-x86_64-pc-windows-msvc.zip`, `nkpui-<ver>-x86_64-pc-windows-msvc.zip` |
+| `windows-arm64` | `windows-11-arm` | `aarch64-pc-windows-msvc` | `nkp-<ver>-aarch64-pc-windows-msvc.zip`, `nkpui-<ver>-aarch64-pc-windows-msvc.zip` |
 
 - **Native ARM64 runners (`ubuntu-24.04-arm`, `windows-11-arm`):** chosen so
   both `nkp` and `nkpui` link cleanly against native `libxkbcommon-dev` on
@@ -710,7 +710,7 @@ in `crates/nkpui/` via `--locked --release` without the `tooling` feature):
   fragility.
 - **Validation per OS:**
   - Linux (`amd64` and `arm64`): strips both binaries, smoke-tests `nkp --version`,
-    validates `nkeepass` archives and `.deb` via `packaging/validate.sh --binary`,
+    validates `nkp` archives and `nkeepass` `.deb` via `packaging/validate.sh --binary`,
     and verifies per-target `SHA256SUMS`.
   - macOS (`arm64` and `amd64`): checks Mach-O architecture of both binaries via
     `lipo -archs`, smoke-tests `nkp --version` and `--help` on native `macos-arm64`,
@@ -756,22 +756,23 @@ tar.gz/zip/deb are functional and validated in `build.yml` (deb built with
 `dpkg-deb` on the ubuntu runner); pacman packages are built by
 `packaging/pacman/build.sh` with `makepkg` on Arch hosts — tested locally,
 not built in CI (ubuntu runners have no makepkg). The builder rejects any
-tarball whose basename is not the canonical `nkeepass-<version>-<triple>`
+tarball whose basename is not the canonical `nkp-<version>-<triple>`
 name, so nothing from the caller-supplied path can reach the generated
 PKGBUILD. The rpm spec is real metadata but requires `rpmbuild`, which
 neither CI nor this machine has, so it is wired but **never built and not
-build-verified** — the only automated check is the crate-version wiring in
-`validate.sh`; the winget manifest and choco nuspec are stubs with explicit
-placeholders and are
+build-verified** — the only automated check is the crate-version and `Source0`
+archive-name wiring in `validate.sh`; the winget manifest and choco nuspec are
+stubs with explicit placeholders and are
 not submittable or buildable packages.
 
 Naming compatibility: the product is neo-keepass and its executable is
-`nkp` (`nkp.exe` on Windows). Package identifiers and archive names
-deliberately keep the historical `nkeepass` name — archive basenames and
-zip root `nkeepass-<version>-<triple>`, deb `Package:` and `.deb` file
-name, rpm `Name:`, pacman `pkgname`, winget/choco identifiers — while the
-executable inside every container is shipped as `nkp` / `nkp.exe` and
-installed as `/usr/bin/nkp`. See `packaging/README.md`.
+`nkp` (`nkp.exe` on Windows). CLI distribution archive basenames and top-level
+archive roots use `nkp-<version>-<triple>` (matching `nkpui-<version>-<triple>`
+and the `nkp` executable), while distro package identifiers deliberately keep
+the historical `nkeepass` name — deb `Package:` and `.deb` file name, rpm
+`Name:`, pacman `pkgname`, winget/choco identifiers — and the executable
+inside every container is shipped as `nkp` / `nkp.exe` and installed as
+`/usr/bin/nkp`. See `packaging/README.md`.
 
 ## Verified locally vs. not
 

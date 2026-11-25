@@ -146,7 +146,7 @@ jobs:
             -Binary "target/$triple/release/nkp.exe" \
             -Version "$version" -Triple "$triple" -OutputDir dist
           pwsh -NoProfile -File packaging/scripts/windows-verify-artifact.ps1 \
-            -Zip "dist/nkeepass-$version-$triple.zip" \
+            -Zip "dist/nkp-$version-$triple.zip" \
             -BuiltExe "target/$triple/release/nkp.exe" \
             -Version "$version" -Triple "$triple" -Smoke
 

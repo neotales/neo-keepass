@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 # Verifies a packaged Windows artifact as a unit. Runs after
 # windows-package.ps1 and before upload (see .github/workflows/
 # windows-build.yml). Checks, in order:
@@ -41,7 +41,7 @@
 #      they can be opened); a name that resolves to a reparse point
 #      (symlink/junction) instead of a regular file is rejected; every
 #      hash must match the actual file; and the canonical
-#      nkeepass-<version>-<triple>.zip in the dist dir must BE the file
+#      nkp-<version>-<triple>.zip in the dist dir must BE the file
 #      that was checked (same resolved path, not just the same name), so
 #      the verified artifact is the one whose hash was published.
 #   8. with -Smoke: the EXTRACTED exe is executed with --version and
@@ -113,7 +113,7 @@ if (-not $PSBoundParameters.ContainsKey('DistDir')) {
     $DistDir = Split-Path -Parent ((Resolve-Path $Zip).Path)
 }
 $distDirResolved = (Resolve-Path $DistDir).Path
-$name = "nkeepass-$Version-$Triple"
+$name = "nkp-$Version-$Triple"
 $extractRoot = Join-Path ([IO.Path]::GetTempPath()) ("nkeepass-verify-" + [guid]::NewGuid().ToString('N'))
 $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
