@@ -2,6 +2,8 @@
 //! credentials are owned until lock/exit. This is not whole-heap erasure:
 //! model/rendering copies, terminal scrollback, and screenshots may persist.
 
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -14,8 +16,9 @@ use crate::clipboard::{ArboardAdapter, ClipboardCopyOutcome, ClipboardLease};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use neotales_keepass::KdbxCredentials;
 use nkeepass::{
-    KDBX_LIMITS, SearchHit, VaultService,
+    CustomIconId, KDBX_LIMITS, SearchHit, VaultService,
     glob::Glob,
+    icons::{DEFAULT_GROUP_ICON_ID, IconCategory, StandardIcon, standard_icon, standard_icons},
     service::{EntryRef, GroupRef, ListCursor, ListPage, TreeCursor, TreeGroup},
 };
 use ratatui::{
@@ -38,10 +41,207 @@ const MIN_COLUMNS: u16 = 40;
 const MIN_ROWS: u16 = 12;
 const CLIPBOARD_WARNING: &str = "Clipboard could not be safely cleared; it may still contain the password. Clear it manually. Acknowledging does not clear it.";
 
+/// Explicit color preference passed from the CLI `--color` / `NO_COLOR` / `FORCE_COLOR` options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColorOverride {
+    Auto,
+    Always,
+    Never,
+    Basic,
+    TrueColor,
+}
+
+/// Detected terminal color capability tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorTier {
+    TrueColor,
+    Ansi256,
+    Basic16,
+    None,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detect_color_tier(
+    override_mode: ColorOverride,
+    no_color: Option<&OsStr>,
+    term: Option<&str>,
+    colorterm: Option<&str>,
+    wt_session: Option<&OsStr>,
+    kitty_window_id: Option<&OsStr>,
+    wezterm_pane: Option<&OsStr>,
+) -> ColorTier {
+    if override_mode == ColorOverride::Never || term == Some("dumb") {
+        return ColorTier::None;
+    }
+    if override_mode == ColorOverride::Auto && no_color.is_some_and(|value| !value.is_empty()) {
+        return ColorTier::None;
+    }
+    if override_mode == ColorOverride::Basic {
+        return ColorTier::Basic16;
+    }
+    if colorterm.is_some_and(|value| {
+        value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
+    }) || wt_session.is_some_and(|value| !value.is_empty())
+        || kitty_window_id.is_some_and(|value| !value.is_empty())
+        || wezterm_pane.is_some_and(|value| !value.is_empty())
+    {
+        ColorTier::TrueColor
+    } else if term.is_some_and(|value| value.contains("256color")) {
+        ColorTier::Ansi256
+    } else {
+        ColorTier::Basic16
+    }
+}
+
+fn detect_color_tier_from_env(override_mode: ColorOverride) -> ColorTier {
+    let no_color = std::env::var_os("NO_COLOR");
+    let term = std::env::var("TERM").ok();
+    let colorterm = std::env::var("COLORTERM").ok();
+    let wt_session = std::env::var_os("WT_SESSION");
+    let kitty_window_id = std::env::var_os("KITTY_WINDOW_ID");
+    let wezterm_pane = std::env::var_os("WEZTERM_PANE");
+    detect_color_tier(
+        override_mode,
+        no_color.as_deref(),
+        term.as_deref(),
+        colorterm.as_deref(),
+        wt_session.as_deref(),
+        kitty_window_id.as_deref(),
+        wezterm_pane.as_deref(),
+    )
+}
+
+/// Adaptive 4-tier TUI palette covering headers, selections, diagnostics, and icon categories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TuiTheme {
+    tier: ColorTier,
+    header: Style,
+    muted: Style,
+    selection: Style,
+    dirty: Style,
+    error: Style,
+    warning: Style,
+    cat_security: Style,
+    cat_network: Style,
+    cat_system: Style,
+    cat_personal: Style,
+    cat_folders: Style,
+    cat_media: Style,
+    cat_misc: Style,
+}
+
+impl TuiTheme {
+    fn from_tier(tier: ColorTier) -> Self {
+        match tier {
+            ColorTier::TrueColor => Self {
+                tier,
+                header: Style::default()
+                    .fg(Color::Rgb(80, 190, 255))
+                    .add_modifier(Modifier::BOLD),
+                muted: Style::default().fg(Color::Rgb(130, 140, 155)),
+                selection: Style::default()
+                    .fg(Color::Rgb(240, 190, 70))
+                    .add_modifier(Modifier::BOLD),
+                dirty: Style::default()
+                    .fg(Color::Rgb(255, 175, 65))
+                    .add_modifier(Modifier::BOLD),
+                error: Style::default()
+                    .fg(Color::Rgb(255, 90, 90))
+                    .add_modifier(Modifier::BOLD),
+                warning: Style::default().fg(Color::Rgb(240, 190, 70)),
+                cat_security: Style::default().fg(Color::Rgb(240, 190, 70)),
+                cat_network: Style::default().fg(Color::Rgb(80, 190, 255)),
+                cat_system: Style::default().fg(Color::Rgb(175, 135, 255)),
+                cat_personal: Style::default().fg(Color::Rgb(90, 210, 130)),
+                cat_folders: Style::default().fg(Color::Rgb(100, 165, 245)),
+                cat_media: Style::default().fg(Color::Rgb(240, 125, 185)),
+                cat_misc: Style::default().fg(Color::Rgb(185, 195, 210)),
+            },
+            ColorTier::Ansi256 => Self {
+                tier,
+                header: Style::default()
+                    .fg(Color::Indexed(39))
+                    .add_modifier(Modifier::BOLD),
+                muted: Style::default().fg(Color::Indexed(244)),
+                selection: Style::default()
+                    .fg(Color::Indexed(220))
+                    .add_modifier(Modifier::BOLD),
+                dirty: Style::default()
+                    .fg(Color::Indexed(214))
+                    .add_modifier(Modifier::BOLD),
+                error: Style::default()
+                    .fg(Color::Indexed(203))
+                    .add_modifier(Modifier::BOLD),
+                warning: Style::default().fg(Color::Indexed(220)),
+                cat_security: Style::default().fg(Color::Indexed(220)),
+                cat_network: Style::default().fg(Color::Indexed(39)),
+                cat_system: Style::default().fg(Color::Indexed(141)),
+                cat_personal: Style::default().fg(Color::Indexed(78)),
+                cat_folders: Style::default().fg(Color::Indexed(75)),
+                cat_media: Style::default().fg(Color::Indexed(212)),
+                cat_misc: Style::default().fg(Color::Indexed(250)),
+            },
+            ColorTier::Basic16 => Self {
+                tier,
+                header: Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+                muted: Style::default().fg(Color::DarkGray),
+                selection: Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                dirty: Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                error: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                warning: Style::default().fg(Color::Yellow),
+                cat_security: Style::default().fg(Color::Yellow),
+                cat_network: Style::default().fg(Color::Cyan),
+                cat_system: Style::default().fg(Color::LightBlue),
+                cat_personal: Style::default().fg(Color::Green),
+                cat_folders: Style::default().fg(Color::Blue),
+                cat_media: Style::default().fg(Color::Magenta),
+                cat_misc: Style::default().fg(Color::Gray),
+            },
+            ColorTier::None => Self {
+                tier,
+                header: Style::default().add_modifier(Modifier::BOLD),
+                muted: Style::default().add_modifier(Modifier::DIM),
+                selection: Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                dirty: Style::default().add_modifier(Modifier::BOLD),
+                error: Style::default().add_modifier(Modifier::BOLD),
+                warning: Style::default().add_modifier(Modifier::BOLD),
+                cat_security: Style::default(),
+                cat_network: Style::default(),
+                cat_system: Style::default(),
+                cat_personal: Style::default(),
+                cat_folders: Style::default(),
+                cat_media: Style::default(),
+                cat_misc: Style::default(),
+            },
+        }
+    }
+
+    const fn category_style(&self, category: IconCategory) -> Style {
+        match category {
+            IconCategory::Security => self.cat_security,
+            IconCategory::Network => self.cat_network,
+            IconCategory::System => self.cat_system,
+            IconCategory::Personal => self.cat_personal,
+            IconCategory::Folders => self.cat_folders,
+            IconCategory::Media => self.cat_media,
+            IconCategory::Misc => self.cat_misc,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Query,
     Edit,
+    RenameTitle,
+    EditTags,
+    SetOtp,
     PasswordReveal,
     ClipboardCopy,
     TotpReveal,
@@ -61,15 +261,21 @@ struct UiGroup {
     label: String,
     path: String,
     reference: Option<GroupRef>,
+    icon_id: u32,
+    custom_icon_id: Option<CustomIconId>,
 }
 
-impl From<(String, GroupRef)> for UiGroup {
-    fn from((path, reference): (String, GroupRef)) -> Self {
+impl From<(String, GroupRef, u32, Option<CustomIconId>)> for UiGroup {
+    fn from(
+        (path, reference, icon_id, custom_icon_id): (String, GroupRef, u32, Option<CustomIconId>),
+    ) -> Self {
         let label = path.rsplit('/').next().unwrap_or(&path).to_owned();
         Self {
             label,
             path,
             reference: Some(reference),
+            icon_id,
+            custom_icon_id,
         }
     }
 }
@@ -81,6 +287,8 @@ impl UiGroup {
             label,
             path,
             reference: None,
+            icon_id: DEFAULT_GROUP_ICON_ID,
+            custom_icon_id: None,
         }
     }
 }
@@ -89,6 +297,11 @@ impl UiGroup {
 enum DeleteKind {
     Entry,
     Group,
+}
+
+enum IconTarget {
+    EntryItem(EntryRef),
+    GroupItem(GroupRef),
 }
 
 enum Modal {
@@ -108,6 +321,13 @@ enum Modal {
         scroll: usize,
     },
     Aliases {
+        scroll: usize,
+    },
+    IconPicker {
+        target: IconTarget,
+        filter: String,
+        filtering: bool,
+        selected: usize,
         scroll: usize,
     },
     ConfirmDelete {
@@ -189,6 +409,7 @@ struct App {
     query: Zeroizing<String>,
     query_before_input: Zeroizing<String>,
     entry: Option<EntryRef>,
+    entry_icon: Option<(u32, Option<CustomIconId>)>,
     detail: Vec<String>,
     fields: Vec<(String, bool)>,
     selected_field: usize,
@@ -206,6 +427,7 @@ struct App {
     // status, never the instructions for the action Enter/YES will submit.
     action_prompt: String,
     pending_group: Option<GroupRef>,
+    pending_entry: Option<EntryRef>,
     dirty: bool,
     pending_decision: Option<PendingDecision>,
     attachment_selected: usize,
@@ -218,6 +440,7 @@ struct App {
     include_groups: bool,
     aliases: Vec<String>,
     modal: Option<Modal>,
+    theme: TuiTheme,
 }
 
 #[derive(Clone)]
@@ -571,6 +794,274 @@ fn begin_delete_group(app: &mut App) {
     });
 }
 
+const PALETTE_CHOICES: [&str; 10] = [
+    "Add group",
+    "Add entry",
+    "Remove entry",
+    "Remove group",
+    "View aliases",
+    "Change entry icon",
+    "Change group icon",
+    "Rename entry title",
+    "Edit entry tags",
+    "Set/update OTP URI",
+];
+
+const fn icon_category_label(category: IconCategory) -> &'static str {
+    match category {
+        IconCategory::Security => "Security",
+        IconCategory::Network => "Network",
+        IconCategory::System => "System",
+        IconCategory::Personal => "Personal",
+        IconCategory::Folders => "Folders",
+        IconCategory::Media => "Media",
+        IconCategory::Misc => "Misc",
+    }
+}
+
+fn filtered_standard_icons(filter: &str) -> Vec<&'static StandardIcon> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return standard_icons().iter().collect();
+    }
+    standard_icons()
+        .iter()
+        .filter(|icon| {
+            icon.name.to_ascii_lowercase().contains(&needle)
+                || icon_category_label(icon.category)
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+                || icon.id.to_string().contains(&needle)
+        })
+        .collect()
+}
+
+fn valid_unpadded_base32(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+    for byte in value.bytes() {
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a',
+            b'2'..=b'7' => byte - b'2' + 26,
+            _ => return false,
+        };
+        buffer = (buffer << 5) | u32::from(digit);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            buffer &= (1_u32 << bits) - 1;
+        }
+    }
+    bits == 0 || buffer == 0
+}
+
+fn validate_totp_uri(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_control() || nkeepass::template::is_bidi_or_line_separator(c))
+    {
+        return Err("Invalid OTP URI: disallowed or empty input");
+    }
+    let rest = value
+        .strip_prefix("otpauth://")
+        .ok_or("OTP URI must start with otpauth://totp/")?;
+    let (label, query) = rest
+        .split_once('?')
+        .ok_or("OTP URI must include ?secret=...&period=30")?;
+    match label.split('/').next().unwrap_or_default() {
+        "totp" => {}
+        "hotp" => return Err("HOTP is unsupported; use otpauth://totp/"),
+        _ => return Err("OTP URI type must be totp"),
+    }
+    let mut values = BTreeMap::new();
+    for part in query.split('&') {
+        let (key, val) = part
+            .split_once('=')
+            .ok_or("Malformed OTP URI query parameter")?;
+        if values.insert(key, val).is_some() {
+            return Err("Duplicate OTP URI parameter");
+        }
+    }
+    let secret = values
+        .remove("secret")
+        .ok_or("OTP URI secret parameter is required")?;
+    if !valid_unpadded_base32(secret) {
+        return Err("OTP URI secret must be valid unpadded Base32");
+    }
+    let _issuer = values.remove("issuer");
+    if let Some(counter) = values.remove("counter")
+        && counter.parse::<u64>().is_err()
+    {
+        return Err("Invalid OTP URI counter");
+    }
+    let period = values
+        .remove("period")
+        .ok_or("TOTP URI requires positive period (e.g. period=30)")?;
+    if period.parse::<u64>().is_err_and(|_| true) || period.parse::<u64>().ok() == Some(0) {
+        return Err("TOTP URI period must be a positive integer");
+    }
+    if let Some(algorithm) = values.remove("algorithm")
+        && !matches!(algorithm, "SHA1" | "SHA256" | "SHA512")
+    {
+        return Err("Unsupported OTP algorithm (use SHA1, SHA256, or SHA512)");
+    }
+    if let Some(digits) = values.remove("digits")
+        && !matches!(digits, "6" | "8")
+    {
+        return Err("Unsupported OTP digits (use 6 or 8)");
+    }
+    if !values.is_empty() {
+        return Err("Unknown OTP URI parameter");
+    }
+    Ok(())
+}
+
+fn selected_entry_ref(app: &App) -> Option<EntryRef> {
+    app.entry.clone().or_else(|| {
+        app.selected
+            .checked_sub(app.groups.len())
+            .and_then(|index| app.hits.get(index))
+            .map(SearchHit::reference)
+    })
+}
+
+fn begin_icon_picker(app: &mut App, prefer_group: Option<bool>) {
+    app.clear_reveal();
+    let (target, current_icon_id) = match prefer_group {
+        Some(false) => {
+            let Some(reference) = selected_entry_ref(app) else {
+                app.status = "Select an entry before choosing Change entry icon".into();
+                return;
+            };
+            let icon_id = app
+                .service
+                .selected_entry(&reference)
+                .map_or(0, |view| view.icon_id());
+            (IconTarget::EntryItem(reference), icon_id)
+        }
+        Some(true) => {
+            let Some(reference) = selected_group(app) else {
+                app.status = "Select a group before choosing Change group icon".into();
+                return;
+            };
+            let icon_id = if app.entry.is_none() {
+                app.groups
+                    .get(app.selected)
+                    .map_or(DEFAULT_GROUP_ICON_ID, |group| group.icon_id)
+            } else {
+                DEFAULT_GROUP_ICON_ID
+            };
+            (IconTarget::GroupItem(reference), icon_id)
+        }
+        None => {
+            if let Some(reference) = app.entry.clone() {
+                let icon_id = app
+                    .service
+                    .selected_entry(&reference)
+                    .map_or(0, |view| view.icon_id());
+                (IconTarget::EntryItem(reference), icon_id)
+            } else if let Some(group) = app.groups.get(app.selected) {
+                let reference = group
+                    .reference
+                    .clone()
+                    .or_else(|| app.service.resolve_group(app.session, &group.path).ok());
+                let Some(reference) = reference else {
+                    app.status = "Cannot select group for icon change".into();
+                    return;
+                };
+                (IconTarget::GroupItem(reference), group.icon_id)
+            } else if let Some(hit) = app
+                .selected
+                .checked_sub(app.groups.len())
+                .and_then(|index| app.hits.get(index))
+            {
+                (IconTarget::EntryItem(hit.reference()), hit.icon_id())
+            } else {
+                (
+                    IconTarget::GroupItem(app.tree_parent.clone()),
+                    DEFAULT_GROUP_ICON_ID,
+                )
+            }
+        }
+    };
+    let selected = usize::try_from(current_icon_id).unwrap_or(0).min(68);
+    app.modal = Some(Modal::IconPicker {
+        target,
+        filter: String::new(),
+        filtering: false,
+        selected,
+        scroll: selected.saturating_sub(3),
+    });
+}
+
+fn begin_entry_mutation(app: &mut App, action: Action) {
+    let Some(reference) = selected_entry_ref(app) else {
+        app.status = "Select an entry first".into();
+        return;
+    };
+    let current = app.service.selected_entry(&reference).ok();
+    app.pending_entry = Some(reference);
+    match action {
+        Action::RenameTitle => {
+            begin_action(
+                app,
+                Action::RenameTitle,
+                "Rename entry title · Enter apply · Esc cancel",
+            );
+            if let Some(view) = current {
+                app.input.push_str(view.title());
+            }
+        }
+        Action::EditTags => {
+            begin_action(
+                app,
+                Action::EditTags,
+                "Edit tags (comma-separated; empty clears) · Enter apply · Esc cancel",
+            );
+            if let Some(view) = current {
+                app.input.push_str(&view.tags().join(", "));
+            }
+        }
+        Action::SetOtp => {
+            begin_action(
+                app,
+                Action::SetOtp,
+                "Set/update OTP URI (otpauth://totp/...); input is masked · Enter apply · Esc cancel",
+            );
+            app.edit_mode = true;
+        }
+        _ => {}
+    }
+}
+
+fn apply_icon_selection(app: &mut App, target: &IconTarget, icon: &StandardIcon) {
+    let result = match target {
+        IconTarget::EntryItem(reference) => app.service.set_entry_icon(reference, icon.id),
+        IconTarget::GroupItem(reference) => app.service.set_group_icon(reference, icon.id),
+    };
+    match result {
+        Ok(()) => {
+            app.dirty = true;
+            app.reset_tree_after_mutation();
+            app.entry = None;
+            app.entry_icon = None;
+            app.detail.clear();
+            app.fields.clear();
+            app.refresh();
+            app.status = format!(
+                "Icon set to {} {} ({}) in memory; press s to save",
+                icon.glyph, icon.name, icon.id
+            );
+        }
+        Err(error) => app.status = clean(error.message()),
+    }
+}
+
 fn select_palette_action(app: &mut App, selected: usize) {
     app.modal = None;
     match selected {
@@ -579,6 +1070,11 @@ fn select_palette_action(app: &mut App, selected: usize) {
         2 => begin_delete_entry(app),
         3 => begin_delete_group(app),
         4 => app.modal = Some(Modal::Aliases { scroll: 0 }),
+        5 => begin_icon_picker(app, Some(false)),
+        6 => begin_icon_picker(app, Some(true)),
+        7 => begin_entry_mutation(app, Action::RenameTitle),
+        8 => begin_entry_mutation(app, Action::EditTags),
+        9 => begin_entry_mutation(app, Action::SetOtp),
         _ => {}
     }
 }
@@ -714,13 +1210,166 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
                 app.modal = Some(Modal::Palette { selected, scroll });
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                selected = selected.saturating_add(1).min(4);
+                selected = selected
+                    .saturating_add(1)
+                    .min(PALETTE_CHOICES.len().saturating_sub(1));
                 scroll = selected.saturating_sub(3);
                 app.modal = Some(Modal::Palette { selected, scroll });
             }
             KeyCode::Enter => select_palette_action(app, selected),
             _ => app.modal = Some(Modal::Palette { selected, scroll }),
         },
+        Modal::IconPicker {
+            target,
+            mut filter,
+            mut filtering,
+            mut selected,
+            mut scroll,
+        } => {
+            let matches = filtered_standard_icons(&filter);
+            let count = matches.len();
+            let current = selected.min(count.saturating_sub(1));
+            match key {
+                KeyCode::Esc => {
+                    app.status = "Icon selection cancelled".into();
+                }
+                KeyCode::Enter => {
+                    if let Some(icon) = matches.get(current).copied() {
+                        apply_icon_selection(app, &target, icon);
+                    } else {
+                        app.status = "No matching icon selected".into();
+                    }
+                }
+                KeyCode::Char('/') if !filtering => {
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering: true,
+                        selected: current,
+                        scroll,
+                    });
+                }
+                KeyCode::Up => {
+                    selected = current.saturating_sub(1);
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected,
+                        scroll,
+                    });
+                }
+                KeyCode::Down => {
+                    selected = current.saturating_add(1).min(count.saturating_sub(1));
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected,
+                        scroll,
+                    });
+                }
+                KeyCode::PageUp => {
+                    selected = current.saturating_sub(10);
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected,
+                        scroll,
+                    });
+                }
+                KeyCode::PageDown => {
+                    selected = current.saturating_add(10).min(count.saturating_sub(1));
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected,
+                        scroll,
+                    });
+                }
+                KeyCode::Home => {
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected: 0,
+                        scroll: 0,
+                    });
+                }
+                KeyCode::End => {
+                    selected = count.saturating_sub(1);
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected,
+                        scroll,
+                    });
+                }
+                KeyCode::Char('k') if !filtering => {
+                    selected = current.saturating_sub(1);
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected,
+                        scroll,
+                    });
+                }
+                KeyCode::Char('j') if !filtering => {
+                    selected = current.saturating_add(1).min(count.saturating_sub(1));
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected,
+                        scroll,
+                    });
+                }
+                KeyCode::Backspace => {
+                    if filter.is_empty() {
+                        filtering = false;
+                    } else {
+                        filter.pop();
+                    }
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected: 0,
+                        scroll: 0,
+                    });
+                }
+                KeyCode::Char(c) if filtering && !c.is_control() && filter.len() < 64 => {
+                    filter.push(c);
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected: 0,
+                        scroll: 0,
+                    });
+                }
+                _ => {
+                    app.modal = Some(Modal::IconPicker {
+                        target,
+                        filter,
+                        filtering,
+                        selected: current,
+                        scroll,
+                    });
+                }
+            }
+        }
         Modal::ConfirmDelete {
             kind,
             path,
@@ -1162,10 +1811,12 @@ impl App {
             .into_iter()
             .filter_map(|group| {
                 let reference = group.reference();
+                let icon_id = group.icon_id();
+                let custom_icon_id = group.custom_icon_id();
                 self.service
                     .group_path(&reference)
                     .ok()
-                    .map(|path| UiGroup::from((path, reference)))
+                    .map(|path| UiGroup::from((path, reference, icon_id, custom_icon_id)))
             })
             .collect();
     }
@@ -1187,6 +1838,7 @@ impl App {
             let _ = self.service.release_list_cursor(cursor);
         }
         self.entry = None;
+        self.entry_icon = None;
         self.detail.clear();
         self.fields.clear();
         self.clear_reveal();
@@ -1370,8 +2022,20 @@ impl App {
         let reference = hit.reference();
         match self.service.selected_entry(&reference) {
             Ok(view) => {
+                let icon = standard_icon(view.icon_id());
+                self.entry_icon = Some((view.icon_id(), view.custom_icon_id()));
                 self.detail = vec![
                     format!("Title: {}", clean(view.title())),
+                    format!(
+                        "Icon: {} {}{}",
+                        icon.glyph,
+                        icon.name,
+                        if view.custom_icon_id().is_some() {
+                            " [custom]"
+                        } else {
+                            ""
+                        }
+                    ),
                     format!(
                         "Tags: {}",
                         view.tags()
@@ -1400,7 +2064,7 @@ impl App {
                 self.selected_field = self.selected_field.min(self.fields.len().saturating_sub(1));
                 self.detail.push("Attachments:".to_owned());
                 self.entry = Some(reference);
-                self.status = "↑/↓ select field · e edit value · r reveal password for 15s · s save · Esc back".into();
+                self.status = "↑/↓ select field · e edit value · r reveal password for 15s · I icon · s save · Esc back".into();
             }
             Err(error) => self.status = clean(error.message()),
         }
@@ -1487,6 +2151,7 @@ impl App {
         self.input_mode = false;
         self.edit_mode = false;
         self.pending_group = None;
+        self.pending_entry = None;
         self.action_target = None;
         self.modal = None;
         self.action = Action::Query;
@@ -1498,6 +2163,8 @@ impl App {
         self.groups.clear();
         self.hits.clear();
         self.entry = None;
+        self.entry_icon = None;
+        self.entry_icon = None;
         self.detail.clear();
         self.fields.clear();
         self.locked = true;
@@ -1547,56 +2214,60 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         clean(&app.query)
     };
     frame.render_widget(
-        Paragraph::new(format!(
-            "Path filter: {path_filter}  ·  {groups_state}  ·  / edit  ·  g toggle groups"
-        )),
+        Paragraph::new(Line::from(vec![
+            Span::styled("nkp", app.theme.header),
+            Span::raw(format!(
+                " · Path: {path_filter} · {groups_state} · / edit · g groups"
+            )),
+        ])),
         areas[0],
     );
     let items = app
         .groups
         .iter()
         .map(|group| {
-            ListItem::new(Line::from(vec![
-                Span::styled("▸ ", Style::default().fg(Color::Cyan)),
+            let icon = standard_icon(group.icon_id);
+            let mut spans = vec![
+                Span::styled(icon.glyph, app.theme.category_style(icon.category)),
+                Span::raw(" "),
                 Span::raw(clean(if app.query.is_empty() {
                     &group.label
                 } else {
                     &group.path
                 })),
-            ]))
+            ];
+            if group.custom_icon_id.is_some() {
+                spans.push(Span::styled(" [custom]", app.theme.muted));
+            }
+            ListItem::new(Line::from(spans))
         })
         .chain(app.hits.iter().map(|hit| {
+            let icon = standard_icon(hit.icon_id());
             ListItem::new(Line::from(vec![
-                Span::raw(if app.query.is_empty() { "  " } else { "" }),
+                Span::styled(icon.glyph, app.theme.category_style(icon.category)),
+                Span::raw(" "),
                 Span::raw(clean(hit.title())),
-                Span::styled(
-                    format!("  {}", clean(hit.path())),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("  {}", clean(hit.path())), app.theme.muted),
             ]))
         }))
         .collect::<Vec<_>>();
     let mut state = ListState::default();
     state.select((!app.locked && app.entry.is_none()).then_some(app.selected));
     let title = if app.locked {
-        "LOCKED".to_owned()
+        "nkp · LOCKED".to_owned()
     } else if app.query.is_empty() {
         let path = app
             .service
             .group_path(&app.tree_parent)
             .map_or_else(|_| "current folder".to_owned(), |path| clean(&path));
-        format!("Vault tree · ▾ {path} · ▸ child folders")
+        format!("nkp · Vault tree · ▾ {path} · ▸ child folders")
     } else {
-        "Path matches · Enter opens group/entry".to_owned()
+        "nkp · Path matches · Enter opens group/entry".to_owned()
     };
     frame.render_stateful_widget(
         List::new(items)
             .block(Block::default().title(title).borders(Borders::ALL))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            .highlight_style(app.theme.selection),
         body[0],
         &mut state,
     );
@@ -1604,7 +2275,36 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .detail
         .iter()
         .flat_map(|line| {
-            let mut rows = vec![Line::from(line.clone())];
+            let styled_line = if line.starts_with("Title: ")
+                && let Some((icon_id, _)) = app.entry_icon
+            {
+                let icon = standard_icon(icon_id);
+                Line::from(vec![
+                    Span::styled(icon.glyph, app.theme.category_style(icon.category)),
+                    Span::raw(" "),
+                    Span::raw(line.clone()),
+                ])
+            } else if line.starts_with("Icon: ")
+                && let Some((icon_id, custom_icon_id)) = app.entry_icon
+            {
+                let icon = standard_icon(icon_id);
+                Line::from(vec![
+                    Span::raw("Icon: "),
+                    Span::styled(icon.glyph, app.theme.category_style(icon.category)),
+                    Span::raw(format!(
+                        " {}{}",
+                        icon.name,
+                        if custom_icon_id.is_some() {
+                            " [custom]"
+                        } else {
+                            ""
+                        }
+                    )),
+                ])
+            } else {
+                Line::from(line.clone())
+            };
+            let mut rows = vec![styled_line];
             if line == "Fields (values hidden):" {
                 rows.extend(
                     app.fields
@@ -1613,12 +2313,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                         .map(|(index, (name, protected))| {
                             let text = field_row(name, *protected, index == app.selected_field);
                             if index == app.selected_field {
-                                Line::from(Span::styled(
-                                    text,
-                                    Style::default()
-                                        .fg(Color::Yellow)
-                                        .add_modifier(Modifier::BOLD),
-                                ))
+                                Line::from(Span::styled(text, app.theme.selection))
                             } else {
                                 Line::from(text)
                             }
@@ -1657,10 +2352,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     {
         detail.push(Line::from(vec![
             Span::raw("REVEALED (15s): "),
-            Span::styled(
-                value,
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(value, app.theme.error),
         ]));
         detail.push(Line::from(
             "Warning: terminal scrollback and screenshots persist.",
@@ -1672,13 +2364,10 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         app.dirty,
         app.input_mode && app.edit_mode && !app.input.is_empty(),
     ) {
-        detail.push(Line::from(Span::styled(
-            "UNSAVED CHANGES",
-            Style::default().fg(Color::Yellow),
-        )));
+        detail.push(Line::from(Span::styled("UNSAVED CHANGES", app.theme.dirty)));
     }
     if !app.locked && app.entry.is_some() {
-        detail.push(Line::from("↑/↓ select field · e edit selected (value only) · r reveal · c copy password · t TOTP · g generate · a add attachment · n/p attachment · x export · d remove · o export · i import · s save"));
+        detail.push(Line::from("↑/↓ select field · e edit selected (value only) · r reveal · c copy password · t TOTP · g generate · I icon · a add attachment · n/p attachment · x export · d remove · o export · i import · s save"));
     }
     frame.render_widget(
         Paragraph::new(detail).block(
@@ -1702,6 +2391,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         );
         frame.render_widget(
             Paragraph::new("Clipboard may contain password.\nClear it manually. F3 review/ack.")
+                .style(app.theme.warning)
                 .wrap(Wrap { trim: false }),
             footer[1],
         );
@@ -1715,7 +2405,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         draw_compact_entry(frame, app, areas[1]);
     }
     if let Some(modal @ Modal::ClipboardWarning { .. }) = &app.modal {
-        draw_modal(frame, modal, &app.aliases);
+        draw_modal(frame, modal, &app.aliases, &app.theme);
     } else if app.pending_decision.is_some() {
         draw_action_dialog(
             frame,
@@ -1730,7 +2420,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             None,
         );
     } else if let Some(modal @ Modal::Target { .. }) = &app.modal {
-        draw_modal(frame, modal, &app.aliases);
+        draw_modal(frame, modal, &app.aliases, &app.theme);
     } else if app.input_mode && app.action == Action::RevealField {
         draw_target_dialog(
             frame,
@@ -1780,15 +2470,18 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             } else {
                 "WARNING: terminal scrollback and screenshots persist. Esc hides the value."
             })
+            .style(app.theme.warning)
             .wrap(Wrap { trim: false }),
             chunks[0],
         );
         frame.render_widget(
-            Paragraph::new(value.as_str()).wrap(Wrap { trim: false }),
+            Paragraph::new(value.as_str())
+                .style(app.theme.error)
+                .wrap(Wrap { trim: false }),
             chunks[1],
         );
     } else if let Some(modal) = &app.modal {
-        draw_modal(frame, modal, &app.aliases);
+        draw_modal(frame, modal, &app.aliases, &app.theme);
     }
 }
 
@@ -1802,10 +2495,19 @@ fn draw_compact_entry(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
-    frame.render_widget(
-        Paragraph::new(app.detail.first().map_or("", String::as_str)),
-        chunks[0],
-    );
+    let title_line = match (app.detail.first(), app.entry_icon) {
+        (Some(title), Some((icon_id, _))) => {
+            let icon = standard_icon(icon_id);
+            Line::from(vec![
+                Span::styled(icon.glyph, app.theme.category_style(icon.category)),
+                Span::raw(" "),
+                Span::raw(title.as_str()),
+            ])
+        }
+        (Some(title), None) => Line::from(title.as_str()),
+        (None, _) => Line::from(""),
+    };
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
     let rows = app
         .fields
         .iter()
@@ -1817,11 +2519,7 @@ fn draw_compact_entry(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select((!rows.is_empty()).then_some(app.selected_field));
     frame.render_stateful_widget(
-        List::new(rows).highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
+        List::new(rows).highlight_style(app.theme.selection),
         chunks[1],
         &mut state,
     );
@@ -1898,9 +2596,10 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 fn help_lines() -> Vec<Line<'static>> {
     [
+        "nkp interactive TUI keybindings:",
         "q                 Quit (unsaved changes require a decision)",
         "?                 Open this help; Esc closes it",
-        "Ctrl-P            Open command palette",
+        "Ctrl-P            Open nkp command palette",
         "/                 Search paths with glob patterns; Enter applies",
         "g (tree)          Toggle matching groups in path results",
         "Up/Down or j/k    Move selection",
@@ -1909,18 +2608,22 @@ fn help_lines() -> Vec<Line<'static>> {
         "n                 Load next result page",
         "a / e             Add group / entry beneath selected or current group",
         "x / X             Remove selected entry / group (type YES to confirm)",
+        "I                 Change KeePass icon (entry or group; 0..=68)",
         "s                 Save unsaved vault changes",
         "d                 Discard unsaved changes in exit prompt",
         "c                 Cancel an exit prompt",
-        "Ctrl-P palette    Add group, add entry, remove entry/group, view aliases",
+        "Ctrl-P palette    Add/remove entry or group, change icon, rename title,",
+        "                  edit tags, set/update OTP URI, view aliases",
         "Entry view:",
         "  e edit selected field · r reveal password · v reveal selected field",
-        "  c copy password · t reveal TOTP · g generate password (entry view)",
+        "  c copy password · t reveal TOTP · g generate password · I change icon",
         "  a add attachment · x export selected · d remove selected (type YES)",
         "  F2 inspect full attachment or field-consent target; arrows/Home/End pan",
         "  F3 review pending clipboard warning; a acknowledges only in that view",
         "  o export interchange · i import interchange · s save",
         "  Esc/Enter back to tree · n/p select attachment",
+        "Icon picker: j/k or Up/Down move · / type filter · Enter apply · Esc cancel",
+        "Colors: adaptive 4-tier (TrueColor / 256-color / Basic16 / NO_COLOR)",
         "Palette/help/aliases: Up/Down or j/k scroll; Esc closes",
         "Deletion confirmation requires typing YES exactly.",
     ]
@@ -1933,7 +2636,7 @@ fn help_lines() -> Vec<Line<'static>> {
     clippy::too_many_lines,
     reason = "keeps the small modal renderer together"
 )]
-fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
+fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String], theme: &TuiTheme) {
     let area = centered_rect(78, 78, frame.area());
     frame.render_widget(Clear, area);
     match modal {
@@ -1966,7 +2669,7 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
             frame.render_widget(
                 Tabs::new(vec![Line::from("Keybindings")]).select(0).block(
                     Block::default()
-                        .title("Help · Tab 1/1")
+                        .title("nkp Help · Tab 1/1")
                         .borders(Borders::ALL),
                 ),
                 chunks[0],
@@ -1980,14 +2683,7 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
             );
         }
         Modal::Palette { selected, scroll } => {
-            let choices = [
-                "Add group",
-                "Add entry",
-                "Remove entry",
-                "Remove group",
-                "View aliases",
-            ];
-            let rows = choices
+            let rows = PALETTE_CHOICES
                 .iter()
                 .enumerate()
                 .map(|(index, label)| {
@@ -2001,16 +2697,86 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
                 List::new(rows)
                     .block(
                         Block::default()
-                            .title("Command palette · Enter select · Esc close")
+                            .title("nkp Palette · Enter select · Esc close")
                             .borders(Borders::ALL),
                     )
-                    .highlight_style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    .highlight_style(theme.selection),
                 area,
                 &mut state,
+            );
+            let _ = scroll;
+        }
+        Modal::IconPicker {
+            filter,
+            filtering,
+            selected,
+            scroll,
+            ..
+        } => {
+            let matches = filtered_standard_icons(filter);
+            let block = Block::default()
+                .title("nkp Icons · Enter apply · Esc cancel")
+                .borders(Borders::ALL);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            let filter_line = if *filtering || !filter.is_empty() {
+                Line::from(vec![
+                    Span::styled("Filter: ", theme.header),
+                    Span::raw(clean(filter)),
+                ])
+            } else {
+                Line::from(Span::styled(
+                    format!("/ filter · {} icons · j/k move", matches.len()),
+                    theme.muted,
+                ))
+            };
+            frame.render_widget(Paragraph::new(filter_line), chunks[0]);
+            let rows = if matches.is_empty() {
+                vec![ListItem::new(Line::from(Span::styled(
+                    "No matching icons",
+                    theme.muted,
+                )))]
+            } else {
+                matches
+                    .iter()
+                    .map(|icon| {
+                        ListItem::new(Line::from(vec![
+                            Span::styled(format!("{:>2} ", icon.id), theme.muted),
+                            Span::styled(icon.glyph, theme.category_style(icon.category)),
+                            Span::raw(format!(" {} ", icon.name)),
+                            Span::styled(
+                                format!("[{}]", icon_category_label(icon.category)),
+                                theme.muted,
+                            ),
+                        ]))
+                    })
+                    .collect()
+            };
+            let mut state = ListState::default();
+            if !matches.is_empty() {
+                state.select(Some((*selected).min(matches.len().saturating_sub(1))));
+            }
+            frame.render_stateful_widget(
+                List::new(rows).highlight_style(theme.selection),
+                chunks[1],
+                &mut state,
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    if *filtering {
+                        "Type to filter · Backspace · Enter apply · Esc cancel"
+                    } else {
+                        "Enter apply · / filter · Esc cancel"
+                    },
+                    theme.muted,
+                ))),
+                chunks[2],
             );
             let _ = scroll;
         }
@@ -2029,7 +2795,7 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String]) {
                     .scroll((u16::try_from(*scroll).unwrap_or(u16::MAX), 0))
                     .block(
                         Block::default()
-                            .title("Aliases · Esc close")
+                            .title("nkp Aliases · Esc close")
                             .borders(Borders::ALL),
                     ),
                 area,
@@ -2134,6 +2900,9 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                 &mut app.input,
                 &mut app.field_to_reveal,
             );
+            if !app.input_mode {
+                app.pending_entry = None;
+            }
             if query_was_active {
                 app.query_before_input.zeroize();
             }
@@ -2250,6 +3019,7 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                         );
                         app.edit_field.clear();
                         app.pending_group = None;
+                        app.pending_entry = None;
                     }
                 }
                 KeyCode::Backspace => {
@@ -2262,6 +3032,48 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                     if app.action == Action::Query {
                         update_live_query(&mut app.query, &app.input);
                         app.refresh();
+                    }
+                }
+                KeyCode::Enter if app.edit_mode && app.action == Action::SetOtp => {
+                    match validate_totp_uri(&app.input) {
+                        Ok(()) => {
+                            let Some(reference) = app.pending_entry.as_ref().or(app.entry.as_ref())
+                            else {
+                                clear_input(&mut app.input);
+                                app.input_mode = false;
+                                app.edit_mode = false;
+                                app.pending_entry = None;
+                                app.status = "No selected entry".into();
+                                continue;
+                            };
+                            match app.service.set_custom_field(reference, "otp", &app.input) {
+                                Ok(()) => {
+                                    clear_input(&mut app.input);
+                                    app.input_mode = false;
+                                    app.edit_mode = false;
+                                    app.pending_entry = None;
+                                    app.dirty = true;
+                                    app.reset_tree_after_mutation();
+                                    app.entry = None;
+                                    app.entry_icon = None;
+                                    app.detail.clear();
+                                    app.fields.clear();
+                                    app.refresh();
+                                    app.status =
+                                        "OTP URI updated in memory; press s to save".into();
+                                }
+                                Err(error) => {
+                                    app.status = format!(
+                                        "{}; draft retained (retry or Esc to discard)",
+                                        clean(error.message())
+                                    );
+                                }
+                            }
+                        }
+                        Err(message) => {
+                            app.status =
+                                format!("{message}; draft retained (retry or Esc to discard)");
+                        }
                     }
                 }
                 KeyCode::Enter if app.edit_mode => {
@@ -2287,13 +3099,65 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                         app.dirty = true;
                         app.reset_tree_after_mutation();
                         app.entry = None;
+                        app.entry_icon = None;
                         app.detail.clear();
+                        app.fields.clear();
                         app.refresh();
                     }
                 }
                 KeyCode::Enter if !app.edit_mode && app.action != Action::Query => {
                     let value = Zeroizing::new(app.input.to_string());
                     match app.action {
+                        Action::RenameTitle => {
+                            if let Some(reference) =
+                                app.pending_entry.take().or_else(|| app.entry.clone())
+                            {
+                                match app.service.set_title(&reference, &value) {
+                                    Ok(()) => {
+                                        app.dirty = true;
+                                        app.reset_tree_after_mutation();
+                                        app.entry = None;
+                                        app.entry_icon = None;
+                                        app.detail.clear();
+                                        app.fields.clear();
+                                        app.refresh();
+                                        app.status =
+                                            "Entry title renamed in memory; press s to save".into();
+                                    }
+                                    Err(error) => app.status = clean(error.message()),
+                                }
+                            } else {
+                                app.status = "No entry selected".into();
+                            }
+                        }
+                        Action::EditTags => {
+                            if let Some(reference) =
+                                app.pending_entry.take().or_else(|| app.entry.clone())
+                            {
+                                let tags = value
+                                    .split(',')
+                                    .map(str::trim)
+                                    .filter(|tag| !tag.is_empty())
+                                    .map(str::to_owned)
+                                    .collect::<Vec<_>>();
+                                match app.service.set_tags(&reference, tags) {
+                                    Ok(()) => {
+                                        app.dirty = true;
+                                        app.reset_tree_after_mutation();
+                                        app.entry = None;
+                                        app.entry_icon = None;
+                                        app.detail.clear();
+                                        app.fields.clear();
+                                        app.refresh();
+                                        app.status =
+                                            "Entry tags updated in memory; press s to save".into();
+                                    }
+                                    Err(error) => app.status = clean(error.message()),
+                                }
+                            } else {
+                                app.status = "No entry selected".into();
+                            }
+                        }
                         Action::PasswordReveal => {
                             if value.as_str() == "YES" {
                                 reveal_password(app);
@@ -2358,12 +3222,13 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                                 app.status = "Field reveal cancelled".into();
                             }
                         }
-                        Action::Query | Action::Edit => unreachable!(),
+                        Action::Query | Action::Edit | Action::SetOtp => unreachable!(),
                     }
                     clear_input(&mut app.input);
                     app.input_mode = false;
                     app.edit_mode = false;
                     app.action_target = None;
+                    app.pending_entry = None;
                 }
                 KeyCode::Enter => {
                     app.query.zeroize();
@@ -2406,6 +3271,7 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                 KeyCode::Char('e') => begin_add(app, Action::AddEntry),
                 KeyCode::Char('x') => begin_delete_entry(app),
                 KeyCode::Char('X') => begin_delete_group(app),
+                KeyCode::Char('I') => begin_icon_picker(app, None),
                 KeyCode::Char('g') => {
                     app.include_groups = !app.include_groups;
                     if app.query.is_empty() {
@@ -2457,10 +3323,12 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
             match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
                     app.entry = None;
+                    app.entry_icon = None;
                     app.detail.clear();
                     app.fields.clear();
                     app.clear_reveal();
                 }
+                KeyCode::Char('I') => begin_icon_picker(app, None),
                 KeyCode::Char('e') => {
                     app.clear_reveal();
                     let Some((field, _)) = app.fields.get(app.selected_field) else {
@@ -2497,7 +3365,7 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
                     app,
                     Action::ClipboardCopy,
                     if app.clipboard.supports_timed_clear() {
-                        "Copy password? Other apps can read it. Windows will attempt an ownership-safe clear in 30s, but it may remain. Type YES to confirm."
+                        "Copy password? Other apps can read it. nkp will attempt an ownership-safe clear in 30s, but it may remain. Type YES to confirm."
                     } else {
                         "Copy password? Other apps can read it. This platform cannot safely auto-clear; clear manually when done. Type YES to confirm."
                     },
@@ -2553,7 +3421,7 @@ fn run_ui(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> io::Res
 /// then reinstates exact prior modes. No primary-screen clearing is performed.
 /// Escaping UI errors lock the App before potentially blocking terminal teardown;
 /// recoverable save failures retain the unlocked App for an explicit retry.
-pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
+pub fn launch(path: &Path, aliases: Vec<String>, color_override: ColorOverride) -> io::Result<()> {
     #[cfg(unix)]
     let mut password =
         terminal_password::read_controlling("Vault password: ", Duration::from_secs(300))?;
@@ -2567,7 +3435,8 @@ pub fn launch(path: &Path, aliases: Vec<String>) -> io::Result<()> {
     let session = service
         .open(path, &mut credentials, &KDBX_LIMITS)
         .map_err(|_| io::Error::other("cannot unlock vault"))?;
-    let mut app = new_app(service, session, credentials, aliases)?;
+    let theme = TuiTheme::from_tier(detect_color_tier_from_env(color_override));
+    let mut app = new_app_with_theme(service, session, credentials, aliases, theme)?;
     app.refresh();
     #[cfg(unix)]
     let result = run_terminal(&mut app, path);
@@ -2675,11 +3544,28 @@ fn finish_terminal(result: io::Result<()>, cleanup: io::Result<()>) -> io::Resul
     }
 }
 
+#[cfg(test)]
 fn new_app(
     service: VaultService,
     session: nkeepass::SessionId,
     credentials: KdbxCredentials,
     aliases: Vec<String>,
+) -> io::Result<App> {
+    new_app_with_theme(
+        service,
+        session,
+        credentials,
+        aliases,
+        TuiTheme::from_tier(ColorTier::Basic16),
+    )
+}
+
+fn new_app_with_theme(
+    service: VaultService,
+    session: nkeepass::SessionId,
+    credentials: KdbxCredentials,
+    aliases: Vec<String>,
+    theme: TuiTheme,
 ) -> io::Result<App> {
     let tree_parent = service
         .root_group(session)
@@ -2699,6 +3585,7 @@ fn new_app(
         query: Zeroizing::new(String::new()),
         query_before_input: Zeroizing::new(String::new()),
         entry: None,
+        entry_icon: None,
         detail: Vec::new(),
         fields: Vec::new(),
         selected_field: 0,
@@ -2714,6 +3601,7 @@ fn new_app(
         action: Action::Query,
         action_prompt: String::new(),
         pending_group: None,
+        pending_entry: None,
         dirty: false,
         pending_decision: None,
         attachment_selected: 0,
@@ -2726,6 +3614,7 @@ fn new_app(
         include_groups: true,
         aliases,
         modal: None,
+        theme,
     })
 }
 
@@ -4165,5 +5054,278 @@ mod tests {
         super::reset_tree_location(&mut parent, &mut stack, root);
         assert_eq!(parent, 0);
         assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn adaptive_color_tiers_select_and_fall_back_gracefully() {
+        use std::collections::HashSet;
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Auto,
+                Some(OsStr::new("1")),
+                Some("xterm-256color"),
+                Some("truecolor"),
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::None
+        );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Auto,
+                None,
+                Some("dumb"),
+                Some("truecolor"),
+                Some(OsStr::new("1")),
+                None,
+                None,
+            ),
+            super::ColorTier::None
+        );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Never,
+                None,
+                Some("xterm-256color"),
+                Some("truecolor"),
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::None
+        );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Auto,
+                Some(OsStr::new("")),
+                Some("xterm-256color"),
+                Some("truecolor"),
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::TrueColor
+        );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Auto,
+                None,
+                Some("xterm"),
+                Some("24bit"),
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::TrueColor
+        );
+        for env_flag in ["wt", "kitty", "wezterm"] {
+            let tier = super::detect_color_tier(
+                super::ColorOverride::Auto,
+                None,
+                Some("xterm"),
+                None,
+                (env_flag == "wt").then_some(OsStr::new("session")),
+                (env_flag == "kitty").then_some(OsStr::new("1")),
+                (env_flag == "wezterm").then_some(OsStr::new("0")),
+            );
+            assert_eq!(tier, super::ColorTier::TrueColor, "{env_flag}");
+        }
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Auto,
+                None,
+                Some("xterm-256color"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::Ansi256
+        );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Auto,
+                None,
+                Some("xterm"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::Basic16
+        );
+        assert_eq!(
+            super::detect_color_tier(
+                super::ColorOverride::Basic,
+                None,
+                Some("xterm-256color"),
+                Some("truecolor"),
+                None,
+                None,
+                None,
+            ),
+            super::ColorTier::Basic16
+        );
+
+        let none_theme = super::TuiTheme::from_tier(super::ColorTier::None);
+        for style in [
+            none_theme.header,
+            none_theme.muted,
+            none_theme.selection,
+            none_theme.dirty,
+            none_theme.error,
+            none_theme.warning,
+        ] {
+            assert_eq!(style.fg, None);
+            assert_eq!(style.bg, None);
+        }
+        let categories = [
+            nkeepass::icons::IconCategory::Security,
+            nkeepass::icons::IconCategory::Network,
+            nkeepass::icons::IconCategory::System,
+            nkeepass::icons::IconCategory::Personal,
+            nkeepass::icons::IconCategory::Folders,
+            nkeepass::icons::IconCategory::Media,
+            nkeepass::icons::IconCategory::Misc,
+        ];
+        for tier in [
+            super::ColorTier::TrueColor,
+            super::ColorTier::Ansi256,
+            super::ColorTier::Basic16,
+        ] {
+            let theme = super::TuiTheme::from_tier(tier);
+            let distinct: HashSet<_> = categories
+                .iter()
+                .map(|cat| theme.category_style(*cat).fg)
+                .collect();
+            assert_eq!(distinct.len(), categories.len(), "{tier:?}");
+            assert!(!distinct.contains(&None), "{tier:?}");
+        }
+    }
+
+    #[test]
+    fn icons_render_on_groups_entries_detail_and_picker_persists() {
+        use crossterm::event::KeyCode;
+        use nkeepass::icons::standard_icon;
+
+        let (_dir, mut app) = app_fixture();
+        // Path-only group defaults to standard KeePass folder icon 48.
+        let path_group = super::UiGroup::from_path("Root/Work".to_owned());
+        assert_eq!(path_group.icon_id, 48);
+        assert_eq!(path_group.custom_icon_id, None);
+
+        // Add a child group and assign a custom standard icon to entry + group via IconPicker.
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.add_group(&root, "Mail").unwrap();
+        app.reset_tree_after_mutation();
+        app.refresh();
+        assert_eq!(app.groups.len(), 1);
+        assert_eq!(app.groups[0].icon_id, 48);
+
+        let rendered_tree = screen(&app, 80, 20);
+        assert!(rendered_tree.contains(standard_icon(48).glyph));
+        assert!(rendered_tree.contains(standard_icon(0).glyph));
+        assert!(rendered_tree.contains("nkp"));
+
+        // Open IconPicker on group row (selected == 0), filter for "Email" (19), apply.
+        super::begin_icon_picker(&mut app, Some(true));
+        assert!(matches!(app.modal, Some(super::Modal::IconPicker { .. })));
+        let picker_screen = screen(&app, 40, 12);
+        assert!(picker_screen.contains("nkp Icons"));
+
+        super::handle_modal_key(&mut app, KeyCode::Char('/'));
+        for ch in "Email".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        let filtered = super::filtered_standard_icons("Email");
+        assert!(filtered.iter().any(|icon| icon.id == 19));
+        // Cancel first with Esc to verify no dirty mutation.
+        super::handle_modal_key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+        assert!(!app.dirty);
+
+        // Now apply icon 19 ("Email") to the group.
+        super::begin_icon_picker(&mut app, Some(true));
+        super::handle_modal_key(&mut app, KeyCode::Char('/'));
+        for ch in "19".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        assert!(app.dirty);
+        assert_eq!(app.groups[0].icon_id, 19);
+        let rendered_updated = screen(&app, 80, 20);
+        assert!(rendered_updated.contains(standard_icon(19).glyph));
+
+        // Select entry (row 1 after 1 group) and open detail view; verify Icon header.
+        app.selected = 1;
+        app.select();
+        let detail_screen = screen(&app, 80, 24);
+        assert!(detail_screen.contains("Icon: ⚷ Key"));
+        assert!(!detail_screen.contains("[custom]"));
+
+        // Simulate custom icon indicator on selected entry header.
+        app.entry_icon = Some((19, nkeepass::CustomIconId::from_bytes([0x22; 16])));
+        app.detail[1] = "Icon: ✉ Email [custom]".to_owned();
+        let custom_detail_screen = screen(&app, 80, 24);
+        assert!(custom_detail_screen.contains("Icon: ✉ Email [custom]"));
+    }
+
+    #[test]
+    fn totp_uri_validation_and_entry_ergonomic_mutations_work() {
+        let (_dir, mut app) = app_fixture();
+        assert!(
+            super::validate_totp_uri(
+                "otpauth://totp/mail?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=6&period=30"
+            )
+            .is_ok()
+        );
+        assert!(super::validate_totp_uri("not-a-uri").is_err());
+        assert!(
+            super::validate_totp_uri("otpauth://hotp/mail?secret=JBSWY3DPEHPK3PXP&counter=0")
+                .is_err()
+        );
+        assert!(
+            super::validate_totp_uri("otpauth://totp/mail?secret=BAD!BASE32&period=30").is_err()
+        );
+        assert!(
+            super::validate_totp_uri("otpauth://totp/mail?secret=JBSWY3DPEHPK3PXP&period=0")
+                .is_err()
+        );
+
+        let entry_ref = app.hits[0].reference();
+        app.service.set_title(&entry_ref, "renamed-entry").unwrap();
+        let renamed_ref = app
+            .service
+            .resolve_entry(app.session, "renamed-entry")
+            .unwrap()
+            .reference();
+        app.service
+            .set_tags(&renamed_ref, vec!["work".into(), "mail".into()])
+            .unwrap();
+        let tagged_ref = app
+            .service
+            .resolve_entry(app.session, "renamed-entry")
+            .unwrap()
+            .reference();
+        app.service
+            .set_custom_field(
+                &tagged_ref,
+                "otp",
+                "otpauth://totp/mail?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=6&period=30",
+            )
+            .unwrap();
+        let final_ref = app
+            .service
+            .resolve_entry(app.session, "renamed-entry")
+            .unwrap()
+            .reference();
+        let view = app.service.selected_entry(&final_ref).unwrap();
+        assert_eq!(view.title(), "renamed-entry");
+        assert_eq!(view.tags(), ["work", "mail"]);
+        assert!(view.has_otp());
+        assert!(app.service.totp_code_with_period(&final_ref, 59).is_ok());
     }
 }

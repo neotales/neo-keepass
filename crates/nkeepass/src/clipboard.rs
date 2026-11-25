@@ -42,14 +42,40 @@ pub(crate) enum ClipboardCopyOutcome {
 /// Small injectable surface used by the lease and its tests.
 pub(crate) trait ClipboardAdapter {
     fn set_text(&mut self, value: &str) -> Result<ClipboardSetOutcome, ClipboardError>;
-    /// Clears only when the backend can atomically verify the app still owns the copy.
+    /// Clears when the backend can verify the clipboard still matches `value`
+    /// (atomically via sequence number on Windows, or best-effort
+    /// compare-and-clear on non-Windows).
     fn clear_if_current(&mut self, value: &str) -> Result<bool, ClipboardError>;
     fn supports_timed_clear(&self) -> bool {
         false
     }
 }
 
+#[cfg(not(windows))]
+fn compare_and_clear_with<G, C>(get_text: G, clear: C, value: &str) -> Result<bool, ClipboardError>
+where
+    G: FnOnce() -> Result<String, arboard::Error>,
+    C: FnOnce() -> Result<(), arboard::Error>,
+{
+    match get_text() {
+        Ok(current) => {
+            let current = Zeroizing::new(current);
+            if current.as_str() == value {
+                clear().map_err(|_| ClipboardError)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        Err(arboard::Error::ContentNotAvailable) => Ok(false),
+        Err(_) => Err(ClipboardError),
+    }
+}
+
 /// Native desktop clipboard adapter provided by arboard.
+///
+/// Windows uses an atomic clipboard sequence number; Linux and macOS use
+/// best-effort compare-and-clear via `get_text()` and `clear()`.
 #[derive(Default)]
 pub(crate) struct ArboardAdapter {
     #[cfg(not(windows))]
@@ -97,9 +123,10 @@ impl ClipboardAdapter for ArboardAdapter {
         Ok(ClipboardSetOutcome::Copied)
     }
 
-    fn clear_if_current(&mut self, _value: &str) -> Result<bool, ClipboardError> {
+    fn clear_if_current(&mut self, value: &str) -> Result<bool, ClipboardError> {
         #[cfg(windows)]
         {
+            let _ = value;
             let Some(sequence) = self.sequence.take() else {
                 return Ok(false);
             };
@@ -107,14 +134,19 @@ impl ClipboardAdapter for ArboardAdapter {
         }
         #[cfg(not(windows))]
         {
-            // arboard exposes separate read and clear calls, so compare-then-clear
-            // can erase clipboard data written by another application in between.
-            Err(ClipboardError)
+            // Best-effort compare-and-clear: unlike Windows' atomic sequence
+            // number, arboard exposes separate read and clear calls, so we only
+            // clear when the current clipboard text still matches `value`.
+            let clipboard = self.clipboard()?;
+            let current = clipboard.get_text();
+            compare_and_clear_with(|| current, || clipboard.clear(), value)
         }
     }
 
+    /// Returns `true`: Windows uses atomic sequence checks; Linux/macOS use
+    /// best-effort compare-and-clear via `get_text()` and `clear()`.
     fn supports_timed_clear(&self) -> bool {
-        cfg!(windows)
+        true
     }
 }
 
@@ -439,9 +471,54 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn arboard_adapter_fails_safe_without_atomic_ownership_clear() {
-        let mut adapter = super::ArboardAdapter::default();
-        assert_eq!(adapter.clear_if_current("secret"), Err(ClipboardError));
+    fn arboard_adapter_supports_timed_clear_and_compare_and_clear() {
+        let adapter = super::ArboardAdapter::default();
+        assert!(adapter.supports_timed_clear());
+
+        let mut cleared = false;
+        assert_eq!(
+            super::compare_and_clear_with(
+                || Ok("secret".to_owned()),
+                || {
+                    cleared = true;
+                    Ok(())
+                },
+                "secret"
+            ),
+            Ok(true)
+        );
+        assert!(cleared);
+
+        let mut clobbered = false;
+        assert_eq!(
+            super::compare_and_clear_with(
+                || Ok("other-app-copy".to_owned()),
+                || {
+                    clobbered = true;
+                    Ok(())
+                },
+                "secret"
+            ),
+            Ok(false)
+        );
+        assert!(!clobbered);
+
+        assert_eq!(
+            super::compare_and_clear_with(
+                || Err(arboard::Error::ContentNotAvailable),
+                || Ok(()),
+                "secret"
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            super::compare_and_clear_with(
+                || Err(arboard::Error::ClipboardNotSupported),
+                || Ok(()),
+                "secret"
+            ),
+            Err(ClipboardError)
+        );
     }
 
     #[test]

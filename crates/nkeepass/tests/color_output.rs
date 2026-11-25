@@ -91,11 +91,13 @@ fn color_environment_and_explicit_options_only_style_human_help_and_diagnostics(
     assert!(!force_off.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
 
     let basic = nkp(&["--color=basic", "--help"], &[]);
+    let ansi256 = nkp(&["--color=always", "--help"], &[("TERM", "xterm-256color")]);
     let truecolor = nkp(
         &["--color=truecolor", "--help"],
         &[("COLORTERM", "truecolor")],
     );
     assert!(basic.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
+    assert!(ansi256.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
     assert!(truecolor.stdout.windows(2).any(|bytes| bytes == b"\x1b["));
     assert!(
         basic
@@ -104,11 +106,18 @@ fn color_environment_and_explicit_options_only_style_human_help_and_diagnostics(
             .any(|bytes| bytes == b"\x1b[1;36m")
     );
     assert!(
+        ansi256
+            .stdout
+            .windows(b"\x1b[1;38;5;39m".len())
+            .any(|bytes| bytes == b"\x1b[1;38;5;39m")
+    );
+    assert!(
         truecolor
             .stdout
             .windows(b"\x1b[1;38;2;80;190;255m".len())
             .any(|bytes| bytes == b"\x1b[1;38;2;80;190;255m")
     );
+    assert_eq!(strip_sgr(&basic.stdout), strip_sgr(&ansi256.stdout));
     assert_eq!(strip_sgr(&basic.stdout), strip_sgr(&truecolor.stdout));
 
     let disabled = nkp(&["--no-color", "--help"], &[("FORCE_COLOR", "3")]);

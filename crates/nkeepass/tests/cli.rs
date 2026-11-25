@@ -4035,7 +4035,7 @@ fn root_help_formats_aliases_shortcut_descriptions_and_safety_sections() {
 
 #[cfg(unix)]
 #[test]
-fn help_uses_the_argv0_basename_including_executable_extension() {
+fn help_uses_the_argv0_basename_stripping_exe_extension() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
@@ -4043,7 +4043,8 @@ fn help_uses_the_argv0_basename_including_executable_extension() {
     for (argv0, expected) in [
         (OsString::from("/opt/nkp"), "nkp"),
         (OsString::from("nkp"), "nkp"),
-        (OsString::from("/opt/tools/nkp.exe"), "nkp.exe"),
+        (OsString::from("/opt/tools/nkp.exe"), "nkp"),
+        (OsString::from("/opt/tools/kp.EXE"), "kp"),
         (OsString::from("/opt/tools/工具"), "工具"),
         (OsString::from_vec(b"/opt/tools/nkp-\xff".to_vec()), "nkp-�"),
     ] {

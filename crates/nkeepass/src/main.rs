@@ -895,7 +895,7 @@ const INIT_OPTIONS: &[HelpOption] = &[
     },
 ];
 const INIT_NOTES: &[&str] = &[
-    "Recovery: Privately pipe age --decrypt -i IDENTITY BACKUP to nkp --vault DATABASE secrets ls --password-stdin. Protect the identity; see the vault reference.",
+    "Recovery: Privately pipe age --decrypt -i IDENTITY BACKUP to {program} --vault DATABASE secrets ls --password-stdin. Protect the identity; see the vault reference.",
     "Password persistence: Password-only master passwords are saved age-encrypted in the data directory; identity is in config.",
     "Crash recovery: Directory ancestry durability is unconfirmed; keep independent protected copies of the identity and encrypted backup.",
     "Partial failure: Supplied password-only: backup follows successful vault creation; backup failure leaves the vault installed. Generated master: backup and association precede vault creation; their failure stops creation.",
@@ -1022,7 +1022,7 @@ const SHELL_COMMANDS: &[HelpCommand] = &[
         "Emit completions and direnv-style hooks for bash, zsh, fish, pwsh, powershell, or nushell.",
         &["shell init bash"],
         &[
-            "POSIX sh does not support directory hooks; use `nkp shell completions sh` or `nkp completion sh` for completions.",
+            "POSIX sh does not support directory hooks; use `{program} shell completions sh` or `{program} completion sh` for completions.",
         ],
         SHELL_INIT_OPTIONS,
         NO_COMMANDS,
@@ -2258,7 +2258,8 @@ fn current_stdout_style() -> u8 {
 fn style_human_header(text: &str, style: u8) -> String {
     match style {
         1 => format!("\x1b[1;36m{text}\x1b[0m"),
-        2 => format!("\x1b[1;38;2;80;190;255m{text}\x1b[0m"),
+        2 => format!("\x1b[1;38;5;39m{text}\x1b[0m"),
+        3 => format!("\x1b[1;38;2;80;190;255m{text}\x1b[0m"),
         _ => text.to_owned(),
     }
 }
@@ -2266,9 +2267,11 @@ fn style_human_header(text: &str, style: u8) -> String {
 fn style_human_badge(badge: &str, style: u8, protected_tone: bool) -> String {
     match (style, protected_tone) {
         (1, true) => format!("\x1b[33m{badge}\x1b[0m"),
-        (2, true) => format!("\x1b[38;2;240;190;70m{badge}\x1b[0m"),
+        (2, true) => format!("\x1b[38;5;220m{badge}\x1b[0m"),
+        (3, true) => format!("\x1b[38;2;240;190;70m{badge}\x1b[0m"),
         (1, false) => format!("\x1b[32m{badge}\x1b[0m"),
-        (2, false) => format!("\x1b[38;2;90;210;130m{badge}\x1b[0m"),
+        (2, false) => format!("\x1b[38;5;78m{badge}\x1b[0m"),
+        (3, false) => format!("\x1b[38;2;90;210;130m{badge}\x1b[0m"),
         _ => badge.to_owned(),
     }
 }
@@ -10000,12 +10003,29 @@ fn parsed_command_route(args: &[String]) -> (usize, Vec<String>) {
 }
 
 fn program_basename(argv0: &OsStr) -> String {
-    Path::new(argv0)
+    let raw = Path::new(argv0)
         .file_name()
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| OsStr::new("nkp"))
-        .to_string_lossy()
-        .into_owned()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let stripped = match raw.len().checked_sub(4) {
+        Some(prefix_len)
+            if raw.is_char_boundary(prefix_len)
+                && raw[prefix_len..].eq_ignore_ascii_case(".exe") =>
+        {
+            &raw[..prefix_len]
+        }
+        _ => raw.as_ref(),
+    };
+    if stripped.is_empty()
+        || stripped
+            .chars()
+            .any(|c| c.is_control() || nkeepass::template::is_bidi_or_line_separator(c))
+    {
+        "nkp".to_owned()
+    } else {
+        stripped.to_owned()
+    }
 }
 
 fn command_path<'a>(commands: &'a [HelpCommand], route: &[String]) -> Option<&'a HelpCommand> {
@@ -10190,7 +10210,8 @@ fn render_help_with_style(program: &str, route: &[String], width: usize, style: 
     if !help_notes.is_empty() {
         output.push_str("NOTES:\n");
         for note in help_notes {
-            write_paragraph(&mut output, note, width, "  ");
+            let expanded = note.replace("{program}", program);
+            write_paragraph(&mut output, &expanded, width, "  ");
         }
         output.push('\n');
     }
@@ -10240,7 +10261,8 @@ fn render_help_with_style(program: &str, route: &[String], width: usize, style: 
     // Wrap plain text first. Escape bytes must never affect column accounting.
     match style {
         1 => output.replacen("\nUsage:", "\n\x1b[1;36mUsage:\x1b[0m", 1),
-        2 => output.replacen("\nUsage:", "\n\x1b[1;38;2;80;190;255mUsage:\x1b[0m", 1),
+        2 => output.replacen("\nUsage:", "\n\x1b[1;38;5;39mUsage:\x1b[0m", 1),
+        3 => output.replacen("\nUsage:", "\n\x1b[1;38;2;80;190;255mUsage:\x1b[0m", 1),
         _ => output,
     }
 }
@@ -10414,7 +10436,7 @@ fn with_root_credentials<'a>(
     clippy::too_many_lines,
     reason = "dispatch for the small initial command surface"
 )]
-fn run(args: &[String], program: &str) -> Result<()> {
+fn run(args: &[String], program: &str, color: ColorOption) -> Result<()> {
     if let Some(route) = help_request(args) {
         return print_help(program, &route);
     }
@@ -10496,7 +10518,8 @@ fn run(args: &[String], program: &str) -> Result<()> {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        return tui::launch(Path::new(path), aliases).map_err(|_| err("TUI operation failed"));
+        return tui::launch(Path::new(path), aliases, color.into_tui_override())
+            .map_err(|_| err("TUI operation failed"));
     }
     match command {
         "completion" => {
@@ -10827,7 +10850,7 @@ fn main() {
         std::sync::atomic::Ordering::Relaxed,
     );
     let command_args = normalize_cli_aliases(&command_args);
-    if let Err(error) = run(&command_args, &program) {
+    if let Err(error) = run(&command_args, &program, color) {
         let machine = machine_diagnostic_route(&command_args);
         let style = if machine {
             0
@@ -10842,6 +10865,8 @@ fn main() {
         if style == 1 {
             let _ = writeln!(io::stderr(), "\x1b[1;31mnkp:\x1b[0m {message}");
         } else if style == 2 {
+            let _ = writeln!(io::stderr(), "\x1b[1;38;5;203mnkp:\x1b[0m {message}");
+        } else if style == 3 {
             let _ = writeln!(io::stderr(), "\x1b[1;38;2;255;90;90mnkp:\x1b[0m {message}");
         } else {
             let _ = writeln!(io::stderr(), "nkp: {message}");
@@ -10959,6 +10984,30 @@ enum ColorOption {
 }
 
 impl ColorOption {
+    const fn into_tui_override(self) -> tui::ColorOverride {
+        match self {
+            Self::Auto => tui::ColorOverride::Auto,
+            Self::Always => tui::ColorOverride::Always,
+            Self::Never => tui::ColorOverride::Never,
+            Self::Basic => tui::ColorOverride::Basic,
+            Self::Truecolor => tui::ColorOverride::TrueColor,
+        }
+    }
+
+    fn detected_style(term: Option<&str>, colorterm: Option<&str>) -> u8 {
+        if matches!(
+            colorterm,
+            Some(value) if value.eq_ignore_ascii_case("truecolor")
+                || value.eq_ignore_ascii_case("24bit")
+        ) {
+            3
+        } else if term.is_some_and(|term| term.contains("256color")) {
+            2
+        } else {
+            1
+        }
+    }
+
     fn style(self, tty: bool, term: Option<&str>, colorterm: Option<&str>) -> u8 {
         self.style_with_terminal_support(tty, term, colorterm, !cfg!(windows))
     }
@@ -10976,27 +11025,8 @@ impl ColorOption {
         match self {
             Self::Never => 0,
             Self::Basic => 1,
-            Self::Truecolor => {
-                if matches!(colorterm, Some("truecolor" | "24bit")) {
-                    2
-                } else {
-                    1
-                }
-            }
-            Self::Always => {
-                if matches!(colorterm, Some("truecolor" | "24bit")) {
-                    2
-                } else {
-                    1
-                }
-            }
-            Self::Auto if tty => {
-                if matches!(colorterm, Some("truecolor" | "24bit")) {
-                    2
-                } else {
-                    1
-                }
-            }
+            Self::Truecolor | Self::Always => Self::detected_style(term, colorterm),
+            Self::Auto if tty => Self::detected_style(term, colorterm),
             Self::Auto => 0,
         }
     }
@@ -11148,15 +11178,36 @@ mod tests {
         );
         assert_eq!(style(ColorOption::Auto, true, Some("xterm"), None), 1);
         assert_eq!(
-            style(ColorOption::Auto, true, Some("xterm"), Some("24bit")),
+            style(ColorOption::Auto, true, Some("xterm-256color"), None),
             2
         );
+        assert_eq!(
+            style(
+                ColorOption::Auto,
+                true,
+                Some("xterm-256color"),
+                Some("24bit")
+            ),
+            3
+        );
+        assert_eq!(
+            style(ColorOption::Auto, true, Some("xterm"), Some("24bit")),
+            3
+        );
         assert_eq!(style(ColorOption::Always, false, Some("xterm"), None), 1);
+        assert_eq!(
+            style(ColorOption::Always, false, Some("tmux-256color"), None),
+            2
+        );
         assert_eq!(
             style(ColorOption::Always, false, Some("dumb"), Some("truecolor")),
             0
         );
         assert_eq!(style(ColorOption::Truecolor, false, Some("xterm"), None), 1);
+        assert_eq!(
+            style(ColorOption::Truecolor, false, Some("xterm-256color"), None),
+            2
+        );
         assert_eq!(
             style(ColorOption::Never, true, Some("xterm"), Some("truecolor")),
             0
@@ -11224,12 +11275,48 @@ mod tests {
         for width in [24, 40, 88] {
             for route in [vec![], vec!["get".to_owned(), "many".to_owned()]] {
                 let plain = render_help("nkp", &route, width);
-                for (style, sgr) in [(1, "\x1b[1;36m"), (2, "\x1b[1;38;2;80;190;255m")] {
+                for (style, sgr) in [
+                    (1, "\x1b[1;36m"),
+                    (2, "\x1b[1;38;5;39m"),
+                    (3, "\x1b[1;38;2;80;190;255m"),
+                ] {
                     let styled = render_help_with_style("nkp", &route, width, style);
                     assert_eq!(styled.replace(sgr, "").replace("\x1b[0m", ""), plain);
                 }
             }
         }
+    }
+
+    #[test]
+    fn program_basename_strips_exe_and_sanitizes() {
+        for (argv0, expected) in [
+            ("nkp", "nkp"),
+            ("nkeepass", "nkeepass"),
+            ("kp", "kp"),
+            ("nkpo", "nkpo"),
+            ("/usr/local/bin/kp", "kp"),
+            ("nkp.exe", "nkp"),
+            ("kp.EXE", "kp"),
+            ("NKeepass.Exe", "NKeepass"),
+            (".exe", "nkp"),
+            (".EXE", "nkp"),
+            ("", "nkp"),
+            ("/", "nkp"),
+            ("bad\x1bname", "nkp"),
+            ("bad\u{202e}name", "nkp"),
+        ] {
+            assert_eq!(program_basename(OsStr::new(argv0)), expected, "{argv0}");
+        }
+        #[cfg(windows)]
+        assert_eq!(program_basename(OsStr::new(r"C:\Tools\nkp.exe")), "nkp");
+
+        let init_help = render_help("kp", &["init".to_owned()], HELP_WIDTH);
+        assert!(init_help.contains("to kp --vault DATABASE"));
+        assert!(!init_help.contains("to nkp --vault DATABASE"));
+
+        let shell_help = render_help("kp", &["shell".to_owned(), "init".to_owned()], HELP_WIDTH);
+        assert!(shell_help.contains("use `kp shell completions sh` or `kp completion sh`"));
+        assert!(!shell_help.contains("`nkp shell completions sh`"));
     }
 
     #[test]
