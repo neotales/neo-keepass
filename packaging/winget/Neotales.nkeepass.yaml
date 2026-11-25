@@ -6,7 +6,7 @@
 # which this repository deliberately does not have yet: there is no release
 # channel. Do not submit this to microsoft/winget-pkgs.
 PackageIdentifier: Neotales.nkeepass
-PackageVersion: 0.0.0.25
+PackageVersion: 0.0.0.0
 PackageLocale: en-US
 Publisher: Neotales
 # Human-facing display name is the product name; the PackageIdentifier keeps

@@ -7,10 +7,10 @@
 # runners or this machine. The spec is real metadata, not a stub: versions
 # derive from the crate version below.
 #
-# RPM forbids dashes in Version:, so the crate's 0.0.0-alpha.25 is translated
-# to 0.0.0.alpha.25 for the Version tag while Source0 keeps the dashed name
+# RPM forbids dashes in Version:, so the crate's 0.0.0-alpha.0 is translated
+# to 0.0.0.alpha.0 for the Version tag while Source0 keeps the dashed name
 # the archive script produces.
-%global crate_version 0.0.0-alpha.25
+%global crate_version 0.0.0-alpha.0
 %global crate_version_dots %(v=%{crate_version}; echo "${v//-/.}")
 
 Name:           nkeepass

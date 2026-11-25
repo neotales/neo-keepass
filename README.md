@@ -180,4 +180,6 @@ guides, and separate command references. The [alias index](docs/commands.md)
 maps alternate command and option spellings to those references.
 
 CI/CD, packaging, and benchmarks are documented in `docs/ci-cd.md`; packaging
-artifact status is in `packaging/README.md`.
+artifact status is in `packaging/README.md`. Release notes are in
+[`CHANGELOG.md`](CHANGELOG.md) and milestone tracking is in
+[the `v0.0.0-alpha.0` milestone](docs/milestones/v0.0.0-alpha.0.md).
