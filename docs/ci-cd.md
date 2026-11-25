@@ -4,17 +4,21 @@ Workflows live in `.github/workflows/`. All actions are pinned to commit SHAs
 (tag noted in a comment); runners are pinned to specific images. Toolchain is
 pinned to Rust 1.98.1 via `rust-toolchain.toml` — do not use `stable` here.
 
-Nothing publishes, pushes, or opens credentials. Artifacts become workflow
-artifacts only; there is no release channel yet.
+All build and CI jobs run with `contents: read` and upload workflow artifacts
+only; `.github/workflows/release.yml` grants `contents: write` strictly to its
+final `publish-release` job (gated to `refs/tags/v*` after all 6 platform
+builds succeed). No custom secrets are opened.
 
 **Timeouts:** every job carries an explicit `timeout-minutes` (otherwise
 GitHub's default 360 applies). The values — 20-40 for the fast `ci.yml`
-lanes, 60 for the test matrix, build matrix, bench, and the Windows build —
+lanes (and 20 for `publish-release`), 60 for the test matrix, build matrix,
+`release.yml` platform builds, bench, and the Windows build —
 are conservative caps chosen relative to each job's cost drivers (cold
 compiles, interpreter runs, advisory-DB fetches); they are not multiples of
 measured CI runs, and no CI timing baseline was used. Steps that *execute*
 compiled test/binary code also carry a tighter step bound (test step 30,
-completion test 15, packaging self-tests 20, RSA lane 30, bench 45) because
+`nkpui` test step 20, completion test 15, packaging self-tests 20, RSA lane 30,
+bench 45) because
 that is the class that can block forever on an unread prompt — run
 134478538047 (macos-15) hung >75m in a Bash completion PTY test under the
 360 default. The RSA lane round-trips against a committed 16,384-bit test
@@ -35,10 +39,11 @@ Triggered on push to `main`/`dev`, pull requests, and manual dispatch.
 | `completion-interpreters` | `ubuntu-24.04` | generated zsh (`5.9`) and PowerShell (`7.6.10`) syntax tests |
 | `rsa-slow-lane` | `ubuntu-24.04` | ignored 16,384-bit RSA SSH round-trip fixture test |
 | `keepassxc-interop` | `ubuntu-24.04` | installs `keepassxc` (`keepassxc-cli`) and runs ignored KeePassXC interop tests for `neotales-keepass` (`cli_interop`) and `nkeepass` (`keepassxc_interop`) |
-| `test` | `ubuntu-24.04`, `macos-15`, `windows-2025` | `cargo test --workspace` |
-| `lint` | `ubuntu-24.04` | `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `scripts/check-workflows.sh` |
-| `packaging-tests` | `ubuntu-24.04` | builds the release binary, runs `packaging/test.sh` (real `dpkg-deb` builder path) |
-| `audit` | `ubuntu-24.04` | `cargo audit` against the pinned `Cargo.lock` |
+| `test` | `ubuntu-24.04`, `macos-15`, `windows-2025` | `cargo test --locked --workspace` |
+| `lint` | `ubuntu-24.04` | `cargo fmt --check`, `cargo clippy --locked --workspace --all-targets`, `scripts/check-workflows.sh` |
+| `nkpui` | `ubuntu-24.04` | installs `libxkbcommon-dev` (`DEBIAN_FRONTEND=noninteractive`) and runs `fmt --check`, `clippy --locked --all-targets --no-deps -- -D warnings`, `test --locked`, and `check --locked --release` in `crates/nkpui/` |
+| `packaging-tests` | `ubuntu-24.04` | builds the release binary (`--locked`), runs `packaging/test.sh` (real `dpkg-deb` builder path) |
+| `audit` | `ubuntu-24.04` | `cargo audit` against the pinned root `Cargo.lock` and `crates/nkpui/Cargo.lock` |
 
 **KeePassXC interop lane (`keepassxc-interop`):** runs on `ubuntu-24.04`
 (30-minute job timeout, 15-minute bound on each test step). Ubuntu 24.04
@@ -103,12 +108,25 @@ private-write integration tests. A successful cross-check on another OS is not
 evidence that these tests passed on Windows. Do not silence failures with
 `continue-on-error` or additional platform skips.
 
-**Audit:** `cargo audit` scans the pinned `Cargo.lock` against the advisory
-database available at run time; the database is not pinned, so results can
-change over time. A fresh local audit on 2026-11-16 scanned 325 dependencies
-and exited 0 with no findings. The RSA migration is complete: the lockfile
-uses upstream `rsa 0.10.0`, with no dependency fork or advisory ignore.
-The CI job stays unsuppressed so future findings fail visibly.
+**nkpui lane (`nkpui`):** runs on `ubuntu-24.04` (`permissions: contents: read`,
+40-minute job timeout, 20-minute bound on the test step) because
+`crates/nkpui/` is an isolated nested Cargo workspace with its own
+`crates/nkpui/Cargo.lock` that is excluded from root `--workspace` commands.
+It installs `libxkbcommon-dev` non-interactively with `--no-install-recommends`
+(required at link time because `rune` links `-lxkbcommon`) and runs
+`cargo +1.98.1 fmt --check`,
+`cargo +1.98.1 clippy --locked --all-targets --no-deps -- -D warnings`,
+`cargo +1.98.1 test --locked`, and `cargo +1.98.1 check --locked --release`
+inside `crates/nkpui/`.
+
+**Audit:** `cargo audit` scans both the pinned root `Cargo.lock` and
+`crates/nkpui/Cargo.lock` (`cargo audit --file crates/nkpui/Cargo.lock`) against
+the advisory database available at run time; the database is not pinned, so
+results can change over time. A fresh local audit on 2026-11-16 scanned 325
+dependencies in the root lockfile and exited 0 with no findings. The RSA
+migration is complete: the lockfile uses upstream `rsa 0.10.0`, with no
+dependency fork or advisory ignore. The CI job stays unsuppressed so future
+findings in either lockfile fail visibly.
 
 **Windows failure of run 43846609261 (first Windows execution):** the `Test`
 step failed with exit code 101. What public data shows and what it cannot:
@@ -658,6 +676,61 @@ dev host has no system pwsh but runs the suite through a portable pwsh
 7.6.10 (`test-windows-package.ps1`), so the scripts — including their
 failure paths — execute locally; the `windows-build.yml` runner re-runs
 the same suite in the real target environment on every build.
+
+## `release.yml` — 6-platform release pipeline
+
+Triggered on `push: tags: ["v*"]` and `workflow_dispatch` (with optional `ref`
+input). `workflow_dispatch` runs are dry runs that build, verify, and upload all
+6 platform artifact bundles as workflow artifacts (`retention-days: 14`) without
+creating a GitHub Release; tag pushes (`refs/tags/v*`) additionally run the
+final `publish-release` job.
+
+**Permissions and security:** top-level `permissions` is `contents: read`.
+`permissions: contents: write` is granted **only** to `publish-release` after
+`build-linux`, `build-macos`, and `build-windows` all succeed. Every action is
+pinned to a 40-character commit SHA, checkout sets
+`persist-credentials: false`, and all `${{ ... }}` values are passed to shell
+scripts via `env:` rather than interpolated into `run:` blocks.
+
+**6-target matrix** (builds both `nkp` via `--locked -p nkeepass` and `nkpui`
+in `crates/nkpui/` via `--locked --release` without the `tooling` feature):
+
+| Platform | Runner | Rust target | Archives produced |
+|---|---|---|---|
+| `linux-amd64` | `ubuntu-24.04` | `x86_64-unknown-linux-gnu` | `nkeepass-<ver>-x86_64-unknown-linux-gnu.{tar.gz,zip}`, `nkeepass-<ver>-amd64.deb`, `nkpui-<ver>-x86_64-unknown-linux-gnu.{tar.gz,zip}` |
+| `linux-arm64` | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` | `nkeepass-<ver>-aarch64-unknown-linux-gnu.{tar.gz,zip}`, `nkeepass-<ver>-arm64.deb`, `nkpui-<ver>-aarch64-unknown-linux-gnu.{tar.gz,zip}` |
+| `macos-arm64` | `macos-15` | `aarch64-apple-darwin` | `nkeepass-<ver>-aarch64-apple-darwin.{tar.gz,zip}`, `nkpui-<ver>-aarch64-apple-darwin.{tar.gz,zip}` |
+| `macos-amd64` | `macos-15` | `x86_64-apple-darwin` | `nkeepass-<ver>-x86_64-apple-darwin.{tar.gz,zip}`, `nkpui-<ver>-x86_64-apple-darwin.{tar.gz,zip}` |
+| `windows-amd64` | `windows-2025` | `x86_64-pc-windows-msvc` | `nkeepass-<ver>-x86_64-pc-windows-msvc.zip`, `nkpui-<ver>-x86_64-pc-windows-msvc.zip` |
+| `windows-arm64` | `windows-11-arm` | `aarch64-pc-windows-msvc` | `nkeepass-<ver>-aarch64-pc-windows-msvc.zip`, `nkpui-<ver>-aarch64-pc-windows-msvc.zip` |
+
+- **Native ARM64 runners (`ubuntu-24.04-arm`, `windows-11-arm`):** chosen so
+  both `nkp` and `nkpui` link cleanly against native `libxkbcommon-dev` on
+  Linux and native MSVC ARM64 toolchains on Windows without cross-sysroot
+  fragility.
+- **Validation per OS:**
+  - Linux (`amd64` and `arm64`): strips both binaries, smoke-tests `nkp --version`,
+    validates `nkeepass` archives and `.deb` via `packaging/validate.sh --binary`,
+    and verifies per-target `SHA256SUMS`.
+  - macOS (`arm64` and `amd64`): checks Mach-O architecture of both binaries via
+    `lipo -archs`, smoke-tests `nkp --version` and `--help` on native `macos-arm64`,
+    and verifies per-target `SHA256SUMS`.
+  - Windows (`amd64` and `arm64`): checks PE COFF machine of both `nkp.exe` and
+    `nkpui.exe` via `packaging/scripts/windows-validate.ps1` (`x64` / `arm64`),
+    packages `nkp.exe` via `packaging/scripts/windows-package.ps1`, runs
+    `packaging/scripts/windows-verify-artifact.ps1 -Smoke` on `windows-amd64`
+    (or native `nkp.exe --version`/`--help` smoke checks on `windows-arm64`,
+    since `windows-verify-artifact.ps1` targets x64 COFF/job layouts), packages
+    `nkpui-<ver>-<triple>.zip` (`nkpui.exe`, `LICENSE.md`,
+    `WINDOWS-LIMITATIONS.txt`), and verifies per-target `SHA256SUMS`.
+
+**`publish-release`:** downloads all 6 artifact bundles via
+`actions/download-artifact`, verifies every target's `SHA256SUMS` and non-empty
+archive set, checks for filename collisions, generates a consolidated top-level
+`SHA256SUMS` across all 6-platform archives, and publishes idempotently via
+`gh release create` (`--verify-tag`, `--generate-notes`, `--prerelease` when
+the tag contains `-`) or `gh release upload --clobber` if the release already
+exists.
 
 ## `bench.yml` — benchmarks
 

@@ -1,0 +1,391 @@
+name: release
+
+# Builds release binaries and distribution archives for both nkp (nkeepass) and
+# nkpui across all 6 target platforms (linux/macos/windows x amd64/arm64),
+# uploads per-platform workflow artifacts (including on workflow_dispatch dry
+# runs), and publishes a GitHub Release when triggered by a v* tag push.
+#
+# Least privilege: top-level permissions are contents: read; only the final
+# publish-release job requests contents: write after all 6 builds succeed.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build (defaults to current branch)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: release (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
+    steps:
+      # Untrusted/dispatched code is compiled here; do not persist checkout creds.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-${{ matrix.platform }}
+          workspaces: |
+            .
+            crates/nkpui
+      - name: Install libxkbcommon-dev
+        # Required at link time because rune links -lxkbcommon via xkbcommon.
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends libxkbcommon-dev
+      - name: Build release binaries (--locked)
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p nkeepass --target "$TARGET"
+          (cd crates/nkpui && cargo build --release --locked --target "$TARGET")
+      - name: Strip and smoke-test native binary
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          strip "target/$TARGET/release/nkp"
+          strip "crates/nkpui/target/$TARGET/release/nkpui"
+          timeout 10 "target/$TARGET/release/nkp" --version
+      - name: Package and validate artifacts
+        env:
+          TARGET: ${{ matrix.target }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+        run: |
+          set -euo pipefail
+          version=$(packaging/scripts/version.sh)
+          dist="$PWD/dist"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+
+          nkp_bin="target/$TARGET/release/nkp"
+          nkpui_bin="crates/nkpui/target/$TARGET/release/nkpui"
+
+          packaging/scripts/archive.sh "$nkp_bin" "$version" "$TARGET" "$dist"
+          packaging/deb/build.sh "$nkp_bin" "$version" "$DEB_ARCH" "$dist"
+          packaging/validate.sh --binary "$nkp_bin" "$dist" "$version" "$TARGET"
+
+          nkpui_name="nkpui-${version}-${TARGET}"
+          stage=$(mktemp -d "${TMPDIR:-/tmp}/nkpui-archive.XXXXXX")
+          trap 'rm -rf "$stage"' EXIT
+          mkdir -p "$stage/$nkpui_name"
+          cp "$nkpui_bin" "$stage/$nkpui_name/nkpui"
+          chmod 755 "$stage/$nkpui_name/nkpui"
+          cp README.md LICENSE.md "$stage/$nkpui_name/"
+          tar -czf "$dist/$nkpui_name.tar.gz" -C "$stage" "$nkpui_name"
+          (cd "$stage" && zip -r -q -X "$dist/$nkpui_name.zip" "$nkpui_name")
+
+          (cd "$dist" && LC_ALL=C sha256sum *.tar.gz *.zip *.deb > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: release (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            lipo_arch: arm64
+            native: "true"
+          - platform: macos-amd64
+            runner: macos-15
+            target: x86_64-apple-darwin
+            lipo_arch: x86_64
+            native: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-${{ matrix.platform }}
+          workspaces: |
+            .
+            crates/nkpui
+      - name: Build release binaries (--locked)
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p nkeepass --target "$TARGET"
+          (cd crates/nkpui && cargo build --release --locked --target "$TARGET")
+      - name: Verify Mach-O architecture and smoke-test native binary
+        env:
+          TARGET: ${{ matrix.target }}
+          LIPO_ARCH: ${{ matrix.lipo_arch }}
+          NATIVE: ${{ matrix.native }}
+        run: |
+          set -euo pipefail
+          for bin in "target/$TARGET/release/nkp" "crates/nkpui/target/$TARGET/release/nkpui"; do
+            archs=$(lipo -archs "$bin")
+            if [ "$archs" != "$LIPO_ARCH" ]; then
+              echo "::error::$bin architecture is '$archs', expected '$LIPO_ARCH'"
+              exit 1
+            fi
+          done
+          if [ "$NATIVE" = "true" ]; then
+            "target/$TARGET/release/nkp" --version
+            "target/$TARGET/release/nkp" --help >/dev/null
+          fi
+      - name: Package artifacts
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=$(packaging/scripts/version.sh)
+          dist="$PWD/dist"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+
+          nkp_bin="target/$TARGET/release/nkp"
+          nkpui_bin="crates/nkpui/target/$TARGET/release/nkpui"
+
+          packaging/scripts/archive.sh "$nkp_bin" "$version" "$TARGET" "$dist"
+
+          nkpui_name="nkpui-${version}-${TARGET}"
+          stage=$(mktemp -d "${TMPDIR:-/tmp}/nkpui-archive.XXXXXX")
+          trap 'rm -rf "$stage"' EXIT
+          mkdir -p "$stage/$nkpui_name"
+          cp "$nkpui_bin" "$stage/$nkpui_name/nkpui"
+          chmod 755 "$stage/$nkpui_name/nkpui"
+          cp README.md LICENSE.md "$stage/$nkpui_name/"
+          tar -czf "$dist/$nkpui_name.tar.gz" -C "$stage" "$nkpui_name"
+          (cd "$stage" && zip -r -q -X "$dist/$nkpui_name.zip" "$nkpui_name")
+
+          (cd "$dist" && shasum -a 256 *.tar.gz *.zip > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    name: release (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-amd64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            machine: x64
+            verify_full: "true"
+          - platform: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            machine: arm64
+            verify_full: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-${{ matrix.platform }}
+          workspaces: |
+            .
+            crates/nkpui
+      - name: Build release binaries (--locked)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p nkeepass --target "$TARGET"
+          (cd crates/nkpui && cargo build --release --locked --target "$TARGET")
+      - name: Validate PE architecture
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          pwsh -NoProfile -File packaging/scripts/windows-validate.ps1 \
+            -Binary "target/$TARGET/release/nkp.exe" -Machine "$MACHINE"
+          pwsh -NoProfile -File packaging/scripts/windows-validate.ps1 \
+            -Binary "crates/nkpui/target/$TARGET/release/nkpui.exe" -Machine "$MACHINE"
+      - name: Package and verify artifacts
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERIFY_FULL: ${{ matrix.verify_full }}
+        run: |
+          set -euo pipefail
+          version=$(packaging/scripts/version.sh)
+          dist="$PWD/dist"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+
+          nkp_exe="target/$TARGET/release/nkp.exe"
+          nkpui_exe="crates/nkpui/target/$TARGET/release/nkpui.exe"
+
+          pwsh -NoProfile -File packaging/scripts/windows-package.ps1 \
+            -Binary "$nkp_exe" -Version "$version" -Triple "$TARGET" -OutputDir dist
+
+          if [ "$VERIFY_FULL" = "true" ]; then
+            pwsh -NoProfile -File packaging/scripts/windows-verify-artifact.ps1 \
+              -Zip "dist/nkeepass-$version-$TARGET.zip" \
+              -BuiltExe "$nkp_exe" \
+              -Version "$version" -Triple "$TARGET" -Smoke
+          else
+            # windows-verify-artifact.ps1 targets x64 COFF/job layouts;
+            # windows-validate.ps1 already verified arm64 PE above, so
+            # smoke-run the native arm64 CLI directly here.
+            timeout 10 "$nkp_exe" --version
+            timeout 10 "$nkp_exe" --help >/dev/null
+          fi
+
+          nkpui_name="nkpui-${version}-${TARGET}"
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          mkdir -p "$stage/$nkpui_name"
+          cp "$nkpui_exe" "$stage/$nkpui_name/nkpui.exe"
+          cp LICENSE.md packaging/windows/WINDOWS-LIMITATIONS.txt "$stage/$nkpui_name/"
+          STAGE_PKG=$(cygpath -w "$stage/$nkpui_name") \
+          ZIP_OUT=$(cygpath -w "$dist/$nkpui_name.zip") \
+          pwsh -NoProfile -Command 'Compress-Archive -Path $env:STAGE_PKG -DestinationPath $env:ZIP_OUT -CompressionLevel Optimal'
+
+          nkpui_hash=$(sha256sum "$dist/$nkpui_name.zip" | cut -d' ' -f1)
+          printf '%s  %s\n' "$nkpui_hash" "$nkpui_name.zip" >> "$dist/SHA256SUMS"
+          (cd "$dist" && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: publish GitHub release
+    needs: [build-linux, build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: downloaded-artifacts
+      - name: Verify all 6 platform artifacts and build consolidated SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release-assets
+          mkdir -p release-assets
+
+          expected_platforms=(
+            linux-amd64
+            linux-arm64
+            macos-amd64
+            macos-arm64
+            windows-amd64
+            windows-arm64
+          )
+
+          for platform in "${expected_platforms[@]}"; do
+            dir="downloaded-artifacts/release-${platform}"
+            if [ ! -d "$dir" ]; then
+              echo "::error::missing downloaded artifact directory for ${platform}: $dir"
+              exit 1
+            fi
+            if [ ! -f "$dir/SHA256SUMS" ]; then
+              echo "::error::missing SHA256SUMS for ${platform}"
+              exit 1
+            fi
+            (cd "$dir" && sha256sum -c SHA256SUMS)
+
+            shopt -s nullglob
+            archives=("$dir"/*.tar.gz "$dir"/*.zip "$dir"/*.deb)
+            shopt -u nullglob
+            if [ "${#archives[@]}" -eq 0 ]; then
+              echo "::error::no release archives found for ${platform}"
+              exit 1
+            fi
+
+            for archive in "${archives[@]}"; do
+              base=$(basename "$archive")
+              if [ -e "release-assets/$base" ]; then
+                echo "::error::duplicate release archive filename across platforms: $base"
+                exit 1
+              fi
+              cp "$archive" "release-assets/$base"
+            done
+          done
+
+          (
+            cd release-assets
+            LC_ALL=C sha256sum *.tar.gz *.zip *.deb > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+          ls -la release-assets
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$TAG_NAME"
+          flags=(--repo "$GH_REPO" --verify-tag --title "$tag" --generate-notes)
+          if [[ "$tag" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --repo "$GH_REPO" --clobber
+          else
+            gh release create "$tag" release-assets/* "${flags[@]}"
+          fi
