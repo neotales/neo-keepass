@@ -2504,7 +2504,7 @@ dependencies = [
 
 [[package]]
 name = "nkeepass"
-version = "0.0.0-alpha.1"
+version = "0.0.0-alpha.2"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -2527,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "nkpui"
-version = "0.0.0-alpha.1"
+version = "0.0.0-alpha.2"
 dependencies = [
  "neotales-keepass",
  "nkeepass",

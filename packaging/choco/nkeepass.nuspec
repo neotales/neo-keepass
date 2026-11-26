@@ -8,7 +8,7 @@
     <!-- Display-only <title> is the product name; the <id> keeps the
          historical nkeepass package identifier (see packaging/README.md). -->
     <id>nkeepass</id>
-    <version>0.0.0-alpha.1</version>
+    <version>0.0.0-alpha.2</version>
     <title>neo-keepass (Staging)</title>
     <authors>Neotales</authors>
     <owners>Neotales</owners>

@@ -5,6 +5,50 @@ All notable changes to `neo-keepass` (`nkp` and `nkpui`) are documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.0-alpha.2] - 2026-11-26
+
+### Added
+
+- **`VaultService` APIs & search/path helpers (`nkeepass`):**
+  - Added `group_tree`, `list_custom_icons`, `set_entry_custom_icon`, `set_group_custom_icon`, `rename_group`, `move_entry`, `reorder_entry`, `clone_entry`, `recycle_entry`, `restore_entry`, `empty_recycle_bin`, `database_settings`, `update_database_settings`, `otp_metadata`, `hotp_next_code`, and `set_entry_otp_config`.
+  - Added wildcard `*`/`?` search and binary-search `complete_path` completion support.
+- **OTP & KDBX 4 interoperability (`neotales-keepass` `0.0.0-alpha.2`):**
+  - Added Steam Guard, HOTP, padded Base32, and KeePass 2.x `TimeOtp-*` fallback parsing.
+- **TUI power features, navigation, and mouse support (`nkp`):**
+  - Added `nkp tui [PATH|ALIAS]` vault alias, default vault, and `--vault` launch resolution with synced completions across all 6 shells (`bash`, `sh`, `zsh`, `fish`, `powershell`/`pwsh`, `nushell`).
+  - Added mouse capture with click and scroll-wheel support (guarded by lock-before-teardown `MouseCaptureGuard`), 3-pane wide layout, stay-in-subgroup + auto-select on entry creation, and `Ctrl+S` save with `[UNSAVED · Ctrl+S]` badge.
+  - Added Move Entry (`m`), Reorder (`Alt+Up`/`Down`, `K`/`J`), Clone (`C`/`Ctrl+D`), Recycle/Restore/Empty Recycle Bin (`R` with confirmed permanent delete/empty), HOTP next-code generation + guided TOTP/HOTP configurator modal, Editable Path Bar (`Ctrl+K`/`Ctrl+G`/`:` with 5-item `Tab` dropdown), and Database Settings modal (`S`/`Ctrl+O`).
+- **Desktop UI power features (`nkpui`):**
+  - Modularized the desktop UI (`crates/nkpui/src/ui/`) and added a collapsible `TreeView` group sidebar with arrow-key navigation and Rename / New Subgroup / Empty Recycle Bin actions.
+  - Added Move Up/Down entry reordering (`Alt+Up`/`Down`), Move-to-Group picker, drag-and-drop entries onto groups or entry slots, Clone Entry, Recycle/Restore/Empty Recycle Bin, and right-click context menus (`rune_kit::context_menu`) with expanded keyboard shortcuts.
+  - Added Editable Path Bar (`Ctrl/Cmd+K`, `Ctrl/Cmd+G` with 5-item `Tab` dropdown), wildcard `*`/`?` Search Bar, Copy and Open URL (`http`/`https` only) actions on unprotected standard fields, and a draining 30-second clipboard progress bar.
+  - Added embedded custom KDBX icon selection in the Icon Picker alongside the 69 standard KeePass icons, guided TOTP/HOTP configurator, TOTP draining bar, HOTP `"Generate Next Code"`, and Database & Security Settings modal (`Ctrl/Cmd+,`).
+
+### Changed
+
+- **Published `neotales-*` dependencies & Rust `1.100.0` toolchain:**
+  - Migrated from vendored `crates/neotales-{keepass,age,x509}` crates to published crates.io `0.0.0-alpha.2` releases (`neotales-keepass`, `neotales-age`, transitive `neotales-x509`, `rsa 0.10.0` only) and bumped Rust toolchain/MSRV to `1.100.0`.
+- **KDBX 4 save fidelity & defaults:**
+  - Preserved loaded KDBX 4 KDF, cipher, and compression settings on save, while defaulting new vaults to Argon2id + GZip.
+- **Auto-lock defaults (`nkpui`):**
+  - Configured a 5-minute idle auto-lock default and kept focus-loss auto-lock opt-in (`false`) while masking revealed secrets on focus loss.
+- **Version bumps:**
+  - Updated `nkeepass`, `nkpui`, RPM spec, and Chocolatey nuspec versions to `0.0.0-alpha.2`.
+
+### Fixed
+
+- **KDBX 4 binary inner-stream & XML ordering (`neotales-keepass` `0.0.0-alpha.2`):**
+  - Fixed KDBX 4 `InnerHeader` binary inner-stream desync and document-order XML traversal, resolving real-vault `"password is not valid UTF-8"` errors.
+- **Cross-platform TUI input & small-terminal layout (`nkp`):**
+  - Filtered Windows `KeyEventKind::Release` duplicate events and hardened small (`40x12`) dialogs and pagination.
+- **Desktop secret reveals & UI state (`nkpui`):**
+  - Handled empty (`"(empty)"`) and non-UTF-8 secret reveals cleanly, and fixed `instant_changes` propagation, widget secret wipes, and lock overlay clearing.
+
+### Security
+
+- **Fail-closed recycle, OTP, and URL/reveal hardening (`nkp`, `nkpui`):**
+  - Hardened TUI recycle/empty-bin fail-closed guards and OTP validation, restricted desktop Open URL to `http`/`https` schemes, and ensured revealed secrets and transient widgets are masked/wiped on focus loss and vault lock.
+
 ## [0.0.0-alpha.1] - 2026-11-25
 
 ### Added
