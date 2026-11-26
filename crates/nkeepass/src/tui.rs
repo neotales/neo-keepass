@@ -453,7 +453,7 @@ enum Modal {
 }
 
 enum TreeOrListPage {
-    Tree(Vec<SearchHit>),
+    Tree(Vec<SearchHit>, usize),
     List(ListPage),
 }
 
@@ -531,6 +531,8 @@ struct App {
     tree_stack: Vec<GroupRef>,
     tree_cursor: Option<TreeCursor>,
     list_cursor: Option<ListCursor>,
+    tree_page_index: usize,
+    tree_withheld: usize,
     page_failure: Option<String>,
     group_selected: usize,
     entry_selected: usize,
@@ -1016,13 +1018,25 @@ fn valid_unpadded_base32(value: &str) -> bool {
     bits == 0 || buffer == 0
 }
 
+fn strip_ascii_whitespace_zeroizing(value: &str) -> Zeroizing<String> {
+    let mut cleaned = Zeroizing::new(String::with_capacity(value.len()));
+    for ch in value.chars() {
+        if !ch.is_ascii_whitespace() {
+            cleaned.push(ch);
+        }
+    }
+    cleaned
+}
+
 fn valid_base32_secret(value: &str) -> bool {
-    let trimmed = value.trim_end_matches('=');
-    let pad_len = value.len().saturating_sub(trimmed.len());
-    if pad_len > 0 && (!value.len().is_multiple_of(8) || !matches!(pad_len, 1 | 3 | 4 | 6)) {
+    let normalized = strip_ascii_whitespace_zeroizing(value);
+    let trimmed = normalized.trim_end_matches('=');
+    let pad_len = normalized.len().saturating_sub(trimmed.len());
+    if pad_len > 0 && (!normalized.len().is_multiple_of(8) || !matches!(pad_len, 1 | 3 | 4 | 6)) {
         return false;
     }
-    valid_unpadded_base32(trimmed)
+    // Decoded Base32 payload must be >= 1 byte (at least two 5-bit symbols).
+    trimmed.len() >= 2 && valid_unpadded_base32(trimmed)
 }
 
 #[cfg(test)]
@@ -1099,13 +1113,15 @@ fn validate_otp_uri(value: &str) -> Result<(), &'static str> {
     let rest = value
         .strip_prefix("otpauth://")
         .ok_or("OTP URI must start with otpauth://totp/ or otpauth://hotp/")?;
-    let (label, query) = rest
-        .split_once('?')
-        .ok_or("OTP URI must include ?secret=... query parameters")?;
-    let kind = label.split('/').next().unwrap_or_default();
+    let (kind, account_and_query) = rest
+        .split_once('/')
+        .ok_or("OTP URI must include / after totp or hotp")?;
     if !matches!(kind, "totp" | "hotp") {
         return Err("OTP URI type must be totp or hotp");
     }
+    let (_label, query) = account_and_query
+        .split_once('?')
+        .ok_or("OTP URI must include ?secret=... query parameters")?;
     let mut values = BTreeMap::new();
     for part in query.split('&') {
         let (key, val) = part
@@ -1122,11 +1138,15 @@ fn validate_otp_uri(value: &str) -> Result<(), &'static str> {
         return Err("OTP URI secret must be valid Base32");
     }
     let _issuer = values.remove("issuer");
+    let _image = values.remove("image");
     let encoder = values.remove("encoder");
-    if let Some(enc) = encoder
-        && !enc.eq_ignore_ascii_case("steam")
-    {
-        return Err("Unsupported OTP encoder (only steam is supported)");
+    if let Some(enc) = encoder {
+        if !matches!(enc, "steam" | "default" | "standard") {
+            return Err("Unsupported OTP encoder (use steam, default, or standard)");
+        }
+        if kind == "hotp" && enc == "steam" {
+            return Err("Steam encoder is only supported for TOTP");
+        }
     }
     if let Some(counter) = values.remove("counter") {
         if counter.parse::<u64>().is_err() {
@@ -1141,14 +1161,12 @@ fn validate_otp_uri(value: &str) -> Result<(), &'static str> {
         return Err("OTP URI period must be a positive integer");
     }
     if let Some(algorithm) = values.remove("algorithm")
-        && !(algorithm.eq_ignore_ascii_case("SHA1")
-            || algorithm.eq_ignore_ascii_case("SHA256")
-            || algorithm.eq_ignore_ascii_case("SHA512"))
+        && !matches!(algorithm, "SHA1" | "SHA256" | "SHA512")
     {
         return Err("Unsupported OTP algorithm (use SHA1, SHA256, or SHA512)");
     }
     if let Some(digits) = values.remove("digits") {
-        let valid = if encoder.is_some_and(|enc| enc.eq_ignore_ascii_case("steam")) {
+        let valid = if encoder == Some("steam") {
             digits == "5"
         } else {
             matches!(digits, "6" | "8")
@@ -1381,8 +1399,8 @@ fn finish_delete(
             .map(|()| DeleteOutcome::EntryRemoved),
         DeleteKind::PermanentEntry => entry
             .ok_or(nkeepass::ServiceError::NotFound)
-            .and_then(|reference| app.service.recycle_entry(reference))
-            .map(|_| DeleteOutcome::PermanentEntry),
+            .and_then(|reference| app.service.remove_entry(reference))
+            .map(|()| DeleteOutcome::PermanentEntry),
         DeleteKind::Group => group
             .ok_or(nkeepass::ServiceError::NotFound)
             .and_then(|reference| app.service.remove_group(reference))
@@ -1499,6 +1517,10 @@ fn reorder_selected_entry(app: &mut App, move_up: bool) {
         app.status = "Cannot reorder entries while search filter is active".into();
         return;
     }
+    if app.tree_page_index > 0 || app.tree_withheld > 0 {
+        app.status = "Cannot reorder entries on a paginated or withheld page".into();
+        return;
+    }
     let Some(hit) = app.hits.get(app.entry_selected) else {
         app.status = "Select an entry before reordering".into();
         return;
@@ -1566,13 +1588,14 @@ fn clone_selected_entry(app: &mut App) {
                 .hits
                 .iter()
                 .position(|hit| hit.reference() == cloned_ref)
-                .or_else(|| app.hits.len().checked_sub(1))
             {
                 app.entry_selected = idx;
                 app.focus = FocusPane::Entries;
                 app.load_entry_preview();
+                app.status = "Cloned entry — press Ctrl+S or s to save".into();
+            } else {
+                app.status = "Cloned entry (on another page) — press Ctrl+S or s to save".into();
             }
-            app.status = "Cloned entry — press Ctrl+S or s to save".into();
         }
         Err(error) => app.status = clean(error.message()),
     }
@@ -1584,53 +1607,57 @@ fn recycle_selected_entry(app: &mut App) {
         app.status = "Select an entry before choosing Recycle entry".into();
         return;
     };
-    let recycle_enabled = app
-        .service
-        .database_settings(app.session)
-        .map_or(true, |settings| {
-            let DatabaseSettings {
-                recycle_bin_enabled,
-                ..
-            } = settings;
-            recycle_bin_enabled
-        });
-    let already_in_bin = app
-        .service
-        .group_tree(app.session)
-        .ok()
-        .and_then(|tree| {
-            let bin_path = find_recycle_bin_path(&tree)?.to_owned();
-            let entry_path = app
-                .hits
-                .iter()
-                .find(|hit| hit.reference() == entry_ref)
-                .map(|hit| hit.path().to_owned())
-                .or_else(|| app.service.group_path(&app.tree_parent).ok())?;
-            Some(entry_path == bin_path || entry_path.starts_with(&format!("{bin_path}/")))
-        })
-        .unwrap_or(false);
-    if !recycle_enabled || already_in_bin {
-        let path_desc = app
-            .hits
-            .iter()
-            .find(|hit| hit.reference() == entry_ref)
-            .map_or_else(|| "selected entry".to_owned(), |hit| hit.path().to_owned());
+    let DatabaseSettings {
+        recycle_bin_enabled,
+        ..
+    } = match app.service.database_settings(app.session) {
+        Ok(settings) => settings,
+        Err(error) => {
+            app.status = clean(error.message());
+            return;
+        }
+    };
+    let path_desc = app
+        .hits
+        .iter()
+        .find(|hit| hit.reference() == entry_ref)
+        .map_or_else(|| "selected entry".to_owned(), |hit| hit.path().to_owned());
+    let prompt_permanent = |app: &mut App, reason: &str, entry_ref: EntryRef| {
         app.modal = Some(Modal::ConfirmDelete {
             kind: DeleteKind::PermanentEntry,
-            path: format!(
-                "Permanent delete ({}): {path_desc}",
-                if recycle_enabled {
-                    "already in Recycle Bin"
-                } else {
-                    "Recycle Bin disabled"
-                }
-            ),
+            path: format!("{reason}: {path_desc}"),
             entry: Some(entry_ref),
             group: None,
             input: Zeroizing::new(String::new()),
             offset: 0,
         });
+    };
+    if !recycle_bin_enabled {
+        prompt_permanent(app, "Recycle Bin disabled", entry_ref);
         return;
+    }
+    let tree = match app.service.group_tree(app.session) {
+        Ok(tree) => tree,
+        Err(error) => {
+            app.status = clean(error.message());
+            return;
+        }
+    };
+    if let Some(bin_path) = find_recycle_bin_path(&tree) {
+        let entry_path = app
+            .hits
+            .iter()
+            .find(|hit| hit.reference() == entry_ref)
+            .map(|hit| hit.path().to_owned())
+            .or_else(|| app.service.group_path(&app.tree_parent).ok());
+        let Some(entry_path) = entry_path else {
+            prompt_permanent(app, "Cannot verify Recycle Bin location", entry_ref);
+            return;
+        };
+        if entry_path == bin_path || entry_path.starts_with(&format!("{bin_path}/")) {
+            prompt_permanent(app, "Already in Recycle Bin", entry_ref);
+            return;
+        }
     }
     let (active_path, stack_paths) = capture_tree_paths(app);
     match app.service.recycle_entry(&entry_ref) {
@@ -1799,7 +1826,7 @@ fn begin_otp_config(app: &mut App) {
         use_steam,
         acct_label,
         issuer_label: String::new(),
-        secret_b32: Zeroizing::new(String::new()),
+        secret_b32: Zeroizing::new(String::with_capacity(260)),
         selected_row: 0,
         editing_text: false,
         error_msg: None,
@@ -1811,7 +1838,8 @@ fn apply_otp_config(app: &mut App, draft: &mut OtpConfigDraft) -> bool {
         draft.error_msg = Some("Account label is required".into());
         return false;
     }
-    if !valid_base32_secret(draft.secret_b32.trim()) {
+    let cleaned_secret = strip_ascii_whitespace_zeroizing(&draft.secret_b32);
+    if !valid_base32_secret(&cleaned_secret) {
         draft.error_msg = Some("Secret must be valid Base32".into());
         return false;
     }
@@ -1847,22 +1875,34 @@ fn apply_otp_config(app: &mut App, draft: &mut OtpConfigDraft) -> bool {
         steam: draft.use_steam,
     };
     let was_open = app.entry.is_some();
-    let prev_sel = app.entry_selected;
+    let target_path = app
+        .hits
+        .iter()
+        .find(|hit| hit.reference() == draft.entry_ref)
+        .map(|hit| hit.path().to_owned());
     let (active_path, stack_paths) = capture_tree_paths(app);
     match app
         .service
-        .set_entry_otp_config(&draft.entry_ref, &config, draft.secret_b32.trim())
+        .set_entry_otp_config(&draft.entry_ref, &config, &cleaned_secret)
     {
         Ok(()) => {
             draft.secret_b32.zeroize();
             app.dirty = true;
             app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
             app.refresh();
-            if was_open && let Some(hit) = app.hits.get(prev_sel) {
-                let fresh = hit.reference();
-                if app.load_entry_from_ref(&fresh) {
-                    app.entry = Some(fresh);
-                    app.focus = FocusPane::Detail;
+            if was_open {
+                if let Some(idx) = target_path
+                    .as_deref()
+                    .and_then(|path| app.hits.iter().position(|hit| hit.path() == path))
+                {
+                    app.entry_selected = idx;
+                    let fresh = app.hits[idx].reference();
+                    if app.load_entry_from_ref(&fresh) {
+                        app.entry = Some(fresh);
+                        app.focus = FocusPane::Detail;
+                    }
+                } else {
+                    app.entry = None;
                 }
             }
             app.status = "OTP configured in memory — press Ctrl+S or s to save".into();
@@ -1997,14 +2037,21 @@ fn navigate_to_path_completion(app: &mut App, item: &PathCompletionItem) -> bool
             item.target_entry
                 .as_ref()
                 .is_some_and(|target| hit.reference() == *target)
-                || hit.title() == item.leaf_label
+                || hit.path() == item.full_path
         });
         if let Some(idx) = entry_idx {
             app.entry_selected = idx;
             app.focus = FocusPane::Entries;
             app.select();
+            app.status = format!("Navigated to /{}", clean(&item.full_path));
+        } else {
+            app.entry = None;
+            app.focus = FocusPane::Entries;
+            app.status = format!(
+                "Navigated to parent group; use n for next page ({})",
+                clean(&item.leaf_label)
+            );
         }
-        app.status = format!("Navigated to /{}", clean(&item.full_path));
         true
     }
 }
@@ -2180,36 +2227,68 @@ fn db_settings_row_count(kdf_kind: DbKdfKind) -> usize {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "explicit validation checks keep per-field error messages concise"
+)]
 fn apply_db_settings(app: &mut App, draft: &mut DbSettingsDraft) -> bool {
     let Ok(history_max_items) = draft.hist_max_items.trim().parse::<i32>() else {
-        draft.error_msg = Some("History Max Items must be an integer >= -1".into());
+        draft.error_msg = Some("History Max Items must be >= -1".into());
         return false;
     };
+    if history_max_items < -1 {
+        draft.error_msg = Some("History Max Items must be >= -1".into());
+        return false;
+    }
     let Ok(history_max_size) = draft.hist_max_size.trim().parse::<i64>() else {
-        draft.error_msg = Some("History Max Size must be an integer >= -1".into());
+        draft.error_msg = Some("History Max Size must be >= -1".into());
         return false;
     };
+    if history_max_size < -1 {
+        draft.error_msg = Some("History Max Size must be >= -1".into());
+        return false;
+    }
     let kdf = match draft.kdf_kind {
         DbKdfKind::Aes => {
             let Ok(rounds) = draft.aes_rounds.trim().parse::<u64>() else {
-                draft.error_msg = Some("AES KDF rounds must be a positive integer".into());
+                draft.error_msg = Some("AES KDF rounds must be > 0".into());
                 return false;
             };
+            if rounds == 0 {
+                draft.error_msg = Some("AES KDF rounds must be > 0".into());
+                return false;
+            }
             VaultKdfSummary::Aes { rounds }
         }
         DbKdfKind::Argon2d | DbKdfKind::Argon2id => {
             let Ok(memory_kib) = draft.argon_mem.trim().parse::<u32>() else {
-                draft.error_msg = Some("Argon2 Memory KiB must be a positive integer".into());
+                draft.error_msg = Some("Argon2 Memory KiB must be > 0".into());
                 return false;
             };
+            if memory_kib == 0 {
+                draft.error_msg = Some("Argon2 Memory KiB must be > 0".into());
+                return false;
+            }
             let Ok(iterations) = draft.argon_iters.trim().parse::<u32>() else {
-                draft.error_msg = Some("Argon2 Iterations must be a positive integer".into());
+                draft.error_msg = Some("Argon2 Iterations must be > 0".into());
                 return false;
             };
+            if iterations == 0 {
+                draft.error_msg = Some("Argon2 Iterations must be > 0".into());
+                return false;
+            }
             let Ok(lanes) = draft.argon_lanes.trim().parse::<u32>() else {
-                draft.error_msg = Some("Argon2 Lanes must be a positive integer".into());
+                draft.error_msg = Some("Argon2 Lanes must be > 0".into());
                 return false;
             };
+            if lanes == 0 {
+                draft.error_msg = Some("Argon2 Lanes must be > 0".into());
+                return false;
+            }
+            if u64::from(memory_kib) < u64::from(lanes).saturating_mul(8) {
+                draft.error_msg = Some("Argon2 Memory must be >= 8 * Lanes".into());
+                return false;
+            }
             if draft.kdf_kind == DbKdfKind::Argon2id {
                 VaultKdfSummary::Argon2id {
                     memory_kib,
@@ -2250,10 +2329,7 @@ fn apply_db_settings(app: &mut App, draft: &mut DbSettingsDraft) -> bool {
             true
         }
         Err(error) => {
-            draft.error_msg = Some(format!(
-                "{} (verify KDF memory >= 8*lanes and parameter limits)",
-                clean(error.message())
-            ));
+            draft.error_msg = Some(clean(error.message()));
             false
         }
     }
@@ -2703,7 +2779,7 @@ fn handle_modal_key_event(app: &mut App, key_event: KeyEvent) {
             }
         }
         Modal::PathBar(mut state) => {
-            if handle_path_bar_key(app, &mut state, key) {
+            if handle_path_bar_key(app, &mut state, key, modifiers) {
                 app.modal = Some(Modal::PathBar(state));
             }
         }
@@ -2720,7 +2796,7 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
     handle_modal_key_event(app, KeyEvent::new(key, KeyModifiers::NONE));
 }
 
-fn handle_otp_config_edit_key(draft: &mut OtpConfigDraft, key: KeyCode) {
+fn handle_otp_config_edit_key(draft: &mut OtpConfigDraft, key: KeyCode, modifiers: KeyModifiers) {
     match key {
         KeyCode::Esc | KeyCode::Enter => {
             draft.editing_text = false;
@@ -2740,14 +2816,14 @@ fn handle_otp_config_edit_key(draft: &mut OtpConfigDraft, key: KeyCode) {
                 }
             }
             7 => {
-                let keep = draft.secret_b32.chars().count().saturating_sub(1);
-                let remaining: String = draft.secret_b32.chars().take(keep).collect();
-                draft.secret_b32.zeroize();
-                draft.secret_b32.push_str(&remaining);
+                let _ = draft.secret_b32.pop();
             }
             _ => {}
         },
-        KeyCode::Char(c) if !c.is_control() => {
+        KeyCode::Char(c)
+            if !c.is_control()
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
             draft.error_msg = None;
             match draft.selected_row {
                 1 if draft.acct_label.len() < 128 => draft.acct_label.push(c),
@@ -2779,7 +2855,7 @@ fn handle_otp_config_key(
         return !apply_otp_config(app, draft);
     }
     if draft.editing_text {
-        handle_otp_config_edit_key(draft, key);
+        handle_otp_config_edit_key(draft, key, modifiers);
         return true;
     }
     match key {
@@ -2848,7 +2924,12 @@ fn handle_otp_config_key(
     }
 }
 
-fn handle_path_bar_key(app: &mut App, state: &mut PathBarState, key: KeyCode) -> bool {
+fn handle_path_bar_key(
+    app: &mut App,
+    state: &mut PathBarState,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
     match key {
         KeyCode::Esc => {
             app.status = "Path bar closed".into();
@@ -2892,7 +2973,11 @@ fn handle_path_bar_key(app: &mut App, state: &mut PathBarState, key: KeyCode) ->
             state.error_msg = None;
             true
         }
-        KeyCode::Char(c) if !c.is_control() && state.buffer.len() < 1024 => {
+        KeyCode::Char(c)
+            if !c.is_control()
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && state.buffer.len() < 1024 =>
+        {
             state.buffer.push(c);
             state.dropdown_open = false;
             state.completions.clear();
@@ -2954,7 +3039,10 @@ fn handle_db_settings_key(
                 }
                 _ => {}
             },
-            KeyCode::Char(c) if !c.is_control() => {
+            KeyCode::Char(c)
+                if !c.is_control()
+                    && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 draft.error_msg = None;
                 match draft.selected_row {
                     0 if draft.db_name.len() < 128 => draft.db_name.push(c),
@@ -3291,18 +3379,30 @@ fn reveal_otp(app: &mut App) {
     );
     if is_hotp {
         let was_open = app.entry.is_some();
-        let prev_sel = app.entry_selected;
+        let target_path = app
+            .hits
+            .iter()
+            .find(|hit| hit.reference() == reference)
+            .map(|hit| hit.path().to_owned());
         let (active_path, stack_paths) = capture_tree_paths(app);
         match app.service.hotp_next_code(&reference) {
             Ok(code) => {
                 app.dirty = true;
                 app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
                 app.refresh();
-                if was_open && let Some(hit) = app.hits.get(prev_sel) {
-                    let fresh = hit.reference();
-                    if app.load_entry_from_ref(&fresh) {
-                        app.entry = Some(fresh);
-                        app.focus = FocusPane::Detail;
+                if was_open {
+                    if let Some(idx) = target_path
+                        .as_deref()
+                        .and_then(|path| app.hits.iter().position(|hit| hit.path() == path))
+                    {
+                        app.entry_selected = idx;
+                        let fresh = app.hits[idx].reference();
+                        if app.load_entry_from_ref(&fresh) {
+                            app.entry = Some(fresh);
+                            app.focus = FocusPane::Detail;
+                        }
+                    } else {
+                        app.entry = None;
                     }
                 }
                 app.clear_reveal();
@@ -3541,11 +3641,9 @@ impl App {
         let Some(pending) = self.pending_decision else {
             return DecisionEffect::None;
         };
-        let input = if input == DecisionInput::SaveSucceeded
-            && self.edit_mode
-            && self.input_mode
-            && !self.input.is_empty()
-        {
+        let has_unapplied_draft = (self.edit_mode && self.input_mode && !self.input.is_empty())
+            || matches!(self.modal, Some(Modal::OtpConfig(_) | Modal::DbSettings(_)));
+        let input = if input == DecisionInput::SaveSucceeded && has_unapplied_draft {
             self.status =
                 "Finish or cancel the pending edit before saving; press c to return to it".into();
             DecisionInput::SaveFailed
@@ -3570,6 +3668,9 @@ impl App {
                 &mut self.edit_mode,
             );
             self.edit_field.clear();
+            if matches!(self.modal, Some(Modal::OtpConfig(_) | Modal::DbSettings(_))) {
+                self.modal = None;
+            }
             DecisionInput::Discard
         } else {
             DecisionInput::Cancel
@@ -3668,6 +3769,8 @@ impl App {
             result.map(|page| {
                 self.list_groups(page.groups);
                 self.tree_cursor = page.next_cursor;
+                self.tree_page_index = 0;
+                self.tree_withheld = page.withheld;
                 page.entries
             })
         } else {
@@ -3678,6 +3781,8 @@ impl App {
                 .list_page(self.session, Some(&pattern), None)
                 .map(|page| {
                     self.list_cursor = page.next_cursor;
+                    self.tree_page_index = 0;
+                    self.tree_withheld = page.withheld;
                     page.hits
                 });
             match (groups, entries) {
@@ -3836,7 +3941,7 @@ impl App {
                     page.map(|page| {
                         self.list_groups(page.groups);
                         self.tree_cursor = page.next_cursor;
-                        TreeOrListPage::Tree(page.entries)
+                        TreeOrListPage::Tree(page.entries, page.withheld)
                     })
                 })
         } else {
@@ -3855,7 +3960,9 @@ impl App {
                 })
         };
         match page {
-            Ok(Some(TreeOrListPage::Tree(hits))) => {
+            Ok(Some(TreeOrListPage::Tree(hits, withheld))) => {
+                self.tree_page_index = self.tree_page_index.saturating_add(1);
+                self.tree_withheld = withheld;
                 self.group_selected = 0;
                 self.entry_selected = 0;
                 self.hits = hits;
@@ -3872,6 +3979,8 @@ impl App {
                 );
             }
             Ok(Some(TreeOrListPage::List(page))) => {
+                self.tree_page_index = self.tree_page_index.saturating_add(1);
+                self.tree_withheld = page.withheld;
                 self.entry_selected = 0;
                 self.hits = page.hits;
                 self.load_entry_preview();
@@ -4016,7 +4125,8 @@ impl App {
                 self.pending_decision,
                 needs_decision(
                     self.dirty,
-                    self.input_mode && self.edit_mode && !self.input.is_empty(),
+                    (self.input_mode && self.edit_mode && !self.input.is_empty())
+                        || matches!(self.modal, Some(Modal::OtpConfig(_) | Modal::DbSettings(_))),
                 ),
                 DecisionInput::RequestLock,
             );
@@ -4893,19 +5003,28 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String], theme: &
             offset,
             ..
         } => {
-            let label = match kind {
-                DeleteKind::Entry | DeleteKind::PermanentEntry => "entry",
-                DeleteKind::Group => "group and all its contents",
-                DeleteKind::EmptyRecycleBin => "all entries and subgroups in Recycle Bin",
+            let prompt = match kind {
+                DeleteKind::Entry => format!(
+                    "{}\nRemove entry?\nType YES to confirm.",
+                    path.split_once(": ")
+                        .map_or("Selected target", |(label, _)| label)
+                ),
+                DeleteKind::PermanentEntry => {
+                    "Permanent delete\nRemove entry?\nType YES to confirm.".to_owned()
+                }
+                DeleteKind::Group => format!(
+                    "{}\nRemove group and all its contents?\nType YES to confirm.",
+                    path.split_once(": ")
+                        .map_or("Selected target", |(label, _)| label)
+                ),
+                DeleteKind::EmptyRecycleBin => {
+                    "Recycle Bin\nEmpty Recycle Bin?\nType YES to confirm.".to_owned()
+                }
             };
             draw_target_dialog(
                 frame,
                 "Confirm deletion",
-                &format!(
-                    "{}\nRemove {label}?\nType YES to confirm.",
-                    path.split_once(": ")
-                        .map_or("Selected target", |(label, _)| label)
-                ),
+                &prompt,
                 path,
                 *offset,
                 &clean(input),
@@ -5300,11 +5419,18 @@ fn draw_target_dialog(
     frame.render_widget(Paragraph::new(keys).wrap(Wrap { trim: false }), chunks[3]);
 }
 
+#[cfg(test)]
+fn handle_input_mode_key(app: &mut App, key: KeyCode) {
+    handle_input_mode_key_event(app, KeyEvent::new(key, KeyModifiers::NONE));
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "keeps input-mode submission and key handling together"
 )]
-fn handle_input_mode_key(app: &mut App, key: KeyCode) {
+fn handle_input_mode_key_event(app: &mut App, key_event: KeyEvent) {
+    let key = key_event.code;
+    let modifiers = key_event.modifiers;
     match key {
         KeyCode::Esc => {
             app.action_target = None;
@@ -5539,6 +5665,7 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char(c)
             if !c.is_control()
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 && app.input.len() + c.len_utf8()
                     <= if app.edit_mode {
                         64 * 1024
@@ -5995,7 +6122,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
         return KeyOutcome::Continue;
     }
     if app.input_mode {
-        handle_input_mode_key(app, key.code);
+        handle_input_mode_key_event(app, key);
         return KeyOutcome::Continue;
     }
     if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
@@ -6428,6 +6555,8 @@ fn new_app_with_theme(
         tree_stack: Vec::new(),
         tree_cursor: None,
         list_cursor: None,
+        tree_page_index: 0,
+        tree_withheld: 0,
         page_failure: None,
         group_selected: 0,
         entry_selected: 0,
@@ -8712,6 +8841,16 @@ mod tests {
         app.query.clear();
         app.refresh();
 
+        // Reordering while paginated or with withheld rows is refused cleanly.
+        app.tree_page_index = 1;
+        super::select_palette_action(&mut app, 11);
+        assert!(app.status.contains("paginated"));
+        app.tree_page_index = 0;
+        app.tree_withheld = 1;
+        super::select_palette_action(&mut app, 11);
+        assert!(app.status.contains("withheld"));
+        app.tree_withheld = 0;
+
         // Open MoveEntry modal via 'm', verify Esc cancels, then move "Example" into "Work".
         app.dirty = false;
         app.entry_selected = 0;
@@ -8811,8 +8950,25 @@ mod tests {
                 ..
             })
         ));
+        let perm_40x12 = screen(&mut app, 40, 12);
+        assert!(perm_40x12.contains("Type YES to confirm."));
         super::handle_modal_key(&mut app, KeyCode::Esc);
         assert!(app.modal.is_none());
+
+        // When session/service errors (e.g. stale session), recycle_selected_entry fails closed.
+        let mut other_service = nkeepass::VaultService::default();
+        let mut other_creds =
+            neotales_keepass::KdbxCredentials::password("disposable-tui-fixture").unwrap();
+        let stale_session = other_service
+            .open(&vault_path, &mut other_creds, &nkeepass::KDBX_LIMITS)
+            .unwrap();
+        let saved_session = app.session;
+        app.session = stale_session;
+        super::recycle_selected_entry(&mut app);
+        assert!(app.modal.is_none());
+        assert!(!app.dirty);
+        assert_eq!(app.hits.len(), 2);
+        app.session = saved_session;
 
         // Enable Recycle Bin in database settings.
         let DatabaseSettings {
@@ -8908,6 +9064,7 @@ mod tests {
         ));
         let confirm_40x12 = screen(&mut app, 40, 12);
         assert!(confirm_40x12.contains("Confirm deletion"));
+        assert!(confirm_40x12.contains("Type YES to confirm."));
         for ch in "YES".chars() {
             super::handle_modal_key(&mut app, KeyCode::Char(ch));
         }
@@ -8922,6 +9079,31 @@ mod tests {
             .position(|group| group.label == "Recycle Bin")
             .unwrap();
         app.enter_group(bin_idx);
+        assert!(app.hits.is_empty());
+
+        // Verify PermanentEntry confirmation ('YES') permanently deletes via remove_entry.
+        app.navigate_up();
+        assert_eq!(app.hits.len(), 1);
+        app.entry_selected = 0;
+        super::select_palette_action(&mut app, 14);
+        let bin_idx = app
+            .groups
+            .iter()
+            .position(|group| group.label == "Recycle Bin")
+            .unwrap();
+        app.enter_group(bin_idx);
+        assert_eq!(app.hits.len(), 1);
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &vault_path,
+        );
+        for ch in "YES".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+        assert!(app.status.contains("Entry permanently deleted"));
         assert!(app.hits.is_empty());
     }
 
@@ -8948,15 +9130,44 @@ mod tests {
             )
             .is_ok()
         );
+        assert!(
+            super::validate_otp_uri(
+                "otpauth://totp/mail?secret=JBSW Y3DP EHPK 3PXP&encoder=default&image=https://example.invalid/icon.png"
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_otp_uri("otpauth://totp/mail?secret=JBSWY3DPEHPK3PXP&encoder=standard")
+                .is_ok()
+        );
+        assert!(super::validate_otp_uri("otpauth://totp?secret=JBSWY3DPEHPK3PXP").is_err());
+        assert!(
+            super::validate_otp_uri("otpauth://totp/mail?secret=JBSWY3DPEHPK3PXP&algorithm=sha256")
+                .is_err()
+        );
+        assert!(
+            super::validate_otp_uri(
+                "otpauth://totp/Steam:user?secret=JBSWY3DPEHPK3PXP&digits=5&encoder=STEAM"
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_otp_uri(
+                "otpauth://hotp/mail?secret=JBSWY3DPEHPK3PXP&counter=0&encoder=steam"
+            )
+            .is_err()
+        );
+        assert!(super::validate_otp_uri("otpauth://totp/mail?secret=A=======").is_err());
+        assert!(super::validate_otp_uri("otpauth://totp/mail?secret=A").is_err());
         assert!(super::validate_otp_uri("otpauth://hotp/mail?secret=JBSWY3DPEHPK3PXP").is_err());
 
         let (dir, mut app) = app_fixture();
         let vault_path = dir.path().join("fixture.kdbx");
 
-        // Open OtpConfig modal via palette 18, enter a secret, verify masking & Esc zeroization.
+        // Open OtpConfig modal via palette 18, enter a secret with Ctrl+C ignored and Backspace pop, verify masking & Esc zeroization.
         super::select_palette_action(&mut app, 18);
         assert!(matches!(app.modal, Some(super::Modal::OtpConfig(_))));
-        // Navigate to Secret row (index 7), edit, type secret, finish editing.
+        // Navigate to Secret row (index 7), edit, type secret + extra char, Ctrl+C ignored, Backspace pops.
         for _ in 0..7 {
             super::handle_modal_key(&mut app, KeyCode::Down);
         }
@@ -8965,6 +9176,16 @@ mod tests {
         for ch in secret.chars() {
             super::handle_modal_key(&mut app, KeyCode::Char(ch));
         }
+        super::handle_modal_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        super::handle_modal_key(&mut app, KeyCode::Char('Z'));
+        super::handle_modal_key(&mut app, KeyCode::Backspace);
+        assert!(matches!(
+            &app.modal,
+            Some(super::Modal::OtpConfig(draft)) if draft.secret_b32.as_str() == secret
+        ));
         super::handle_modal_key(&mut app, KeyCode::Enter);
 
         let wide_otp = screen(&mut app, 80, 24);
@@ -9196,12 +9417,21 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
         );
-        // Must preserve modal + edits + show validation error without marking dirty!
+        // Must preserve modal + edits + show concise <=38-char validation error without marking dirty!
         assert!(!app.dirty);
         assert!(matches!(
             &app.modal,
-            Some(super::Modal::DbSettings(draft)) if draft.error_msg.is_some() && draft.db_name == "VaultX"
+            Some(super::Modal::DbSettings(draft))
+                if draft.error_msg.as_deref() == Some("Argon2 Memory must be >= 8 * Lanes")
+                    && draft.db_name == "VaultX"
         ));
+
+        // Unapplied DbSettings modal blocks pending_decision SaveSucceeded instead of discarding draft.
+        app.pending_decision = Some(super::PendingDecision::Exit);
+        let effect = app.resolve_pending_decision(super::DecisionInput::SaveSucceeded, &vault_path);
+        assert_eq!(effect, super::DecisionEffect::None);
+        assert!(app.status.contains("Finish or cancel the pending edit"));
+        app.pending_decision = None;
 
         // Fix Argon2 Memory to "64", apply via Ctrl+S!
         super::handle_modal_key(&mut app, KeyCode::Enter);
