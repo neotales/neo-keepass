@@ -22,7 +22,11 @@ use nkeepass::{
     CustomIconId, KDBX_LIMITS, SearchHit, VaultService,
     glob::Glob,
     icons::{DEFAULT_GROUP_ICON_ID, IconCategory, StandardIcon, standard_icon, standard_icons},
-    service::{EntryRef, GroupRef, ListCursor, ListPage, TreeCursor, TreeGroup},
+    service::{
+        DatabaseSettings, DatabaseSettingsUpdate, EntryRef, GroupRef, GroupTreeNode, ListCursor,
+        ListPage, OtpConfig, OtpMetadata, PathCompletion, ServiceOtpAlgorithm, ServiceOtpKind,
+        TreeCursor, TreeGroup, VaultCipher, VaultCompression, VaultKdfSummary,
+    },
 };
 use ratatui::{
     DefaultTerminal, Frame,
@@ -322,12 +326,83 @@ impl UiGroup {
 #[derive(Clone, Copy)]
 enum DeleteKind {
     Entry,
+    PermanentEntry,
     Group,
+    EmptyRecycleBin,
 }
 
 enum IconTarget {
     EntryItem(EntryRef),
     GroupItem(GroupRef),
+}
+
+struct MoveGroupRow {
+    group_ref: GroupRef,
+    row_label: String,
+    row_path: String,
+    depth: usize,
+    std_icon: u32,
+    recycle_bin: bool,
+}
+
+#[derive(Clone)]
+struct PathCompletionItem {
+    full_path: String,
+    leaf_label: String,
+    is_group_item: bool,
+    std_icon: u32,
+    target_group: Option<GroupRef>,
+    target_entry: Option<EntryRef>,
+}
+
+struct PathBarState {
+    buffer: String,
+    completions: Vec<PathCompletionItem>,
+    selected: usize,
+    dropdown_open: bool,
+    error_msg: Option<String>,
+}
+
+struct OtpConfigDraft {
+    entry_ref: EntryRef,
+    otp_kind: ServiceOtpKind,
+    otp_algorithm: ServiceOtpAlgorithm,
+    otp_digits: u8,
+    period_text: String,
+    counter_text: String,
+    use_steam: bool,
+    acct_label: String,
+    issuer_label: String,
+    secret_b32: Zeroizing<String>,
+    selected_row: usize,
+    editing_text: bool,
+    error_msg: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DbKdfKind {
+    Argon2id,
+    Argon2d,
+    Aes,
+}
+
+struct DbSettingsDraft {
+    db_name: String,
+    db_desc: String,
+    db_default_user: String,
+    recycle_enabled: bool,
+    hist_max_items: String,
+    hist_max_size: String,
+    cipher: VaultCipher,
+    compression: VaultCompression,
+    kdf_kind: DbKdfKind,
+    aes_rounds: String,
+    argon_mem: String,
+    argon_iters: String,
+    argon_lanes: String,
+    selected_row: usize,
+    editing_text: bool,
+    error_msg: Option<String>,
 }
 
 enum Modal {
@@ -364,6 +439,17 @@ enum Modal {
         input: Zeroizing<String>,
         offset: usize,
     },
+    MoveEntry {
+        entry_ref: EntryRef,
+        entry_title: String,
+        rows: Vec<MoveGroupRow>,
+        selected: usize,
+        scroll: usize,
+        error_msg: Option<String>,
+    },
+    OtpConfig(OtpConfigDraft),
+    PathBar(PathBarState),
+    DbSettings(DbSettingsDraft),
 }
 
 enum TreeOrListPage {
@@ -455,6 +541,7 @@ struct App {
     compact_detail: bool,
     compact_fields_offset: usize,
     compact_fields_area: Rect,
+    header_area: Rect,
     groups_area: Rect,
     entries_area: Rect,
     detail_area: Rect,
@@ -853,7 +940,7 @@ fn begin_delete_group(app: &mut App) {
     });
 }
 
-const PALETTE_CHOICES: [&str; 10] = [
+const PALETTE_CHOICES: [&str; 21] = [
     "Add group",
     "Add entry",
     "Remove entry",
@@ -864,6 +951,17 @@ const PALETTE_CHOICES: [&str; 10] = [
     "Rename entry title",
     "Edit entry tags",
     "Set/update OTP URI",
+    "Move entry to group",
+    "Move entry up",
+    "Move entry down",
+    "Clone entry",
+    "Recycle entry",
+    "Restore entry from Recycle Bin",
+    "Empty Recycle Bin",
+    "Reveal OTP / Generate HOTP",
+    "Configure OTP (TOTP/HOTP)",
+    "Go to path (Path Bar)",
+    "Database settings",
 ];
 
 const fn icon_category_label(category: IconCategory) -> &'static str {
@@ -918,6 +1016,16 @@ fn valid_unpadded_base32(value: &str) -> bool {
     bits == 0 || buffer == 0
 }
 
+fn valid_base32_secret(value: &str) -> bool {
+    let trimmed = value.trim_end_matches('=');
+    let pad_len = value.len().saturating_sub(trimmed.len());
+    if pad_len > 0 && (!value.len().is_multiple_of(8) || !matches!(pad_len, 1 | 3 | 4 | 6)) {
+        return false;
+    }
+    valid_unpadded_base32(trimmed)
+}
+
+#[cfg(test)]
 fn validate_totp_uri(value: &str) -> Result<(), &'static str> {
     if value.is_empty()
         || value
@@ -973,6 +1081,81 @@ fn validate_totp_uri(value: &str) -> Result<(), &'static str> {
         && !matches!(digits, "6" | "8")
     {
         return Err("Unsupported OTP digits (use 6 or 8)");
+    }
+    if !values.is_empty() {
+        return Err("Unknown OTP URI parameter");
+    }
+    Ok(())
+}
+
+fn validate_otp_uri(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_control() || nkeepass::template::is_bidi_or_line_separator(c))
+    {
+        return Err("Invalid OTP URI: disallowed or empty input");
+    }
+    let rest = value
+        .strip_prefix("otpauth://")
+        .ok_or("OTP URI must start with otpauth://totp/ or otpauth://hotp/")?;
+    let (label, query) = rest
+        .split_once('?')
+        .ok_or("OTP URI must include ?secret=... query parameters")?;
+    let kind = label.split('/').next().unwrap_or_default();
+    if !matches!(kind, "totp" | "hotp") {
+        return Err("OTP URI type must be totp or hotp");
+    }
+    let mut values = BTreeMap::new();
+    for part in query.split('&') {
+        let (key, val) = part
+            .split_once('=')
+            .ok_or("Malformed OTP URI query parameter")?;
+        if values.insert(key, val).is_some() {
+            return Err("Duplicate OTP URI parameter");
+        }
+    }
+    let secret = values
+        .remove("secret")
+        .ok_or("OTP URI secret parameter is required")?;
+    if !valid_base32_secret(secret) {
+        return Err("OTP URI secret must be valid Base32");
+    }
+    let _issuer = values.remove("issuer");
+    let encoder = values.remove("encoder");
+    if let Some(enc) = encoder
+        && !enc.eq_ignore_ascii_case("steam")
+    {
+        return Err("Unsupported OTP encoder (only steam is supported)");
+    }
+    if let Some(counter) = values.remove("counter") {
+        if counter.parse::<u64>().is_err() {
+            return Err("Invalid OTP URI counter");
+        }
+    } else if kind == "hotp" {
+        return Err("HOTP URI requires counter parameter (e.g. counter=0)");
+    }
+    if let Some(period) = values.remove("period")
+        && period.parse::<u64>().ok().is_none_or(|p| p == 0)
+    {
+        return Err("OTP URI period must be a positive integer");
+    }
+    if let Some(algorithm) = values.remove("algorithm")
+        && !(algorithm.eq_ignore_ascii_case("SHA1")
+            || algorithm.eq_ignore_ascii_case("SHA256")
+            || algorithm.eq_ignore_ascii_case("SHA512"))
+    {
+        return Err("Unsupported OTP algorithm (use SHA1, SHA256, or SHA512)");
+    }
+    if let Some(digits) = values.remove("digits") {
+        let valid = if encoder.is_some_and(|enc| enc.eq_ignore_ascii_case("steam")) {
+            digits == "5"
+        } else {
+            matches!(digits, "6" | "8")
+        };
+        if !valid {
+            return Err("Unsupported OTP digits (use 6 or 8, or 5 for Steam)");
+        }
     }
     if !values.is_empty() {
         return Err("Unknown OTP URI parameter");
@@ -1093,7 +1276,7 @@ fn begin_entry_mutation(app: &mut App, action: Action) {
             begin_action(
                 app,
                 Action::SetOtp,
-                "Set/update OTP URI (otpauth://totp/...); input is masked · Enter apply · Esc cancel",
+                "Set/update OTP URI (otpauth://totp|hotp/...); input is masked · Enter apply · Esc cancel",
             );
             app.edit_mode = true;
         }
@@ -1137,6 +1320,17 @@ fn select_palette_action(app: &mut App, selected: usize) {
         7 => begin_entry_mutation(app, Action::RenameTitle),
         8 => begin_entry_mutation(app, Action::EditTags),
         9 => begin_entry_mutation(app, Action::SetOtp),
+        10 => begin_move_entry(app),
+        11 => reorder_selected_entry(app, true),
+        12 => reorder_selected_entry(app, false),
+        13 => clone_selected_entry(app),
+        14 => recycle_selected_entry(app),
+        15 => restore_selected_entry(app),
+        16 => begin_empty_recycle_bin(app),
+        17 => begin_otp_reveal(app),
+        18 => begin_otp_config(app),
+        19 => begin_path_bar(app),
+        20 => begin_db_settings(app),
         _ => {}
     }
 }
@@ -1157,40 +1351,72 @@ fn begin_add(app: &mut App, action: Action) {
     begin_action(app, action, prompt);
 }
 
+fn capture_tree_paths(app: &App) -> (Option<String>, Vec<String>) {
+    let active_path = app.service.group_path(&app.tree_parent).ok();
+    let stack_paths = app
+        .tree_stack
+        .iter()
+        .filter_map(|group| app.service.group_path(group).ok())
+        .collect();
+    (active_path, stack_paths)
+}
+
 fn finish_delete(
     app: &mut App,
     kind: DeleteKind,
     entry: Option<&EntryRef>,
     group: Option<&GroupRef>,
 ) {
+    let (active_path, stack_paths) = capture_tree_paths(app);
+    enum DeleteOutcome {
+        EntryRemoved,
+        GroupRemoved,
+        PermanentEntry,
+        EmptyBin(usize),
+    }
     let result = match kind {
         DeleteKind::Entry => entry
             .ok_or(nkeepass::ServiceError::NotFound)
-            .and_then(|reference| app.service.remove_entry(reference)),
+            .and_then(|reference| app.service.remove_entry(reference))
+            .map(|()| DeleteOutcome::EntryRemoved),
+        DeleteKind::PermanentEntry => entry
+            .ok_or(nkeepass::ServiceError::NotFound)
+            .and_then(|reference| app.service.recycle_entry(reference))
+            .map(|_| DeleteOutcome::PermanentEntry),
         DeleteKind::Group => group
             .ok_or(nkeepass::ServiceError::NotFound)
-            .and_then(|reference| app.service.remove_group(reference)),
+            .and_then(|reference| app.service.remove_group(reference))
+            .map(|()| DeleteOutcome::GroupRemoved),
+        DeleteKind::EmptyRecycleBin => app
+            .service
+            .empty_recycle_bin(app.session)
+            .map(DeleteOutcome::EmptyBin),
     };
     match result {
-        Ok(()) => {
-            app.dirty = true;
+        Ok(outcome) => {
+            if !matches!(outcome, DeleteOutcome::EmptyBin(0)) {
+                app.dirty = true;
+            }
             app.entry = None;
+            app.entry_icon = None;
             app.detail.clear();
             app.fields.clear();
-            app.re_resolve_current_tree();
+            app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
             app.refresh();
-            app.status = match kind {
-                DeleteKind::Entry => {
-                    format!(
-                        "Entry removed in memory — press Ctrl+S or s to save to {}",
-                        app.vault_name
-                    )
+            app.status = match outcome {
+                DeleteOutcome::EntryRemoved => format!(
+                    "Entry removed in memory — press Ctrl+S or s to save to {}",
+                    app.vault_name
+                ),
+                DeleteOutcome::PermanentEntry => {
+                    "Entry permanently deleted — press Ctrl+S or s to save".into()
                 }
-                DeleteKind::Group => {
-                    format!(
-                        "Group removed in memory — press Ctrl+S or s to save to {}",
-                        app.vault_name
-                    )
+                DeleteOutcome::GroupRemoved => format!(
+                    "Group removed in memory — press Ctrl+S or s to save to {}",
+                    app.vault_name
+                ),
+                DeleteOutcome::EmptyBin(count) => {
+                    format!("Emptied Recycle Bin ({count} removed) — press Ctrl+S or s to save")
                 }
             };
         }
@@ -1198,11 +1424,848 @@ fn finish_delete(
     }
 }
 
+fn flatten_group_tree(node: GroupTreeNode, depth: usize, out: &mut Vec<MoveGroupRow>) {
+    let GroupTreeNode {
+        reference,
+        label,
+        path,
+        icon_id,
+        custom_icon_id: _,
+        entry_count: _,
+        is_recycle_bin,
+        children,
+    } = node;
+    out.push(MoveGroupRow {
+        group_ref: reference,
+        row_label: label,
+        row_path: path,
+        depth,
+        std_icon: icon_id,
+        recycle_bin: is_recycle_bin,
+    });
+    for child in children {
+        flatten_group_tree(child, depth.saturating_add(1), out);
+    }
+}
+
+fn find_recycle_bin_path(node: &GroupTreeNode) -> Option<&str> {
+    if node.is_recycle_bin {
+        return Some(node.path.as_str());
+    }
+    for child in &node.children {
+        if let Some(found) = find_recycle_bin_path(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn begin_move_entry(app: &mut App) {
+    app.clear_reveal();
+    let Some(entry_ref) = selected_entry_ref(app) else {
+        app.status = "Select an entry before choosing Move entry".into();
+        return;
+    };
+    let entry_title = app.service.selected_entry(&entry_ref).map_or_else(
+        |_| "Selected entry".to_owned(),
+        |view| view.title().to_owned(),
+    );
+    let tree = match app.service.group_tree(app.session) {
+        Ok(tree) => tree,
+        Err(error) => {
+            app.status = clean(error.message());
+            return;
+        }
+    };
+    let mut rows = Vec::new();
+    flatten_group_tree(tree, 0, &mut rows);
+    if rows.is_empty() {
+        app.status = "No groups available".into();
+        return;
+    }
+    app.modal = Some(Modal::MoveEntry {
+        entry_ref,
+        entry_title,
+        rows,
+        selected: 0,
+        scroll: 0,
+        error_msg: None,
+    });
+}
+
+fn reorder_selected_entry(app: &mut App, move_up: bool) {
+    app.clear_reveal();
+    if !app.query.is_empty() {
+        app.status = "Cannot reorder entries while search filter is active".into();
+        return;
+    }
+    let Some(hit) = app.hits.get(app.entry_selected) else {
+        app.status = "Select an entry before reordering".into();
+        return;
+    };
+    if app.hits.len() < 2 {
+        app.status = "Need at least two entries in group to reorder".into();
+        return;
+    }
+    let new_index = if move_up {
+        if app.entry_selected == 0 {
+            app.status = "Entry is already at the top".into();
+            return;
+        }
+        app.entry_selected - 1
+    } else {
+        if app.entry_selected + 1 >= app.hits.len() {
+            app.status = "Entry is already at the bottom".into();
+            return;
+        }
+        app.entry_selected + 1
+    };
+    let was_detail = app.entry.is_some();
+    let entry_ref = hit.reference();
+    let (active_path, stack_paths) = capture_tree_paths(app);
+    match app.service.reorder_entry(&entry_ref, new_index) {
+        Ok(_fresh_ref) => {
+            app.dirty = true;
+            app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+            app.entry_selected = new_index;
+            app.refresh();
+            if was_detail && let Some(updated_hit) = app.hits.get(app.entry_selected) {
+                let updated_ref = updated_hit.reference();
+                if app.load_entry_from_ref(&updated_ref) {
+                    app.entry = Some(updated_ref);
+                    app.focus = FocusPane::Detail;
+                }
+            }
+            app.status = if move_up {
+                "Moved entry up — press Ctrl+S or s to save".into()
+            } else {
+                "Moved entry down — press Ctrl+S or s to save".into()
+            };
+        }
+        Err(error) => app.status = clean(error.message()),
+    }
+}
+
+fn clone_selected_entry(app: &mut App) {
+    app.clear_reveal();
+    let Some(entry_ref) = selected_entry_ref(app) else {
+        app.status = "Select an entry before choosing Clone entry".into();
+        return;
+    };
+    let (active_path, stack_paths) = capture_tree_paths(app);
+    match app.service.clone_entry(&entry_ref) {
+        Ok(cloned_ref) => {
+            app.dirty = true;
+            app.entry = None;
+            app.entry_icon = None;
+            app.detail.clear();
+            app.fields.clear();
+            app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+            app.refresh();
+            if let Some(idx) = app
+                .hits
+                .iter()
+                .position(|hit| hit.reference() == cloned_ref)
+                .or_else(|| app.hits.len().checked_sub(1))
+            {
+                app.entry_selected = idx;
+                app.focus = FocusPane::Entries;
+                app.load_entry_preview();
+            }
+            app.status = "Cloned entry — press Ctrl+S or s to save".into();
+        }
+        Err(error) => app.status = clean(error.message()),
+    }
+}
+
+fn recycle_selected_entry(app: &mut App) {
+    app.clear_reveal();
+    let Some(entry_ref) = selected_entry_ref(app) else {
+        app.status = "Select an entry before choosing Recycle entry".into();
+        return;
+    };
+    let recycle_enabled = app
+        .service
+        .database_settings(app.session)
+        .map_or(true, |settings| {
+            let DatabaseSettings {
+                recycle_bin_enabled,
+                ..
+            } = settings;
+            recycle_bin_enabled
+        });
+    let already_in_bin = app
+        .service
+        .group_tree(app.session)
+        .ok()
+        .and_then(|tree| {
+            let bin_path = find_recycle_bin_path(&tree)?.to_owned();
+            let entry_path = app
+                .hits
+                .iter()
+                .find(|hit| hit.reference() == entry_ref)
+                .map(|hit| hit.path().to_owned())
+                .or_else(|| app.service.group_path(&app.tree_parent).ok())?;
+            Some(entry_path == bin_path || entry_path.starts_with(&format!("{bin_path}/")))
+        })
+        .unwrap_or(false);
+    if !recycle_enabled || already_in_bin {
+        let path_desc = app
+            .hits
+            .iter()
+            .find(|hit| hit.reference() == entry_ref)
+            .map_or_else(|| "selected entry".to_owned(), |hit| hit.path().to_owned());
+        app.modal = Some(Modal::ConfirmDelete {
+            kind: DeleteKind::PermanentEntry,
+            path: format!(
+                "Permanent delete ({}): {path_desc}",
+                if recycle_enabled {
+                    "already in Recycle Bin"
+                } else {
+                    "Recycle Bin disabled"
+                }
+            ),
+            entry: Some(entry_ref),
+            group: None,
+            input: Zeroizing::new(String::new()),
+            offset: 0,
+        });
+        return;
+    }
+    let (active_path, stack_paths) = capture_tree_paths(app);
+    match app.service.recycle_entry(&entry_ref) {
+        Ok(moved_to_bin) => {
+            app.dirty = true;
+            app.entry = None;
+            app.entry_icon = None;
+            app.detail.clear();
+            app.fields.clear();
+            app.clear_reveal();
+            app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+            app.refresh();
+            app.status = if moved_to_bin {
+                "Moved to Recycle Bin — press Ctrl+S or s to save".into()
+            } else {
+                "Entry permanently deleted — press Ctrl+S or s to save".into()
+            };
+        }
+        Err(error) => app.status = clean(error.message()),
+    }
+}
+
+fn restore_selected_entry(app: &mut App) {
+    app.clear_reveal();
+    let Some(entry_ref) = selected_entry_ref(app) else {
+        app.status = "Select an entry inside the Recycle Bin first".into();
+        return;
+    };
+    let (active_path, stack_paths) = capture_tree_paths(app);
+    match app.service.restore_entry(&entry_ref) {
+        Ok(_restored_ref) => {
+            app.dirty = true;
+            app.entry = None;
+            app.entry_icon = None;
+            app.detail.clear();
+            app.fields.clear();
+            app.clear_reveal();
+            app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+            app.refresh();
+            app.status = "Restored entry — press Ctrl+S or s to save".into();
+        }
+        Err(nkeepass::ServiceError::InvalidInput) => {
+            app.status = "Entry is not in the Recycle Bin".into();
+        }
+        Err(error) => app.status = clean(error.message()),
+    }
+}
+
+fn begin_empty_recycle_bin(app: &mut App) {
+    app.clear_reveal();
+    app.modal = Some(Modal::ConfirmDelete {
+        kind: DeleteKind::EmptyRecycleBin,
+        path: "Recycle Bin: permanently delete all recycled entries and subgroups".into(),
+        entry: None,
+        group: None,
+        input: Zeroizing::new(String::new()),
+        offset: 0,
+    });
+}
+
+fn format_otp_metadata(meta: Option<OtpMetadata>, has_otp_fallback: bool) -> String {
+    match meta {
+        Some(OtpMetadata {
+            kind: ServiceOtpKind::Totp,
+            algorithm: _,
+            digits,
+            period,
+            counter: _,
+            steam,
+        }) => {
+            let secs = period.unwrap_or(30);
+            if steam {
+                format!("TOTP ({digits}d, {secs}s, Steam)")
+            } else {
+                format!("TOTP ({digits}d, {secs}s)")
+            }
+        }
+        Some(OtpMetadata {
+            kind: ServiceOtpKind::Hotp,
+            algorithm: _,
+            digits,
+            period: _,
+            counter,
+            steam: _,
+        }) => {
+            format!("HOTP ({digits}d, counter {})", counter.unwrap_or(0))
+        }
+        None => {
+            if has_otp_fallback {
+                "present (invalid)".into()
+            } else {
+                "none".into()
+            }
+        }
+    }
+}
+
+fn begin_otp_reveal(app: &mut App) {
+    let Some(reference) = selected_entry_ref(app) else {
+        app.status = "Select an entry first".into();
+        return;
+    };
+    let is_hotp = matches!(
+        app.service.otp_metadata(&reference),
+        Ok(Some(OtpMetadata {
+            kind: ServiceOtpKind::Hotp,
+            ..
+        }))
+    );
+    app.pending_entry = Some(reference);
+    let prompt = if is_hotp {
+        "Generate next HOTP (increments counter)? Type YES. WARNING: terminal scrollback may retain the code."
+    } else {
+        "Reveal current TOTP? Type YES. WARNING: terminal scrollback may retain the code."
+    };
+    begin_action(app, Action::TotpReveal, prompt);
+}
+
+fn begin_otp_config(app: &mut App) {
+    app.clear_reveal();
+    let Some(entry_ref) = selected_entry_ref(app) else {
+        app.status = "Select an entry before choosing Configure OTP".into();
+        return;
+    };
+    let acct_label = app
+        .service
+        .selected_entry(&entry_ref)
+        .map(|view| view.title().to_owned())
+        .ok()
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "account".to_owned());
+    let existing = app.service.otp_metadata(&entry_ref).ok().flatten();
+    let (otp_kind, otp_algorithm, otp_digits, period_text, counter_text, use_steam) = match existing
+    {
+        Some(OtpMetadata {
+            kind,
+            algorithm,
+            digits,
+            period,
+            counter,
+            steam,
+        }) => (
+            kind,
+            algorithm,
+            digits,
+            period.unwrap_or(30).to_string(),
+            counter.unwrap_or(0).to_string(),
+            steam,
+        ),
+        None => (
+            ServiceOtpKind::Totp,
+            ServiceOtpAlgorithm::Sha1,
+            6,
+            "30".to_owned(),
+            "0".to_owned(),
+            false,
+        ),
+    };
+    app.modal = Some(Modal::OtpConfig(OtpConfigDraft {
+        entry_ref,
+        otp_kind,
+        otp_algorithm,
+        otp_digits,
+        period_text,
+        counter_text,
+        use_steam,
+        acct_label,
+        issuer_label: String::new(),
+        secret_b32: Zeroizing::new(String::new()),
+        selected_row: 0,
+        editing_text: false,
+        error_msg: None,
+    }));
+}
+
+fn apply_otp_config(app: &mut App, draft: &mut OtpConfigDraft) -> bool {
+    if draft.acct_label.trim().is_empty() {
+        draft.error_msg = Some("Account label is required".into());
+        return false;
+    }
+    if !valid_base32_secret(draft.secret_b32.trim()) {
+        draft.error_msg = Some("Secret must be valid Base32".into());
+        return false;
+    }
+    let (period, counter) = match draft.otp_kind {
+        ServiceOtpKind::Totp => {
+            let Ok(secs) = draft.period_text.trim().parse::<u64>() else {
+                draft.error_msg = Some("Period must be a positive integer".into());
+                return false;
+            };
+            if secs == 0 {
+                draft.error_msg = Some("Period must be greater than 0".into());
+                return false;
+            }
+            (Some(secs), None)
+        }
+        ServiceOtpKind::Hotp => {
+            let Ok(cnt) = draft.counter_text.trim().parse::<u64>() else {
+                draft.error_msg = Some("Counter must be a non-negative integer".into());
+                return false;
+            };
+            (None, Some(cnt))
+        }
+    };
+    let config = OtpConfig {
+        kind: draft.otp_kind,
+        account: draft.acct_label.trim().to_owned(),
+        issuer: (!draft.issuer_label.trim().is_empty())
+            .then(|| draft.issuer_label.trim().to_owned()),
+        algorithm: draft.otp_algorithm,
+        digits: if draft.use_steam { 5 } else { draft.otp_digits },
+        period,
+        counter,
+        steam: draft.use_steam,
+    };
+    let was_open = app.entry.is_some();
+    let prev_sel = app.entry_selected;
+    let (active_path, stack_paths) = capture_tree_paths(app);
+    match app
+        .service
+        .set_entry_otp_config(&draft.entry_ref, &config, draft.secret_b32.trim())
+    {
+        Ok(()) => {
+            draft.secret_b32.zeroize();
+            app.dirty = true;
+            app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+            app.refresh();
+            if was_open && let Some(hit) = app.hits.get(prev_sel) {
+                let fresh = hit.reference();
+                if app.load_entry_from_ref(&fresh) {
+                    app.entry = Some(fresh);
+                    app.focus = FocusPane::Detail;
+                }
+            }
+            app.status = "OTP configured in memory — press Ctrl+S or s to save".into();
+            true
+        }
+        Err(error) => {
+            draft.error_msg = Some(clean(error.message()));
+            false
+        }
+    }
+}
+
+fn strip_root_prefix(root_name: &str, full_path: &str) -> String {
+    if root_name.is_empty() {
+        if full_path.is_empty() {
+            return "/".to_owned();
+        }
+        return format!("/{}", full_path.trim_start_matches('/'));
+    }
+    if full_path == root_name {
+        return "/".to_owned();
+    }
+    if let Some(rest) = full_path.strip_prefix(&format!("{root_name}/")) {
+        return format!("/{rest}");
+    }
+    format!("/{}", full_path.trim_start_matches('/'))
+}
+
+fn begin_path_bar(app: &mut App) {
+    app.clear_reveal();
+    app.modal = Some(Modal::PathBar(PathBarState {
+        buffer: app.display_group_path(),
+        completions: Vec::new(),
+        selected: 0,
+        dropdown_open: false,
+        error_msg: None,
+    }));
+}
+
+fn path_bar_complete(app: &App, state: &mut PathBarState) {
+    state.error_msg = None;
+    let root_name = app
+        .service
+        .root_group(app.session)
+        .and_then(|root| app.service.group_path(&root))
+        .unwrap_or_default();
+    match app.service.complete_path(app.session, &state.buffer, 5) {
+        Ok(matches) => {
+            let items: Vec<PathCompletionItem> = matches
+                .into_iter()
+                .map(|item| {
+                    let PathCompletion {
+                        path,
+                        label,
+                        is_group,
+                        icon_id,
+                        custom_icon_id: _,
+                        group_ref,
+                        entry_ref,
+                    } = item;
+                    PathCompletionItem {
+                        full_path: path,
+                        leaf_label: label,
+                        is_group_item: is_group,
+                        std_icon: icon_id,
+                        target_group: group_ref,
+                        target_entry: entry_ref,
+                    }
+                })
+                .collect();
+            if items.is_empty() {
+                state.completions.clear();
+                state.dropdown_open = false;
+                state.selected = 0;
+                state.error_msg = Some("No matching path".into());
+            } else if items.len() == 1 {
+                state.buffer = strip_root_prefix(&root_name, &items[0].full_path);
+                state.completions = items;
+                state.selected = 0;
+                state.dropdown_open = false;
+            } else {
+                state.completions = items;
+                state.selected = 0;
+                state.dropdown_open = true;
+            }
+        }
+        Err(error) => {
+            state.completions.clear();
+            state.dropdown_open = false;
+            state.error_msg = Some(clean(error.message()));
+        }
+    }
+}
+
+fn navigate_to_path_completion(app: &mut App, item: &PathCompletionItem) -> bool {
+    let root_path = app
+        .service
+        .root_group(app.session)
+        .and_then(|root| app.service.group_path(&root))
+        .unwrap_or_default();
+    app.clear_reveal();
+    app.query.zeroize();
+    app.query_before_input.zeroize();
+    if item.is_group_item {
+        let target_path = item
+            .target_group
+            .as_ref()
+            .and_then(|group_ref| app.service.group_path(group_ref).ok())
+            .or_else(|| Some(item.full_path.clone()));
+        let stack_paths = rebuild_stack_paths(&root_path, target_path.as_deref());
+        app.re_resolve_tree_after_mutation(target_path.as_deref(), &stack_paths);
+        app.group_selected = 0;
+        app.entry_selected = 0;
+        app.entry = None;
+        app.refresh();
+        app.focus = if app.groups.is_empty() && !app.hits.is_empty() {
+            FocusPane::Entries
+        } else {
+            FocusPane::Groups
+        };
+        app.status = format!("Navigated to {}", app.display_group_path());
+        true
+    } else {
+        let parent_path = item
+            .full_path
+            .rsplit_once('/')
+            .map_or_else(|| root_path.clone(), |(parent, _)| parent.to_owned());
+        let stack_paths = rebuild_stack_paths(&root_path, Some(&parent_path));
+        app.re_resolve_tree_after_mutation(Some(&parent_path), &stack_paths);
+        app.refresh();
+        let entry_idx = app.hits.iter().position(|hit| {
+            item.target_entry
+                .as_ref()
+                .is_some_and(|target| hit.reference() == *target)
+                || hit.title() == item.leaf_label
+        });
+        if let Some(idx) = entry_idx {
+            app.entry_selected = idx;
+            app.focus = FocusPane::Entries;
+            app.select();
+        }
+        app.status = format!("Navigated to /{}", clean(&item.full_path));
+        true
+    }
+}
+
+fn submit_path_bar(app: &mut App, state: &mut PathBarState) -> bool {
+    if state.dropdown_open
+        && let Some(item) = state.completions.get(state.selected).cloned()
+    {
+        return navigate_to_path_completion(app, &item);
+    }
+    let trimmed = state.buffer.trim();
+    if trimmed == "/" || trimmed.is_empty() {
+        app.clear_reveal();
+        app.query.zeroize();
+        app.query_before_input.zeroize();
+        app.reset_tree_after_mutation();
+        app.group_selected = 0;
+        app.entry_selected = 0;
+        app.entry = None;
+        app.refresh();
+        app.status = "Navigated to /".into();
+        return true;
+    }
+    let root_path = app
+        .service
+        .root_group(app.session)
+        .and_then(|root| app.service.group_path(&root))
+        .unwrap_or_default();
+    let rel = trimmed.trim_start_matches('/');
+    let full_candidate =
+        if root_path.is_empty() || rel == root_path || rel.starts_with(&format!("{root_path}/")) {
+            rel.to_owned()
+        } else {
+            format!("{root_path}/{rel}")
+        };
+    if let Ok(group_ref) = app.service.resolve_group(app.session, &full_candidate) {
+        let label = rel.rsplit('/').next().unwrap_or(rel).to_owned();
+        return navigate_to_path_completion(
+            app,
+            &PathCompletionItem {
+                full_path: full_candidate,
+                leaf_label: label,
+                is_group_item: true,
+                std_icon: DEFAULT_GROUP_ICON_ID,
+                target_group: Some(group_ref),
+                target_entry: None,
+            },
+        );
+    }
+    if let Ok(resolved) = app.service.resolve_entry(app.session, &full_candidate) {
+        let entry_ref = resolved.reference();
+        let path = resolved.path().to_owned();
+        let label = path.rsplit('/').next().unwrap_or(&path).to_owned();
+        return navigate_to_path_completion(
+            app,
+            &PathCompletionItem {
+                full_path: path,
+                leaf_label: label,
+                is_group_item: false,
+                std_icon: 0,
+                target_group: None,
+                target_entry: Some(entry_ref),
+            },
+        );
+    }
+    if let Ok(matches) = app.service.complete_path(app.session, trimmed, 5) {
+        if matches.len() == 1
+            && let Some(first) = matches.into_iter().next()
+        {
+            let PathCompletion {
+                path,
+                label,
+                is_group,
+                icon_id,
+                custom_icon_id: _,
+                group_ref,
+                entry_ref,
+            } = first;
+            return navigate_to_path_completion(
+                app,
+                &PathCompletionItem {
+                    full_path: path,
+                    leaf_label: label,
+                    is_group_item: is_group,
+                    std_icon: icon_id,
+                    target_group: group_ref,
+                    target_entry: entry_ref,
+                },
+            );
+        }
+        path_bar_complete(app, state);
+        return false;
+    }
+    state.error_msg = Some("Path not found".into());
+    false
+}
+
+fn begin_db_settings(app: &mut App) {
+    app.clear_reveal();
+    let settings = match app.service.database_settings(app.session) {
+        Ok(settings) => settings,
+        Err(error) => {
+            app.status = clean(error.message());
+            return;
+        }
+    };
+    let DatabaseSettings {
+        name,
+        description,
+        default_username,
+        recycle_bin_enabled,
+        history_max_items,
+        history_max_size,
+        outer_cipher,
+        compression,
+        kdf,
+    } = settings;
+    let (kdf_kind, aes_rounds, argon_mem, argon_iters, argon_lanes) = match kdf {
+        VaultKdfSummary::Aes { rounds } => (
+            DbKdfKind::Aes,
+            rounds.to_string(),
+            "65536".to_owned(),
+            "2".to_owned(),
+            "2".to_owned(),
+        ),
+        VaultKdfSummary::Argon2d {
+            memory_kib,
+            iterations,
+            lanes,
+        } => (
+            DbKdfKind::Argon2d,
+            "60000".to_owned(),
+            memory_kib.to_string(),
+            iterations.to_string(),
+            lanes.to_string(),
+        ),
+        VaultKdfSummary::Argon2id {
+            memory_kib,
+            iterations,
+            lanes,
+        } => (
+            DbKdfKind::Argon2id,
+            "60000".to_owned(),
+            memory_kib.to_string(),
+            iterations.to_string(),
+            lanes.to_string(),
+        ),
+    };
+    app.modal = Some(Modal::DbSettings(DbSettingsDraft {
+        db_name: name,
+        db_desc: description,
+        db_default_user: default_username,
+        recycle_enabled: recycle_bin_enabled,
+        hist_max_items: history_max_items.to_string(),
+        hist_max_size: history_max_size.to_string(),
+        cipher: outer_cipher,
+        compression,
+        kdf_kind,
+        aes_rounds,
+        argon_mem,
+        argon_iters,
+        argon_lanes,
+        selected_row: 0,
+        editing_text: false,
+        error_msg: None,
+    }));
+}
+
+fn db_settings_row_count(kdf_kind: DbKdfKind) -> usize {
+    match kdf_kind {
+        DbKdfKind::Aes => 11,
+        DbKdfKind::Argon2id | DbKdfKind::Argon2d => 13,
+    }
+}
+
+fn apply_db_settings(app: &mut App, draft: &mut DbSettingsDraft) -> bool {
+    let Ok(history_max_items) = draft.hist_max_items.trim().parse::<i32>() else {
+        draft.error_msg = Some("History Max Items must be an integer >= -1".into());
+        return false;
+    };
+    let Ok(history_max_size) = draft.hist_max_size.trim().parse::<i64>() else {
+        draft.error_msg = Some("History Max Size must be an integer >= -1".into());
+        return false;
+    };
+    let kdf = match draft.kdf_kind {
+        DbKdfKind::Aes => {
+            let Ok(rounds) = draft.aes_rounds.trim().parse::<u64>() else {
+                draft.error_msg = Some("AES KDF rounds must be a positive integer".into());
+                return false;
+            };
+            VaultKdfSummary::Aes { rounds }
+        }
+        DbKdfKind::Argon2d | DbKdfKind::Argon2id => {
+            let Ok(memory_kib) = draft.argon_mem.trim().parse::<u32>() else {
+                draft.error_msg = Some("Argon2 Memory KiB must be a positive integer".into());
+                return false;
+            };
+            let Ok(iterations) = draft.argon_iters.trim().parse::<u32>() else {
+                draft.error_msg = Some("Argon2 Iterations must be a positive integer".into());
+                return false;
+            };
+            let Ok(lanes) = draft.argon_lanes.trim().parse::<u32>() else {
+                draft.error_msg = Some("Argon2 Lanes must be a positive integer".into());
+                return false;
+            };
+            if draft.kdf_kind == DbKdfKind::Argon2id {
+                VaultKdfSummary::Argon2id {
+                    memory_kib,
+                    iterations,
+                    lanes,
+                }
+            } else {
+                VaultKdfSummary::Argon2d {
+                    memory_kib,
+                    iterations,
+                    lanes,
+                }
+            }
+        }
+    };
+    let update = DatabaseSettingsUpdate {
+        name: draft.db_name.clone(),
+        description: draft.db_desc.clone(),
+        default_username: draft.db_default_user.clone(),
+        recycle_bin_enabled: draft.recycle_enabled,
+        history_max_items,
+        history_max_size,
+        outer_cipher: draft.cipher,
+        compression: draft.compression,
+        kdf,
+    };
+    let (active_path, stack_paths) = capture_tree_paths(app);
+    match app.service.update_database_settings(app.session, update) {
+        Ok(()) => {
+            app.dirty = true;
+            app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+            app.entry = None;
+            app.entry_icon = None;
+            app.detail.clear();
+            app.fields.clear();
+            app.refresh();
+            app.status = "Database settings updated — press Ctrl+S or s to save".into();
+            true
+        }
+        Err(error) => {
+            draft.error_msg = Some(format!(
+                "{} (verify KDF memory >= 8*lanes and parameter limits)",
+                clean(error.message())
+            ));
+            false
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "modal variants share ownership and focus handling"
 )]
-fn handle_modal_key(app: &mut App, key: KeyCode) {
+fn handle_modal_key_event(app: &mut App, key_event: KeyEvent) {
+    let key = key_event.code;
+    let modifiers = key_event.modifiers;
     let Some(modal) = app.modal.take() else {
         return;
     };
@@ -1499,6 +2562,515 @@ fn handle_modal_key(app: &mut App, key: KeyCode) {
                 });
             }
         },
+        Modal::MoveEntry {
+            entry_ref,
+            entry_title,
+            rows,
+            mut selected,
+            mut scroll,
+            mut error_msg,
+        } => {
+            let count = rows.len();
+            match key {
+                KeyCode::Esc => {
+                    app.status = "Move cancelled".into();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected.saturating_sub(1);
+                    scroll = selected.saturating_sub(3);
+                    error_msg = None;
+                    app.modal = Some(Modal::MoveEntry {
+                        entry_ref,
+                        entry_title,
+                        rows,
+                        selected,
+                        scroll,
+                        error_msg,
+                    });
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = selected.saturating_add(1).min(count.saturating_sub(1));
+                    scroll = selected.saturating_sub(3);
+                    error_msg = None;
+                    app.modal = Some(Modal::MoveEntry {
+                        entry_ref,
+                        entry_title,
+                        rows,
+                        selected,
+                        scroll,
+                        error_msg,
+                    });
+                }
+                KeyCode::PageUp => {
+                    selected = selected.saturating_sub(10);
+                    scroll = selected.saturating_sub(3);
+                    error_msg = None;
+                    app.modal = Some(Modal::MoveEntry {
+                        entry_ref,
+                        entry_title,
+                        rows,
+                        selected,
+                        scroll,
+                        error_msg,
+                    });
+                }
+                KeyCode::PageDown => {
+                    selected = selected.saturating_add(10).min(count.saturating_sub(1));
+                    scroll = selected.saturating_sub(3);
+                    error_msg = None;
+                    app.modal = Some(Modal::MoveEntry {
+                        entry_ref,
+                        entry_title,
+                        rows,
+                        selected,
+                        scroll,
+                        error_msg,
+                    });
+                }
+                KeyCode::Home => {
+                    app.modal = Some(Modal::MoveEntry {
+                        entry_ref,
+                        entry_title,
+                        rows,
+                        selected: 0,
+                        scroll: 0,
+                        error_msg: None,
+                    });
+                }
+                KeyCode::End => {
+                    selected = count.saturating_sub(1);
+                    scroll = selected.saturating_sub(3);
+                    app.modal = Some(Modal::MoveEntry {
+                        entry_ref,
+                        entry_title,
+                        rows,
+                        selected,
+                        scroll,
+                        error_msg: None,
+                    });
+                }
+                KeyCode::Enter => {
+                    if let Some(target) = rows.get(selected) {
+                        let moved_path = target.row_path.clone();
+                        let (active_path, stack_paths) = capture_tree_paths(app);
+                        match app.service.move_entry(&entry_ref, &target.group_ref) {
+                            Ok(_) => {
+                                app.dirty = true;
+                                app.entry = None;
+                                app.entry_icon = None;
+                                app.detail.clear();
+                                app.fields.clear();
+                                app.re_resolve_tree_after_mutation(
+                                    active_path.as_deref(),
+                                    &stack_paths,
+                                );
+                                app.refresh();
+                                app.status = format!(
+                                    "Moved entry to {} — press Ctrl+S or s to save",
+                                    clean(&moved_path)
+                                );
+                            }
+                            Err(error) => {
+                                let msg = clean(error.message());
+                                app.status.clone_from(&msg);
+                                app.modal = Some(Modal::MoveEntry {
+                                    entry_ref,
+                                    entry_title,
+                                    rows,
+                                    selected,
+                                    scroll,
+                                    error_msg: Some(msg),
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    app.modal = Some(Modal::MoveEntry {
+                        entry_ref,
+                        entry_title,
+                        rows,
+                        selected,
+                        scroll,
+                        error_msg,
+                    });
+                }
+            }
+        }
+        Modal::OtpConfig(mut draft) => {
+            if handle_otp_config_key(app, &mut draft, key, modifiers) {
+                app.modal = Some(Modal::OtpConfig(draft));
+            }
+        }
+        Modal::PathBar(mut state) => {
+            if handle_path_bar_key(app, &mut state, key) {
+                app.modal = Some(Modal::PathBar(state));
+            }
+        }
+        Modal::DbSettings(mut draft) => {
+            if handle_db_settings_key(app, &mut draft, key, modifiers) {
+                app.modal = Some(Modal::DbSettings(draft));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn handle_modal_key(app: &mut App, key: KeyCode) {
+    handle_modal_key_event(app, KeyEvent::new(key, KeyModifiers::NONE));
+}
+
+fn handle_otp_config_edit_key(draft: &mut OtpConfigDraft, key: KeyCode) {
+    match key {
+        KeyCode::Esc | KeyCode::Enter => {
+            draft.editing_text = false;
+        }
+        KeyCode::Backspace => match draft.selected_row {
+            1 => {
+                draft.acct_label.pop();
+            }
+            2 => {
+                draft.issuer_label.pop();
+            }
+            5 => {
+                if draft.otp_kind == ServiceOtpKind::Totp {
+                    draft.period_text.pop();
+                } else {
+                    draft.counter_text.pop();
+                }
+            }
+            7 => {
+                let keep = draft.secret_b32.chars().count().saturating_sub(1);
+                let remaining: String = draft.secret_b32.chars().take(keep).collect();
+                draft.secret_b32.zeroize();
+                draft.secret_b32.push_str(&remaining);
+            }
+            _ => {}
+        },
+        KeyCode::Char(c) if !c.is_control() => {
+            draft.error_msg = None;
+            match draft.selected_row {
+                1 if draft.acct_label.len() < 128 => draft.acct_label.push(c),
+                2 if draft.issuer_label.len() < 128 => draft.issuer_label.push(c),
+                5 if c.is_ascii_digit() => {
+                    if draft.otp_kind == ServiceOtpKind::Totp && draft.period_text.len() < 10 {
+                        draft.period_text.push(c);
+                    } else if draft.otp_kind == ServiceOtpKind::Hotp
+                        && draft.counter_text.len() < 20
+                    {
+                        draft.counter_text.push(c);
+                    }
+                }
+                7 if draft.secret_b32.len() < 256 => draft.secret_b32.push(c),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_otp_config_key(
+    app: &mut App,
+    draft: &mut OtpConfigDraft,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
+    if key == KeyCode::Char('s') && modifiers.contains(KeyModifiers::CONTROL) {
+        return !apply_otp_config(app, draft);
+    }
+    if draft.editing_text {
+        handle_otp_config_edit_key(draft, key);
+        return true;
+    }
+    match key {
+        KeyCode::Esc => {
+            draft.secret_b32.zeroize();
+            app.status = "OTP configuration cancelled".into();
+            false
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            draft.selected_row = draft.selected_row.saturating_sub(1);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            draft.selected_row = draft.selected_row.saturating_add(1).min(8);
+            true
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+            draft.error_msg = None;
+            match draft.selected_row {
+                0 => {
+                    draft.otp_kind = match draft.otp_kind {
+                        ServiceOtpKind::Totp => ServiceOtpKind::Hotp,
+                        ServiceOtpKind::Hotp => ServiceOtpKind::Totp,
+                    };
+                    if draft.otp_kind == ServiceOtpKind::Hotp && draft.use_steam {
+                        draft.use_steam = false;
+                        draft.otp_digits = 6;
+                    }
+                }
+                3 => {
+                    let forward = key != KeyCode::Left;
+                    draft.otp_algorithm = match (draft.otp_algorithm, forward) {
+                        (ServiceOtpAlgorithm::Sha1, true)
+                        | (ServiceOtpAlgorithm::Sha512, false) => ServiceOtpAlgorithm::Sha256,
+                        (ServiceOtpAlgorithm::Sha256, true)
+                        | (ServiceOtpAlgorithm::Sha1, false) => ServiceOtpAlgorithm::Sha512,
+                        (ServiceOtpAlgorithm::Sha512, true)
+                        | (ServiceOtpAlgorithm::Sha256, false) => ServiceOtpAlgorithm::Sha1,
+                    };
+                }
+                4 => {
+                    if !draft.use_steam {
+                        draft.otp_digits = if draft.otp_digits == 6 { 8 } else { 6 };
+                    }
+                }
+                6 => {
+                    if draft.otp_kind == ServiceOtpKind::Totp {
+                        draft.use_steam = !draft.use_steam;
+                        draft.otp_digits = if draft.use_steam { 5 } else { 6 };
+                    }
+                }
+                _ => {}
+            }
+            true
+        }
+        KeyCode::Enter => match draft.selected_row {
+            0 | 3 | 4 | 6 => handle_otp_config_key(app, draft, KeyCode::Char(' '), modifiers),
+            1 | 2 | 5 | 7 => {
+                draft.editing_text = true;
+                true
+            }
+            8 => !apply_otp_config(app, draft),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+fn handle_path_bar_key(app: &mut App, state: &mut PathBarState, key: KeyCode) -> bool {
+    match key {
+        KeyCode::Esc => {
+            app.status = "Path bar closed".into();
+            false
+        }
+        KeyCode::Tab => {
+            if state.dropdown_open && state.completions.len() > 1 {
+                state.selected = (state.selected + 1) % state.completions.len();
+            } else {
+                path_bar_complete(app, state);
+            }
+            true
+        }
+        KeyCode::BackTab => {
+            if state.dropdown_open && state.completions.len() > 1 {
+                state.selected = if state.selected == 0 {
+                    state.completions.len() - 1
+                } else {
+                    state.selected - 1
+                };
+            }
+            true
+        }
+        KeyCode::Down if state.dropdown_open && !state.completions.is_empty() => {
+            state.selected = state
+                .selected
+                .saturating_add(1)
+                .min(state.completions.len().saturating_sub(1));
+            true
+        }
+        KeyCode::Up if state.dropdown_open && !state.completions.is_empty() => {
+            state.selected = state.selected.saturating_sub(1);
+            true
+        }
+        KeyCode::Enter => !submit_path_bar(app, state),
+        KeyCode::Backspace => {
+            state.buffer.pop();
+            state.dropdown_open = false;
+            state.completions.clear();
+            state.selected = 0;
+            state.error_msg = None;
+            true
+        }
+        KeyCode::Char(c) if !c.is_control() && state.buffer.len() < 1024 => {
+            state.buffer.push(c);
+            state.dropdown_open = false;
+            state.completions.clear();
+            state.selected = 0;
+            state.error_msg = None;
+            true
+        }
+        _ => true,
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "database settings modal fields share clean state transitions"
+)]
+fn handle_db_settings_key(
+    app: &mut App,
+    draft: &mut DbSettingsDraft,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
+    if key == KeyCode::Char('s') && modifiers.contains(KeyModifiers::CONTROL) {
+        return !apply_db_settings(app, draft);
+    }
+    let row_count = db_settings_row_count(draft.kdf_kind);
+    let apply_row = row_count - 1;
+    if draft.editing_text {
+        match key {
+            KeyCode::Esc | KeyCode::Enter => {
+                draft.editing_text = false;
+            }
+            KeyCode::Backspace => match draft.selected_row {
+                0 => {
+                    draft.db_name.pop();
+                }
+                1 => {
+                    draft.db_desc.pop();
+                }
+                2 => {
+                    draft.db_default_user.pop();
+                }
+                4 => {
+                    draft.hist_max_items.pop();
+                }
+                5 => {
+                    draft.hist_max_size.pop();
+                }
+                9 if draft.kdf_kind == DbKdfKind::Aes => {
+                    draft.aes_rounds.pop();
+                }
+                9 => {
+                    draft.argon_mem.pop();
+                }
+                10 if draft.kdf_kind != DbKdfKind::Aes => {
+                    draft.argon_iters.pop();
+                }
+                11 if draft.kdf_kind != DbKdfKind::Aes => {
+                    draft.argon_lanes.pop();
+                }
+                _ => {}
+            },
+            KeyCode::Char(c) if !c.is_control() => {
+                draft.error_msg = None;
+                match draft.selected_row {
+                    0 if draft.db_name.len() < 128 => draft.db_name.push(c),
+                    1 if draft.db_desc.len() < 512 => draft.db_desc.push(c),
+                    2 if draft.db_default_user.len() < 128 => draft.db_default_user.push(c),
+                    4 if (c.is_ascii_digit() || (c == '-' && draft.hist_max_items.is_empty()))
+                        && draft.hist_max_items.len() < 12 =>
+                    {
+                        draft.hist_max_items.push(c);
+                    }
+                    5 if (c.is_ascii_digit() || (c == '-' && draft.hist_max_size.is_empty()))
+                        && draft.hist_max_size.len() < 20 =>
+                    {
+                        draft.hist_max_size.push(c);
+                    }
+                    9 if draft.kdf_kind == DbKdfKind::Aes
+                        && c.is_ascii_digit()
+                        && draft.aes_rounds.len() < 12 =>
+                    {
+                        draft.aes_rounds.push(c);
+                    }
+                    9 if draft.kdf_kind != DbKdfKind::Aes
+                        && c.is_ascii_digit()
+                        && draft.argon_mem.len() < 12 =>
+                    {
+                        draft.argon_mem.push(c);
+                    }
+                    10 if draft.kdf_kind != DbKdfKind::Aes
+                        && c.is_ascii_digit()
+                        && draft.argon_iters.len() < 10 =>
+                    {
+                        draft.argon_iters.push(c);
+                    }
+                    11 if draft.kdf_kind != DbKdfKind::Aes
+                        && c.is_ascii_digit()
+                        && draft.argon_lanes.len() < 6 =>
+                    {
+                        draft.argon_lanes.push(c);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        return true;
+    }
+    match key {
+        KeyCode::Esc => {
+            app.status = "Database settings cancelled".into();
+            false
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            draft.selected_row = draft.selected_row.saturating_sub(1);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            draft.selected_row = draft.selected_row.saturating_add(1).min(apply_row);
+            true
+        }
+        KeyCode::PageUp => {
+            draft.selected_row = draft.selected_row.saturating_sub(5);
+            true
+        }
+        KeyCode::PageDown => {
+            draft.selected_row = draft.selected_row.saturating_add(5).min(apply_row);
+            true
+        }
+        KeyCode::Home => {
+            draft.selected_row = 0;
+            true
+        }
+        KeyCode::End => {
+            draft.selected_row = apply_row;
+            true
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+            draft.error_msg = None;
+            match draft.selected_row {
+                3 => draft.recycle_enabled = !draft.recycle_enabled,
+                6 => {
+                    draft.cipher = match draft.cipher {
+                        VaultCipher::Aes => VaultCipher::ChaCha20,
+                        VaultCipher::ChaCha20 => VaultCipher::Aes,
+                    };
+                }
+                7 => {
+                    draft.compression = match draft.compression {
+                        VaultCompression::GZip => VaultCompression::None,
+                        VaultCompression::None => VaultCompression::GZip,
+                    };
+                }
+                8 => {
+                    let forward = key != KeyCode::Left;
+                    draft.kdf_kind = match (draft.kdf_kind, forward) {
+                        (DbKdfKind::Argon2id, true) | (DbKdfKind::Aes, false) => DbKdfKind::Argon2d,
+                        (DbKdfKind::Argon2d, true) | (DbKdfKind::Argon2id, false) => DbKdfKind::Aes,
+                        (DbKdfKind::Aes, true) | (DbKdfKind::Argon2d, false) => DbKdfKind::Argon2id,
+                    };
+                    let max_row = db_settings_row_count(draft.kdf_kind) - 1;
+                    draft.selected_row = draft.selected_row.min(max_row);
+                }
+                _ => {}
+            }
+            true
+        }
+        KeyCode::Enter => {
+            if draft.selected_row == apply_row {
+                !apply_db_settings(app, draft)
+            } else if matches!(draft.selected_row, 3 | 6 | 7 | 8) {
+                handle_db_settings_key(app, draft, KeyCode::Char(' '), modifiers)
+            } else {
+                draft.editing_text = true;
+                true
+            }
+        }
+        _ => true,
     }
 }
 
@@ -1706,12 +3278,47 @@ fn reveal_selected_field(app: &mut App, field: &str) {
     }
 }
 
-fn reveal_totp(app: &mut App) {
-    let Some(reference) = &app.entry else { return };
+fn reveal_otp(app: &mut App) {
+    let Some(reference) = app.pending_entry.clone().or_else(|| app.entry.clone()) else {
+        return;
+    };
+    let is_hotp = matches!(
+        app.service.otp_metadata(&reference),
+        Ok(Some(OtpMetadata {
+            kind: ServiceOtpKind::Hotp,
+            ..
+        }))
+    );
+    if is_hotp {
+        let was_open = app.entry.is_some();
+        let prev_sel = app.entry_selected;
+        let (active_path, stack_paths) = capture_tree_paths(app);
+        match app.service.hotp_next_code(&reference) {
+            Ok(code) => {
+                app.dirty = true;
+                app.re_resolve_tree_after_mutation(active_path.as_deref(), &stack_paths);
+                app.refresh();
+                if was_open && let Some(hit) = app.hits.get(prev_sel) {
+                    let fresh = hit.reference();
+                    if app.load_entry_from_ref(&fresh) {
+                        app.entry = Some(fresh);
+                        app.focus = FocusPane::Detail;
+                    }
+                }
+                app.clear_reveal();
+                app.reveal = Some(code);
+                app.reveal_until = Some(Instant::now() + REVEAL_TTL);
+                app.status =
+                    "HOTP generated (counter incremented) — press Ctrl+S or s to save".into();
+            }
+            Err(error) => app.status = clean(error.message()),
+        }
+        return;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    match app.service.totp_code_with_period(reference, now) {
+    match app.service.totp_code_with_period(&reference, now) {
         Ok(code) => {
             app.clear_reveal();
             app.reveal = Some(Zeroizing::new(code.code().to_owned()));
@@ -2321,7 +3928,10 @@ impl App {
                     ),
                     format!(
                         "OTP: {} · Auto-type: {} ({} associations)",
-                        if view.has_otp() { "present" } else { "none" },
+                        format_otp_metadata(
+                            self.service.otp_metadata(reference).ok().flatten(),
+                            view.has_otp(),
+                        ),
                         if view.auto_type_enabled() {
                             "enabled"
                         } else {
@@ -2501,6 +4111,7 @@ impl App {
 )]
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if !usable_size(frame.area()) {
+        app.header_area = Rect::default();
         app.groups_area = Rect::default();
         app.entries_area = Rect::default();
         app.detail_area = Rect::default();
@@ -2563,6 +4174,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Line::from(spans)
     };
+    app.header_area = areas[0];
     frame.render_widget(Paragraph::new(header_line), areas[0]);
 
     let (groups_area, entries_area, detail_area) = if areas[1].width >= 72 {
@@ -3065,6 +4677,8 @@ fn help_lines() -> Vec<Line<'static>> {
         "?                 Open this help; Esc closes it",
         "Ctrl-P            Open nkp command palette",
         "/                 Search paths with glob patterns; Enter applies",
+        "Ctrl+K / Ctrl+G / : Open editable Path Bar (Tab completes, 5-item list)",
+        "S / Ctrl+O        Database-level settings modal",
         "g (tree)          Toggle matching groups in path results",
         "Tab / Shift-Tab   Switch focus between Groups and Entries",
         "Up/Down or j/k    Move selection",
@@ -3072,18 +4686,23 @@ fn help_lines() -> Vec<Line<'static>> {
         "Backspace / Left  Go to parent group / return from detail",
         "n                 Load next result page",
         "a / e             Add group / entry beneath selected or current group",
+        "m                 Move selected entry to another group",
+        "Alt+Up/Dn or K/J  Reorder selected entry up / down within group",
+        "C / Ctrl+D        Clone / duplicate selected entry",
+        "R                 Recycle selected entry (or confirm permanent delete)",
         "x / X             Remove selected entry / group (type YES to confirm)",
         "I                 Change KeePass icon (entry or group; 0..=68)",
+        "o (tree)          Reveal TOTP or generate next HOTP for selected entry",
         "Ctrl+S / s        Save unsaved vault changes",
-        "Mouse             Click group/entry to select or open; wheel scrolls",
+        "Mouse             Click header for Path Bar; click/wheel panes & modals",
         "d                 Discard unsaved changes in exit prompt",
         "c                 Cancel an exit prompt",
-        "Ctrl-P palette    Add/remove entry or group, change icon, rename title,",
-        "                  edit tags, set/update OTP URI, view aliases",
+        "Ctrl-P palette    Add/remove/move/reorder/clone/recycle/restore entries,",
+        "                  empty Recycle Bin, OTP reveal/config, Path Bar, DB settings",
         "Entry view:",
         "  e edit selected field · r reveal password · v reveal selected field",
-        "  c copy password · t reveal TOTP · g generate password · I change icon",
-        "  a add attachment · x export selected · d remove selected (type YES)",
+        "  c copy password · t reveal TOTP / next HOTP · g generate password · I icon",
+        "  m move to group · C clone · R recycle · a/n/p/x/d attachments",
         "  F2 inspect full attachment or field-consent target; arrows/Home/End pan",
         "  F3 review pending clipboard warning; a acknowledges only in that view",
         "  o export interchange · i import interchange · s save",
@@ -3091,7 +4710,7 @@ fn help_lines() -> Vec<Line<'static>> {
         "Icon picker: j/k or Up/Down move · / type filter · Enter apply · Esc cancel",
         "Colors: adaptive 4-tier (TrueColor / 256-color / Basic16 / NO_COLOR)",
         "Palette/help/aliases: Up/Down or j/k scroll; Esc closes",
-        "Deletion confirmation requires typing YES exactly.",
+        "Deletion & Empty Recycle Bin require typing YES exactly.",
     ]
     .into_iter()
     .map(Line::from)
@@ -3275,8 +4894,9 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String], theme: &
             ..
         } => {
             let label = match kind {
-                DeleteKind::Entry => "entry",
+                DeleteKind::Entry | DeleteKind::PermanentEntry => "entry",
                 DeleteKind::Group => "group and all its contents",
+                DeleteKind::EmptyRecycleBin => "all entries and subgroups in Recycle Bin",
             };
             draw_target_dialog(
                 frame,
@@ -3292,7 +4912,356 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, aliases: &[String], theme: &
                 "Arrows/PgUp/PgDn inspect full target\nHome/End · Enter delete · Esc cancel",
             );
         }
+        Modal::MoveEntry {
+            entry_title,
+            rows,
+            selected,
+            scroll,
+            error_msg,
+            ..
+        } => draw_move_entry_modal(
+            frame,
+            entry_title,
+            rows,
+            *selected,
+            *scroll,
+            error_msg.as_deref(),
+            theme,
+        ),
+        Modal::OtpConfig(draft) => draw_otp_config_modal(frame, draft, theme),
+        Modal::PathBar(state) => draw_path_bar_modal(frame, state, theme),
+        Modal::DbSettings(draft) => draw_db_settings_modal(frame, draft, theme),
     }
+}
+
+fn compact_or_centered_area(frame: &Frame<'_>) -> Rect {
+    let full = frame.area();
+    if full.width < 68 || full.height < 18 {
+        full
+    } else {
+        centered_rect(78, 78, full)
+    }
+}
+
+fn draw_move_entry_modal(
+    frame: &mut Frame<'_>,
+    entry_title: &str,
+    rows: &[MoveGroupRow],
+    selected: usize,
+    _scroll: usize,
+    error_msg: Option<&str>,
+    theme: &TuiTheme,
+) {
+    let area = compact_or_centered_area(frame);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title("Move entry to group · Enter · Esc")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Entry: ", theme.header),
+            Span::raw(clean(entry_title)),
+        ])),
+        chunks[0],
+    );
+    let items: Vec<ListItem<'_>> = rows
+        .iter()
+        .map(|row| {
+            let icon = standard_icon(row.std_icon);
+            let indent = "  ".repeat(row.depth);
+            let mut spans = vec![
+                Span::raw(indent),
+                Span::styled(icon.glyph, theme.category_style(icon.category)),
+                Span::raw(format!(" {}", clean(&row.row_label))),
+            ];
+            if row.recycle_bin {
+                spans.push(Span::styled(" [Recycle Bin]", theme.warning));
+            }
+            if row.depth > 0 {
+                spans.push(Span::styled(
+                    format!("  ({})", clean(&row.row_path)),
+                    theme.muted,
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !items.is_empty() {
+        state.select(Some(selected.min(items.len().saturating_sub(1))));
+    }
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(theme.selection),
+        chunks[1],
+        &mut state,
+    );
+    let footer = error_msg.map_or_else(
+        || {
+            Line::from(Span::styled(
+                "j/k move · Enter move · Esc cancel",
+                theme.muted,
+            ))
+        },
+        |err| Line::from(Span::styled(clean(err), theme.error)),
+    );
+    frame.render_widget(Paragraph::new(footer), chunks[2]);
+}
+
+fn draw_otp_config_modal(frame: &mut Frame<'_>, draft: &OtpConfigDraft, theme: &TuiTheme) {
+    let area = compact_or_centered_area(frame);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title("Configure OTP (TOTP/HOTP)")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    let kind_str = match draft.otp_kind {
+        ServiceOtpKind::Totp => "TOTP",
+        ServiceOtpKind::Hotp => "HOTP",
+    };
+    let algo_str = match draft.otp_algorithm {
+        ServiceOtpAlgorithm::Sha1 => "SHA1",
+        ServiceOtpAlgorithm::Sha256 => "SHA256",
+        ServiceOtpAlgorithm::Sha512 => "SHA512",
+    };
+    let masked_secret = "•".repeat(draft.secret_b32.chars().count());
+    let param_label = if draft.otp_kind == ServiceOtpKind::Totp {
+        format!("Period (s): {}", clean(&draft.period_text))
+    } else {
+        format!("Counter: {}", clean(&draft.counter_text))
+    };
+    let rows = [
+        format!("Kind: < {kind_str} >"),
+        format!("Account: {}", clean(&draft.acct_label)),
+        format!("Issuer: {}", clean(&draft.issuer_label)),
+        format!("Algorithm: < {algo_str} >"),
+        format!(
+            "Digits: < {} >",
+            if draft.use_steam { 5 } else { draft.otp_digits }
+        ),
+        param_label,
+        format!("Steam: < {} >", if draft.use_steam { "Yes" } else { "No" }),
+        format!("Secret (Base32): {masked_secret}"),
+        "[Apply OTP Config]".to_owned(),
+    ];
+    let items: Vec<ListItem<'_>> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let prefix = if idx == draft.selected_row {
+                if draft.editing_text { "* " } else { "> " }
+            } else {
+                "  "
+            };
+            ListItem::new(format!("{prefix}{text}"))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(draft.selected_row.min(8)));
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(theme.selection),
+        chunks[0],
+        &mut state,
+    );
+    let footer_lines = if let Some(err) = &draft.error_msg {
+        vec![
+            Line::from(Span::styled(clean(err), theme.error)),
+            Line::from(Span::styled("Edit & retry · Esc cancel", theme.muted)),
+        ]
+    } else if draft.editing_text {
+        vec![
+            Line::from(Span::styled(
+                "Editing field (secret is masked)",
+                theme.header,
+            )),
+            Line::from(Span::styled(
+                "Type text · Enter/Esc done field",
+                theme.muted,
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled("↑/↓ move · ←/→/Space toggle", theme.muted)),
+            Line::from(Span::styled(
+                "Enter edit/apply · Ctrl+S apply · Esc",
+                theme.muted,
+            )),
+        ]
+    };
+    frame.render_widget(Paragraph::new(footer_lines), chunks[1]);
+}
+
+fn draw_path_bar_modal(frame: &mut Frame<'_>, state: &PathBarState, theme: &TuiTheme) {
+    let full = frame.area();
+    let dropdown_rows = if state.dropdown_open && !state.completions.is_empty() {
+        u16::try_from(state.completions.len().min(5)).unwrap_or(5) + 2
+    } else {
+        0
+    };
+    let total_height = (3 + dropdown_rows + 1).min(full.height);
+    let overlay = Rect::new(full.x, full.y, full.width, total_height);
+    frame.render_widget(Clear, overlay);
+    let mut constraints = vec![Constraint::Length(3)];
+    if dropdown_rows > 0 {
+        constraints.push(Constraint::Length(dropdown_rows));
+    }
+    constraints.push(Constraint::Length(1));
+    let chunks = Layout::vertical(constraints).split(overlay);
+    frame.render_widget(
+        Paragraph::new(format!("> {}", clean(&state.buffer))).block(
+            Block::default()
+                .title("Go to path · Tab complete · Enter go · Esc")
+                .borders(Borders::ALL)
+                .border_style(theme.focused_border),
+        ),
+        chunks[0],
+    );
+    let footer_idx = if dropdown_rows > 0 {
+        let items: Vec<ListItem<'_>> = state
+            .completions
+            .iter()
+            .take(5)
+            .map(|item| {
+                let icon = standard_icon(item.std_icon);
+                let kind_tag = if item.is_group_item {
+                    "[group]"
+                } else {
+                    "[entry]"
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(icon.glyph, theme.category_style(icon.category)),
+                    Span::raw(" "),
+                    Span::styled(kind_tag, theme.muted),
+                    Span::raw(format!(" {}", clean(&item.full_path))),
+                ]))
+            })
+            .collect();
+        let mut list_state = ListState::default();
+        list_state.select(Some(
+            state
+                .selected
+                .min(state.completions.len().min(5).saturating_sub(1)),
+        ));
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL))
+                .highlight_style(theme.selection),
+            chunks[1],
+            &mut list_state,
+        );
+        2
+    } else {
+        1
+    };
+    let footer = if let Some(err) = &state.error_msg {
+        Line::from(Span::styled(clean(err), theme.error))
+    } else {
+        Line::from(Span::styled(
+            "Tab complete · ↑/↓ cycle · Enter go · Esc",
+            theme.muted,
+        ))
+    };
+    frame.render_widget(Paragraph::new(footer), chunks[footer_idx]);
+}
+
+fn draw_db_settings_modal(frame: &mut Frame<'_>, draft: &DbSettingsDraft, theme: &TuiTheme) {
+    let area = compact_or_centered_area(frame);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title("Database Settings")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    let cipher_str = match draft.cipher {
+        VaultCipher::Aes => "AES-256",
+        VaultCipher::ChaCha20 => "ChaCha20",
+    };
+    let comp_str = match draft.compression {
+        VaultCompression::GZip => "GZip",
+        VaultCompression::None => "None",
+    };
+    let kdf_str = match draft.kdf_kind {
+        DbKdfKind::Argon2id => "Argon2id",
+        DbKdfKind::Argon2d => "Argon2d",
+        DbKdfKind::Aes => "AES-KDF",
+    };
+    let mut rows = vec![
+        format!("Database Name: {}", clean(&draft.db_name)),
+        format!("Description: {}", clean(&draft.db_desc)),
+        format!("Default Username: {}", clean(&draft.db_default_user)),
+        format!(
+            "Recycle Bin: < {} >",
+            if draft.recycle_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ),
+        format!("History Max Items: {}", clean(&draft.hist_max_items)),
+        format!("History Max Size (B): {}", clean(&draft.hist_max_size)),
+        format!("Outer Cipher: < {cipher_str} >"),
+        format!("Compression: < {comp_str} >"),
+        format!("KDF: < {kdf_str} >"),
+    ];
+    match draft.kdf_kind {
+        DbKdfKind::Aes => rows.push(format!("AES Rounds: {}", clean(&draft.aes_rounds))),
+        DbKdfKind::Argon2id | DbKdfKind::Argon2d => {
+            rows.push(format!("Argon2 Memory (KiB): {}", clean(&draft.argon_mem)));
+            rows.push(format!("Argon2 Iterations: {}", clean(&draft.argon_iters)));
+            rows.push(format!("Argon2 Lanes: {}", clean(&draft.argon_lanes)));
+        }
+    }
+    rows.push("[Apply Settings]".to_owned());
+    let row_count = rows.len();
+    let items: Vec<ListItem<'_>> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let prefix = if idx == draft.selected_row {
+                if draft.editing_text { "* " } else { "> " }
+            } else {
+                "  "
+            };
+            ListItem::new(format!("{prefix}{text}"))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(draft.selected_row.min(row_count.saturating_sub(1))));
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(theme.selection),
+        chunks[0],
+        &mut state,
+    );
+    let footer_lines = if let Some(err) = &draft.error_msg {
+        vec![
+            Line::from(Span::styled(clean(err), theme.error)),
+            Line::from(Span::styled("Fix & retry · Esc cancel", theme.muted)),
+        ]
+    } else if draft.editing_text {
+        vec![
+            Line::from(Span::styled("Editing field", theme.header)),
+            Line::from(Span::styled("Type value · Enter/Esc done", theme.muted)),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled("↑/↓ move · ←/→/Space cycle", theme.muted)),
+            Line::from(Span::styled(
+                "Enter edit/apply · Ctrl+S apply · Esc",
+                theme.muted,
+            )),
+        ]
+    };
+    frame.render_widget(Paragraph::new(footer_lines), chunks[1]);
 }
 
 #[allow(
@@ -3369,7 +5338,7 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Enter if app.edit_mode && app.action == Action::SetOtp => {
-            match validate_totp_uri(&app.input) {
+            match validate_otp_uri(&app.input) {
                 Ok(()) => {
                     let Some(reference) = app.pending_entry.as_ref().or(app.entry.as_ref()) else {
                         clear_input(&mut app.input);
@@ -3506,9 +5475,9 @@ fn handle_input_mode_key(app: &mut App, key: KeyCode) {
                 }
                 Action::TotpReveal => {
                     if value.as_str() == "YES" {
-                        reveal_totp(app);
+                        reveal_otp(app);
                     } else {
-                        app.status = "TOTP reveal cancelled".into();
+                        app.status = "OTP reveal cancelled".into();
                     }
                 }
                 Action::Generate => match value.parse::<usize>() {
@@ -3695,11 +5664,60 @@ fn scroll_modal(modal: &mut Modal, down: bool) {
             let key = if down { KeyCode::Down } else { KeyCode::Up };
             *offset = move_target_offset(*offset, path, key);
         }
+        Modal::MoveEntry {
+            rows,
+            selected,
+            scroll,
+            ..
+        } => {
+            let count = rows.len();
+            *selected = if down {
+                selected.saturating_add(1).min(count.saturating_sub(1))
+            } else {
+                selected.saturating_sub(1)
+            };
+            *scroll = selected.saturating_sub(3);
+        }
+        Modal::PathBar(state) => {
+            if state.dropdown_open && !state.completions.is_empty() {
+                state.selected = if down {
+                    state
+                        .selected
+                        .saturating_add(1)
+                        .min(state.completions.len().saturating_sub(1))
+                } else {
+                    state.selected.saturating_sub(1)
+                };
+            }
+        }
+        Modal::OtpConfig(draft) => {
+            if !draft.editing_text {
+                draft.selected_row = if down {
+                    draft.selected_row.saturating_add(1).min(8)
+                } else {
+                    draft.selected_row.saturating_sub(1)
+                };
+            }
+        }
+        Modal::DbSettings(draft) => {
+            if !draft.editing_text {
+                let max_row = db_settings_row_count(draft.kdf_kind).saturating_sub(1);
+                draft.selected_row = if down {
+                    draft.selected_row.saturating_add(1).min(max_row)
+                } else {
+                    draft.selected_row.saturating_sub(1)
+                };
+            }
+        }
         Modal::ClipboardWarning { .. } => {}
     }
 }
 
 fn handle_mouse_left_click(app: &mut App, column: u16, row: u16) {
+    if rect_contains(app.header_area, column, row) {
+        begin_path_bar(app);
+        return;
+    }
     if let Some(row_idx) = list_row_at(
         app.groups_area,
         column,
@@ -3861,7 +5879,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
         return KeyOutcome::Continue;
     }
     if matches!(&app.modal, Some(Modal::ClipboardWarning { .. })) {
-        handle_modal_key(app, key.code);
+        handle_modal_key_event(app, key);
         return KeyOutcome::Continue;
     }
     if app.locked {
@@ -3892,6 +5910,10 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
         }
         return KeyOutcome::Continue;
     }
+    if app.modal.is_some() {
+        handle_modal_key_event(app, key);
+        return KeyOutcome::Continue;
+    }
     if !app.input_mode && key.code == KeyCode::Char('q') {
         let (pending, effect) = reduce_decision(
             app.pending_decision,
@@ -3906,10 +5928,6 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
             return KeyOutcome::Exit;
         }
         app.status = "Unsaved changes: s save · d discard · c cancel".into();
-        return KeyOutcome::Continue;
-    }
-    if app.modal.is_some() {
-        handle_modal_key(app, key.code);
         return KeyOutcome::Continue;
     }
     if key.code == KeyCode::F(2)
@@ -3934,6 +5952,42 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
         && key.modifiers.contains(KeyModifiers::CONTROL)
     {
         app.save_with_status(path);
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode
+        && ((matches!(key.code, KeyCode::Char('k' | 'g'))
+            && key.modifiers.contains(KeyModifiers::CONTROL))
+            || key.code == KeyCode::Char(':'))
+    {
+        begin_path_bar(app);
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode
+        && ((key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || key.code == KeyCode::Char('C'))
+    {
+        clone_selected_entry(app);
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode
+        && ((key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || key.code == KeyCode::Char('S'))
+    {
+        begin_db_settings(app);
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode
+        && ((key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::ALT))
+            || key.code == KeyCode::Char('K'))
+    {
+        reorder_selected_entry(app, true);
+        return KeyOutcome::Continue;
+    }
+    if !app.input_mode
+        && ((key.code == KeyCode::Down && key.modifiers.contains(KeyModifiers::ALT))
+            || key.code == KeyCode::Char('J'))
+    {
+        reorder_selected_entry(app, false);
         return KeyOutcome::Continue;
     }
     if !app.input_mode && key.code == KeyCode::Char('?') {
@@ -3962,6 +6016,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
             KeyCode::Char('s') => app.save_with_status(path),
             KeyCode::Char('a') => begin_add(app, Action::AddGroup),
             KeyCode::Char('e') => begin_add(app, Action::AddEntry),
+            KeyCode::Char('m') => begin_move_entry(app),
+            KeyCode::Char('R') => recycle_selected_entry(app),
+            KeyCode::Char('o' | 't') => begin_otp_reveal(app),
             KeyCode::Char('x') => begin_delete_entry(app),
             KeyCode::Char('X') => begin_delete_group(app),
             KeyCode::Char('I') => begin_icon_picker(app, None),
@@ -4040,6 +6097,8 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
                 app.load_entry_preview();
             }
             KeyCode::Char('I') => begin_icon_picker(app, None),
+            KeyCode::Char('m') => begin_move_entry(app),
+            KeyCode::Char('R') => recycle_selected_entry(app),
             KeyCode::Char('e') => {
                 app.clear_reveal();
                 let Some((field, _)) = app.fields.get(app.selected_field) else {
@@ -4083,11 +6142,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, path: &Path) -> KeyOutcome {
                     "Copy password? Other apps can read it. This platform cannot safely auto-clear; clear manually when done. Type YES to confirm."
                 },
             ),
-            KeyCode::Char('t') => begin_action(
-                app,
-                Action::TotpReveal,
-                "Reveal current TOTP? Type YES. HOTP is unsupported. WARNING: terminal scrollback may retain the code.",
-            ),
+            KeyCode::Char('t') => begin_otp_reveal(app),
             KeyCode::Char('v') => begin_field_reveal(app),
             KeyCode::Char('a') => begin_action(
                 app,
@@ -4383,6 +6438,7 @@ fn new_app_with_theme(
         compact_detail: false,
         compact_fields_offset: 0,
         compact_fields_area: Rect::default(),
+        header_area: Rect::default(),
         groups_area: Rect::default(),
         entries_area: Rect::default(),
         detail_area: Rect::default(),
@@ -6606,5 +8662,601 @@ mod tests {
         assert!(!app.dirty);
         assert!(app.status.contains("Saved to work.kdbx"));
         assert!(vault_path.exists());
+    }
+
+    #[allow(clippy::unwrap_used, reason = "disposable test fixture")]
+    #[test]
+    fn move_entry_modal_and_reorder_entry_up_down_work_at_40x12_and_wide() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (dir, mut app) = app_fixture();
+        let vault_path = dir.path().join("fixture.kdbx");
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.add_group(&root, "Work").unwrap();
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.create_entry_in_group(&root, "Beta").unwrap();
+        app.reset_tree_after_mutation();
+        app.refresh();
+        assert_eq!(app.hits.len(), 2);
+        assert_eq!(app.hits[0].title(), "Example");
+        assert_eq!(app.hits[1].title(), "Beta");
+
+        // Reorder entry down with Alt+Down and up with 'K'.
+        app.focus = super::FocusPane::Entries;
+        app.entry_selected = 0;
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::ALT),
+            &vault_path,
+        );
+        assert!(app.dirty);
+        assert_eq!(app.entry_selected, 1);
+        assert_eq!(app.hits[0].title(), "Beta");
+        assert_eq!(app.hits[1].title(), "Example");
+        assert!(app.status.contains("Moved entry down"));
+
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            &vault_path,
+        );
+        assert_eq!(app.entry_selected, 0);
+        assert_eq!(app.hits[0].title(), "Example");
+        assert!(app.status.contains("Moved entry up"));
+
+        // Reordering while search filter is active is refused cleanly.
+        app.query.push_str("Example");
+        app.refresh();
+        super::select_palette_action(&mut app, 11);
+        assert!(app.status.contains("search filter"));
+        app.query.clear();
+        app.refresh();
+
+        // Open MoveEntry modal via 'm', verify Esc cancels, then move "Example" into "Work".
+        app.dirty = false;
+        app.entry_selected = 0;
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+            &vault_path,
+        );
+        assert!(matches!(app.modal, Some(super::Modal::MoveEntry { .. })));
+        let wide = screen(&mut app, 80, 24);
+        assert!(wide.contains("Move entry to group"));
+        assert!(wide.contains("Work"));
+        let narrow = screen(&mut app, 40, 12);
+        assert!(narrow.contains("Move entry"));
+
+        super::handle_modal_key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+        assert!(!app.dirty);
+
+        // Open via palette index 10 ("Move entry to group"), navigate to Work (index 1), Enter.
+        super::select_palette_action(&mut app, 10);
+        super::handle_modal_key(&mut app, KeyCode::Char('j'));
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+        assert!(app.dirty);
+        assert!(app.status.contains("Moved entry to"));
+        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.hits[0].title(), "Beta");
+
+        // Enter Work and verify "Example" arrived.
+        app.enter_group(0);
+        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.hits[0].title(), "Example");
+    }
+
+    #[allow(clippy::unwrap_used, reason = "disposable test fixture")]
+    #[test]
+    fn clone_entry_duplicates_in_group_and_auto_selects_clone() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (dir, mut app) = app_fixture();
+        let vault_path = dir.path().join("fixture.kdbx");
+        app.focus = super::FocusPane::Entries;
+        app.entry_selected = 0;
+
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
+            &vault_path,
+        );
+        assert!(app.dirty);
+        assert_eq!(app.hits.len(), 2);
+        assert_eq!(app.entry_selected, 1);
+        assert_eq!(app.hits[1].title(), "Example (Copy)");
+        assert!(app.status.contains("Cloned entry"));
+
+        // Ctrl+D also clones and keeps incrementing copy suffix.
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &vault_path,
+        );
+        assert_eq!(app.hits.len(), 3);
+        assert_eq!(app.entry_selected, 2);
+        assert_eq!(app.hits[2].title(), "Example (Copy) (Copy)");
+    }
+
+    #[allow(
+        clippy::unwrap_used,
+        clippy::too_many_lines,
+        reason = "disposable test fixture"
+    )]
+    #[test]
+    fn recycle_restore_and_empty_recycle_bin_require_confirm_for_permanent_purge() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use nkeepass::service::{DatabaseSettings, DatabaseSettingsUpdate};
+
+        let (dir, mut app) = app_fixture();
+        let vault_path = dir.path().join("fixture.kdbx");
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.create_entry_in_group(&root, "Temp").unwrap();
+        app.reset_tree_after_mutation();
+        app.refresh();
+        assert_eq!(app.hits.len(), 2);
+
+        // When Recycle Bin is disabled by default, 'R' requires explicit YES confirmation!
+        app.entry_selected = 1;
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &vault_path,
+        );
+        assert!(matches!(
+            app.modal,
+            Some(super::Modal::ConfirmDelete {
+                kind: super::DeleteKind::PermanentEntry,
+                ..
+            })
+        ));
+        super::handle_modal_key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+
+        // Enable Recycle Bin in database settings.
+        let DatabaseSettings {
+            name,
+            description,
+            default_username,
+            history_max_items,
+            history_max_size,
+            outer_cipher,
+            compression,
+            kdf,
+            ..
+        } = app.service.database_settings(app.session).unwrap();
+        app.service
+            .update_database_settings(
+                app.session,
+                DatabaseSettingsUpdate {
+                    name,
+                    description,
+                    default_username,
+                    recycle_bin_enabled: true,
+                    history_max_items,
+                    history_max_size,
+                    outer_cipher,
+                    compression,
+                    kdf,
+                },
+            )
+            .unwrap();
+        app.re_resolve_current_tree();
+        app.refresh();
+
+        // Recycle "Temp" via shortcut 'R'.
+        app.entry_selected = 1;
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &vault_path,
+        );
+        assert!(app.modal.is_none());
+        assert!(app.dirty);
+        assert!(app.status.contains("Moved to Recycle Bin"));
+        assert_eq!(app.hits.len(), 1);
+        assert!(app.groups.iter().any(|group| group.label == "Recycle Bin"));
+
+        // Enter Recycle Bin and verify Restore entry restores "Temp" to Root.
+        let bin_idx = app
+            .groups
+            .iter()
+            .position(|group| group.label == "Recycle Bin")
+            .unwrap();
+        app.enter_group(bin_idx);
+        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.hits[0].title(), "Temp");
+
+        // Attempting 'R' while already inside Recycle Bin requires explicit YES confirmation!
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &vault_path,
+        );
+        assert!(matches!(
+            app.modal,
+            Some(super::Modal::ConfirmDelete {
+                kind: super::DeleteKind::PermanentEntry,
+                ..
+            })
+        ));
+        super::handle_modal_key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+        assert_eq!(app.hits.len(), 1);
+
+        // Palette 15: Restore entry from Recycle Bin.
+        super::select_palette_action(&mut app, 15);
+        assert!(app.status.contains("Restored entry"));
+        assert!(app.hits.is_empty());
+
+        // Navigate back to Root, recycle "Temp" again, then Empty Recycle Bin with confirmation.
+        app.navigate_up();
+        assert_eq!(app.hits.len(), 2);
+        app.entry_selected = 1;
+        super::select_palette_action(&mut app, 14);
+        assert_eq!(app.hits.len(), 1);
+
+        // Palette 16: Empty Recycle Bin -> must require YES confirmation!
+        super::select_palette_action(&mut app, 16);
+        assert!(matches!(
+            app.modal,
+            Some(super::Modal::ConfirmDelete {
+                kind: super::DeleteKind::EmptyRecycleBin,
+                ..
+            })
+        ));
+        let confirm_40x12 = screen(&mut app, 40, 12);
+        assert!(confirm_40x12.contains("Confirm deletion"));
+        for ch in "YES".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+        assert!(app.status.contains("Emptied Recycle Bin (1 removed)"));
+
+        // Re-verify Recycle Bin is empty.
+        let bin_idx = app
+            .groups
+            .iter()
+            .position(|group| group.label == "Recycle Bin")
+            .unwrap();
+        app.enter_group(bin_idx);
+        assert!(app.hits.is_empty());
+    }
+
+    #[allow(clippy::unwrap_used, reason = "disposable test fixture")]
+    #[test]
+    fn hotp_totp_display_generation_and_otp_config_modal_mask_and_zeroize_secret() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        assert!(
+            super::validate_otp_uri(
+                "otpauth://totp/Issuer:user?secret=MZXW6===&issuer=Issuer&digits=6&period=30"
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_otp_uri(
+                "otpauth://hotp/mail?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0&algorithm=SHA256&digits=8"
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_otp_uri(
+                "otpauth://totp/Steam:user?secret=JBSWY3DPEHPK3PXP&digits=5&encoder=steam"
+            )
+            .is_ok()
+        );
+        assert!(super::validate_otp_uri("otpauth://hotp/mail?secret=JBSWY3DPEHPK3PXP").is_err());
+
+        let (dir, mut app) = app_fixture();
+        let vault_path = dir.path().join("fixture.kdbx");
+
+        // Open OtpConfig modal via palette 18, enter a secret, verify masking & Esc zeroization.
+        super::select_palette_action(&mut app, 18);
+        assert!(matches!(app.modal, Some(super::Modal::OtpConfig(_))));
+        // Navigate to Secret row (index 7), edit, type secret, finish editing.
+        for _ in 0..7 {
+            super::handle_modal_key(&mut app, KeyCode::Down);
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        for ch in secret.chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+
+        let wide_otp = screen(&mut app, 80, 24);
+        assert!(!wide_otp.contains("GEZDGNBVGY3TQOJQ"));
+        assert!(wide_otp.contains(&"•".repeat(secret.len())));
+        let narrow_otp = screen(&mut app, 40, 12);
+        assert!(!narrow_otp.contains("GEZDGNBVGY3TQOJQ"));
+        assert!(narrow_otp.contains("Configure OTP"));
+
+        // Esc cancels and leaves vault clean.
+        super::handle_modal_key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+        assert!(!app.dirty);
+
+        // Configure HOTP via OtpConfig modal and apply!
+        super::select_palette_action(&mut app, 18);
+        // Row 0: toggle Kind -> HOTP.
+        super::handle_modal_key(&mut app, KeyCode::Char(' '));
+        // Move to Secret row (index 7), edit, enter RFC 4226 test secret, apply with Ctrl+S.
+        for _ in 0..7 {
+            super::handle_modal_key(&mut app, KeyCode::Down);
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        for ch in secret.chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        super::handle_modal_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert!(app.modal.is_none());
+        assert!(app.dirty);
+        assert!(app.status.contains("OTP configured"));
+
+        // Verify detail pane shows HOTP (6d, counter 0).
+        app.select();
+        let detail_screen = screen(&mut app, 100, 24);
+        assert!(detail_screen.contains("OTP: HOTP (6d, counter 0)"));
+
+        // Trigger OTP reveal ('t' -> confirm YES) and verify RFC 4226 HOTP code (755224 at counter 0).
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &vault_path,
+        );
+        assert!(app.input_mode);
+        for ch in "YES".chars() {
+            super::handle_input_mode_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_input_mode_key(&mut app, KeyCode::Enter);
+        assert_eq!(app.reveal.as_deref().map(String::as_str), Some("755224"));
+        assert!(app.status.contains("HOTP generated (counter incremented)"));
+
+        // Hide reveal with Esc and verify counter incremented to 1 in detail pane.
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &vault_path,
+        );
+        assert!(app.reveal.is_none());
+        let after_detail = screen(&mut app, 100, 24);
+        assert!(after_detail.contains("OTP: HOTP (6d, counter 1)"));
+
+        // Lock clears reveal & modal cleanly.
+        app.lock_vault();
+        assert!(app.locked);
+        assert!(app.reveal.is_none());
+        assert!(app.modal.is_none());
+    }
+
+    #[allow(clippy::unwrap_used, reason = "disposable test fixture")]
+    #[test]
+    fn path_bar_tab_completion_dropdown_and_navigation_work_at_40x12_and_wide() {
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let (dir, mut app) = app_fixture();
+        let vault_path = dir.path().join("fixture.kdbx");
+        let root = app.service.root_group(app.session).unwrap();
+        app.service.add_group(&root, "Work").unwrap();
+        let work_ref = app.service.resolve_group(app.session, "Root/Work").unwrap();
+        app.service.add_group(&work_ref, "Prod").unwrap();
+        let work_ref = app.service.resolve_group(app.session, "Root/Work").unwrap();
+        app.service
+            .create_entry_in_group(&work_ref, "WorkMail")
+            .unwrap();
+        let prod_ref = app
+            .service
+            .resolve_group(app.session, "Root/Work/Prod")
+            .unwrap();
+        app.service
+            .create_entry_in_group(&prod_ref, "ProdDb")
+            .unwrap();
+        app.reset_tree_after_mutation();
+        app.refresh();
+
+        // Render once so header_area is recorded, then click header to open PathBar.
+        let _ = screen(&mut app, 80, 24);
+        let hx = app.header_area.x + 2;
+        let hy = app.header_area.y;
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hx,
+                row: hy,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(matches!(app.modal, Some(super::Modal::PathBar(_))));
+        super::handle_modal_key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+
+        // Open via Ctrl+K, clear "/", type "Work" -> Tab shows 3-item dropdown (Work, Work/Prod, Work/WorkMail).
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &vault_path,
+        );
+        super::handle_modal_key(&mut app, KeyCode::Backspace);
+        for ch in "Work".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Tab);
+        let wide_pb = screen(&mut app, 80, 24);
+        assert!(wide_pb.contains("[group]"));
+        assert!(wide_pb.contains("[entry]"));
+        assert!(wide_pb.contains("Root/Work/Prod"));
+        let narrow_pb = screen(&mut app, 40, 12);
+        assert!(narrow_pb.contains("Go to path"));
+
+        // Cycle down to Root/Work/Prod and press Enter to jump to group /Work/Prod.
+        super::handle_modal_key(&mut app, KeyCode::Down);
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+        assert_eq!(app.display_group_path(), "/Work/Prod");
+        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.hits[0].title(), "ProdDb");
+
+        // Open PathBar via ':', type "/Work/WorkM", Tab autocompletes 1-match immediately, Enter opens entry!
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+            &vault_path,
+        );
+        // Replace prefilled "/Work/Prod" with "/Work/WorkM".
+        for _ in 0.."/Work/Prod".len() {
+            super::handle_modal_key(&mut app, KeyCode::Backspace);
+        }
+        for ch in "/Work/WorkM".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Tab);
+        assert!(matches!(
+            &app.modal,
+            Some(super::Modal::PathBar(state))
+                if !state.dropdown_open && state.buffer == "/Work/WorkMail"
+        ));
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+        assert_eq!(app.display_group_path(), "/Work");
+        assert!(app.entry.is_some());
+        assert!(
+            app.detail
+                .first()
+                .is_some_and(|line| line == "Title: WorkMail")
+        );
+    }
+
+    #[allow(clippy::unwrap_used, reason = "disposable test fixture")]
+    #[test]
+    fn db_settings_modal_edits_validates_preserves_draft_and_applies_at_40x12() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use nkeepass::service::{DatabaseSettings, VaultCipher, VaultCompression, VaultKdfSummary};
+
+        let (dir, mut app) = app_fixture();
+        let vault_path = dir.path().join("fixture.kdbx");
+
+        // Open DbSettings via uppercase 'S'.
+        super::handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT),
+            &vault_path,
+        );
+        assert!(matches!(app.modal, Some(super::Modal::DbSettings(_))));
+        let narrow = screen(&mut app, 40, 12);
+        assert!(narrow.contains("Database Settings"));
+
+        // Edit Database Name (row 0) -> "VaultX".
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        for ch in "VaultX".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+
+        // Move to Recycle Bin (row 3) and toggle.
+        for _ in 0..3 {
+            super::handle_modal_key(&mut app, KeyCode::Down);
+        }
+        super::handle_modal_key(&mut app, KeyCode::Char(' '));
+
+        // Move to Cipher (row 6) -> ChaCha20, Compression (row 7) -> None, KDF (row 8) -> Argon2id.
+        for _ in 0..3 {
+            super::handle_modal_key(&mut app, KeyCode::Down);
+        }
+        super::handle_modal_key(&mut app, KeyCode::Right);
+        super::handle_modal_key(&mut app, KeyCode::Down);
+        super::handle_modal_key(&mut app, KeyCode::Right);
+        super::handle_modal_key(&mut app, KeyCode::Down);
+        // Cycle KDF until Argon2id is selected.
+        while !matches!(
+            &app.modal,
+            Some(super::Modal::DbSettings(draft)) if draft.kdf_kind == super::DbKdfKind::Argon2id
+        ) {
+            super::handle_modal_key(&mut app, KeyCode::Right);
+        }
+
+        // Move to Argon2 Memory (row 9), set invalid small memory "4" (< 8 * lanes), attempt Ctrl+S!
+        super::handle_modal_key(&mut app, KeyCode::Down);
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        for _ in 0..10 {
+            super::handle_modal_key(&mut app, KeyCode::Backspace);
+        }
+        super::handle_modal_key(&mut app, KeyCode::Char('4'));
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        super::handle_modal_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        // Must preserve modal + edits + show validation error without marking dirty!
+        assert!(!app.dirty);
+        assert!(matches!(
+            &app.modal,
+            Some(super::Modal::DbSettings(draft)) if draft.error_msg.is_some() && draft.db_name == "VaultX"
+        ));
+
+        // Fix Argon2 Memory to "64", apply via Ctrl+S!
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        super::handle_modal_key(&mut app, KeyCode::Backspace);
+        for ch in "64".chars() {
+            super::handle_modal_key(&mut app, KeyCode::Char(ch));
+        }
+        super::handle_modal_key(&mut app, KeyCode::Enter);
+        super::handle_modal_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert!(app.modal.is_none());
+        assert!(app.dirty);
+        assert!(app.status.contains("Database settings updated"));
+
+        let DatabaseSettings {
+            name,
+            recycle_bin_enabled,
+            outer_cipher,
+            compression,
+            kdf,
+            ..
+        } = app.service.database_settings(app.session).unwrap();
+        assert_eq!(name, "VaultX");
+        assert!(recycle_bin_enabled);
+        assert_eq!(outer_cipher, VaultCipher::ChaCha20);
+        assert_eq!(compression, VaultCompression::GZip);
+        assert!(matches!(
+            kdf,
+            VaultKdfSummary::Argon2id { memory_kib: 64, .. }
+        ));
+    }
+
+    #[test]
+    fn help_modal_documents_new_power_shortcuts() {
+        let (_dir, mut app) = app_fixture();
+        app.modal = Some(super::Modal::Help { scroll: 0 });
+        let help_text: String = super::help_lines()
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            "Ctrl+K",
+            "S / Ctrl+O",
+            "Move selected entry",
+            "Alt+Up/Dn",
+            "Clone / duplicate",
+            "Recycle selected entry",
+            "Empty Recycle Bin",
+        ] {
+            assert!(help_text.contains(needle), "missing {needle} in help");
+        }
+        let help_40x12 = screen(&mut app, 40, 12);
+        assert!(help_40x12.contains("nkp Help"));
     }
 }
